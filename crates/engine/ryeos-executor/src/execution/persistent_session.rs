@@ -1147,6 +1147,14 @@ fn spawn_capsule_process_held(
             &state.isolation,
             &workspace,
         )?;
+    // Recovery has converted the CAS objects into an owned prepared plan.
+    // Release the CAS flock (and its fork-sensitive lease) before the direct
+    // attachment fork; retaining it here would either make the same-thread
+    // fork fail closed or let a held child inherit mutation authority.
+    authority.ensure_guard(&guard)?;
+    drop(cas);
+    drop(guard);
+    drop(authority);
     let (daemon_socket, worker_socket) = std::os::unix::net::UnixStream::pair()
         .context("create daemon-owned persistent-session channel")?;
     let target_channel = ryeos_engine::isolation::IsolationTargetChannelAuthority::new(

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:e438789288c48cb2aa88a2ce4832d7a5db5d9b234011f08b6182fe26a1e64742:l+q2sNkTtY4joC7MQA7ifWD9WHxAK4Q6N81y2qbajEDaJEmsMbkgfrGjibts67RUWa13O4vFkX/l+CKXx5lfBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T19:44:25Z:a0f39b68214faf14b2b060f2acd262803bb1f83c96563eaeaf6210f2ee0cc16a:OadCXi1oxDay3Qhj6eRo0aVxgbPZnQSvy8KbC0SMK8tbG5AoMoziB9+wYPBSXhFWqtQsIWB95/w8RPoASQ/2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.4.1"
+version: "1.4.2"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -20,6 +20,7 @@ test, refresh bundles, or install this checkout locally.
 | Full gate | `./scripts/gate.sh` |
 | Rebuild/sign bundles only | `./scripts/gate.sh --refresh-bundles --no-tests` |
 | Rebuild/sign bundles, then run full gate | `./scripts/gate.sh --refresh-bundles` |
+| Rebuild/sign bundles, then run only the serial crash-qualification matrices | `./scripts/gate.sh --refresh-bundles --crash-qualification-only` |
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
@@ -46,6 +47,20 @@ refresh without the test gate:
 ```bash
 ./scripts/gate.sh --refresh-bundles --no-tests
 ```
+
+A full refreshed gate also runs the directive native-resume and explicit
+cross-site worker-handoff crash matrices. The handoff matrix is deliberately
+serial and takes roughly 40 minutes on the development host. CI therefore
+runs the ordinary workspace suite and crash qualification as separate jobs:
+
+```bash
+./scripts/gate.sh --refresh-bundles --skip-crash-qualification
+./scripts/gate.sh --refresh-bundles --crash-qualification-only
+```
+
+Both jobs remain mandatory. The split prevents either validation lane from
+consuming the other's timeout; it does not reduce the matrix or its retained
+qualification report.
 
 ## Bundle refresh rules
 

@@ -14,6 +14,8 @@ pub mod mock_provider;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod runtime_phase_cut;
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
+use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -29,6 +31,95 @@ use tokio::process::{Child, Command};
 
 const DEFAULT_DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Parent end of the feature-only handoff crash gate.
+///
+/// The daemon writes closed evidence naming the exact durable boundary and
+/// live operation identity to an inherited Lillux channel, then parks the
+/// request thread. Once this reader validates that record, the test can
+/// SIGKILL the whole daemon with no Rust unwinding or guard cleanup. That makes
+/// the restart evidence equivalent to a process crash, not an in-process
+/// injected error or a post-restart reconstruction.
+#[cfg(all(unix, feature = "handoff-test-support"))]
+pub struct HandoffCrashGate {
+    expected: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    reader: Option<lillux::InheritedDuplexChannel>,
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+impl HandoffCrashGate {
+    fn pair(
+        expected: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    ) -> anyhow::Result<(Self, lillux::InheritedDuplexChannelChildAuthority)> {
+        let (reader, writer) = lillux::inherited_duplex_channel_pair()
+            .map_err(anyhow::Error::msg)
+            .context("create handoff crash gate channel")?;
+        Ok((
+            Self {
+                expected,
+                reader: Some(reader),
+            },
+            writer,
+        ))
+    }
+
+    fn attach_writer(
+        command: &mut Command,
+        writer: lillux::InheritedDuplexChannelChildAuthority,
+        boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    ) -> anyhow::Result<()> {
+        command
+            .arg("--handoff-phase-cut-boundary")
+            .arg(boundary.as_str());
+        writer
+            .bind_to_command(
+                command.as_std_mut(),
+                ryeos_app::worker_handoff::test_support::HANDOFF_PHASE_CUT_FD_ENV,
+            )
+            .map_err(anyhow::Error::msg)
+            .context("bind handoff crash gate channel to daemon")
+    }
+
+    /// Wait until the child has durably crossed the configured boundary.
+    pub async fn wait_reached(
+        &mut self,
+    ) -> anyhow::Result<ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence> {
+        let mut reader = self
+            .reader
+            .take()
+            .context("handoff crash gate was already consumed")?;
+        let observed = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                let mut record = Vec::with_capacity(513);
+                for _ in 0..=512 {
+                    let mut byte = [0u8; 1];
+                    reader
+                        .read_exact(&mut byte)
+                        .context("read handoff phase-cut evidence")?;
+                    if byte[0] == b'\n' {
+                        return Ok(record);
+                    }
+                    record.push(byte[0]);
+                }
+                anyhow::bail!("handoff phase-cut evidence exceeds 512 bytes")
+            }),
+        )
+        .await
+        .context("timed out waiting for handoff crash boundary")?
+        .context("join handoff crash gate reader")??;
+        let evidence: ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence =
+            serde_json::from_slice(&observed).context("decode handoff phase-cut evidence")?;
+        evidence.validate()?;
+        anyhow::ensure!(
+            evidence.boundary == self.expected,
+            "handoff crash gate expected `{}` but observed `{}`",
+            self.expected,
+            evidence.boundary
+        );
+        Ok(evidence)
+    }
+}
 
 fn daemon_startup_deadline() -> anyhow::Result<Instant> {
     let timeout = match std::env::var("RYEOSD_TEST_STARTUP_TIMEOUT_SECS") {
@@ -640,13 +731,47 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
+        Self::start_fast_with_optional_node_key(None, plant, tweak).await
+    }
+
+    /// Like [`start_fast_with`], but initializes the daemon with an explicit
+    /// node identity. This is required by cross-site tests: two daemons using
+    /// the ordinary deterministic fixture would authenticate as one node.
+    pub async fn start_fast_with_node_key<S, F>(
+        node_key: SigningKey,
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
+        Self::start_fast_with_optional_node_key(Some(node_key), plant, tweak).await
+    }
+
+    async fn start_fast_with_optional_node_key<S, F>(
+        node_key: Option<SigningKey>,
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
         let state_dir_outer = tempfile::tempdir()?;
         let user_space = tempfile::tempdir()?;
 
         // Copy core bundle to temp so fast fixture writes don't pollute workspace.
         let (core_bundle_tmp, state_path) = copy_core_to_temp();
 
-        let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
+        let fixture = match node_key {
+            Some(node_key) => fast_fixture::populate_initialized_state_with_node_key(
+                &state_path,
+                user_space.path(),
+                node_key,
+            )?,
+            None => fast_fixture::populate_initialized_state(&state_path, user_space.path())?,
+        };
         // The harness copies `bundles/core` to `state_path`. Register it
         // so `bootstrap::verify_initialized` sees at least one bundle. Tests
         // that need additional bundles call `register_standard_bundle` from
@@ -735,6 +860,49 @@ impl DaemonHarness {
             node_key: Some(fixture.node.clone()),
         };
         Ok((harness, fixture))
+    }
+
+    /// Spawn a fast-fixture daemon with one exact handoff crash boundary
+    /// connected to the parent over an inherited Unix stream.
+    ///
+    /// This helper only exists in the explicit test-support build. The caller
+    /// waits for [`HandoffCrashGate::wait_reached`], SIGKILLs this harness, and
+    /// then uses [`respawn_with`] without a gate to exercise normal recovery.
+    #[cfg(all(unix, feature = "handoff-test-support"))]
+    pub async fn start_fast_with_handoff_crash_gate<S>(
+        plant: S,
+        boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture, HandoffCrashGate)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+    {
+        let (gate, writer) = HandoffCrashGate::pair(boundary)?;
+        let (harness, fixture) = Self::start_fast_with(plant, move |command| {
+            HandoffCrashGate::attach_writer(command, writer, boundary)
+                .expect("bind handoff crash gate to daemon");
+        })
+        .await?;
+        Ok((harness, fixture, gate))
+    }
+
+    /// Cross-site variant of [`start_fast_with_handoff_crash_gate`] with an
+    /// independently selected node identity.
+    #[cfg(all(unix, feature = "handoff-test-support"))]
+    pub async fn start_fast_with_node_key_and_handoff_crash_gate<S>(
+        node_key: SigningKey,
+        plant: S,
+        boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture, HandoffCrashGate)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+    {
+        let (gate, writer) = HandoffCrashGate::pair(boundary)?;
+        let (harness, fixture) = Self::start_fast_with_node_key(node_key, plant, move |command| {
+            HandoffCrashGate::attach_writer(command, writer, boundary)
+                .expect("bind handoff crash gate to daemon");
+        })
+        .await?;
+        Ok((harness, fixture, gate))
     }
 
     /// POST `/execute` to the daemon and return (status, json body).
@@ -866,8 +1034,10 @@ impl DaemonHarness {
     ///
     /// **No ``** is passed — state is already initialized.
     pub async fn respawn_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
-        // Bind `:0` and read the new actual address back from daemon.json.
-        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        // A restarted node keeps the same configured endpoint. Cross-node
+        // recovery peers must not need an out-of-band route rewrite merely
+        // because this test process replaced the daemon generation.
+        let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
 
@@ -879,6 +1049,10 @@ impl DaemonHarness {
         let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&self.state_path)
+            // The initial disposable daemon records the requested `:0` bind,
+            // while recovery must preserve the resolved endpoint so its peer
+            // can redrive without rewriting route authority.
+            .arg("--force")
             .arg("--bind")
             .arg(bind.to_string())
             .arg("--uds-path")
@@ -918,6 +1092,114 @@ impl DaemonHarness {
         Ok(())
     }
 
+    /// Re-spawn a stopped fast-fixture daemon with one test-only handoff crash
+    /// gate. Unlike the startup-recovery helper below, this waits for normal
+    /// readiness and returns the parent gate so a test can issue a live request,
+    /// observe its exact durable cut, and SIGKILL the process.
+    #[cfg(all(unix, feature = "handoff-test-support"))]
+    pub async fn respawn_with_handoff_crash_gate(
+        &mut self,
+        boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+        tweak: impl FnOnce(&mut Command),
+    ) -> anyhow::Result<HandoffCrashGate> {
+        let bind = self.bind;
+        let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
+        let daemon_json = self.state_path.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json);
+        let (gate, writer) = HandoffCrashGate::pair(boundary)?;
+        let mut cmd = ryeosd_command();
+        cmd.arg("--app-root")
+            .arg(&self.state_path)
+            .arg("--force")
+            .arg("--bind")
+            .arg(bind.to_string())
+            .arg("--uds-path")
+            .arg(&self.uds_path)
+            .env("HOSTNAME", "testhost")
+            .env("RYEOS_APP_ROOT", &self.state_path)
+            .env("HOME", self.user_space.path())
+            .stdout(Stdio::null())
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
+            .kill_on_drop(true);
+        HandoffCrashGate::attach_writer(&mut cmd, writer, boundary)?;
+        tweak(&mut cmd);
+
+        let startup_deadline = daemon_startup_deadline()?;
+        self.child = cmd.spawn()?;
+        wait_for_daemon_discovery(
+            &mut self.child,
+            &daemon_json,
+            &stderr_log_path,
+            "gated respawned daemon",
+            startup_deadline,
+        )
+        .await?;
+        self.bind = read_actual_bind(&daemon_json)?;
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            &stderr_log_path,
+            "gated respawned daemon",
+            startup_deadline,
+        )
+        .await?;
+        self.stderr_log_path = stderr_log_path;
+        Ok(gate)
+    }
+
+    /// Re-spawn against the same durable app root and return only after normal
+    /// startup recovery reaches one exact handoff boundary.
+    ///
+    /// Unlike [`respawn_with`], this deliberately does not wait for daemon
+    /// readiness: recovery can reach the cut before the ready surface is
+    /// published. On success the child is still alive and parked at the cut;
+    /// callers must [`kill_daemon`] it before a normal respawn.
+    #[cfg(all(unix, feature = "handoff-test-support"))]
+    pub async fn respawn_until_handoff_crash_boundary(
+        &mut self,
+        boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    ) -> anyhow::Result<ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence> {
+        let bind = self.bind;
+        let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
+        let daemon_json = self.state_path.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json);
+        let (mut gate, writer) = HandoffCrashGate::pair(boundary)?;
+
+        let mut command = ryeosd_command();
+        command
+            .arg("--app-root")
+            .arg(&self.state_path)
+            .arg("--force")
+            .arg("--bind")
+            .arg(bind.to_string())
+            .arg("--uds-path")
+            .arg(&self.uds_path)
+            .env("HOSTNAME", "testhost")
+            .env("RYEOS_APP_ROOT", &self.state_path)
+            .env("HOME", self.user_space.path())
+            .stdout(Stdio::null())
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
+            .kill_on_drop(true);
+        HandoffCrashGate::attach_writer(&mut command, writer, boundary)?;
+
+        self.child = command.spawn()?;
+        self.stderr_log_path = stderr_log_path.clone();
+        match gate.wait_reached().await {
+            Ok(evidence) => Ok(evidence),
+            Err(error) => {
+                let stderr =
+                    stop_and_collect_daemon_stderr(&mut self.child, &stderr_log_path).await;
+                Err(error).with_context(|| {
+                    format!(
+                        "respawned daemon did not reach handoff boundary `{boundary}`; daemon stderr:\n{stderr}"
+                    )
+                })
+            }
+        }
+    }
+
     /// Kill the daemon child, wait for cleanup, and re-spawn against
     /// the same `state_path`, `user_space`, `bind`, and `uds_path`.
     /// The caller passes a `tweak` closure to set any additional env
@@ -929,9 +1211,8 @@ impl DaemonHarness {
     /// **No ``** is passed — the state directory is
     /// already initialized from the original spawn.
     ///
-    /// For tests that need to kill orphaned subprocesses between
-    /// daemon death and respawn, use [`kill_daemon`] + [`respawn_with`]
-    /// instead.
+    /// For tests that need to kill orphaned subprocesses between daemon death
+    /// and respawn, use [`kill_daemon`] + [`respawn_with`] instead.
     pub async fn restart_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
         // 1. SIGKILL the current child.
         self.child
@@ -967,7 +1248,7 @@ impl DaemonHarness {
         }
 
         // 4. Re-spawn with `:0`; read actual bind from daemon.json.
-        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
@@ -975,6 +1256,7 @@ impl DaemonHarness {
         let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&self.state_path)
+            .arg("--force")
             .arg("--bind")
             .arg(bind.to_string())
             .arg("--uds-path")

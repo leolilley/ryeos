@@ -1,7 +1,32 @@
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use std::time::Duration;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Subcommand;
+
+/// One process-local monotonic measurement owned by the Lillux host-time
+/// boundary. The value is intentionally opaque: callers may retain it only to
+/// measure elapsed duration in the same process and clock domain.
+#[derive(Debug)]
+pub struct MonotonicTimer {
+    started_at: Instant,
+}
+
+impl MonotonicTimer {
+    pub fn start() -> Self {
+        Self {
+            started_at: Instant::now(),
+        }
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    pub fn elapsed_millis(&self) -> u64 {
+        u64::try_from(self.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
 
 pub fn iso8601_now() -> String {
     let now = SystemTime::now()

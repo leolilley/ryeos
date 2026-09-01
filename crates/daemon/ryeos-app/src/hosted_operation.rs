@@ -311,7 +311,10 @@ pub fn begin_hosted_root_operation(
         let thread = state_store
             .get_thread(root_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("hosted execution root thread disappeared"))?;
-        Ok(!crate::state_store::is_terminal_status(&thread.status))
+        Ok(!crate::state_store::is_terminal_status(&thread.status)
+            && state_store
+                .active_source_worker_handoff_for_placement(root_thread_id)?
+                .is_none())
     })
 }
 
@@ -328,7 +331,10 @@ pub fn begin_hosted_root_operation_if_appendable(
         let thread = state_store
             .get_thread(root_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("hosted execution root thread disappeared"))?;
-        Ok(!crate::state_store::is_terminal_status(&thread.status))
+        Ok(!crate::state_store::is_terminal_status(&thread.status)
+            && state_store
+                .active_source_worker_handoff_for_placement(root_thread_id)?
+                .is_none())
     })
 }
 
@@ -370,9 +376,13 @@ impl Drop for HostedRootTerminalizationGuard {
     }
 }
 
-pub fn begin_hosted_root_terminalization(
+fn begin_hosted_root_terminalization_with_check<F>(
     root_thread_id: &str,
-) -> Result<HostedRootTerminalizationGuard> {
+    mut durable_disposition_is_allowed: F,
+) -> Result<HostedRootTerminalizationGuard>
+where
+    F: FnMut() -> Result<bool>,
+{
     let gate = root_gate(root_thread_id);
     {
         let mut state = gate
@@ -389,10 +399,58 @@ pub fn begin_hosted_root_terminalization(
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+        match durable_disposition_is_allowed() {
+            Ok(true) => {}
+            Ok(false) => {
+                state.terminalizing = false;
+                gate.changed.notify_all();
+                bail!("hosted execution root has an active source handoff");
+            }
+            Err(error) => {
+                state.terminalizing = false;
+                gate.changed.notify_all();
+                return Err(error);
+            }
+        }
     }
     Ok(HostedRootTerminalizationGuard {
         gate,
         committed: false,
+    })
+}
+
+/// Acquire exclusive disposition ownership after every prior root mutation
+/// settles. A durable source-role handoff owns that placement's disposition,
+/// so unrelated cancellation/finalization cannot race its writer cut.
+pub fn begin_hosted_root_terminalization(
+    state_store: &crate::state_store::StateStore,
+    root_thread_id: &str,
+) -> Result<HostedRootTerminalizationGuard> {
+    begin_hosted_root_terminalization_with_check(root_thread_id, || {
+        Ok(state_store
+            .active_source_worker_handoff_for_placement(root_thread_id)?
+            .is_none())
+    })
+}
+
+/// Reacquire exclusive source disposition for recovery of the exact durable
+/// handoff that already owns it. This is the only bypass for the ordinary
+/// active-handoff fence; a different or absent operation fails closed.
+pub fn begin_hosted_root_handoff_recovery(
+    state_store: &crate::state_store::StateStore,
+    root_thread_id: &str,
+    operation_id: &str,
+) -> Result<HostedRootTerminalizationGuard> {
+    begin_hosted_root_terminalization_with_check(root_thread_id, || {
+        let Some((_job, operation)) =
+            state_store.active_source_worker_handoff_for_placement(root_thread_id)?
+        else {
+            return Ok(false);
+        };
+        if operation.operation_id != operation_id {
+            bail!("source placement is fenced by another worker handoff operation");
+        }
+        Ok(true)
     })
 }
 
@@ -410,7 +468,8 @@ mod tests {
         .unwrap();
         let terminal_appendable = Arc::clone(&appendable);
         let joined = std::thread::spawn(move || {
-            let mut terminal = begin_hosted_root_terminalization(root_id).unwrap();
+            let mut terminal =
+                begin_hosted_root_terminalization_with_check(root_id, || Ok(true)).unwrap();
             terminal_appendable.store(false, std::sync::atomic::Ordering::Release);
             terminal.commit();
         });

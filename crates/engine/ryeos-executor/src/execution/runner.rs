@@ -458,8 +458,10 @@ pub(crate) fn stop_owner_dropped_execution_tree(
     // Fence new hosted mutations and wait for every pre-existing root-chain
     // lease to settle before terminalization. This is a pushed ownership
     // barrier, not a SQLite polling loop.
-    let mut root_terminalization =
-        ryeos_app::hosted_operation::begin_hosted_root_terminalization(root_thread_id)?;
+    let mut root_terminalization = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+        &state.state_store,
+        root_thread_id,
+    )?;
     // These are independent ownership domains. A projection/cleanup error in
     // the subordinate session must never prevent the root process tree from
     // being stopped. Preserve both errors and report them only after the root

@@ -6825,8 +6825,11 @@ async fn run_claimed_thread_row_inner(
         let mut hosted_root_terminalization =
             if state.state_store.dedicated_session(&thread_id)?.is_some() {
                 Some(
-                    ryeos_app::hosted_operation::begin_hosted_root_terminalization(&thread_id)
-                        .map_err(BuildAndLaunchError::Internal)?,
+                    ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+                        &state.state_store,
+                        &thread_id,
+                    )
+                    .map_err(BuildAndLaunchError::Internal)?,
                 )
             } else {
                 None
@@ -8576,9 +8579,11 @@ async fn finalize_recovered_hosted_candidate_disposition(
     );
     let terminal_status = runtime_terminal_status(runtime_result.status);
     let fallback = fallback_finalization(thread_id, &runtime_result, terminal_status);
-    let mut root_terminalization =
-        ryeos_app::hosted_operation::begin_hosted_root_terminalization(thread_id)
-            .map_err(BuildAndLaunchError::Internal)?;
+    let mut root_terminalization = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+        &state.state_store,
+        thread_id,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
         &fallback.params,
         fallback.managed_envelope,

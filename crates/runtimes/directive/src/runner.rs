@@ -635,7 +635,7 @@ fn retry_delay_for_reason(
     }
     let factor = 1u64 << attempt.min(16);
     let delay_ms = execution.backoff_base_ms.saturating_mul(factor);
-    Some(std::time::Duration::from_millis(delay_ms))
+    Some(lillux::time::Duration::from_millis(delay_ms))
 }
 
 fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {

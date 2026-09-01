@@ -84,8 +84,10 @@ pub use operational::{
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
     OperationalCredentialProfileRecord, OperationalDb, ReplayIndexActivationRequired,
     ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome, ReplayPublishOutcome,
-    ReplayRecordVerification, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord,
-    SyncJobState, SyncJobUpdate,
+    ReplayRecordVerification, SYNC_JOB_UNBOUNDED_ATTEMPTS,
+    SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS, SyncJobAttemptRecord, SyncJobAttemptState,
+    SyncJobRecord, SyncJobState, SyncJobUpdate, sync_job_attempt_count_is_valid,
+    sync_job_attempts_are_unbounded, sync_job_attempts_exhausted,
 };
 pub use pending_publication::PendingCasPublication;
 pub use project_materialization::PinnedProjectMaterialization;

@@ -165,7 +165,7 @@ fn claim_activation_attempt(
                 | ryeos_state::SyncJobState::Retryable
         ) && !has_running_attempt
         {
-            if job.attempt_count >= job.max_attempts {
+            if job.attempts_exhausted() {
                 db.update_sync_job(
                     job_id,
                     &ryeos_state::SyncJobUpdate {
@@ -2073,7 +2073,7 @@ fn settle_retryable_attempt_failure(
         .state_store
         .with_state_db(|db| db.get_sync_job(job_id))?
         .context("managed activation job disappeared before failure settlement")?;
-    let terminal = latest.attempt_count >= latest.max_attempts;
+    let terminal = latest.attempts_exhausted();
     settle_attempt(
         state,
         job_id,

@@ -191,12 +191,46 @@ fn main() -> Result<()> {
     result
 }
 
+#[cfg(feature = "handoff-test-support")]
+fn build_handoff_phase_gate(
+    cli: &Cli,
+) -> Result<Option<Arc<ryeos_app::worker_handoff::test_support::HandoffPhaseGate>>> {
+    use std::str::FromStr as _;
+
+    use ryeos_app::worker_handoff::test_support::{
+        HANDOFF_PHASE_CUT_FD_ENV, HandoffCrashBoundary, HandoffPhaseGate,
+    };
+
+    let descriptor_configured = std::env::var_os(HANDOFF_PHASE_CUT_FD_ENV).is_some();
+    let boundary = match (
+        descriptor_configured,
+        cli.handoff_phase_cut_boundary.as_deref(),
+    ) {
+        (false, None) => return Ok(None),
+        (true, Some(boundary)) => boundary,
+        _ => anyhow::bail!("handoff phase-cut boundary and channel must be supplied together"),
+    };
+    // SAFETY: the test parent minted this exact connected channel through
+    // Lillux and consumed its child authority into this daemon spawn.
+    let writer =
+        unsafe { lillux::take_inherited_duplex_channel_from_env(HANDOFF_PHASE_CUT_FD_ENV) }
+            .map_err(anyhow::Error::msg)
+            .context("adopt inherited handoff phase-cut channel")?;
+    Ok(Some(Arc::new(HandoffPhaseGate::new(
+        HandoffCrashBoundary::from_str(boundary)?,
+        writer,
+    ))))
+}
+
 async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
     let process_started = Instant::now();
     let process_started_at = lillux::time::iso8601_now();
     let cli = Cli::parse();
+
+    #[cfg(feature = "handoff-test-support")]
+    let handoff_phase_gate = build_handoff_phase_gate(&cli)?;
 
     if let Some(config::DaemonCommand::BuildInfo {
         revision,
@@ -773,6 +807,10 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
+                    #[cfg(feature = "handoff-test-support")]
+                    if let Some(gate) = handoff_phase_gate.clone() {
+                        ext.insert(gate);
+                    }
                     Arc::new(ext)
                 },
                 write_barrier: Arc::new(write_barrier),
@@ -809,6 +847,20 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 accounting,
                 persistent_sessions: Arc::new(persistent_sessions),
             };
+            // This is a generation cut, not a periodic repair. Settle every
+            // attempt owned by the dead predecessor before any startup
+            // recovery can terminalize its job and before application
+            // admission can create an attempt owned by this process.
+            let interrupted_sync_attempts = app_state
+                .state_store
+                .reconcile_interrupted_sync_job_attempts()
+                .context("reconcile predecessor sync-job attempts")?;
+            if interrupted_sync_attempts != 0 {
+                tracing::warn!(
+                    interrupted_sync_attempts,
+                    "settled sync-job attempts interrupted by the previous daemon process"
+                );
+            }
             let admission_store = app_state.state_store.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
@@ -1786,6 +1838,19 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
                 .state_store
                 .remote_continuation_authority(&thread.chain_root_id, thread_id)?
                 .is_some();
+        let durable_source_handoff_owner = match state
+            .state_store
+            .active_source_worker_handoff_for_placement(thread_id)?
+        {
+            Some((_job, operation)) if operation.chain_root_id == thread.chain_root_id => true,
+            Some((_job, operation)) => {
+                anyhow::bail!(
+                    "active source handoff {} contradicts recovery target {thread_id} chain authority",
+                    operation.operation_id
+                );
+            }
+            None => false,
+        };
         if status.is_terminal()
             || live_owned_process
             || state.state_store.get_launch_claim(thread_id)?.is_some()
@@ -1793,12 +1858,13 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
             || durable_follow_owner
             || durable_follow_resume_edge
             || durable_remote_adoption_edge
+            || durable_source_handoff_owner
             || durable_window_owner
         {
             continue;
         }
         anyhow::bail!(
-            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/wait/follow/window ownership"
+            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/wait/follow/handoff/window ownership"
         );
     }
     Ok(())
@@ -1906,16 +1972,6 @@ async fn dispatch_follow_actions(
 async fn run_periodic_recovery(state: AppState) -> Result<()> {
     if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
         return Ok(());
-    }
-    let interrupted_sync_attempts = state
-        .state_store
-        .reconcile_interrupted_sync_job_attempts()
-        .context("reconcile interrupted sync-job attempts")?;
-    if interrupted_sync_attempts != 0 {
-        tracing::warn!(
-            interrupted_sync_attempts,
-            "settled sync-job attempts interrupted by the previous daemon process"
-        );
     }
     if let Err(error) =
         ryeos_api::handlers::external_content_activate::recover_durable_activations(&state).await

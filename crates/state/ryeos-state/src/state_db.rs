@@ -5722,6 +5722,17 @@ impl StateDb {
         self.operational()?.create_sync_job(job)
     }
 
+    pub fn create_sync_job_with_initial_progress(
+        &self,
+        job: &NewSyncJob,
+        state: SyncJobState,
+        phase: &str,
+        result: Option<&serde_json::Value>,
+    ) -> anyhow::Result<SyncJobRecord> {
+        self.operational()?
+            .create_sync_job_with_initial_progress(job, state, phase, result)
+    }
+
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
         self.operational()?.update_sync_job(job_id, update)
     }
@@ -5782,6 +5793,16 @@ impl StateDb {
         limit: usize,
     ) -> anyhow::Result<Vec<SyncJobRecord>> {
         self.operational()?.list_sync_jobs_by_state(state, limit)
+    }
+
+    pub fn list_sync_jobs_by_operation_type_before(
+        &self,
+        operation_type: &str,
+        before: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_sync_jobs_by_operation_type_before(operation_type, before, limit)
     }
 
     pub fn list_active_sync_jobs_by_operation_type(

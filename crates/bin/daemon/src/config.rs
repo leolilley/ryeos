@@ -41,6 +41,11 @@ pub struct Cli {
     /// Resolve stored config conflicts in favor of explicit CLI values.
     #[arg(long)]
     pub force: bool,
+
+    /// Test-only selection paired with a Lillux-owned inherited channel.
+    #[cfg(feature = "handoff-test-support")]
+    #[arg(long, hide = true)]
+    pub handoff_phase_cut_boundary: Option<String>,
 }
 
 impl Cli {

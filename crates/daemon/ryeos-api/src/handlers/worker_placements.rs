@@ -21,16 +21,60 @@ use ryeos_app::worker_handoff::{
     CredentialGenerationReservation, RemoteResumeContextRebind, WORKER_PLACEMENT_ABORT_SERVICE,
     WORKER_PLACEMENT_ADOPT_SERVICE, WORKER_PLACEMENT_PREFLIGHT_SERVICE,
     WORKER_PLACEMENT_PREPARE_SERVICE, WORKER_SESSION_HANDOFF_OPERATION,
-    WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION, WorkerHandoffJobRole, WorkerHandoffPhase,
-    WorkerPlacementAbortRequest, WorkerPlacementAbortResponse, WorkerPlacementAdmissionEvidence,
-    WorkerPlacementAdoptRequest, WorkerPlacementAdoptResponse, WorkerPlacementPreflightEvidence,
-    WorkerPlacementPreflightJobOperation, WorkerPlacementPreflightRequest,
-    WorkerPlacementPreflightResponse, WorkerPlacementPrepareRequest,
-    WorkerPlacementPrepareResponse, WorkerSessionHandoffJobOperation, WorkerSessionHandoffProgress,
+    WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT, WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION,
+    WorkerHandoffJobRole, WorkerHandoffPhase, WorkerPlacementAbortRequest,
+    WorkerPlacementAbortResponse, WorkerPlacementAbortResult, WorkerPlacementAdmissionEvidence,
+    WorkerPlacementAdoptRequest, WorkerPlacementAdoptResponse, WorkerPlacementAdoptResult,
+    WorkerPlacementCompletionResponse, WorkerPlacementFailureResponse,
+    WorkerPlacementPreflightEvidence, WorkerPlacementPreflightJobOperation,
+    WorkerPlacementPreflightRequest, WorkerPlacementPreflightResponse,
+    WorkerPlacementPrepareRequest, WorkerPlacementPrepareResponse,
+    WorkerSessionHandoffJobOperation, WorkerSessionHandoffProgress,
 };
 use ryeos_executor::executor::ServiceAvailability;
 
 const MAX_HANDOFF_CLOSURE_BYTES: u64 = 48 * 1024 * 1024;
+
+struct PreparedTargetPlacement {
+    response: WorkerPlacementPrepareResponse,
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    project_materialization_ms: u64,
+}
+
+#[cfg(any(test, feature = "handoff-test-support"))]
+#[derive(Default)]
+struct TargetAdoptionQualificationMeasurements {
+    event_replay_ms: Option<u64>,
+    worker_attach_recovery_ms: Option<u64>,
+}
+
+#[cfg(any(test, feature = "handoff-test-support"))]
+fn attach_target_adoption_qualification_measurements(
+    mut response: Value,
+    measurements: TargetAdoptionQualificationMeasurements,
+) -> Value {
+    response["qualification_measurements"] = serde_json::json!({
+        "schema":"ryeos.worker_handoff_target_adoption_measurements.v1",
+        "event_replay_ms":measurements.event_replay_ms,
+        "worker_attach_recovery_ms":measurements.worker_attach_recovery_ms,
+    });
+    response
+}
+
+#[cfg(any(test, feature = "handoff-test-support"))]
+fn reach_target_handoff_crash_boundary(
+    state: &AppState,
+    boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+    operation: &WorkerSessionHandoffJobOperation,
+) -> anyhow::Result<()> {
+    if let Some(gate) = state
+        .extensions
+        .get::<ryeos_app::worker_handoff::test_support::HandoffPhaseGate>()
+    {
+        gate.reach(boundary, operation)?;
+    }
+    Ok(())
+}
 
 fn authenticated_remote_node_site(ctx: &HandlerContext) -> Result<&str, HandlerError> {
     if !ctx.verified
@@ -123,7 +167,7 @@ pub async fn preflight(
         preflight_roots.push(hash.clone());
     }
     let closure = source_client
-        .objects_closure_get(
+        .objects_closure_get_with_total_timeout(
             &preflight_roots,
             ObjectsClosureRequestOptions {
                 max_objects: Some(16_384),
@@ -137,6 +181,7 @@ pub async fn preflight(
                 allow_incomplete: false,
                 allow_untransported_large_objects: true,
             },
+            WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
         .await
         .map_err(|error| {
@@ -444,6 +489,31 @@ pub async fn prepare(
         ));
     }
 
+    let job_id = target_job_id(&req.operation_id);
+    // Serialize the operation before its first remote wait. Abort publishes a
+    // durable claim under this same lock, and the permanent signed fence below
+    // survives terminal sync-job retention.
+    let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
+    if let Some(fence) = state
+        .state_store
+        .worker_handoff_abort_fence(&req.operation_id)
+        .map_err(internal)?
+    {
+        fence.validate_prepare_request(&req).map_err(internal)?;
+        return Err(HandlerError::BadRequest(
+            "target placement was permanently aborted before preparation".into(),
+        ));
+    }
+    if let Some(existing) = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&job_id))
+        .map_err(internal)?
+    {
+        if let Some(response) = classify_existing_target_prepare(&state, &req, &existing)? {
+            return Ok(response);
+        }
+    }
+
     let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
     let mut roots = vec![
         req.source_chain_head_hash.clone(),
@@ -454,7 +524,7 @@ pub async fn prepare(
         roots.push(hash.clone());
     }
     let closure = source_client
-        .objects_closure_get(
+        .objects_closure_get_with_total_timeout(
             &roots,
             ObjectsClosureRequestOptions {
                 max_objects: Some(16_384),
@@ -468,6 +538,7 @@ pub async fn prepare(
                 allow_incomplete: false,
                 allow_untransported_large_objects: true,
             },
+            WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
         .await
         .map_err(|error| {
@@ -522,8 +593,6 @@ pub async fn prepare(
         req.follow_delivery_reservation_attestation_hash.clone(),
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let job_id = target_job_id(&req.operation_id);
-    let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
     let (_, existing_job) = state
         .state_store
         .stage_sync_payload_and_create_job(
@@ -540,22 +609,13 @@ pub async fn prepare(
                 peer: Some(source_remote.config_key.clone()),
                 roots,
                 heads: vec![req.source_chain_head_hash.clone()],
-                max_attempts: 16,
+                max_attempts: ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
             },
         )
         .map_err(internal)?;
 
-    if existing_job.state == ryeos_state::SyncJobState::Completed {
-        let response: WorkerPlacementPrepareResponse = serde_json::from_value(
-            existing_job
-                .result
-                .ok_or_else(|| internal("completed target placement has no result"))?,
-        )
-        .map_err(internal)?;
-        response
-            .validate_against(&req)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-        return serde_json::to_value(response).map_err(internal);
+    if let Some(response) = classify_existing_target_prepare(&state, &req, &existing_job)? {
+        return Ok(response);
     }
 
     let operands = load_source_placement_operands(&state, &transfer).map_err(internal)?;
@@ -574,6 +634,7 @@ pub async fn prepare(
     let result = prepare_after_staging(
         &state,
         &req,
+        &operation,
         &owner,
         &target_project_path,
         &job_id,
@@ -583,7 +644,7 @@ pub async fn prepare(
     .await;
     drop(profile_operation);
     match result {
-        Ok(response) => {
+        Ok(prepared) => {
             settle_target_handoff_attempt(
                 &state,
                 &job_id,
@@ -595,7 +656,17 @@ pub async fn prepare(
                 None,
             )
             .map_err(internal)?;
-            serde_json::to_value(response).map_err(internal)
+            let value = serde_json::to_value(prepared.response).map_err(internal)?;
+            #[cfg(any(test, feature = "handoff-test-support"))]
+            let value = {
+                let mut value = value;
+                value["qualification_measurements"] = serde_json::json!({
+                    "schema":"ryeos.worker_handoff_target_prepare_measurements.v1",
+                    "project_materialization_ms":prepared.project_materialization_ms,
+                });
+                value
+            };
+            Ok(value)
         }
         Err(error) => {
             let detail = bounded_recovery_error(&format!("{error:#}"));
@@ -617,6 +688,112 @@ pub async fn prepare(
     }
 }
 
+fn classify_existing_target_prepare(
+    state: &AppState,
+    request: &WorkerPlacementPrepareRequest,
+    job: &ryeos_state::SyncJobRecord,
+) -> Result<Option<Value>, HandlerError> {
+    let operation =
+        WorkerSessionHandoffJobOperation::from_value(job.operation.clone()).map_err(internal)?;
+    operation
+        .validate_target_prepare_request(request)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if matches!(
+        job.state,
+        ryeos_state::SyncJobState::Completed
+            | ryeos_state::SyncJobState::Failed
+            | ryeos_state::SyncJobState::Cancelled
+    ) {
+        return Err(HandlerError::BadRequest(
+            "terminal target placement cannot be prepared again".into(),
+        ));
+    }
+    if job.phase == "target_abort_claimed" {
+        return Err(HandlerError::BadRequest(
+            "target placement has an active abort claim".into(),
+        ));
+    }
+    let progress = job
+        .result
+        .clone()
+        .map(WorkerSessionHandoffProgress::from_value)
+        .transpose()
+        .map_err(internal)?;
+    let Some(progress) = progress else {
+        return Ok(None);
+    };
+    match progress.phase {
+        WorkerHandoffPhase::Planned => Ok(None),
+        WorkerHandoffPhase::TargetPrepared => {
+            let response = prepared_response_from_progress(state, request, &operation, &progress)
+                .map_err(internal)?;
+            serde_json::to_value(response).map(Some).map_err(internal)
+        }
+        WorkerHandoffPhase::AbortAuthorized => Err(HandlerError::BadRequest(
+            "target placement has an active abort claim".into(),
+        )),
+        WorkerHandoffPhase::SourceCommitted
+        | WorkerHandoffPhase::TargetAdopted
+        | WorkerHandoffPhase::StateInstalled
+        | WorkerHandoffPhase::ProcessAttached
+        | WorkerHandoffPhase::Completed => Err(HandlerError::BadRequest(
+            "target placement already crossed the source writer cut".into(),
+        )),
+        WorkerHandoffPhase::SourceExported => Err(internal(
+            "target placement retained source-only handoff progress",
+        )),
+    }
+}
+
+fn prepared_response_from_progress(
+    state: &AppState,
+    request: &WorkerPlacementPrepareRequest,
+    operation: &WorkerSessionHandoffJobOperation,
+    progress: &WorkerSessionHandoffProgress,
+) -> Result<WorkerPlacementPrepareResponse> {
+    if progress.phase != WorkerHandoffPhase::TargetPrepared
+        || progress.operation_id != operation.operation_id
+    {
+        bail!("target prepare replay has no exact prepared progress");
+    }
+    let attestation_hash = progress
+        .placement_attestation_hash
+        .as_deref()
+        .context("prepared progress has no placement attestation")?;
+    let runtime_seed_hash = progress
+        .target_runtime_seed_hash
+        .as_deref()
+        .context("prepared progress has no runtime seed")?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let value = authority
+        .cas_store()?
+        .get_object(attestation_hash)?
+        .context("prepared placement attestation disappeared")?;
+    let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
+    attestation.verify_with_key(state.identity.verifying_key())?;
+    let placement = WorkerPlacementAdmissionEvidence::from_attestation(&attestation)?;
+    drop(guard);
+    if placement.operation_id != operation.operation_id
+        || placement.target_runtime_seed_hash != runtime_seed_hash
+        || progress.credential_reservation_id.as_deref()
+            != Some(placement.credential_reservation.reservation_id.as_str())
+    {
+        bail!("prepared progress contradicts its signed placement evidence");
+    }
+    let response = WorkerPlacementPrepareResponse {
+        operation_id: operation.operation_id.clone(),
+        placement_attestation_hash: attestation_hash.to_owned(),
+        target_runtime_seed_hash: runtime_seed_hash.to_owned(),
+        target_launch_capsule_hash: placement.target_launch_capsule_hash.clone(),
+        credential_reservation: placement.credential_reservation.clone(),
+        placement,
+    };
+    response.validate_against(request)?;
+    Ok(response)
+}
+
 pub async fn adopt(
     req: WorkerPlacementAdoptRequest,
     ctx: HandlerContext,
@@ -624,11 +801,41 @@ pub async fn adopt(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let job = state
+    let job_id = target_job_id(&req.operation_id);
+    let mut job = state
         .state_store
-        .with_state_db(|db| db.get_sync_job(&target_job_id(&req.operation_id)))
-        .map_err(internal)?
-        .ok_or_else(|| HandlerError::BadRequest("target placement job does not exist".into()))?;
+        .with_state_db(|db| db.get_sync_job(&job_id))
+        .map_err(internal)?;
+    if job.is_none() {
+        // Job retention and the competing abort branch use the same operation
+        // lock as live adoption. Recheck under that lock before consulting the
+        // shared target-branch head so a prepare/abort transition cannot race
+        // a job-absent terminal replay.
+        let operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
+        job = state
+            .state_store
+            .with_state_db(|db| db.get_sync_job(&job_id))
+            .map_err(internal)?;
+        if job.is_none() {
+            let (source_site_id, response) = replay_terminal_target_adoption(&state, &req)?
+                .ok_or_else(|| {
+                    HandlerError::BadRequest("target placement authority does not exist".into())
+                })?;
+            let remotes =
+                config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+            let source_remote = config::resolve_remote_by_site_id(&remotes, &source_site_id)
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            require_authenticated_source_node(
+                &ctx,
+                &source_site_id,
+                &source_remote.remote.principal_id,
+            )?;
+            drop(operation_guard);
+            return serde_json::to_value(response).map_err(internal);
+        }
+        drop(operation_guard);
+    }
+    let job = job.expect("target placement job presence checked");
     let operation = WorkerSessionHandoffJobOperation::from_value(job.operation)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
@@ -639,13 +846,98 @@ pub async fn adopt(
         &operation.source_site_id,
         &source_remote.remote.principal_id,
     )?;
-    adopt_authorized(
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let mut qualification_measurements = TargetAdoptionQualificationMeasurements::default();
+    let response = adopt_authorized(
         req,
         operation.owner_principal,
         operation.source_site_id,
         state,
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        &mut qualification_measurements,
     )
-    .await
+    .await?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let response =
+        attach_target_adoption_qualification_measurements(response, qualification_measurements);
+    Ok(response)
+}
+
+/// Replay the exact mutually exclusive target terminal branch independently
+/// of operational-job retention.
+fn replay_terminal_target_adoption(
+    state: &AppState,
+    request: &WorkerPlacementAdoptRequest,
+) -> Result<Option<(String, WorkerPlacementAdoptResult)>, HandlerError> {
+    let Some(terminal) = state
+        .state_store
+        .worker_handoff_target_terminal(&request.operation_id)
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let terminal_attestation_hash = state
+        .state_store
+        .worker_handoff_target_branch_hash(&request.operation_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("target terminal receipt head disappeared"))?;
+    let (source_site_id, result) = match terminal {
+        ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Adoption(receipt) => {
+            if receipt.request != *request
+                || receipt.target_operation.target_site_id != state.threads.site_id()
+            {
+                return Err(HandlerError::BadRequest(
+                    "target adoption retry contradicts its signed terminal receipt".into(),
+                ));
+            }
+            (
+                receipt.target_operation.source_site_id,
+                WorkerPlacementAdoptResult::Attached {
+                    response: receipt.response,
+                    terminal_attestation_hash,
+                },
+            )
+        }
+        ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Failure(receipt) => {
+            if receipt.request != *request
+                || receipt.target_operation.target_site_id != state.threads.site_id()
+            {
+                return Err(HandlerError::BadRequest(
+                    "target adoption retry contradicts its signed terminal failure".into(),
+                ));
+            }
+            (
+                receipt.target_operation.source_site_id,
+                WorkerPlacementAdoptResult::FailedBeforeAttachment {
+                    failure: receipt.failure,
+                    terminal_attestation_hash,
+                },
+            )
+        }
+        ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Completion(receipt) => {
+            if receipt.request != *request
+                || receipt.target_operation.target_site_id != state.threads.site_id()
+            {
+                return Err(HandlerError::BadRequest(
+                    "target adoption retry contradicts its signed terminal completion".into(),
+                ));
+            }
+            (
+                receipt.target_operation.source_site_id,
+                WorkerPlacementAdoptResult::CompletedBeforeAttachment {
+                    completion: receipt.completion,
+                    terminal_attestation_hash,
+                },
+            )
+        }
+        ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Abort(_) => {
+            return Err(HandlerError::BadRequest(
+                "target placement is durably claimed by the abort branch".into(),
+            ));
+        }
+    };
+    result.validate().map_err(internal)?;
+    Ok(Some((source_site_id, result)))
 }
 
 pub async fn abort(
@@ -655,6 +947,7 @@ pub async fn abort(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let source_operation = req.operation.clone();
     let authenticated_source_site = authenticated_remote_node_site(&ctx)?.to_owned();
     let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &authenticated_source_site)
@@ -664,41 +957,99 @@ pub async fn abort(
         &authenticated_source_site,
         &source_remote.remote.principal_id,
     )?;
-    let job_id = target_job_id(&req.operation_id);
+    if source_operation.source_site_id != authenticated_source_site
+        || source_operation.target_site_id != state.threads.site_id()
+    {
+        return Err(HandlerError::Forbidden(
+            "abort operation differs from its authenticated sites".into(),
+        ));
+    }
+    let operation = source_operation
+        .target_projection(source_remote.config_key.clone())
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let job_id = target_job_id(&operation.operation_id);
     let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
-    let Some(job) = state
+    let existing_fence = state
+        .state_store
+        .worker_handoff_abort_fence(&operation.operation_id)
+        .map_err(internal)?;
+    if let Some(fence) = &existing_fence {
+        let expected = ryeos_app::worker_handoff::WorkerHandoffAbortFenceEvidence::new(
+            operation.clone(),
+            req.abort_chain_head_hash.clone(),
+            fence.terminal_disposition.clone(),
+        )
+        .map_err(internal)?;
+        if *fence != expected {
+            return Err(HandlerError::Forbidden(
+                "target abort fence differs from authenticated abort coordinates".into(),
+            ));
+        }
+        if let Some(disposition) = &fence.terminal_disposition {
+            let response = WorkerPlacementAbortResponse {
+                operation_id: source_operation.operation_id.clone(),
+                chain_root_id: source_operation.chain_root_id.clone(),
+                disposition: disposition.clone(),
+            };
+            response.validate_against(&req).map_err(internal)?;
+            settle_target_abort_job_from_receipt(
+                &state,
+                &job_id,
+                &operation,
+                &req.abort_chain_head_hash,
+                &response,
+            )
+            .map_err(internal)?;
+            let terminal_attestation_hash = state
+                .state_store
+                .worker_handoff_target_branch_hash(&operation.operation_id)
+                .map_err(internal)?
+                .ok_or_else(|| internal("target abort receipt head disappeared"))?;
+            let result = WorkerPlacementAbortResult {
+                response,
+                terminal_attestation_hash,
+            };
+            result.validate_against(&req).map_err(internal)?;
+            return serde_json::to_value(result).map_err(internal);
+        }
+    }
+
+    let existing_job = state
         .state_store
         .with_state_db(|db| db.get_sync_job(&job_id))
-        .map_err(internal)?
-    else {
-        let response = WorkerPlacementAbortResponse {
-            operation_id: req.operation_id.clone(),
-            chain_root_id: req.chain_root_id.clone(),
-            disposition: "target_absent".to_owned(),
-        };
-        response.validate_against(&req).map_err(internal)?;
-        return serde_json::to_value(response).map_err(internal);
-    };
-    let operation = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())
+        .map_err(internal)?;
+    if existing_fence.is_some() && existing_job.is_none() {
+        return Err(internal(
+            "provisional target abort fence lost its active cleanup job",
+        ));
+    }
+    let target_was_absent = existing_job.is_none();
+    let job = state
+        .state_store
+        .claim_worker_handoff_target_abort(
+            &ryeos_state::NewSyncJob {
+                job_id: job_id.clone(),
+                operation_type: WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
+                operation: operation.to_value().map_err(internal)?,
+                peer: Some(source_remote.config_key.clone()),
+                roots: Vec::new(),
+                heads: Vec::new(),
+                max_attempts: ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
+            },
+            &req.abort_chain_head_hash,
+        )
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    if operation.role != WorkerHandoffJobRole::Target
-        || operation.operation_id != req.operation_id
-        || operation.chain_root_id != req.chain_root_id
-        || operation.source_site_id != authenticated_source_site
-        || operation.target_site_id != state.threads.site_id()
-    {
+    let retained_operation = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if retained_operation != operation {
         return Err(HandlerError::Forbidden(
             "target placement job differs from authenticated abort coordinates".into(),
         ));
     }
     if job.state == ryeos_state::SyncJobState::Cancelled {
-        let response: WorkerPlacementAbortResponse = serde_json::from_value(
-            job.result
-                .ok_or_else(|| internal("cancelled target handoff job has no abort result"))?,
-        )
-        .map_err(internal)?;
-        response.validate_against(&req).map_err(internal)?;
-        return serde_json::to_value(response).map_err(internal);
+        return Err(internal(
+            "cancelled target handoff job has no target-signed terminal abort receipt",
+        ));
     }
     if matches!(
         job.state,
@@ -716,17 +1067,28 @@ pub async fn abort(
         .map_err(internal)?;
     if existing_progress
         .as_ref()
-        .is_some_and(|progress| progress.phase >= WorkerHandoffPhase::SourceCommitted)
+        .is_some_and(|progress| progress.phase.successor_is_only_authorized_writer())
     {
         return Err(HandlerError::BadRequest(
             "source-committed target placement cannot be aborted".into(),
         ));
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeAbortEvidenceStage,
+        &operation,
+    )
+    .map_err(internal)?;
 
     let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let mut source_roots = vec![req.abort_chain_head_hash.clone()];
+    if target_was_absent {
+        source_roots.push(source_operation.preflight_attestation_hash.clone());
+    }
     let closure = source_client
-        .objects_closure_get(
-            std::slice::from_ref(&req.abort_chain_head_hash),
+        .objects_closure_get_with_total_timeout(
+            &source_roots,
             ObjectsClosureRequestOptions {
                 max_objects: Some(16_384),
                 max_blobs: Some(16_384),
@@ -739,6 +1101,7 @@ pub async fn abort(
                 allow_incomplete: false,
                 allow_untransported_large_objects: true,
             },
+            WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
         .await
         .map_err(|error| {
@@ -747,13 +1110,14 @@ pub async fn abort(
     import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let payload = import::closure_response_to_export_payload(
-        &req.chain_root_id,
+        &operation.chain_root_id,
         &req.abort_chain_head_hash,
         &closure.entries,
     )
     .map_err(internal)?;
     let mut progress = existing_progress.unwrap_or(
-        WorkerSessionHandoffProgress::planned(req.operation_id.clone()).map_err(internal)?,
+        WorkerSessionHandoffProgress::planned(source_operation.operation_id.clone())
+            .map_err(internal)?,
     );
     progress.phase = WorkerHandoffPhase::AbortAuthorized;
     progress.abort_chain_head_hash = Some(req.abort_chain_head_hash.clone());
@@ -769,10 +1133,17 @@ pub async fn abort(
             },
             &job_id,
             progress.phase.as_str(),
-            std::slice::from_ref(&req.abort_chain_head_hash),
+            &source_roots,
             Some(progress.to_value().map_err(internal)?),
         )
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortEvidenceStaged,
+        &operation,
+    )
+    .map_err(internal)?;
     let authority = state
         .state_store
         .pinned_state_authority()
@@ -780,28 +1151,40 @@ pub async fn abort(
     let guard = authority.acquire_shared_guard().map_err(internal)?;
     ryeos_app::worker_handoff::validate_handoff_abort_authority(
         &authority.cas_store().map_err(internal)?,
-        &operation,
+        &retained_operation,
         &req.abort_chain_head_hash,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     drop(guard);
+    if target_was_absent {
+        validate_abort_operation_against_target_preflight_attestation(&state, &source_operation)?;
+    }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortEvidenceVerified,
+        &operation,
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .publish_worker_handoff_abort_fence(&retained_operation, &req.abort_chain_head_hash)
+        .map_err(internal)?;
 
     let reservation = state
         .state_store
-        .credential_profile_reservation_for_successor(&operation.successor_placement_thread_id)
+        .credential_profile_reservation_for_successor(
+            &retained_operation.successor_placement_thread_id,
+        )
         .map_err(internal)?;
     let disposition = if let Some(reservation) = reservation {
-        if reservation.operation_id != operation.operation_id
-            || reservation.owner_principal != operation.owner_principal
-            || reservation.profile_id != operation.target_credential_profile_id
+        if reservation.operation_id != retained_operation.operation_id
+            || reservation.owner_principal != retained_operation.owner_principal
+            || reservation.profile_id != retained_operation.target_credential_profile_id
         {
-            if reservation.state == "released" {
-                "already_released"
-            } else {
-                return Err(internal(
-                    "live target credential reservation differs from aborted handoff",
-                ));
-            }
+            return Err(internal(
+                "target credential reservation differs from aborted handoff",
+            ));
         } else {
             match reservation.state.as_str() {
                 "reserved" => {
@@ -811,7 +1194,10 @@ pub async fn abort(
                         .map_err(internal)?;
                     "reservation_released"
                 }
-                "released" => "already_released",
+                // This reservation is uniquely bound to the same operation.
+                // Observing it released after an ambiguous crash therefore
+                // reproduces the operation's canonical terminal disposition.
+                "released" => "reservation_released",
                 "consumed" => {
                     return Err(HandlerError::BadRequest(
                         "target placement already consumed its credential reservation".into(),
@@ -821,33 +1207,189 @@ pub async fn abort(
             }
         }
     } else {
-        "already_released"
+        "target_absent"
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortReservationReleased,
+        &operation,
+    )
+    .map_err(internal)?;
     let response = WorkerPlacementAbortResponse {
-        operation_id: req.operation_id.clone(),
-        chain_root_id: req.chain_root_id.clone(),
+        operation_id: source_operation.operation_id.clone(),
+        chain_root_id: source_operation.chain_root_id.clone(),
         disposition: disposition.to_owned(),
     };
     response.validate_against(&req).map_err(internal)?;
-    state
+    let terminal_attestation_hash = state
         .state_store
-        .with_state_db(|db| {
-            db.update_sync_job(
-                &job_id,
-                &ryeos_state::SyncJobUpdate {
-                    state: ryeos_state::SyncJobState::Cancelled,
-                    phase: "aborted".to_owned(),
-                    roots: None,
-                    heads: Some(vec![req.abort_chain_head_hash.clone()]),
-                    uploaded_hashes: Vec::new(),
-                    fetched_hashes: vec![req.abort_chain_head_hash.clone()],
-                    last_error: None,
-                    result: Some(serde_json::to_value(&response)?),
-                },
-            )
-        })
+        .publish_worker_handoff_abort_terminal_receipt(
+            &retained_operation,
+            &req.abort_chain_head_hash,
+            disposition,
+        )
         .map_err(internal)?;
-    serde_json::to_value(response).map_err(internal)
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortReceiptPublished,
+        &operation,
+    )
+    .map_err(internal)?;
+    settle_target_abort_job_from_receipt(
+        &state,
+        &job_id,
+        &retained_operation,
+        &req.abort_chain_head_hash,
+        &response,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortCompletedBeforeResponse,
+        &operation,
+    )
+    .map_err(internal)?;
+    let result = WorkerPlacementAbortResult {
+        response,
+        terminal_attestation_hash,
+    };
+    result.validate_against(&req).map_err(internal)?;
+    serde_json::to_value(result).map_err(internal)
+}
+
+fn settle_target_abort_job_from_receipt(
+    state: &AppState,
+    job_id: &str,
+    operation: &WorkerSessionHandoffJobOperation,
+    abort_chain_head_hash: &str,
+    response: &WorkerPlacementAbortResponse,
+) -> Result<()> {
+    let Some(job) = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(job_id))?
+    else {
+        return Ok(());
+    };
+    let retained = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())?;
+    if retained != *operation || job.heads != [abort_chain_head_hash.to_owned()] {
+        bail!("terminal abort receipt contradicts its retained target job");
+    }
+    if job.state == ryeos_state::SyncJobState::Cancelled {
+        let existing: WorkerPlacementAbortResponse = serde_json::from_value(
+            job.result
+                .context("cancelled target abort job has no terminal receipt")?,
+        )?;
+        if existing != *response {
+            bail!("terminal abort receipt changed after target settlement");
+        }
+        return Ok(());
+    }
+    if matches!(
+        job.state,
+        ryeos_state::SyncJobState::Completed | ryeos_state::SyncJobState::Failed
+    ) {
+        bail!("terminal abort receipt conflicts with another target disposition");
+    }
+    let progress = WorkerSessionHandoffProgress::from_value(
+        job.result
+            .clone()
+            .context("active target abort job has no progress")?,
+    )?;
+    if progress.phase != WorkerHandoffPhase::AbortAuthorized
+        || progress.abort_chain_head_hash.as_deref() != Some(abort_chain_head_hash)
+        || !job.roots.iter().any(|root| root == abort_chain_head_hash)
+    {
+        bail!("terminal abort receipt has no matching authorized target progress");
+    }
+    let reservation = state
+        .state_store
+        .credential_profile_reservation_for_successor(&operation.successor_placement_thread_id)?;
+    match response.disposition.as_str() {
+        "reservation_released" => {
+            let reservation = reservation
+                .context("terminal target abort receipt lost its released reservation")?;
+            if reservation.operation_id != operation.operation_id
+                || reservation.owner_principal != operation.owner_principal
+                || reservation.profile_id != operation.target_credential_profile_id
+                || reservation.state != "released"
+            {
+                bail!("terminal target abort receipt contradicts credential cleanup");
+            }
+        }
+        "target_absent" if reservation.is_none() => {}
+        "target_absent" => {
+            bail!("target-absent abort receipt retained a credential reservation");
+        }
+        _ => bail!("terminal target abort receipt has an invalid disposition"),
+    }
+    state.state_store.with_state_db(|db| {
+        db.update_sync_job(
+            job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Cancelled,
+                phase: "aborted".to_owned(),
+                roots: None,
+                heads: Some(vec![abort_chain_head_hash.to_owned()]),
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: vec![abort_chain_head_hash.to_owned()],
+                last_error: None,
+                result: Some(serde_json::to_value(response)?),
+            },
+        )
+    })
+}
+
+fn validate_abort_operation_against_target_preflight_attestation(
+    state: &AppState,
+    operation: &WorkerSessionHandoffJobOperation,
+) -> Result<(), HandlerError> {
+    let authority = state
+        .state_store
+        .pinned_state_authority()
+        .map_err(internal)?;
+    let guard = authority.acquire_shared_guard().map_err(internal)?;
+    authority.ensure_guard(&guard).map_err(internal)?;
+    let value = authority
+        .cas_store()
+        .map_err(internal)?
+        .get_object(&operation.preflight_attestation_hash)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            HandlerError::BadRequest("source retained no exact target preflight attestation".into())
+        })?;
+    let attestation = ryeos_state::objects::Attestation::from_value(&value)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    attestation
+        .verify_with_key(state.identity.verifying_key())
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let evidence = WorkerPlacementPreflightEvidence::from_attestation(&attestation)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    drop(guard);
+    if operation.role != WorkerHandoffJobRole::Source
+        || evidence.preflight_id != operation.preflight_id
+        || evidence.owner_principal != operation.owner_principal
+        || evidence.chain_root_id != operation.chain_root_id
+        || evidence.origin_site_id != operation.origin_site_id
+        || evidence.source_site_id != operation.source_site_id
+        || evidence.target_site_id != operation.target_site_id
+        || evidence.source_placement_thread_id != operation.source_placement_thread_id
+        || evidence.successor_placement_thread_id != operation.successor_placement_thread_id
+        || evidence.source_chain_head_hash != operation.source_chain_head_hash
+        || evidence.source_last_event_hash != operation.source_last_event_hash
+        || evidence.target_project_path != operation.target_project_path
+        || evidence.project_route_digest != operation.project_route_digest
+        || evidence.target_credential_profile_id != operation.target_credential_profile_id
+        || evidence.follow_delivery_reservation_attestation_hash
+            != operation.follow_delivery_reservation_attestation_hash
+    {
+        return Err(HandlerError::BadRequest(
+            "abort operation differs from its target-signed preflight".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn adopt_authorized(
@@ -855,6 +1397,8 @@ async fn adopt_authorized(
     owner: String,
     source_site_id: String,
     state: Arc<AppState>,
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    qualification_measurements: &mut TargetAdoptionQualificationMeasurements,
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
@@ -879,14 +1423,99 @@ async fn adopt_authorized(
             "target placement job differs from authenticated adoption coordinates".into(),
         ));
     }
-    if job.state == ryeos_state::SyncJobState::Completed {
-        let response = job
-            .result
-            .ok_or_else(|| internal("completed target placement job has no result"))?;
-        let response: WorkerPlacementAdoptResponse =
-            serde_json::from_value(response).map_err(internal)?;
-        validate_adopt_response(&response, &req, &operation).map_err(internal)?;
-        return serde_json::to_value(response).map_err(internal);
+    if job.phase == ryeos_app::worker_handoff::WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE {
+        return Err(HandlerError::BadRequest(
+            "target placement is durably claimed by the abort branch".into(),
+        ));
+    }
+    if let Some((terminal_source_site_id, result)) = replay_terminal_target_adoption(&state, &req)?
+    {
+        if terminal_source_site_id != source_site_id {
+            return Err(HandlerError::Forbidden(
+                "target terminal receipt belongs to another source site".into(),
+            ));
+        }
+        match state
+            .state_store
+            .worker_handoff_target_terminal(&req.operation_id)
+            .map_err(internal)?
+            .ok_or_else(|| internal("target terminal receipt disappeared"))?
+        {
+            ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Adoption(receipt) => {
+                settle_target_adoption_job_from_receipt(&state, &job_id, &receipt)
+                    .map_err(internal)?;
+            }
+            ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Failure(receipt) => {
+                let progress = WorkerSessionHandoffProgress::from_value(
+                    job.result
+                        .clone()
+                        .ok_or_else(|| internal("target failure job has no durable progress"))?,
+                )
+                .map_err(internal)?;
+                if !settle_pre_attachment_target_terminal(&state, &job, &operation, &progress)
+                    .map_err(internal)?
+                {
+                    return Err(internal(
+                        "target terminal failure no longer has exact cleanup authority",
+                    ));
+                }
+                let retained = state
+                    .state_store
+                    .worker_handoff_terminal_failure(&req.operation_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("target terminal failure disappeared"))?;
+                if retained != receipt {
+                    return Err(internal("target terminal failure changed during replay"));
+                }
+            }
+            ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Completion(receipt) => {
+                let progress =
+                    WorkerSessionHandoffProgress::from_value(job.result.clone().ok_or_else(
+                        || internal("target completion job has no durable progress"),
+                    )?)
+                    .map_err(internal)?;
+                if !settle_pre_attachment_target_terminal(&state, &job, &operation, &progress)
+                    .map_err(internal)?
+                {
+                    return Err(internal(
+                        "target terminal completion no longer has exact lifecycle testimony",
+                    ));
+                }
+                let retained = state
+                    .state_store
+                    .worker_handoff_terminal_completion(&req.operation_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("target terminal completion disappeared"))?;
+                if retained != receipt {
+                    return Err(internal("target terminal completion changed during replay"));
+                }
+            }
+            ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Abort(_) => {
+                return Err(HandlerError::BadRequest(
+                    "target placement is durably claimed by the abort branch".into(),
+                ));
+            }
+        }
+        return serde_json::to_value(result).map_err(internal);
+    }
+    let prepared_progress = job
+        .result
+        .clone()
+        .map(WorkerSessionHandoffProgress::from_value)
+        .transpose()
+        .map_err(internal)?
+        .ok_or_else(|| internal("target placement job has no preparation progress"))?;
+    if settle_pre_attachment_target_terminal(&state, &job, &operation, &prepared_progress)
+        .map_err(internal)?
+    {
+        let (terminal_source_site_id, result) = replay_terminal_target_adoption(&state, &req)?
+            .ok_or_else(|| internal("settled target terminal has no signed replay branch"))?;
+        if terminal_source_site_id != source_site_id {
+            return Err(HandlerError::Forbidden(
+                "target terminal receipt belongs to another source site".into(),
+            ));
+        }
+        return serde_json::to_value(result).map_err(internal);
     }
     if matches!(
         job.state,
@@ -896,15 +1525,6 @@ async fn adopt_authorized(
             "terminal target placement cannot be adopted".into(),
         ));
     }
-    let mut adoption_attempt = TargetAdoptionAttempt::begin(state.clone(), &job_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let prepared_progress = job
-        .result
-        .clone()
-        .map(WorkerSessionHandoffProgress::from_value)
-        .transpose()
-        .map_err(internal)?
-        .ok_or_else(|| internal("target placement job has no preparation progress"))?;
     if prepared_progress.operation_id != req.operation_id
         || prepared_progress.placement_attestation_hash.as_deref()
             != Some(req.placement_attestation_hash.as_str())
@@ -914,6 +1534,67 @@ async fn adopt_authorized(
             "adoption request differs from target preparation".into(),
         ));
     }
+    let source_committed_phase = target_adoption_source_commit_phase(prepared_progress.phase)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if source_committed_phase == WorkerHandoffPhase::ProcessAttached {
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        let worker_attach_started = lillux::time::MonotonicTimer::start();
+        ryeos_app::worker_handoff::validate_projected_target_adoption(
+            &job,
+            &operation,
+            &prepared_progress,
+            &req,
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        let placement = load_local_placement(&state, &req.placement_attestation_hash)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        validate_target_placement_for_adoption(&placement, &req, &operation)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+            &placement.credential_reservation.profile_id,
+        )
+        .await
+        .map_err(internal)?;
+        if !target_worker_is_attached(
+            &state,
+            &operation,
+            &placement,
+            &req.placement_attestation_hash,
+            true,
+        )
+        .map_err(internal)?
+        {
+            return Err(internal(
+                "projected target attachment lost its exact session testimony",
+            ));
+        }
+        let response = target_adoption_response(&req, &operation);
+        validate_adopt_response(&response, &req, &operation).map_err(internal)?;
+        let terminal_attestation_hash = state
+            .state_store
+            .publish_worker_handoff_adoption_receipt(&job_id, &operation, &req, &response)
+            .map_err(internal)?;
+        let receipt = ryeos_app::worker_handoff::WorkerHandoffAdoptionReceiptEvidence::new(
+            operation,
+            req,
+            response.clone(),
+        )
+        .map_err(internal)?;
+        settle_target_adoption_job_from_receipt(&state, &job_id, &receipt).map_err(internal)?;
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        {
+            qualification_measurements.worker_attach_recovery_ms =
+                Some(worker_attach_started.elapsed_millis());
+        }
+        let result = WorkerPlacementAdoptResult::Attached {
+            response,
+            terminal_attestation_hash,
+        };
+        result.validate().map_err(internal)?;
+        return serde_json::to_value(result).map_err(internal);
+    }
+    let mut adoption_attempt = TargetAdoptionAttempt::begin(state.clone(), &job_id, &operation)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
 
     let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &source_site_id)
@@ -927,7 +1608,9 @@ async fn adopt_authorized(
         .principal_id
         .strip_prefix("fp:")
         .ok_or_else(|| internal("configured source principal is not a fingerprint"))?;
-    let staged_final_closure = prepared_progress.phase >= WorkerHandoffPhase::SourceCommitted
+    let staged_final_closure = prepared_progress
+        .phase
+        .successor_is_only_authorized_writer()
         && [
             &req.target_chain_head_hash,
             &req.writer_grant_hash,
@@ -960,7 +1643,7 @@ async fn adopt_authorized(
     } else {
         let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
         let closure = source_client
-            .objects_closure_get(
+            .objects_closure_get_with_total_timeout(
                 std::slice::from_ref(&req.target_chain_head_hash),
                 ObjectsClosureRequestOptions {
                     max_objects: Some(16_384),
@@ -974,6 +1657,7 @@ async fn adopt_authorized(
                     allow_incomplete: false,
                     allow_untransported_large_objects: true,
                 },
+                WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
             )
             .await
             .map_err(|error| {
@@ -994,7 +1678,7 @@ async fn adopt_authorized(
     let source_committed = WorkerSessionHandoffProgress {
         schema: "ryeos.worker_session_handoff_progress.v1".to_owned(),
         operation_id: req.operation_id.clone(),
-        phase: std::cmp::max(prepared_progress.phase, WorkerHandoffPhase::SourceCommitted),
+        phase: source_committed_phase,
         placement_attestation_hash: Some(req.placement_attestation_hash.clone()),
         target_runtime_seed_hash: prepared_progress.target_runtime_seed_hash.clone(),
         writer_grant_hash: Some(req.writer_grant_hash.clone()),
@@ -1002,6 +1686,13 @@ async fn adopt_authorized(
         credential_reservation_id: prepared_progress.credential_reservation_id.clone(),
         abort_chain_head_hash: None,
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeSourceCommitEvidenceStage,
+        &operation,
+    )
+    .map_err(internal)?;
     state
         .state_store
         .stage_sync_payload_for_existing_job(
@@ -1022,21 +1713,18 @@ async fn adopt_authorized(
             Some(source_committed.to_value().map_err(internal)?),
         )
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetSourceCommitEvidenceStaged,
+        &operation,
+    )
+    .map_err(internal)?;
 
     let placement = load_local_placement(&state, &req.placement_attestation_hash)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    if placement.operation_id != req.operation_id
-        || placement.preflight_id != operation.preflight_id
-        || placement.preflight_attestation_hash != operation.preflight_attestation_hash
-        || placement.chain_root_id != req.chain_root_id
-        || placement.source_site_id != operation.source_site_id
-        || placement.target_site_id != operation.target_site_id
-        || placement.successor_placement_thread_id != operation.successor_placement_thread_id
-    {
-        return Err(HandlerError::BadRequest(
-            "target placement evidence differs from its durable job".into(),
-        ));
-    }
+    validate_target_placement_for_adoption(&placement, &req, &operation)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let evidence = ryeos_app::worker_handoff::chain_writer_transition_from_placement(
         &placement,
         req.placement_attestation_hash.clone(),
@@ -1062,12 +1750,21 @@ async fn adopt_authorized(
         source_node_verifying_key: source_key,
         target_node_verifying_key: *state.identity.verifying_key(),
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetSourceCommitEvidenceVerified,
+        &operation,
+    )
+    .map_err(internal)?;
 
     // Once the exact admitted worker is attached, its retained remote
     // continuation edge proves that this node already finalized the chain
     // import. Worker observations may have advanced the target-signed chain
     // beyond `target_chain_head_hash`, so retrying the raw import comparison
     // would reject a successful adoption as an unrelated local advance.
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let worker_attach_started = lillux::time::MonotonicTimer::start();
     if let Some(response) = complete_if_target_worker_attached(
         &state,
         &job_id,
@@ -1079,6 +1776,11 @@ async fn adopt_authorized(
     )
     .await?
     {
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        {
+            qualification_measurements.worker_attach_recovery_ms =
+                Some(worker_attach_started.elapsed_millis());
+        }
         return Ok(response);
     }
 
@@ -1099,10 +1801,12 @@ async fn adopt_authorized(
         .map_err(internal)?
         == TargetLaunchClaimDisposition::AwaitExisting
     {
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        let worker_attach_started = lillux::time::MonotonicTimer::start();
         let _ = ryeos_app::dedicated_session_service::wait_for_worker_attachment_projection(
             &state,
             &operation.successor_placement_thread_id,
-            std::time::Duration::from_secs(60),
+            lillux::time::Duration::from_secs(60),
         )
         .await
         .map_err(internal)?;
@@ -1117,15 +1821,29 @@ async fn adopt_authorized(
         )
         .await?
         {
+            #[cfg(any(test, feature = "handoff-test-support"))]
+            {
+                qualification_measurements.worker_attach_recovery_ms =
+                    Some(worker_attach_started.elapsed_millis());
+            }
             return Ok(response);
         }
         return Err(worker_attachment_pending());
     }
 
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeAdoptionPublication,
+        &operation,
+    )
+    .map_err(internal)?;
     let current_head = state
         .state_store
         .with_state_db(|db| db.read_generic_head_ref("chains", &req.chain_root_id))
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let event_replay_started = lillux::time::MonotonicTimer::start();
     if current_head.as_ref().is_some_and(|head| {
         head.target_hash == req.target_chain_head_hash
             && head.signer == state.identity.fingerprint()
@@ -1153,6 +1871,17 @@ async fn adopt_authorized(
             .finalize_remote_adoption_import(staged, &transition)
             .map_err(internal)?;
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    {
+        qualification_measurements.event_replay_ms = Some(event_replay_started.elapsed_millis());
+    }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAdoptionPublished,
+        &operation,
+    )
+    .map_err(internal)?;
     update_target_progress(
         &state,
         &job_id,
@@ -1161,12 +1890,21 @@ async fn adopt_authorized(
         ryeos_state::SyncJobState::Running,
     )
     .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAdoptionProjected,
+        &operation,
+    )
+    .map_err(internal)?;
 
     let profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &placement.credential_reservation.profile_id,
     )
     .await
     .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let worker_attach_started = lillux::time::MonotonicTimer::start();
     if let Some(response) = complete_if_target_worker_attached_under_profile_lock(
         &state,
         &job_id,
@@ -1177,6 +1915,11 @@ async fn adopt_authorized(
         &req.placement_attestation_hash,
         &mut adoption_attempt,
     )? {
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        {
+            qualification_measurements.worker_attach_recovery_ms =
+                Some(worker_attach_started.elapsed_millis());
+        }
         return Ok(response);
     }
     let transfer =
@@ -1198,6 +1941,13 @@ async fn adopt_authorized(
             "target credential generation or reservation changed before state install".into(),
         ));
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeStateInstall,
+        &operation,
+    )
+    .map_err(internal)?;
     let _install = ryeos_app::private_artifact_home::install_portable_state_conditionally(
         &state.config.runtime_state_dir(),
         &profile.home_id,
@@ -1207,12 +1957,26 @@ async fn adopt_authorized(
         &operands.portable_tree,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetStateInstalled,
+        &operation,
+    )
+    .map_err(internal)?;
     update_target_progress(
         &state,
         &job_id,
         WorkerHandoffPhase::StateInstalled,
         &source_committed,
         ryeos_state::SyncJobState::Running,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetStateInstallProjected,
+        &operation,
     )
     .map_err(internal)?;
 
@@ -1222,6 +1986,8 @@ async fn adopt_authorized(
     // callback until the attachment wait timed out.
     drop(profile_operation);
 
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let worker_attach_started = lillux::time::MonotonicTimer::start();
     let launch_metadata = state
         .state_store
         .get_launch_metadata(&operation.successor_placement_thread_id)
@@ -1252,7 +2018,7 @@ async fn adopt_authorized(
     let _ = ryeos_app::dedicated_session_service::wait_for_worker_attachment_projection(
         &state,
         &operation.successor_placement_thread_id,
-        std::time::Duration::from_secs(60),
+        lillux::time::Duration::from_secs(60),
     )
     .await
     .map_err(internal)?;
@@ -1267,9 +2033,38 @@ async fn adopt_authorized(
     )
     .await?
     {
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        {
+            qualification_measurements.worker_attach_recovery_ms =
+                Some(worker_attach_started.elapsed_millis());
+        }
         return Ok(response);
     }
     Err(worker_attachment_pending())
+}
+
+/// Admit only the forward branch from a prepared target into successor-writer
+/// authority. `AbortAuthorized` is an irreversible competing branch: once the
+/// exact source abort successor is durable, no ordinal comparison may turn it
+/// back into source-commit evidence or clear its abort head.
+fn target_adoption_source_commit_phase(
+    current: WorkerHandoffPhase,
+) -> anyhow::Result<WorkerHandoffPhase> {
+    match current {
+        WorkerHandoffPhase::TargetPrepared => Ok(WorkerHandoffPhase::SourceCommitted),
+        WorkerHandoffPhase::SourceCommitted
+        | WorkerHandoffPhase::TargetAdopted
+        | WorkerHandoffPhase::StateInstalled
+        | WorkerHandoffPhase::ProcessAttached => Ok(current),
+        WorkerHandoffPhase::AbortAuthorized => {
+            anyhow::bail!("abort-authorized target placement cannot be adopted")
+        }
+        WorkerHandoffPhase::Planned
+        | WorkerHandoffPhase::SourceExported
+        | WorkerHandoffPhase::Completed => {
+            anyhow::bail!("target placement phase cannot accept source-commit evidence")
+        }
+    }
 }
 
 /// Resume target-local post-cut work from durable job and signed-chain
@@ -1358,7 +2153,7 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
                 }
                 continue;
             }
-            if progress.phase < WorkerHandoffPhase::SourceCommitted
+            if progress.phase.source_is_only_authorized_writer()
                 || progress.placement_attestation_hash.is_none()
                 || progress.writer_grant_hash.is_none()
                 || progress.target_chain_head_hash.is_none()
@@ -1436,11 +2231,15 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
                     .expect("checked"),
                 writer_grant_hash: progress.writer_grant_hash.clone().expect("checked"),
             };
+            #[cfg(any(test, feature = "handoff-test-support"))]
+            let mut qualification_measurements = TargetAdoptionQualificationMeasurements::default();
             match adopt_authorized(
                 request,
                 operation.owner_principal.clone(),
                 operation.source_site_id.clone(),
                 Arc::new(state.clone()),
+                #[cfg(any(test, feature = "handoff-test-support"))]
+                &mut qualification_measurements,
             )
             .await
             {
@@ -1482,13 +2281,185 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
     Ok(recovered)
 }
 
+/// Fold an already-durable target worker attachment into its operational
+/// handoff projection before startup clears the dead daemon generation's
+/// current worker binding.
+///
+/// `attach_worker_process` publishes the worker row, session epoch, workspace
+/// owner, and credential lock in one SQLite transaction. Startup deliberately
+/// retains those coordinates while old workers are quiesced, so this pass can
+/// distinguish a committed attachment from a pre-attachment start. The normal
+/// target recovery path can then publish the permanent receipt after worker
+/// detachment without inventing historical process authority or contacting a
+/// peer.
+pub async fn reconcile_observed_target_handoff_attachments_before_detachment(
+    state: &AppState,
+) -> Result<usize> {
+    let mut repaired = 0usize;
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let jobs = state.state_store.with_state_db(|db| {
+            let after = after
+                .as_ref()
+                .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str()));
+            db.list_active_sync_jobs_by_operation_type_after(
+                WORKER_SESSION_HANDOFF_OPERATION,
+                after,
+                64,
+            )
+        })?;
+        let Some(last) = jobs.last() else {
+            break;
+        };
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            let operation = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())?;
+            if operation.role != WorkerHandoffJobRole::Target {
+                continue;
+            }
+            let Some(result) = job.result.clone() else {
+                // The target job is rooted before placement preparation is
+                // published. A crash in that interval legitimately leaves no
+                // progress to fold before worker detachment; the normal target
+                // recovery pass will re-drive the exact retained operation.
+                // An attachment without that progress would be untestified
+                // process authority and must still fail closed.
+                if let Some(session) = state
+                    .state_store
+                    .dedicated_session(&operation.successor_placement_thread_id)?
+                {
+                    if session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some() {
+                        bail!("target handoff attached a worker without durable progress");
+                    }
+                }
+                continue;
+            };
+            let progress = WorkerSessionHandoffProgress::from_value(result)?;
+            if progress.phase != WorkerHandoffPhase::StateInstalled {
+                continue;
+            }
+            let Some(session) = state
+                .state_store
+                .dedicated_session(&operation.successor_placement_thread_id)?
+            else {
+                continue;
+            };
+            if session.worker_instance_id.is_none() || session.worker_boot_epoch.is_none() {
+                continue;
+            }
+
+            let _operation_guard = target_handoff_operation_lock(&job.job_id)
+                .lock_owned()
+                .await;
+            let latest = state
+                .state_store
+                .with_state_db(|db| db.get_sync_job(&job.job_id))?
+                .context("target handoff job disappeared during attachment repair")?;
+            if !matches!(
+                latest.state,
+                ryeos_state::SyncJobState::Running | ryeos_state::SyncJobState::Retryable
+            ) {
+                continue;
+            }
+            let latest_operation =
+                WorkerSessionHandoffJobOperation::from_value(latest.operation.clone())?;
+            let latest_progress = WorkerSessionHandoffProgress::from_value(
+                latest
+                    .result
+                    .clone()
+                    .context("target handoff job lost its attachment-repair progress")?,
+            )?;
+            if latest_operation != operation {
+                bail!("target handoff operation changed during attachment repair");
+            }
+            if latest_progress.phase != WorkerHandoffPhase::StateInstalled {
+                continue;
+            }
+            let placement_attestation_hash = latest_progress
+                .placement_attestation_hash
+                .as_deref()
+                .context("state-installed target handoff has no placement attestation")?;
+            let writer_grant_hash = latest_progress
+                .writer_grant_hash
+                .as_deref()
+                .context("state-installed target handoff has no writer grant")?;
+            let target_chain_head_hash = latest_progress
+                .target_chain_head_hash
+                .as_deref()
+                .context("state-installed target handoff has no target chain head")?;
+            if ![
+                operation.transfer_manifest_hash.as_str(),
+                placement_attestation_hash,
+                writer_grant_hash,
+                target_chain_head_hash,
+            ]
+            .into_iter()
+            .all(|hash| latest.roots.iter().any(|root| root == hash))
+            {
+                bail!("state-installed target handoff lost its rooted adoption authority");
+            }
+            let request = WorkerPlacementAdoptRequest {
+                operation_id: operation.operation_id.clone(),
+                chain_root_id: operation.chain_root_id.clone(),
+                target_chain_head_hash: target_chain_head_hash.to_owned(),
+                placement_attestation_hash: placement_attestation_hash.to_owned(),
+                writer_grant_hash: writer_grant_hash.to_owned(),
+            };
+            request.validate()?;
+            let placement = load_local_placement(state, placement_attestation_hash)?;
+            validate_target_placement_for_adoption(&placement, &request, &operation)?;
+            // A worker can be atomically attached to its session, then fail
+            // readiness and be exactly reaped before ProcessAttached is
+            // projected into the handoff job. Close that target-terminal
+            // branch before taking the live-attachment profile lease; the
+            // failure settlement owns its own exact cleanup lease and signed
+            // testimony. Contradictory or unproved process states still fall
+            // through to the strict attachment validator below.
+            if settle_pre_attachment_target_terminal(state, &latest, &operation, &latest_progress)?
+            {
+                repaired += 1;
+                continue;
+            }
+            let _profile_operation =
+                ryeos_app::hosted_operation::acquire_credential_profile_operation(
+                    &placement.credential_reservation.profile_id,
+                )
+                .await?;
+            if !target_worker_is_attached(
+                state,
+                &operation,
+                &placement,
+                placement_attestation_hash,
+                false,
+            )? {
+                bail!(
+                    "state-installed target handoff retained a session worker identity without exact attachment testimony"
+                );
+            }
+            update_target_progress(
+                state,
+                &job.job_id,
+                WorkerHandoffPhase::ProcessAttached,
+                &latest_progress,
+                latest.state,
+            )?;
+            repaired += 1;
+        }
+        after = Some(next);
+    }
+    Ok(repaired)
+}
+
 fn settle_pre_attachment_target_terminal(
     state: &AppState,
     job: &ryeos_state::SyncJobRecord,
     operation: &WorkerSessionHandoffJobOperation,
     progress: &WorkerSessionHandoffProgress,
 ) -> Result<bool> {
-    if progress.phase < WorkerHandoffPhase::SourceCommitted {
+    if !matches!(
+        progress.phase,
+        WorkerHandoffPhase::TargetAdopted | WorkerHandoffPhase::StateInstalled
+    ) {
         return Ok(false);
     }
     let Some(successor) = state
@@ -1517,26 +2488,19 @@ fn settle_pre_attachment_target_terminal(
     {
         bail!("pre-attachment target terminal contradicts its durable handoff job");
     }
-    let terminal_before_start = is_settleable_pre_attachment_terminal(
-        authoritative_successor.status,
-        authoritative_successor.started_at.is_some(),
-    );
+    let terminal_before_attachment = authoritative_successor.status.is_terminal();
     if authoritative_successor.status != ryeos_state::objects::ThreadStatus::Created
-        && !terminal_before_start
+        && !terminal_before_attachment
     {
         return Ok(false);
     }
-    let has_attachment_state = successor.runtime.pid.is_some()
+    let has_runtime_process = successor.runtime.pid.is_some()
         || successor.runtime.pgid.is_some()
-        || successor.runtime.process_identity.is_some()
-        || state
-            .state_store
-            .dedicated_session(&operation.successor_placement_thread_id)?
-            .is_some();
-    if has_attachment_state && terminal_before_start {
-        bail!("target terminal has worker attachment state and cannot release its reservation");
+        || successor.runtime.process_identity.is_some();
+    if has_runtime_process && terminal_before_attachment {
+        bail!("target terminal retains runtime process authority before worker attachment");
     }
-    if has_attachment_state {
+    if has_runtime_process {
         return Ok(false);
     }
     let authority = state
@@ -1606,10 +2570,7 @@ fn settle_pre_attachment_target_terminal(
     // its target-local credential generation reserved. The attachment and
     // started-at fences above make every terminal variant equally safe to
     // settle around; the signed terminal itself remains the chain outcome.
-    if !is_settleable_pre_attachment_terminal(
-        authoritative_successor.status,
-        authoritative_successor.started_at.is_some(),
-    ) {
+    if !authoritative_successor.status.is_terminal() {
         return Ok(false);
     }
     let terminal_head = state
@@ -1619,6 +2580,33 @@ fn settle_pre_attachment_target_terminal(
     if terminal_head.signer != state.identity.fingerprint() {
         bail!("pre-attachment target terminal chain lost target ownership");
     }
+    let request = WorkerPlacementAdoptRequest {
+        operation_id: operation.operation_id.clone(),
+        chain_root_id: operation.chain_root_id.clone(),
+        target_chain_head_hash: progress
+            .target_chain_head_hash
+            .clone()
+            .context("target terminal progress has no adoption chain head")?,
+        placement_attestation_hash: progress
+            .placement_attestation_hash
+            .clone()
+            .context("target terminal progress has no placement attestation")?,
+        writer_grant_hash: progress
+            .writer_grant_hash
+            .clone()
+            .context("target terminal progress has no writer grant")?,
+    };
+    request.validate()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    ryeos_state::sync::verify_chain_closure_anchored_pinned(
+        &authority.cas_store()?,
+        &operation.chain_root_id,
+        &terminal_head.target_hash,
+        &request.target_chain_head_hash,
+    )?;
+    drop(guard);
+    drop(authority);
     let reservation = state
         .state_store
         .credential_profile_reservation_for_successor(&operation.successor_placement_thread_id)?
@@ -1629,28 +2617,172 @@ fn settle_pre_attachment_target_terminal(
     {
         bail!("target terminal credential reservation differs from its durable job");
     }
-    match reservation.state.as_str() {
-        "reserved" => state
-            .state_store
-            .release_credential_profile_reservation(&reservation.reservation_id)?,
-        "released" => {}
-        "consumed" => bail!("pre-attachment target terminal consumed its credential reservation"),
-        other => bail!("unknown target credential reservation state {other:?}"),
+    if authoritative_successor.status == ryeos_state::objects::ThreadStatus::Completed {
+        return settle_pre_attachment_target_completion(
+            state,
+            job,
+            operation,
+            progress,
+            &request,
+            &terminal_head.target_hash,
+            &reservation,
+        );
     }
+    let session = state
+        .state_store
+        .dedicated_session(&operation.successor_placement_thread_id)?;
+    let credential_disposition = match session {
+        None => {
+            let _profile_operation =
+                ryeos_app::hosted_operation::acquire_credential_profile_operation_sync(
+                    &operation.target_credential_profile_id,
+                );
+            match reservation.state.as_str() {
+                "reserved" => state
+                    .state_store
+                    .release_credential_profile_reservation(&reservation.reservation_id)?,
+                "released" => {}
+                "consumed" => {
+                    bail!("target terminal consumed its reservation without a session")
+                }
+                other => bail!("unknown target credential reservation state {other:?}"),
+            }
+            "reservation_released"
+        }
+        Some(session) => {
+            if session.chain_root_id != operation.chain_root_id
+                || session.owner_principal != operation.owner_principal
+                || session.credential_profile_id != operation.target_credential_profile_id
+                || session.credential_generation != reservation.credential_generation
+                || reservation.state != "consumed"
+            {
+                bail!("target terminal session contradicts pre-attachment cleanup authority");
+            }
+            match (
+                session.worker_instance_id.as_deref(),
+                session.worker_boot_epoch,
+            ) {
+                (None, None) => match session.state.as_str() {
+                    "recovering" | "terminal" => {}
+                    "outcome_unknown" => {
+                        bail!("target worker cleanup is unproved before failure receipt")
+                    }
+                    other => bail!(
+                        "target terminal retained nonterminal unattached session state {other:?}"
+                    ),
+                },
+                (Some(worker_instance_id), Some(worker_boot_epoch)) => {
+                    let worker = state
+                        .state_store
+                        .worker_process(worker_instance_id)?
+                        .context("target terminal session worker projection disappeared")?;
+                    if worker.placement_thread_id != operation.successor_placement_thread_id
+                        || worker.boot_epoch != worker_boot_epoch
+                        || worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+                        || worker.cleanup_state != "reaped"
+                    {
+                        bail!("target worker death and reap are not proved before failure receipt");
+                    }
+                    if !matches!(
+                        session.state.as_str(),
+                        "recovering" | "outcome_unknown" | "terminal"
+                    ) {
+                        bail!(
+                            "target terminal retained nonterminal worker session state {:?}",
+                            session.state
+                        );
+                    }
+                }
+                _ => bail!("target terminal session retains a partial worker identity"),
+            }
+            ryeos_app::dedicated_session_service::abort_session_for_root_stop(
+                state,
+                &operation.successor_placement_thread_id,
+            )?;
+            let terminal_session = state
+                .state_store
+                .dedicated_session(&operation.successor_placement_thread_id)?
+                .context("target terminal session disappeared during cleanup")?;
+            if terminal_session.state != "terminal" {
+                bail!("target session cleanup is not terminal before failure receipt");
+            }
+            if terminal_session.worker_instance_id.is_some()
+                != terminal_session.worker_boot_epoch.is_some()
+            {
+                bail!("target terminal session retains a partial worker identity");
+            }
+            if let Some(worker_instance_id) = terminal_session.worker_instance_id.as_deref() {
+                let worker = state
+                    .state_store
+                    .worker_process(worker_instance_id)?
+                    .context("target terminal worker projection disappeared after cleanup")?;
+                if worker.boot_epoch != terminal_session.worker_boot_epoch.expect("paired")
+                    || worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+                    || worker.cleanup_state != "reaped"
+                {
+                    bail!("target terminal worker cleanup changed before failure receipt");
+                }
+            }
+            let workspace = state
+                .state_store
+                .execution_workspace(&terminal_session.workspace_id)?
+                .context("target terminal workspace disappeared after cleanup")?;
+            if workspace.state != ryeos_app::runtime_db::WorkspaceState::Closed {
+                bail!("target terminal workspace is not closed before failure receipt");
+            }
+            let profile = state
+                .state_store
+                .credential_profile(&operation.target_credential_profile_id)?
+                .context("target terminal credential profile disappeared")?;
+            if terminal_session
+                .worker_instance_id
+                .as_deref()
+                .is_some_and(|worker| profile.lock_owner.as_deref() == Some(worker))
+            {
+                bail!("target terminal credential lease remains owned by the dead worker");
+            }
+            "consumed_session_terminal"
+        }
+    };
+    let failure = WorkerPlacementFailureResponse {
+        operation_id: operation.operation_id.clone(),
+        chain_root_id: operation.chain_root_id.clone(),
+        placement_thread_id: operation.successor_placement_thread_id.clone(),
+        target_chain_head_hash: terminal_head.target_hash.clone(),
+        terminal_status: authoritative_successor.status.as_str().to_owned(),
+        credential_disposition: credential_disposition.to_owned(),
+    };
+    failure.validate_against(&request, operation)?;
+    let terminal_attestation_hash = state
+        .state_store
+        .publish_worker_handoff_terminal_failure(operation, &request, &failure)?;
     let terminal_error = state
         .state_store
         .get_thread_result(&operation.successor_placement_thread_id)?
         .and_then(|result| result.error)
         .map(|error| error.to_string())
         .unwrap_or_else(|| "target successor failed before worker attachment".to_owned());
-    if job.state != ryeos_state::SyncJobState::Failed {
+    if job.state != ryeos_state::SyncJobState::Failed
+        || job.phase != "target_terminal_before_attachment"
+        || job.heads.as_slice() != [terminal_head.target_hash.as_str()]
+        || !job
+            .roots
+            .iter()
+            .any(|root| root == &terminal_attestation_hash)
+    {
         state.state_store.with_state_db(|db| {
             db.update_sync_job(
                 &job.job_id,
                 &ryeos_state::SyncJobUpdate {
                     state: ryeos_state::SyncJobState::Failed,
                     phase: "target_terminal_before_attachment".to_owned(),
-                    roots: None,
+                    roots: Some({
+                        let mut roots = job.roots.clone();
+                        roots.push(terminal_attestation_hash.clone());
+                        roots.sort();
+                        roots.dedup();
+                        roots
+                    }),
                     heads: Some(vec![terminal_head.target_hash.clone()]),
                     uploaded_hashes: Vec::new(),
                     fetched_hashes: Vec::new(),
@@ -1669,11 +2801,143 @@ fn settle_pre_attachment_target_terminal(
     Ok(true)
 }
 
-fn is_settleable_pre_attachment_terminal(
-    status: ryeos_state::objects::ThreadStatus,
-    has_started_at: bool,
-) -> bool {
-    status.is_terminal() && !has_started_at
+#[allow(clippy::too_many_arguments)]
+fn settle_pre_attachment_target_completion(
+    state: &AppState,
+    job: &ryeos_state::SyncJobRecord,
+    operation: &WorkerSessionHandoffJobOperation,
+    progress: &WorkerSessionHandoffProgress,
+    request: &WorkerPlacementAdoptRequest,
+    terminal_chain_head_hash: &str,
+    reservation: &ryeos_app::runtime_db::CredentialProfileReservationRecord,
+) -> Result<bool> {
+    if reservation.state != "consumed" {
+        bail!("completed target successor did not consume its credential reservation");
+    }
+    let Some(session) = state
+        .state_store
+        .dedicated_session(&operation.successor_placement_thread_id)?
+    else {
+        return Ok(false);
+    };
+    if session.chain_root_id != operation.chain_root_id
+        || session.owner_principal != operation.owner_principal
+        || session.credential_profile_id != operation.target_credential_profile_id
+        || session.credential_generation != reservation.credential_generation
+        || session.terminal_reason.as_deref() != Some("completed")
+        || !matches!(
+            session.state.as_str(),
+            "freezing"
+                | "frozen"
+                | "verifying"
+                | "publish_ready"
+                | "publishing"
+                | "discarding"
+                | "terminal"
+        )
+    {
+        return Ok(false);
+    }
+    let (Some(worker_instance_id), Some(worker_boot_epoch)) = (
+        session.worker_instance_id.as_deref(),
+        session.worker_boot_epoch,
+    ) else {
+        return Ok(false);
+    };
+    let worker = state
+        .state_store
+        .worker_process(worker_instance_id)?
+        .context("completed target successor lost its worker process testimony")?;
+    let placement_attestation = load_attestation(state, &request.placement_attestation_hash)?;
+    placement_attestation.verify_with_key(state.identity.verifying_key())?;
+    let placement = WorkerPlacementAdmissionEvidence::from_attestation(&placement_attestation)?;
+    validate_target_placement_for_adoption(&placement, request, operation)?;
+    if session.remote_thread_id.as_deref()
+        != Some(
+            placement
+                .credential_reservation
+                .upstream_session_id
+                .as_str(),
+        )
+    {
+        return Ok(false);
+    }
+    let profile = state
+        .state_store
+        .credential_profile(&session.credential_profile_id)?
+        .context("completed target successor lost its credential profile")?;
+    if worker.placement_thread_id != operation.successor_placement_thread_id
+        || worker.worker_instance_id != worker_instance_id
+        || worker.boot_epoch != worker_boot_epoch
+        || worker.session_capsule_hash != session.admitted_capsule_hash
+        || !placement_admits_session_capsule(
+            &placement.target_persistent_session_capsules,
+            &session.admitted_capsule_hash,
+        )
+        || worker.lifecycle_generation != session.credential_generation
+        || worker.lifecycle_generation != placement.credential_reservation.generation
+        || worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+        || worker.cleanup_state != "reaped"
+        || profile.profile_id != session.credential_profile_id
+        || profile.owner_principal != operation.owner_principal
+        || profile.lock_owner.as_deref() == Some(worker_instance_id)
+        || !matches!(
+            profile.state.as_str(),
+            "unauthenticated" | "enrolling" | "confirming" | "active"
+        )
+    {
+        return Ok(false);
+    }
+
+    let completion = WorkerPlacementCompletionResponse {
+        operation_id: operation.operation_id.clone(),
+        chain_root_id: operation.chain_root_id.clone(),
+        placement_thread_id: operation.successor_placement_thread_id.clone(),
+        target_chain_head_hash: terminal_chain_head_hash.to_owned(),
+        terminal_status: "completed".to_owned(),
+        credential_disposition: "completed_session_released".to_owned(),
+    };
+    completion.validate_against(request, operation)?;
+    let terminal_attestation_hash = state
+        .state_store
+        .publish_worker_handoff_terminal_completion(operation, request, &completion)?;
+    if job.state != ryeos_state::SyncJobState::Completed
+        || job.phase != "target_completed_before_attachment"
+        || job.heads.as_slice() != [terminal_chain_head_hash]
+        || !job
+            .roots
+            .iter()
+            .any(|root| root == &terminal_attestation_hash)
+    {
+        state.state_store.with_state_db(|db| {
+            db.update_sync_job(
+                &job.job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Completed,
+                    phase: "target_completed_before_attachment".to_owned(),
+                    roots: Some({
+                        let mut roots = job.roots.clone();
+                        roots.push(terminal_attestation_hash.clone());
+                        roots.sort();
+                        roots.dedup();
+                        roots
+                    }),
+                    heads: Some(vec![terminal_chain_head_hash.to_owned()]),
+                    uploaded_hashes: Vec::new(),
+                    fetched_hashes: Vec::new(),
+                    last_error: None,
+                    result: Some(progress.to_value()?),
+                },
+            )
+        })?;
+    }
+    tracing::info!(
+        job_id = %job.job_id,
+        thread_id = %operation.successor_placement_thread_id,
+        chain_head_hash = %terminal_chain_head_hash,
+        "settled target handoff around signed completion before attachment projection"
+    );
+    Ok(true)
 }
 
 fn recover_staged_target_abort(
@@ -1686,6 +2950,29 @@ fn recover_staged_target_abort(
         .abort_chain_head_hash
         .as_deref()
         .context("abort-authorized target job has no source abort head")?;
+    if let Some(fence) = state
+        .state_store
+        .worker_handoff_abort_fence(&operation.operation_id)?
+    {
+        if fence.target_operation != *operation || fence.abort_chain_head_hash != abort_head {
+            bail!("target abort recovery contradicts its permanent fence");
+        }
+        if let Some(disposition) = fence.terminal_disposition {
+            let response = WorkerPlacementAbortResponse {
+                operation_id: operation.operation_id.clone(),
+                chain_root_id: operation.chain_root_id.clone(),
+                disposition,
+            };
+            settle_target_abort_job_from_receipt(
+                state,
+                &job.job_id,
+                operation,
+                abort_head,
+                &response,
+            )?;
+            return Ok(true);
+        }
+    }
     if !job.roots.iter().any(|root| root == abort_head) {
         bail!("target abort head is not retained by its durable job");
     }
@@ -1697,6 +2984,9 @@ fn recover_staged_target_abort(
         abort_head,
     )?;
     drop(guard);
+    state
+        .state_store
+        .publish_worker_handoff_abort_fence(operation, abort_head)?;
     let reservation = state
         .state_store
         .credential_profile_reservation_for_successor(&operation.successor_placement_thread_id)?;
@@ -1705,11 +2995,7 @@ fn recover_staged_target_abort(
             || reservation.owner_principal != operation.owner_principal
             || reservation.profile_id != operation.target_credential_profile_id
         {
-            if reservation.state == "released" {
-                "already_released"
-            } else {
-                bail!("live target credential reservation differs from aborted handoff");
-            }
+            bail!("target credential reservation differs from aborted handoff");
         } else {
             match reservation.state.as_str() {
                 "reserved" => {
@@ -1718,40 +3004,36 @@ fn recover_staged_target_abort(
                         .release_credential_profile_reservation(&reservation.reservation_id)?;
                     "reservation_released"
                 }
-                "released" => "already_released",
+                "released" => "reservation_released",
                 "consumed" => bail!("aborted target placement already consumed its reservation"),
                 other => bail!("unknown target credential reservation state {other:?}"),
             }
         }
     } else {
-        "already_released"
+        "target_absent"
     };
     let response = WorkerPlacementAbortResponse {
         operation_id: operation.operation_id.clone(),
         chain_root_id: operation.chain_root_id.clone(),
         disposition: disposition.to_owned(),
     };
+    let mut source_operation = operation.clone();
+    source_operation.role = WorkerHandoffJobRole::Source;
     let request = WorkerPlacementAbortRequest {
-        operation_id: operation.operation_id.clone(),
-        chain_root_id: operation.chain_root_id.clone(),
+        operation: source_operation,
         abort_chain_head_hash: abort_head.to_owned(),
     };
     response.validate_against(&request)?;
-    state.state_store.with_state_db(|db| {
-        db.update_sync_job(
-            &job.job_id,
-            &ryeos_state::SyncJobUpdate {
-                state: ryeos_state::SyncJobState::Cancelled,
-                phase: "aborted".to_owned(),
-                roots: None,
-                heads: Some(vec![abort_head.to_owned()]),
-                uploaded_hashes: Vec::new(),
-                fetched_hashes: vec![abort_head.to_owned()],
-                last_error: None,
-                result: Some(serde_json::to_value(response)?),
-            },
-        )
-    })?;
+    state
+        .state_store
+        .publish_worker_handoff_abort_terminal_receipt(operation, abort_head, disposition)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortReceiptPublished,
+        operation,
+    )?;
+    settle_target_abort_job_from_receipt(state, &job.job_id, operation, abort_head, &response)?;
     Ok(true)
 }
 
@@ -1914,6 +3196,7 @@ async fn complete_if_target_worker_attached(
         operation,
         placement,
         &request.placement_attestation_hash,
+        progress.phase == WorkerHandoffPhase::ProcessAttached,
     )
     .map_err(internal)?
     {
@@ -1947,17 +3230,37 @@ fn complete_if_target_worker_attached_under_profile_lock(
     placement_attestation_hash: &str,
     attempt: &mut TargetAdoptionAttempt,
 ) -> Result<Option<Value>, HandlerError> {
-    if !target_worker_is_attached(state, operation, placement, placement_attestation_hash)
-        .map_err(internal)?
+    if !target_worker_is_attached(
+        state,
+        operation,
+        placement,
+        placement_attestation_hash,
+        progress.phase == WorkerHandoffPhase::ProcessAttached,
+    )
+    .map_err(internal)?
     {
         return Ok(None);
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetProcessAttachmentObserved,
+        operation,
+    )
+    .map_err(internal)?;
     update_target_progress(
         state,
         job_id,
         WorkerHandoffPhase::ProcessAttached,
         progress,
         ryeos_state::SyncJobState::Running,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetProcessAttachmentProjected,
+        operation,
     )
     .map_err(internal)?;
     complete_target_adoption(state, job_id, request, operation, attempt)
@@ -1982,6 +3285,7 @@ fn target_worker_is_attached(
     operation: &WorkerSessionHandoffJobOperation,
     placement: &WorkerPlacementAdmissionEvidence,
     placement_attestation_hash: &str,
+    attachment_was_projected: bool,
 ) -> Result<bool> {
     let Some(session) = state
         .state_store
@@ -2023,22 +3327,108 @@ fn target_worker_is_attached(
         bail!("attached target worker remote continuation differs from its durable operation");
     }
     let Some(worker_id) = session.worker_instance_id.as_deref() else {
-        return Ok(false);
+        // A safely reaped worker clears its current process binding. The
+        // ProcessAttached job projection was written only after this exact
+        // session and remote-continuation authority were observed together,
+        // so it remains sufficient start testimony for publishing the
+        // permanent receipt after terminalization.
+        return Ok(attachment_was_projected);
     };
     let worker = state
         .state_store
         .worker_process(worker_id)?
         .context("attached target worker projection disappeared")?;
-    if worker.placement_thread_id != operation.successor_placement_thread_id {
-        bail!("attached target worker belongs to another placement");
+    let profile = state
+        .state_store
+        .credential_profile(&session.credential_profile_id)?
+        .context("attached target worker lost its credential profile")?;
+    validate_target_worker_attachment(
+        &session,
+        &worker,
+        &profile,
+        &operation.successor_placement_thread_id,
+        &operation.owner_principal,
+        &placement.target_persistent_session_capsules,
+        placement.credential_reservation.generation,
+        attachment_was_projected,
+    )
+}
+
+fn validate_target_worker_attachment(
+    session: &ryeos_app::runtime_db::DedicatedSessionRecord,
+    worker: &ryeos_app::runtime_db::WorkerProcessRecord,
+    profile: &ryeos_app::runtime_db::CredentialProfileRecord,
+    expected_placement_thread_id: &str,
+    expected_owner_principal: &str,
+    expected_session_capsules: &BTreeMap<String, String>,
+    expected_credential_generation: u64,
+    attachment_was_projected: bool,
+) -> Result<bool> {
+    if session.state == "outcome_unknown" || worker.cleanup_state == "unproved" {
+        bail!("unproved target worker outcome cannot establish attachment");
     }
-    Ok(matches!(
-        worker.state,
-        ryeos_app::runtime_db::WorkerProcessState::Attached
-            | ryeos_app::runtime_db::WorkerProcessState::Live
-            | ryeos_app::runtime_db::WorkerProcessState::Draining
-            | ryeos_app::runtime_db::WorkerProcessState::Dead
-    ))
+    if worker.placement_thread_id != expected_placement_thread_id
+        || session.worker_instance_id.as_deref() != Some(worker.worker_instance_id.as_str())
+        || session.worker_boot_epoch != Some(worker.boot_epoch)
+        || worker.session_capsule_hash != session.admitted_capsule_hash
+        || !placement_admits_session_capsule(
+            expected_session_capsules,
+            &session.admitted_capsule_hash,
+        )
+        || worker.lifecycle_generation != session.credential_generation
+        || worker.lifecycle_generation != expected_credential_generation
+        || profile.profile_id != session.credential_profile_id
+        || profile.owner_principal != expected_owner_principal
+        || profile.credential_generation != session.credential_generation
+        || profile.lock_owner.as_deref() != Some(worker.worker_instance_id.as_str())
+        || !matches!(
+            profile.state.as_str(),
+            "unauthenticated" | "enrolling" | "confirming" | "active"
+        )
+    {
+        bail!(
+            "attached target worker lost its exact session, capsule, lifecycle, or credential authority"
+        );
+    }
+
+    let committed = match worker.state {
+        ryeos_app::runtime_db::WorkerProcessState::Attached => {
+            worker.cleanup_state == "owned" && session.state == "binding"
+        }
+        ryeos_app::runtime_db::WorkerProcessState::Live => {
+            worker.cleanup_state == "owned"
+                && matches!(
+                    session.state.as_str(),
+                    "recovering" | "idle" | "turn_running" | "awaiting_approval"
+                )
+        }
+        ryeos_app::runtime_db::WorkerProcessState::Draining => {
+            worker.cleanup_state == "draining" && session.state == "draining"
+        }
+        ryeos_app::runtime_db::WorkerProcessState::Dead => {
+            attachment_was_projected && worker.cleanup_state == "reaped"
+        }
+        ryeos_app::runtime_db::WorkerProcessState::Starting => false,
+    };
+    if !committed
+        && !matches!(
+            worker.state,
+            ryeos_app::runtime_db::WorkerProcessState::Starting
+                | ryeos_app::runtime_db::WorkerProcessState::Dead
+        )
+    {
+        bail!("target worker process and session lifecycle are contradictory");
+    }
+    Ok(committed)
+}
+
+fn placement_admits_session_capsule(
+    expected_session_capsules: &BTreeMap<String, String>,
+    session_capsule_hash: &str,
+) -> bool {
+    expected_session_capsules
+        .values()
+        .any(|capsule| capsule == session_capsule_hash)
 }
 
 fn update_target_progress(
@@ -2068,6 +3458,37 @@ fn update_target_progress(
     })
 }
 
+fn validate_target_placement_for_adoption(
+    placement: &WorkerPlacementAdmissionEvidence,
+    request: &WorkerPlacementAdoptRequest,
+    operation: &WorkerSessionHandoffJobOperation,
+) -> Result<()> {
+    if placement.operation_id != request.operation_id
+        || placement.preflight_id != operation.preflight_id
+        || placement.preflight_attestation_hash != operation.preflight_attestation_hash
+        || placement.chain_root_id != request.chain_root_id
+        || placement.source_site_id != operation.source_site_id
+        || placement.target_site_id != operation.target_site_id
+        || placement.successor_placement_thread_id != operation.successor_placement_thread_id
+    {
+        bail!("target placement evidence differs from its durable job");
+    }
+    Ok(())
+}
+
+fn target_adoption_response(
+    request: &WorkerPlacementAdoptRequest,
+    operation: &WorkerSessionHandoffJobOperation,
+) -> WorkerPlacementAdoptResponse {
+    WorkerPlacementAdoptResponse {
+        operation_id: request.operation_id.clone(),
+        chain_root_id: request.chain_root_id.clone(),
+        placement_thread_id: operation.successor_placement_thread_id.clone(),
+        target_chain_head_hash: request.target_chain_head_hash.clone(),
+        delivery: "attached".to_owned(),
+    }
+}
+
 fn validate_adopt_response(
     response: &WorkerPlacementAdoptResponse,
     request: &WorkerPlacementAdoptRequest,
@@ -2084,6 +3505,70 @@ fn validate_adopt_response(
     Ok(())
 }
 
+/// Fold permanent target-signed adoption testimony into its operational job
+/// without consuming another retry attempt. Receipt authority must remain
+/// settleable even when the ordinary retry budget was exhausted by crashes
+/// immediately after publication.
+fn settle_target_adoption_job_from_receipt(
+    state: &AppState,
+    job_id: &str,
+    receipt: &ryeos_app::worker_handoff::WorkerHandoffAdoptionReceiptEvidence,
+) -> Result<()> {
+    let Some(job) = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(job_id))?
+    else {
+        return Ok(());
+    };
+    let operation = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())?;
+    if operation != receipt.target_operation {
+        bail!("terminal adoption receipt contradicts its retained target job");
+    }
+    validate_adopt_response(&receipt.response, &receipt.request, &operation)?;
+    if job.state == ryeos_state::SyncJobState::Completed {
+        let existing: WorkerPlacementAdoptResponse = serde_json::from_value(
+            job.result
+                .context("completed target adoption job has no terminal response")?,
+        )?;
+        if existing != receipt.response {
+            bail!("terminal adoption receipt changed after target settlement");
+        }
+        return Ok(());
+    }
+    if matches!(
+        job.state,
+        ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
+    ) {
+        bail!("terminal adoption receipt conflicts with another target disposition");
+    }
+    let progress = WorkerSessionHandoffProgress::from_value(
+        job.result
+            .clone()
+            .context("active target adoption job has no progress")?,
+    )?;
+    ryeos_app::worker_handoff::validate_projected_target_adoption(
+        &job,
+        &operation,
+        &progress,
+        &receipt.request,
+    )?;
+    state.state_store.with_state_db(|db| {
+        db.update_sync_job(
+            job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Completed,
+                phase: WorkerHandoffPhase::Completed.as_str().to_owned(),
+                roots: None,
+                heads: Some(vec![receipt.request.target_chain_head_hash.clone()]),
+                uploaded_hashes: job.uploaded_hashes,
+                fetched_hashes: job.fetched_hashes,
+                last_error: None,
+                result: Some(serde_json::to_value(&receipt.response)?),
+            },
+        )
+    })
+}
+
 fn complete_target_adoption(
     state: &AppState,
     job_id: &str,
@@ -2091,47 +3576,21 @@ fn complete_target_adoption(
     operation: &WorkerSessionHandoffJobOperation,
     attempt: &mut TargetAdoptionAttempt,
 ) -> Result<Value> {
-    let placement = load_local_placement(state, &request.placement_attestation_hash)?;
-    ryeos_app::authoritative_root_fact::append_once(
-        state,
-        &operation.successor_placement_thread_id,
-        "worker_session.remote_adoption_attached",
-        &request.operation_id,
-        serde_json::json!({
-            "schema":1,
-            "operation_id":request.operation_id,
-            "chain_root_id":request.chain_root_id,
-            "source_placement_thread_id":operation.source_placement_thread_id,
-            "placement_thread_id":operation.successor_placement_thread_id,
-            "source_site_id":operation.source_site_id,
-            "target_site_id":operation.target_site_id,
-            "checkpoint_manifest_hash":operation.checkpoint_manifest_hash,
-            "target_chain_head_hash":request.target_chain_head_hash,
-            "placement_attestation_hash":request.placement_attestation_hash,
-            "writer_grant_hash":request.writer_grant_hash,
-            "target_launch_capsule_hash":placement.target_launch_capsule_hash,
-            "target_runtime_seed_hash":placement.target_runtime_seed_hash,
-            "portable_state_tree_hash":load_source_placement_operands(
-                state,
-                &load_transfer_manifest(state, &operation.transfer_manifest_hash)?,
-            )?.restore.portable_state.incoming_tree_hash,
-            "credential_subject_contract_digest":placement.credential_reservation.subject_contract_digest,
-            "credential_subject_digest":placement.credential_reservation.subject_digest,
-        }),
-    )?;
-    let response = WorkerPlacementAdoptResponse {
-        operation_id: request.operation_id.clone(),
-        chain_root_id: request.chain_root_id.clone(),
-        placement_thread_id: operation.successor_placement_thread_id.clone(),
-        target_chain_head_hash: request.target_chain_head_hash.clone(),
-        delivery: "attached".to_owned(),
-    };
+    let response = target_adoption_response(request, operation);
     validate_adopt_response(&response, request, operation)?;
     if attempt.job_id != job_id {
         bail!("target adoption attempt belongs to another durable job");
     }
+    let terminal_attestation_hash = state
+        .state_store
+        .publish_worker_handoff_adoption_receipt(job_id, operation, request, &response)?;
     attempt.complete(serde_json::to_value(&response)?)?;
-    Ok(serde_json::to_value(response)?)
+    let result = WorkerPlacementAdoptResult::Attached {
+        response,
+        terminal_attestation_hash,
+    };
+    result.validate()?;
+    Ok(serde_json::to_value(result)?)
 }
 
 async fn await_worker_adoption_handoff(
@@ -2168,12 +3627,13 @@ async fn await_worker_adoption_handoff(
 async fn prepare_after_staging(
     state: &Arc<AppState>,
     req: &WorkerPlacementPrepareRequest,
+    _operation: &WorkerSessionHandoffJobOperation,
     owner: &str,
     target_project_path: &Path,
     job_id: &str,
     source: &SourcePlacementOperands,
     preflight: &WorkerPlacementPreflightEvidence,
-) -> Result<WorkerPlacementPrepareResponse> {
+) -> Result<PreparedTargetPlacement> {
     let source_resume = source
         .launch_metadata
         .resume_context
@@ -2337,6 +3797,8 @@ async fn prepare_after_staging(
         credential_reservation: credential_reservation.clone(),
     };
     let target_resume = source_resume.for_remote_worker_adoption(&resume_rebind)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let project_materialization_started = lillux::time::MonotonicTimer::start();
     let prepared = ryeos_executor::execution::launch::prepare_remote_machine_successor_launch(
         state,
         &source.manifest.successor_placement_thread_id,
@@ -2350,6 +3812,8 @@ async fn prepare_after_staging(
     )
     .await
     .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let project_materialization_ms = project_materialization_started.elapsed_millis();
     let target_metadata = prepared.launch_metadata().clone();
     let target_capsule = target_metadata
         .admitted_launch_capsule()?
@@ -2451,6 +3915,12 @@ async fn prepare_after_staging(
         credential_reservation_id: Some(credential_reservation.reservation_id.clone()),
         abort_chain_head_hash: None,
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforePreparationPublication,
+        _operation,
+    )?;
     let admission = state.state_store.publish_worker_placement_preparation(
         job_id,
         &source.manifest.content_hash()?,
@@ -2458,6 +3928,12 @@ async fn prepare_after_staging(
         &prepared_seed,
         &attestation,
         &progress,
+    )?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetPreparationPublished,
+        _operation,
     )?;
     if admission.attestation_hash != attestation_hash {
         let value = authority
@@ -2479,7 +3955,11 @@ async fn prepare_after_staging(
         placement,
     };
     response.validate_against(req)?;
-    Ok(response)
+    Ok(PreparedTargetPlacement {
+        response,
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        project_materialization_ms,
+    })
 }
 
 async fn preflight_after_staging(
@@ -2665,15 +4145,24 @@ fn validate_transfer_request(
 }
 
 fn canonical_target_project_path(raw: &str) -> Result<PathBuf> {
-    let canonical = std::fs::canonicalize(raw)
-        .with_context(|| format!("canonicalize target project endpoint {raw:?}"))?;
-    if canonical.to_str() != Some(raw) {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        bail!("target project endpoint must be absolute");
+    }
+    let lexical = path.components().collect::<PathBuf>();
+    if lexical.to_str() != Some(raw) {
         bail!(
             "target project endpoint must already be canonical: {}",
-            canonical.display()
+            lexical.display()
         );
     }
-    Ok(canonical)
+    let pinned = lillux::PinnedDirectory::open(&lexical)
+        .with_context(|| format!("securely open target project endpoint {raw:?}"))?
+        .with_context(|| format!("target project endpoint does not exist: {raw:?}"))?;
+    if pinned.path() != lexical {
+        bail!("target project endpoint authority changed while opening");
+    }
+    Ok(lexical)
 }
 
 fn target_job_id(operation_id: &str) -> String {
@@ -2978,6 +4467,8 @@ fn source_profile_id(resume: &ryeos_app::launch_metadata::ResumeContext) -> Resu
 struct TargetAdoptionAttempt {
     state: Arc<AppState>,
     job_id: String,
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    operation: WorkerSessionHandoffJobOperation,
     attempt_id: String,
     active: bool,
 }
@@ -3048,12 +4539,18 @@ impl Drop for TargetPreflightAttempt {
 }
 
 impl TargetAdoptionAttempt {
-    fn begin(state: Arc<AppState>, job_id: &str) -> Result<Self> {
+    fn begin(
+        state: Arc<AppState>,
+        job_id: &str,
+        _operation: &WorkerSessionHandoffJobOperation,
+    ) -> Result<Self> {
         let attempt_id =
             begin_target_handoff_attempt(&state, job_id, "target_adopt", "target-handoff-adopt")?;
         Ok(Self {
             state,
             job_id: job_id.to_owned(),
+            #[cfg(any(test, feature = "handoff-test-support"))]
+            operation: _operation.clone(),
             attempt_id,
             active: true,
         })
@@ -3061,6 +4558,12 @@ impl TargetAdoptionAttempt {
 
     fn complete(&mut self, result: Value) -> Result<()> {
         let response: WorkerPlacementAdoptResponse = serde_json::from_value(result.clone())?;
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        reach_target_handoff_crash_boundary(
+            &self.state,
+            ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeCompletion,
+            &self.operation,
+        )?;
         self.state.state_store.with_state_db(|db| {
             let latest = db
                 .get_sync_job(&self.job_id)?
@@ -3086,6 +4589,12 @@ impl TargetAdoptionAttempt {
                 },
             )
         })?;
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        reach_target_handoff_crash_boundary(
+            &self.state,
+            ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetCompletedBeforeResponse,
+            &self.operation,
+        )?;
         self.active = false;
         Ok(())
     }
@@ -3282,26 +4791,6 @@ mod authority_tests {
     }
 
     #[test]
-    fn every_proved_pre_attachment_terminal_can_release_its_reservation() {
-        use ryeos_state::objects::ThreadStatus;
-
-        for status in [
-            ThreadStatus::Completed,
-            ThreadStatus::Failed,
-            ThreadStatus::Cancelled,
-            ThreadStatus::Killed,
-            ThreadStatus::TimedOut,
-            ThreadStatus::Continued,
-        ] {
-            assert!(is_settleable_pre_attachment_terminal(status, false));
-            assert!(!is_settleable_pre_attachment_terminal(status, true));
-        }
-        for status in [ThreadStatus::Created, ThreadStatus::Running] {
-            assert!(!is_settleable_pre_attachment_terminal(status, false));
-        }
-    }
-
-    #[test]
     fn target_adoption_never_relaunches_behind_an_active_launch_claim() {
         assert_eq!(
             classify_target_launch_claim(false, false).unwrap(),
@@ -3313,5 +4802,150 @@ mod authority_tests {
         );
         assert!(classify_target_launch_claim(true, false).is_err());
         assert!(classify_target_launch_claim(false, true).is_err());
+    }
+
+    #[test]
+    fn target_project_endpoint_is_existing_canonical_nofollow_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let canonical = project.to_str().unwrap();
+
+        assert_eq!(canonical_target_project_path(canonical).unwrap(), project);
+        assert!(
+            canonical_target_project_path(&format!("{}/./project", root.path().display())).is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("project-alias");
+            std::os::unix::fs::symlink(&project, &alias).unwrap();
+            assert!(canonical_target_project_path(alias.to_str().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn abort_authority_cannot_transition_back_to_target_adoption() {
+        assert!(target_adoption_source_commit_phase(WorkerHandoffPhase::AbortAuthorized).is_err());
+        assert_eq!(
+            target_adoption_source_commit_phase(WorkerHandoffPhase::TargetPrepared).unwrap(),
+            WorkerHandoffPhase::SourceCommitted
+        );
+        for retained in [
+            WorkerHandoffPhase::SourceCommitted,
+            WorkerHandoffPhase::TargetAdopted,
+            WorkerHandoffPhase::StateInstalled,
+            WorkerHandoffPhase::ProcessAttached,
+        ] {
+            assert_eq!(
+                target_adoption_source_commit_phase(retained).unwrap(),
+                retained
+            );
+        }
+        for invalid in [
+            WorkerHandoffPhase::Planned,
+            WorkerHandoffPhase::SourceExported,
+            WorkerHandoffPhase::Completed,
+        ] {
+            assert!(target_adoption_source_commit_phase(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn unproved_worker_start_cannot_become_target_attachment_testimony() {
+        let capsule_hash = "a".repeat(64);
+        let session = ryeos_app::runtime_db::DedicatedSessionRecord {
+            placement_thread_id: "T-successor".to_owned(),
+            chain_root_id: "T-root".to_owned(),
+            owner_principal: "fp:owner".to_owned(),
+            admitted_capsule_hash: capsule_hash.clone(),
+            worker_instance_id: Some("worker-unproved".to_owned()),
+            worker_boot_epoch: Some(1),
+            workspace_id: "workspace:successor".to_owned(),
+            candidate_required: true,
+            credential_profile_id: "credential:target".to_owned(),
+            credential_generation: 7,
+            remote_thread_id: Some("upstream-session".to_owned()),
+            current_turn_id: None,
+            state: "outcome_unknown".to_owned(),
+            send_boundary: "outcome_unknown".to_owned(),
+            candidate_snapshot_hash: None,
+            candidate_validation_hash: None,
+            publication_result: None,
+            terminal_reason: Some("held child cleanup unproved".to_owned()),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        let worker = ryeos_app::runtime_db::WorkerProcessRecord {
+            worker_instance_id: "worker-unproved".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: capsule_hash.clone(),
+            boot_epoch: 1,
+            lifecycle_generation: 7,
+            process_identity: ryeos_app::process::ExecutionProcessIdentity {
+                schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                boot_id: "boot:test".to_owned(),
+                target_pid: 41,
+                target_start_time_ticks: 101,
+                group_leader_pid: 41,
+                group_leader_start_time_ticks: 101,
+            },
+            control_channel_identity: "channel:unproved".to_owned(),
+            state: ryeos_app::runtime_db::WorkerProcessState::Dead,
+            daemon_generation_id: "daemon:test".to_owned(),
+            placement_thread_id: "T-successor".to_owned(),
+            cleanup_state: "unproved".to_owned(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        let profile = ryeos_app::runtime_db::CredentialProfileRecord {
+            profile_id: "credential:target".to_owned(),
+            owner_principal: "fp:owner".to_owned(),
+            home_id: "home:target".to_owned(),
+            authority_revision: 1,
+            credential_generation: 7,
+            state: "active".to_owned(),
+            active_login_id: None,
+            login_epoch: 1,
+            login_expires_at_ms: None,
+            sanitized_account: None,
+            lock_owner: Some("worker-unproved".to_owned()),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        let expected_session_capsules =
+            BTreeMap::from([("worker".to_owned(), capsule_hash.clone())]);
+
+        for attachment_was_projected in [false, true] {
+            assert!(
+                validate_target_worker_attachment(
+                    &session,
+                    &worker,
+                    &profile,
+                    "T-successor",
+                    "fp:owner",
+                    &expected_session_capsules,
+                    7,
+                    attachment_was_projected,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn target_attachment_uses_the_signed_inner_session_capsule_set() {
+        let outer_launch_capsule_hash = "a".repeat(64);
+        let inner_session_capsule_hash = "b".repeat(64);
+        let admitted = BTreeMap::from([("worker".to_owned(), inner_session_capsule_hash.clone())]);
+
+        assert!(placement_admits_session_capsule(
+            &admitted,
+            &inner_session_capsule_hash,
+        ));
+        assert!(!placement_admits_session_capsule(
+            &admitted,
+            &outer_launch_capsule_hash,
+        ));
     }
 }

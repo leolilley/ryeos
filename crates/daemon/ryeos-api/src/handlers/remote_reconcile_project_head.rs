@@ -453,7 +453,7 @@ async fn execute_operation(
                 .state_store
                 .with_state_db(|db| db.get_sync_job(&job_id))?
                 .context("project-head reconciliation job disappeared during settlement")?;
-            let retryable = failure.retryable && latest.attempt_count < latest.max_attempts;
+            let retryable = failure.retryable && !latest.attempts_exhausted();
             settle_attempt(
                 &state,
                 &job_id,
@@ -1096,7 +1096,7 @@ fn terminalize_if_exhausted(state: &AppState, job_id: &str) -> Result<()> {
         .state_store
         .with_state_db(|db| db.get_sync_job(job_id))?
         .context("project-head reconciliation job disappeared")?;
-    if job.state == SyncJobState::Retryable && job.attempt_count >= job.max_attempts {
+    if job.state == SyncJobState::Retryable && job.attempts_exhausted() {
         state.state_store.with_state_db(|db| {
             db.update_sync_job(
                 job_id,
@@ -1148,7 +1148,7 @@ fn validate_job_binding(
         || job.operation_type != OPERATION_TYPE
         || job.peer.as_deref() != Some(operation.remote.as_str())
         || job.max_attempts != MAX_ATTEMPTS
-        || job.attempt_count > job.max_attempts
+        || !job.attempt_count_is_valid()
     {
         bail!("project-head reconciliation job changed its retained authority binding");
     }

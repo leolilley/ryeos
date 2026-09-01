@@ -2791,12 +2791,18 @@ mod tests {
             test_provenance(state, "/proj"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "P",
-            "user:test".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "P",
+                "user:test".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
         (cbt.token, tat.token)
     }
 
@@ -4260,12 +4266,18 @@ mod tests {
             test_provenance(&state, "/proj"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "P",
-            "user:test".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "P",
+                "user:test".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
         let resp = dispatch(
             rpc(
                 "runtime.spawn_follow_child",
@@ -5299,12 +5311,18 @@ mod tests {
         );
         // Mint a tat for a SPECIFIC principal — this is the value the
         // daemon must use, not anything caller-controllable.
-        let tat = state.thread_auth.mint(
-            "T-tat-ok",
-            "fp:server-authoritative-principal".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-tat-ok",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
 
         // The DispatchActionParams struct is `deny_unknown_fields` and
         // does NOT include a principal field, so the only acting principal
@@ -5386,12 +5404,18 @@ mod tests {
             test_provenance(&state, "/p"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "T-caps-empty",
-            "fp:server-authoritative-principal".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-caps-empty",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
 
         let resp = dispatch(
             rpc(
@@ -5434,12 +5458,18 @@ mod tests {
             test_provenance(&state, "/p"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "T-caps-wild",
-            "fp:server-authoritative-principal".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-caps-wild",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
 
         let resp = dispatch(
             rpc(

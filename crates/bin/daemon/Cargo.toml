@@ -22,6 +22,7 @@ latency-profiling = ["ryeos-app/latency-profiling", "ryeos-engine/latency-profil
 # Exact process-kill qualification for runtime-owned durable boundaries. This
 # endpoint and inherited channel do not exist in production daemon builds.
 crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"]
+handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -72,6 +73,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-api = { workspace = true, features = ["handoff-test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }

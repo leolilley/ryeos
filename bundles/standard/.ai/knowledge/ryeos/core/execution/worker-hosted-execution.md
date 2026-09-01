@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T00:15:48Z:82438eeece9459e7704d35026dcce6b7129f3a657e9ec5dfa4705e21b4b760b1:HIQEZ0kBH5IV9b+iz1RjgGwvE8iVCjev7ZUDAY6V597Wzqg/ESOUgy6CzBcrv6y8he5ifDieb9sRMRffINBKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T17:10:32Z:cbc778ff892b12fc201d6002b308d8b8fc34303e31478e71f6aa63dd8d220ed6:a6Vg397E9OiaueWhFWBqElyrMFDCUHlL3glPVQaROo6lATHFtjNlCbznLGgXZBYbEUsYI4XnzLacikQNe090Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -79,6 +79,7 @@ semantic classes.
 For a bidirectional placement peer, the current exact node-grant ceiling is:
 
 ```text
+ryeos.execute.service.objects/get
 ryeos.execute.service.objects/closure/get
 ryeos.execute.service.worker-placements/preflight
 ryeos.execute.service.worker-placements/prepare
@@ -257,6 +258,32 @@ side of every crash gap. A failed pre-commit transfer leaves the source current;
 after the continuation commit the source cannot reactivate and target recovery
 owns completion. Routing follows the signed current chain head, so a stale
 placement thread or boot epoch cannot accept commands.
+
+Target adoption has four mutually exclusive, node-signed terminal branches
+under one permanent operation head: attached successor, source-authorized
+abort, proved completion before attachment projection, or proved terminal
+failure before attachment. Completion never fabricates a `ProcessAttached`
+event; the target instead proves the exact completed terminal chain, dead and
+reaped process identity, and released historical credential lease. Source
+recovery imports that complete signed closure and advances the same chain. A
+later local credential generation or owner may coexist with this historical
+proof, but the old worker may not still own the current lease.
+
+Handoff contact retries are logically unbounded because an offline peer must
+not permanently strand already-transferred authority. While the operational
+job is retained, its cumulative attempt count never decreases; SQLite compacts
+only the newest bounded suffix of terminal attempt diagnostics plus at most one
+running reservation. Ordinary terminal-job GC may later remove that operational
+row and its attempt diagnostics. Permanent target branch heads and signed
+terminal testimony—not the sync-job row—preserve settled handoff authority.
+Every error after reservation—including response decoding, closure fetch, and
+signature validation—settles that reservation before another exact redrive may
+begin. Each authenticated peer interaction has a finite total wall-clock bound;
+expiry settles the current reservation and leaves the same exact logical
+redrive eligible. Sync-job inspection reports the cumulative count, retained row count,
+retention mode, and terminal-row ceiling explicitly; consumers must verify the
+exact newest consecutive suffix rather than mistake diagnostic pruning for
+lost logical attempts.
 
 This federation contract needs no global session registry, shared filesystem,
 identical app-root paths, host-local node-instance ID, scheduler, or transparent

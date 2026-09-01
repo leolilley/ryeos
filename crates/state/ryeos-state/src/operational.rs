@@ -2531,6 +2531,43 @@ pub struct SyncJobRecord {
     pub finished_at: Option<String>,
 }
 
+/// A zero sync-job attempt limit is the explicit durable encoding for an
+/// unbounded exact-operation retry lane. It does not relax operation identity,
+/// single-attempt exclusion, or terminal-state fencing; it only prevents an
+/// admitted recovery protocol from becoming permanently uncontactable because
+/// a peer stayed offline longer than an arbitrary retry count.
+pub const SYNC_JOB_UNBOUNDED_ATTEMPTS: u64 = 0;
+/// Unbounded jobs retain a bounded newest suffix for diagnostics. The durable
+/// `attempt_count` remains cumulative, and a running reservation is never
+/// pruned, so compaction cannot create parallel contact authority.
+pub const SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS: u64 = 64;
+
+pub const fn sync_job_attempts_are_unbounded(max_attempts: u64) -> bool {
+    max_attempts == SYNC_JOB_UNBOUNDED_ATTEMPTS
+}
+
+pub const fn sync_job_attempts_exhausted(attempt_count: u64, max_attempts: u64) -> bool {
+    !sync_job_attempts_are_unbounded(max_attempts) && attempt_count >= max_attempts
+}
+
+pub const fn sync_job_attempt_count_is_valid(attempt_count: u64, max_attempts: u64) -> bool {
+    sync_job_attempts_are_unbounded(max_attempts) || attempt_count <= max_attempts
+}
+
+impl SyncJobRecord {
+    pub const fn attempts_are_unbounded(&self) -> bool {
+        sync_job_attempts_are_unbounded(self.max_attempts)
+    }
+
+    pub const fn attempts_exhausted(&self) -> bool {
+        sync_job_attempts_exhausted(self.attempt_count, self.max_attempts)
+    }
+
+    pub const fn attempt_count_is_valid(&self) -> bool {
+        sync_job_attempt_count_is_valid(self.attempt_count, self.max_attempts)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSyncJob {
     pub job_id: String,
@@ -3114,6 +3151,24 @@ impl OperationalDb {
     pub fn reconcile_interrupted_sync_job_attempts(&self) -> Result<usize> {
         self.immediate_transaction("reconcile interrupted sync job attempts", || {
             let now = lillux::time::iso8601_now();
+            let interrupted_unbounded_jobs = {
+                let mut statement = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT DISTINCT attempts.job_id
+                           FROM sync_job_attempts attempts
+                           JOIN sync_jobs jobs ON jobs.job_id = attempts.job_id
+                          WHERE attempts.state = 'running'
+                            AND jobs.max_attempts = ?1
+                          ORDER BY attempts.job_id",
+                    )
+                    .context("failed to prepare interrupted unbounded sync-job query")?;
+                let rows = statement
+                    .query_map([SYNC_JOB_UNBOUNDED_ATTEMPTS], |row| row.get::<_, String>(0))
+                    .context("failed to query interrupted unbounded sync jobs")?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("failed to collect interrupted unbounded sync jobs")?
+            };
             let interrupted = self
                 .conn
                 .execute(
@@ -3139,13 +3194,33 @@ impl OperationalDb {
                     [&now],
                 )
                 .context("failed to make interrupted sync jobs retryable")?;
+            for job_id in interrupted_unbounded_jobs {
+                self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
+            }
             Ok(interrupted)
         })
     }
 
     pub fn create_sync_job(&self, job: &NewSyncJob) -> Result<SyncJobRecord> {
+        self.create_sync_job_with_initial_progress(job, SyncJobState::Planned, "planned", None)
+    }
+
+    /// Create a job whose first row already records a completed durable
+    /// boundary. This avoids manufacturing a crash window by inserting a
+    /// generic `planned` row and updating it in a second transaction.
+    pub fn create_sync_job_with_initial_progress(
+        &self,
+        job: &NewSyncJob,
+        state: SyncJobState,
+        phase: &str,
+        result: Option<&serde_json::Value>,
+    ) -> Result<SyncJobRecord> {
         validate_sync_job_id(&job.job_id)?;
         validate_non_empty_label("operation_type", &job.operation_type)?;
+        validate_non_empty_label("phase", phase)?;
+        if !matches!(state, SyncJobState::Planned | SyncJobState::Running) {
+            anyhow::bail!("a newly created sync job must be planned or running");
+        }
         let operation = job
             .operation
             .as_object()
@@ -3169,6 +3244,16 @@ impl OperationalDb {
         if operation_json.len() > 256 * 1024 {
             anyhow::bail!("sync job operation exceeds the 256 KiB maximum");
         }
+        let result_json = result
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize initial sync job result")?;
+        if result_json
+            .as_ref()
+            .is_some_and(|value| value.len() > 256 * 1024)
+        {
+            anyhow::bail!("sync job result exceeds the 256 KiB maximum");
+        }
         let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
         self.conn
             .execute(
@@ -3176,17 +3261,20 @@ impl OperationalDb {
                     job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
-                 ) VALUES (?, ?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?, NULL)",
                 rusqlite::params![
                     &job.job_id,
                     &job.operation_type,
                     operation_json,
                     &job.peer,
+                    state.as_str(),
+                    phase,
                     roots_json,
                     heads_json,
                     empty_hashes,
                     empty_hashes,
                     max_attempts,
+                    result_json,
                     &now,
                     &now,
                 ],
@@ -3344,7 +3432,10 @@ impl OperationalDb {
                 job_state.as_str()
             );
         }
-        if attempt_count >= max_attempts {
+        if sync_job_attempts_exhausted(
+            u64::try_from(attempt_count).context("negative sync job attempt count")?,
+            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+        ) {
             anyhow::bail!(
                 "sync job {} has exhausted attempts ({attempt_count}/{max_attempts})",
                 attempt.job_id
@@ -3360,6 +3451,11 @@ impl OperationalDb {
             .context("failed to count running sync job attempts")?;
         if running_attempts > 0 {
             anyhow::bail!("sync job {} already has a running attempt", attempt.job_id);
+        }
+        if sync_job_attempts_are_unbounded(
+            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+        ) {
+            self.prune_unbounded_sync_job_attempts_inner(&attempt.job_id)?;
         }
 
         let attempt_number: i64 = self
@@ -3424,12 +3520,21 @@ impl OperationalDb {
                 finish.state.as_str()
             );
         }
-        let current_state = self
+        let (current_state, job_id, max_attempts) = self
             .conn
             .query_row(
-                "SELECT state FROM sync_job_attempts WHERE attempt_id = ?",
+                "SELECT sync_job_attempts.state, sync_job_attempts.job_id, sync_jobs.max_attempts
+                   FROM sync_job_attempts
+                   JOIN sync_jobs ON sync_jobs.job_id = sync_job_attempts.job_id
+                  WHERE sync_job_attempts.attempt_id = ?",
                 [attempt_id],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()
             .context("failed to load sync job attempt state")?
@@ -3466,6 +3571,30 @@ impl OperationalDb {
             )
             .context("failed to finish sync job attempt")?;
         debug_assert_eq!(changed, 1);
+        if sync_job_attempts_are_unbounded(
+            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+        ) {
+            self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
+        }
+        Ok(())
+    }
+
+    fn prune_unbounded_sync_job_attempts_inner(&self, job_id: &str) -> Result<()> {
+        let retained = i64::try_from(SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS)?;
+        self.conn
+            .execute(
+                "DELETE FROM sync_job_attempts
+                  WHERE job_id = ?1
+                    AND state != 'running'
+                    AND attempt_id NOT IN (
+                        SELECT attempt_id FROM sync_job_attempts
+                         WHERE job_id = ?1 AND state != 'running'
+                         ORDER BY attempt_number DESC
+                         LIMIT ?2
+                    )",
+                rusqlite::params![job_id, retained],
+            )
+            .context("failed to compact unbounded sync-job attempt diagnostics")?;
         Ok(())
     }
 
@@ -3574,6 +3703,57 @@ impl OperationalDb {
         } else {
             stmt.query_map(rusqlite::params![limit as i64], sync_job_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
+    /// Newest-first keyset scan for one durable operation family, including
+    /// terminal rows. The cursor is the exact immutable `(created_at, job_id)`
+    /// pair from the preceding page's last row. Status and audit projections
+    /// use this instead of a capped page of unrelated global jobs.
+    pub fn list_sync_jobs_by_operation_type_before(
+        &self,
+        operation_type: &str,
+        before: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        validate_non_empty_label("operation_type", operation_type)?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows = match before {
+            Some((created_at, job_id)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1
+                           AND (created_at < ?2 OR (created_at = ?2 AND job_id < ?3))
+                         ORDER BY created_at DESC, job_id DESC LIMIT ?4",
+                    )
+                    .context("failed to prepare paged sync operation history query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, created_at, job_id, limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1
+                         ORDER BY created_at DESC, job_id DESC LIMIT ?2",
+                    )
+                    .context("failed to prepare sync operation history query")?;
+                stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
         };
         Ok(rows)
     }
@@ -5358,6 +5538,43 @@ mod tests {
     }
 
     #[test]
+    fn sync_job_can_begin_at_an_already_durable_boundary() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let progress = serde_json::json!({
+            "schema":"ryeos.worker_session_handoff_progress.v1",
+            "operation_id":"11".repeat(32),
+            "phase":"source_exported",
+        });
+
+        let created = db
+            .create_sync_job_with_initial_progress(
+                &NewSyncJob {
+                    job_id: "job:source-exported".to_owned(),
+                    operation_type: "worker_session_handoff".to_owned(),
+                    operation: serde_json::json!({
+                        "schema":1,
+                        "operation_type":"worker_session_handoff",
+                    }),
+                    peer: Some("site:b".to_owned()),
+                    roots: vec!["22".repeat(32)],
+                    heads: vec!["33".repeat(32)],
+                    max_attempts: 3,
+                },
+                SyncJobState::Running,
+                "source_exported",
+                Some(&progress),
+            )
+            .unwrap();
+
+        assert_eq!(created.state, SyncJobState::Running);
+        assert_eq!(created.phase, "source_exported");
+        assert_eq!(created.result, Some(progress));
+        assert_eq!(created.attempt_count, 0);
+        assert!(created.finished_at.is_none());
+    }
+
+    #[test]
     fn sync_job_refuses_an_operation_type_outside_its_canonical_payload() {
         let tempdir = tempfile::tempdir().unwrap();
         let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
@@ -5745,6 +5962,136 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("cannot create attempt"));
+    }
+
+    #[test]
+    fn zero_attempt_limit_is_an_unbounded_exact_operation_lane() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:unbounded".to_owned(),
+            operation_type: "durable_authority_recovery".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "durable_authority_recovery",
+                "operation_id": "fixed",
+            }),
+            peer: Some("peer-offline".to_owned()),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            max_attempts: SYNC_JOB_UNBOUNDED_ATTEMPTS,
+        })
+        .unwrap();
+
+        let total_attempts = SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS + 36;
+        for number in 1..=total_attempts {
+            let attempt_id = format!("attempt:unbounded:{number}");
+            db.create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: attempt_id.clone(),
+                job_id: "job:unbounded".to_owned(),
+                worker_id: None,
+                phase: "peer_contact".to_owned(),
+            })
+            .unwrap();
+            db.finish_sync_job_attempt(
+                &attempt_id,
+                &FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "peer_offline".to_owned(),
+                    error: Some("peer offline".to_owned()),
+                    result: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let retained = db.get_sync_job("job:unbounded").unwrap().unwrap();
+        assert!(retained.attempts_are_unbounded());
+        assert!(!retained.attempts_exhausted());
+        assert!(retained.attempt_count_is_valid());
+        assert_eq!(retained.attempt_count, total_attempts);
+        let attempts = db.list_sync_job_attempts("job:unbounded").unwrap();
+        assert_eq!(
+            u64::try_from(attempts.len()).unwrap(),
+            SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS
+        );
+        assert_eq!(attempts.first().unwrap().attempt_number, 37);
+        assert_eq!(attempts.last().unwrap().attempt_number, total_attempts);
+    }
+
+    #[test]
+    fn startup_reconciliation_prunes_the_interrupted_unbounded_attempt_at_the_cap() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:restart-at-cap".to_owned(),
+            operation_type: "durable_authority_recovery".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "durable_authority_recovery",
+                "operation_id": "restart-at-cap",
+            }),
+            peer: Some("peer-offline".to_owned()),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            max_attempts: SYNC_JOB_UNBOUNDED_ATTEMPTS,
+        })
+        .unwrap();
+
+        for number in 1..=SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS {
+            let attempt_id = format!("attempt:restart-at-cap:{number}");
+            db.create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: attempt_id.clone(),
+                job_id: "job:restart-at-cap".to_owned(),
+                worker_id: None,
+                phase: "peer_contact".to_owned(),
+            })
+            .unwrap();
+            db.finish_sync_job_attempt(
+                &attempt_id,
+                &FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "peer_offline".to_owned(),
+                    error: Some("peer offline".to_owned()),
+                    result: None,
+                },
+            )
+            .unwrap();
+        }
+        let interrupted_number = SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS + 1;
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: format!("attempt:restart-at-cap:{interrupted_number}"),
+            job_id: "job:restart-at-cap".to_owned(),
+            worker_id: None,
+            phase: "peer_contact".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            u64::try_from(
+                db.list_sync_job_attempts("job:restart-at-cap")
+                    .unwrap()
+                    .len()
+            )
+            .unwrap(),
+            SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS + 1
+        );
+
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 1);
+        let job = db.get_sync_job("job:restart-at-cap").unwrap().unwrap();
+        let attempts = db.list_sync_job_attempts("job:restart-at-cap").unwrap();
+        assert_eq!(job.state, SyncJobState::Retryable);
+        assert_eq!(job.attempt_count, interrupted_number);
+        assert_eq!(
+            u64::try_from(attempts.len()).unwrap(),
+            SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS
+        );
+        assert!(attempts.iter().all(|attempt| attempt.state.is_terminal()));
+        assert_eq!(attempts.first().unwrap().attempt_number, 2);
+        assert_eq!(attempts.last().unwrap().attempt_number, interrupted_number);
     }
 
     #[test]

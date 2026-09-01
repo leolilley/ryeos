@@ -76,6 +76,7 @@ const MAX_THREAD_RESULT_RESPONSE_BYTES: usize =
     ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 64 * 1024;
 const MAX_TERMINAL_EVENT_INLINE_ERROR_BYTES: usize = 64 * 1024;
 const MAX_STATE_RESTORE_BYTES: usize = 256 * 1024;
+const ACTIVE_WORKER_HANDOFF_SCAN_PAGE: usize = 64;
 // A portable-state tree stores file bytes as canonical base64.  The signed
 // selector contract currently permits at most 16 MiB of raw selected state,
 // so retain enough room for base64 expansion plus bounded tree metadata.
@@ -1435,6 +1436,91 @@ pub struct StateStore {
     /// proves current ownership and gives cancellation/shutdown one exact task
     /// control instead of terminalizing a row while its handler keeps running.
     active_in_process_handlers: Mutex<HashMap<String, InProcessHandlerControl>>,
+}
+
+fn active_source_worker_handoff_for_placement_in_db(
+    state_db: &StateDb,
+    placement_thread_id: &str,
+) -> Result<
+    Option<(
+        ryeos_state::SyncJobRecord,
+        crate::worker_handoff::WorkerSessionHandoffJobOperation,
+    )>,
+> {
+    let mut found = None;
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let jobs = state_db.list_active_sync_jobs_by_operation_type_after(
+            crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION,
+            after
+                .as_ref()
+                .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+            ACTIVE_WORKER_HANDOFF_SCAN_PAGE,
+        )?;
+        let Some(last) = jobs.last() else {
+            return Ok(found);
+        };
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            let operation = crate::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+                job.operation.clone(),
+            )?;
+            if operation.role != crate::worker_handoff::WorkerHandoffJobRole::Source
+                || operation.source_placement_thread_id != placement_thread_id
+            {
+                continue;
+            }
+            if found.is_some() {
+                bail!("multiple active source handoffs claim placement {placement_thread_id}");
+            }
+            found = Some((job, operation));
+        }
+        after = Some(next);
+    }
+}
+
+fn validate_target_preparation_job_transition(
+    job: &ryeos_state::SyncJobRecord,
+    transfer_manifest_hash: &str,
+    requested_progress: &crate::worker_handoff::WorkerSessionHandoffProgress,
+) -> Result<Option<crate::worker_handoff::WorkerSessionHandoffProgress>> {
+    if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+        || !job.roots.iter().any(|hash| hash == transfer_manifest_hash)
+    {
+        bail!("target worker handoff job is not rooted in its transfer manifest");
+    }
+    if matches!(
+        job.state,
+        ryeos_state::SyncJobState::Completed
+            | ryeos_state::SyncJobState::Failed
+            | ryeos_state::SyncJobState::Cancelled
+    ) || job.phase == crate::worker_handoff::WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE
+    {
+        bail!("terminal or abort-claimed target handoff cannot republish preparation");
+    }
+    let operation =
+        crate::worker_handoff::WorkerSessionHandoffJobOperation::from_value(job.operation.clone())?;
+    if operation.role != crate::worker_handoff::WorkerHandoffJobRole::Target
+        || operation.operation_id != requested_progress.operation_id
+        || requested_progress.phase != crate::worker_handoff::WorkerHandoffPhase::TargetPrepared
+    {
+        bail!("target preparation progress belongs to another authority lane");
+    }
+    let current_progress = job
+        .result
+        .clone()
+        .map(crate::worker_handoff::WorkerSessionHandoffProgress::from_value)
+        .transpose()?;
+    if current_progress.as_ref().is_some_and(|current| {
+        !matches!(
+            current.phase,
+            crate::worker_handoff::WorkerHandoffPhase::Planned
+                | crate::worker_handoff::WorkerHandoffPhase::TargetPrepared
+        )
+    }) {
+        bail!("target handoff already advanced beyond preparation");
+    }
+    Ok(current_progress)
 }
 
 struct InProcessHandlerControlInner {
@@ -4556,6 +4642,22 @@ impl StateStore {
         f(&g.state_db)
     }
 
+    /// Resolve the sole durable source-role handoff currently fencing one
+    /// hosted placement. The existing sync-job ledger is authoritative; this
+    /// query deliberately does not introduce a second placement registry.
+    pub fn active_source_worker_handoff_for_placement(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<
+        Option<(
+            ryeos_state::SyncJobRecord,
+            crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        )>,
+    > {
+        let g = self.lock()?;
+        active_source_worker_handoff_for_placement_in_db(&g.state_db, placement_thread_id)
+    }
+
     pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.admit_dedicated_session(session)
@@ -5645,13 +5747,24 @@ impl StateStore {
         &self,
         prepared: &crate::worker_handoff::PreparedPlacementTransferManifest,
         job: &ryeos_state::NewSyncJob,
+        progress: &crate::worker_handoff::WorkerSessionHandoffProgress,
     ) -> Result<ryeos_state::SyncJobRecord> {
         prepared.object.validate()?;
+        progress.validate()?;
         let manifest_hash = prepared.object_hash()?;
         if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
             || !job.roots.iter().any(|hash| hash == &manifest_hash)
+            || progress.phase != crate::worker_handoff::WorkerHandoffPhase::SourceExported
         {
-            bail!("worker handoff sync job does not pin its transfer manifest");
+            bail!("source-exported worker handoff job does not pin its transfer manifest");
+        }
+        let operation = crate::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+            job.operation.clone(),
+        )?;
+        if operation.role != crate::worker_handoff::WorkerHandoffJobRole::Source
+            || operation.operation_id != progress.operation_id
+        {
+            bail!("source-exported progress belongs to another handoff operation");
         }
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
@@ -5663,6 +5776,19 @@ impl StateStore {
                 bail!("worker handoff job identity is already bound to another operation");
             }
             return Ok(existing);
+        }
+        if let Some((existing, existing_operation)) =
+            active_source_worker_handoff_for_placement_in_db(
+                &g.state_db,
+                &operation.source_placement_thread_id,
+            )?
+        {
+            bail!(
+                "source placement {} is already fenced by active handoff {} ({})",
+                operation.source_placement_thread_id,
+                existing_operation.operation_id,
+                existing.job_id
+            );
         }
         self.state_authority.ensure_guard(permit.cas_guard())?;
         let cas = self.state_authority.cas_store()?;
@@ -5695,7 +5821,652 @@ impl StateStore {
                 job_id: Some(job.job_id.clone()),
                 state: ryeos_state::CasEntryState::Local,
             })?;
-        g.state_db.create_sync_job(job)
+        let progress_value = progress.to_value()?;
+        g.state_db.create_sync_job_with_initial_progress(
+            job,
+            ryeos_state::SyncJobState::Running,
+            progress.phase.as_str(),
+            Some(&progress_value),
+        )
+    }
+
+    /// Win the target's pre-cut prepare/abort branch before any source
+    /// contact. The exact abort head is retained in the existing sync-job head
+    /// coordinate, so a crash cannot reopen prepare/adopt or let a retry name
+    /// a different source successor.
+    pub fn claim_worker_handoff_target_abort(
+        &self,
+        requested_job: &ryeos_state::NewSyncJob,
+        abort_chain_head_hash: &str,
+    ) -> Result<ryeos_state::SyncJobRecord> {
+        ryeos_state::objects::thread_snapshot::validate_canonical_hash(
+            "target abort claim head",
+            abort_chain_head_hash,
+        )?;
+        let requested_operation =
+            crate::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+                requested_job.operation.clone(),
+            )?;
+        if requested_job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+            || requested_operation.role != crate::worker_handoff::WorkerHandoffJobRole::Target
+            || !requested_job.roots.is_empty()
+        {
+            bail!("target abort claim is not an exact target handoff job");
+        }
+        let g = self.lock()?;
+        if let Some(existing) = g.state_db.get_sync_job(&requested_job.job_id)? {
+            if existing.operation_type != requested_job.operation_type
+                || existing.operation != requested_job.operation
+                || existing.peer != requested_job.peer
+                || existing.max_attempts != requested_job.max_attempts
+            {
+                bail!("target abort claim conflicts with another durable operation");
+            }
+            if existing.state == ryeos_state::SyncJobState::Cancelled {
+                if existing.heads != [abort_chain_head_hash] {
+                    bail!("target abort retry changed its terminal source head");
+                }
+                return Ok(existing);
+            }
+            if matches!(
+                existing.state,
+                ryeos_state::SyncJobState::Completed | ryeos_state::SyncJobState::Failed
+            ) {
+                bail!("terminal target handoff cannot enter the abort branch");
+            }
+            let progress = existing
+                .result
+                .clone()
+                .map(crate::worker_handoff::WorkerSessionHandoffProgress::from_value)
+                .transpose()?;
+            if existing.phase == crate::worker_handoff::WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE
+                || progress.as_ref().is_some_and(|progress| {
+                    progress.phase == crate::worker_handoff::WorkerHandoffPhase::AbortAuthorized
+                })
+            {
+                if existing.heads != [abort_chain_head_hash] {
+                    bail!("target abort retry changed its durably claimed source head");
+                }
+                return Ok(existing);
+            }
+            if progress.as_ref().is_some_and(|progress| {
+                !matches!(
+                    progress.phase,
+                    crate::worker_handoff::WorkerHandoffPhase::Planned
+                        | crate::worker_handoff::WorkerHandoffPhase::TargetPrepared
+                )
+            }) {
+                bail!("target handoff already crossed the abortable pre-cut branch");
+            }
+            g.state_db.update_sync_job(
+                &requested_job.job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Running,
+                    phase: crate::worker_handoff::WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE
+                        .to_owned(),
+                    roots: None,
+                    heads: Some(vec![abort_chain_head_hash.to_owned()]),
+                    uploaded_hashes: existing.uploaded_hashes,
+                    fetched_hashes: existing.fetched_hashes,
+                    last_error: None,
+                    result: existing.result,
+                },
+            )?;
+            return g
+                .state_db
+                .get_sync_job(&requested_job.job_id)?
+                .ok_or_else(|| anyhow!("target abort claim disappeared after publication"));
+        }
+        let progress = crate::worker_handoff::WorkerSessionHandoffProgress::planned(
+            requested_operation.operation_id,
+        )?;
+        let mut job = requested_job.clone();
+        job.heads = vec![abort_chain_head_hash.to_owned()];
+        g.state_db.create_sync_job_with_initial_progress(
+            &job,
+            ryeos_state::SyncJobState::Running,
+            crate::worker_handoff::WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE,
+            Some(&progress.to_value()?),
+        )
+    }
+
+    /// Resolve the exact target-node-owned terminal-branch object for one
+    /// operation. Callers still have to parse the closed adoption/abort
+    /// evidence; this helper only prevents service responses from naming a
+    /// mutable job row or an unowned/missing CAS object.
+    pub fn worker_handoff_target_branch_hash(&self, operation_id: &str) -> Result<Option<String>> {
+        ryeos_state::objects::thread_snapshot::validate_canonical_hash(
+            "worker handoff target-branch operation",
+            operation_id,
+        )?;
+        let signer = self.lock()?.signer.clone();
+        let Some(head) = self.with_state_db(|db| {
+            db.read_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                operation_id,
+            )
+        })?
+        else {
+            return Ok(None);
+        };
+        if head.signer != signer.fingerprint() {
+            bail!("worker handoff target branch is not owned by this node");
+        }
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        if authority
+            .cas_store()?
+            .get_object(&head.target_hash)?
+            .is_none()
+        {
+            bail!("worker handoff target-branch object is absent");
+        }
+        Ok(Some(head.target_hash))
+    }
+
+    /// Decode the exact mutually exclusive target terminal branch. The
+    /// permanent generic head, rather than an operational job row, selects
+    /// adoption, source abort, proved pre-attachment completion, or failure.
+    pub fn worker_handoff_target_terminal(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<crate::worker_handoff::WorkerHandoffTargetTerminalEvidence>> {
+        ryeos_state::objects::thread_snapshot::validate_canonical_hash(
+            "worker handoff target-terminal operation",
+            operation_id,
+        )?;
+        let signer = self.lock()?.signer.clone();
+        let Some(head) = self.with_state_db(|db| {
+            db.read_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                operation_id,
+            )
+        })?
+        else {
+            return Ok(None);
+        };
+        if head.signer != signer.fingerprint() {
+            bail!("worker handoff target terminal is not owned by this node");
+        }
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object(&head.target_hash)?
+            .ok_or_else(|| anyhow!("worker handoff target-terminal object is absent"))?;
+        let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
+        let terminal =
+            crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::from_attestation(
+                &attestation,
+                &signer.verifying_key(),
+            )?;
+        let retained_operation_id = match &terminal {
+            crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Adoption(evidence) => {
+                &evidence.target_operation.operation_id
+            }
+            crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Abort(evidence) => {
+                &evidence.target_operation.operation_id
+            }
+            crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Completion(evidence) => {
+                &evidence.target_operation.operation_id
+            }
+            crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Failure(evidence) => {
+                &evidence.target_operation.operation_id
+            }
+        };
+        if retained_operation_id != operation_id {
+            bail!("worker handoff target-terminal head names another operation");
+        }
+        Ok(Some(terminal))
+    }
+
+    /// Read the permanent target-node-signed abort fence for one operation.
+    /// The generic head, not a terminal sync-job retention window, owns the
+    /// refusal authority against a delayed or replayed target prepare.
+    pub fn worker_handoff_abort_fence(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<crate::worker_handoff::WorkerHandoffAbortFenceEvidence>> {
+        match self.worker_handoff_target_terminal(operation_id)? {
+            None => Ok(None),
+            Some(crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Abort(evidence)) => {
+                Ok(Some(evidence))
+            }
+            Some(_) => bail!("worker handoff abort conflicts with another target branch"),
+        }
+    }
+
+    /// Read the target-node-signed terminal adoption receipt for one exact
+    /// handoff operation. Unlike the operational sync-job, this authority is
+    /// retained by a signed generic head and remains available for exact
+    /// response replay after ordinary terminal-job collection.
+    pub fn worker_handoff_adoption_receipt(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<crate::worker_handoff::WorkerHandoffAdoptionReceiptEvidence>> {
+        match self.worker_handoff_target_terminal(operation_id)? {
+            None => Ok(None),
+            Some(crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Adoption(
+                evidence,
+            )) => Ok(Some(evidence)),
+            Some(_) => bail!("worker handoff adoption conflicts with another target branch"),
+        }
+    }
+
+    pub fn worker_handoff_terminal_failure(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<crate::worker_handoff::WorkerHandoffTerminalFailureEvidence>> {
+        match self.worker_handoff_target_terminal(operation_id)? {
+            None => Ok(None),
+            Some(crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Failure(evidence)) => {
+                Ok(Some(evidence))
+            }
+            Some(_) => bail!("worker handoff failure conflicts with another target branch"),
+        }
+    }
+
+    pub fn worker_handoff_terminal_completion(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<crate::worker_handoff::WorkerHandoffTerminalCompletionEvidence>> {
+        match self.worker_handoff_target_terminal(operation_id)? {
+            None => Ok(None),
+            Some(crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Completion(
+                evidence,
+            )) => Ok(Some(evidence)),
+            Some(_) => bail!("worker handoff completion conflicts with another target branch"),
+        }
+    }
+
+    /// Publish the immutable target-side adoption receipt after the exact
+    /// successor attachment has been observed. The receipt is deliberately
+    /// separate from both the worker event chain and terminal sync-job: a
+    /// worker may exit immediately after attachment, and operational jobs
+    /// retain only bounded history.
+    pub fn publish_worker_handoff_adoption_receipt(
+        &self,
+        job_id: &str,
+        target_operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        request: &crate::worker_handoff::WorkerPlacementAdoptRequest,
+        response: &crate::worker_handoff::WorkerPlacementAdoptResponse,
+    ) -> Result<String> {
+        let job = self
+            .with_state_db(|db| db.get_sync_job(job_id))?
+            .context("worker handoff adoption receipt lost its operational job")?;
+        let progress = crate::worker_handoff::WorkerSessionHandoffProgress::from_value(
+            job.result
+                .clone()
+                .context("worker handoff adoption receipt job has no progress")?,
+        )?;
+        crate::worker_handoff::validate_projected_target_adoption(
+            &job,
+            target_operation,
+            &progress,
+            request,
+        )?;
+        let evidence = crate::worker_handoff::WorkerHandoffAdoptionReceiptEvidence::new(
+            target_operation.clone(),
+            request.clone(),
+            response.clone(),
+        )?;
+        if let Some(existing) =
+            self.worker_handoff_adoption_receipt(&target_operation.operation_id)?
+        {
+            if existing != evidence {
+                bail!("worker handoff adoption receipt contradicts its existing operation");
+            }
+            return self
+                .with_state_db(|db| {
+                    db.read_generic_head_ref(
+                        crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                        &target_operation.operation_id,
+                    )
+                })?
+                .map(|head| head.target_hash)
+                .ok_or_else(|| anyhow!("worker handoff adoption receipt disappeared"));
+        }
+
+        let permit = self.acquire_write_permit()?;
+        let previous = self.with_state_db(|db| {
+            db.read_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+            )
+        })?;
+        if previous.is_some() {
+            drop(permit);
+            let existing = self
+                .worker_handoff_adoption_receipt(&target_operation.operation_id)?
+                .ok_or_else(|| anyhow!("worker handoff adoption receipt disappeared"))?;
+            if existing != evidence {
+                bail!("worker handoff adoption receipt contradicts its existing operation");
+            }
+            return self
+                .with_state_db(|db| {
+                    db.read_generic_head_ref(
+                        crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                        &target_operation.operation_id,
+                    )
+                })?
+                .map(|head| head.target_hash)
+                .ok_or_else(|| anyhow!("worker handoff adoption receipt disappeared"));
+        }
+
+        let signer = self.lock()?.signer.clone();
+        let attestation = evidence.sign_attestation(signer.as_ref())?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(
+                permit.cas_guard(),
+                "worker-handoff-adoption-receipt",
+            )?;
+        let attestation_hash =
+            stage.store_object_admitted(permit.cas_guard(), &cas, &attestation.to_value())?;
+        stage.protect_object_hash_admitted(permit.cas_guard(), &attestation_hash)?;
+        self.with_state_db(|db| {
+            db.advance_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+                &attestation_hash,
+                None,
+                signer.as_ref(),
+                permit.cas_guard(),
+            )
+        })?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(
+                %error,
+                operation_id = %target_operation.operation_id,
+                "worker handoff adoption receipt published while temporary roots remained recoverable"
+            );
+        }
+        Ok(attestation_hash)
+    }
+
+    /// Publish immutable target-signed failure testimony only after the exact
+    /// successor terminal and cleanup disposition have been proved by the
+    /// target lifecycle owner. The shared target-branch namespace prevents a
+    /// failure from coexisting with adoption or source abort.
+    pub fn publish_worker_handoff_terminal_failure(
+        &self,
+        target_operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        request: &crate::worker_handoff::WorkerPlacementAdoptRequest,
+        failure: &crate::worker_handoff::WorkerPlacementFailureResponse,
+    ) -> Result<String> {
+        let evidence = crate::worker_handoff::WorkerHandoffTerminalFailureEvidence::new(
+            target_operation.clone(),
+            request.clone(),
+            failure.clone(),
+        )?;
+        if let Some(existing) =
+            self.worker_handoff_target_terminal(&target_operation.operation_id)?
+        {
+            match existing {
+                crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Failure(existing)
+                    if existing == evidence =>
+                {
+                    return self
+                        .worker_handoff_target_branch_hash(&target_operation.operation_id)?
+                        .ok_or_else(|| anyhow!("worker handoff terminal failure disappeared"));
+                }
+                _ => bail!("worker handoff terminal failure conflicts with another target branch"),
+            }
+        }
+
+        let permit = self.acquire_write_permit()?;
+        let previous = self.with_state_db(|db| {
+            db.read_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+            )
+        })?;
+        if previous.is_some() {
+            drop(permit);
+            let existing = self
+                .worker_handoff_terminal_failure(&target_operation.operation_id)?
+                .ok_or_else(|| anyhow!("worker handoff terminal failure disappeared"))?;
+            if existing != evidence {
+                bail!("worker handoff terminal failure changed its existing operation");
+            }
+            return self
+                .worker_handoff_target_branch_hash(&target_operation.operation_id)?
+                .ok_or_else(|| anyhow!("worker handoff terminal failure disappeared"));
+        }
+
+        let signer = self.lock()?.signer.clone();
+        let attestation = evidence.sign_attestation(signer.as_ref())?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(
+                permit.cas_guard(),
+                "worker-handoff-terminal-failure",
+            )?;
+        let attestation_hash =
+            stage.store_object_admitted(permit.cas_guard(), &cas, &attestation.to_value())?;
+        stage.protect_object_hash_admitted(permit.cas_guard(), &attestation_hash)?;
+        self.with_state_db(|db| {
+            db.advance_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+                &attestation_hash,
+                None,
+                signer.as_ref(),
+                permit.cas_guard(),
+            )
+        })?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(
+                %error,
+                operation_id = %target_operation.operation_id,
+                "worker handoff terminal failure published while temporary roots remained recoverable"
+            );
+        }
+        Ok(attestation_hash)
+    }
+
+    /// Publish immutable target-signed successful terminal testimony when the
+    /// successor completes after writer transfer but before the attachment
+    /// projection. The same one-operation branch head makes this mutually
+    /// exclusive with attachment, source abort, and terminal failure.
+    pub fn publish_worker_handoff_terminal_completion(
+        &self,
+        target_operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        request: &crate::worker_handoff::WorkerPlacementAdoptRequest,
+        completion: &crate::worker_handoff::WorkerPlacementCompletionResponse,
+    ) -> Result<String> {
+        let evidence = crate::worker_handoff::WorkerHandoffTerminalCompletionEvidence::new(
+            target_operation.clone(),
+            request.clone(),
+            completion.clone(),
+        )?;
+        if let Some(existing) =
+            self.worker_handoff_target_terminal(&target_operation.operation_id)?
+        {
+            match existing {
+                crate::worker_handoff::WorkerHandoffTargetTerminalEvidence::Completion(
+                    existing,
+                ) if existing == evidence => {
+                    return self
+                        .worker_handoff_target_branch_hash(&target_operation.operation_id)?
+                        .ok_or_else(|| anyhow!("worker handoff terminal completion disappeared"));
+                }
+                _ => {
+                    bail!("worker handoff terminal completion conflicts with another target branch")
+                }
+            }
+        }
+
+        let permit = self.acquire_write_permit()?;
+        let previous = self.with_state_db(|db| {
+            db.read_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+            )
+        })?;
+        if previous.is_some() {
+            drop(permit);
+            let existing = self
+                .worker_handoff_terminal_completion(&target_operation.operation_id)?
+                .ok_or_else(|| anyhow!("worker handoff terminal completion disappeared"))?;
+            if existing != evidence {
+                bail!("worker handoff terminal completion changed its existing operation");
+            }
+            return self
+                .worker_handoff_target_branch_hash(&target_operation.operation_id)?
+                .ok_or_else(|| anyhow!("worker handoff terminal completion disappeared"));
+        }
+
+        let signer = self.lock()?.signer.clone();
+        let attestation = evidence.sign_attestation(signer.as_ref())?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(
+                permit.cas_guard(),
+                "worker-handoff-terminal-completion",
+            )?;
+        let attestation_hash =
+            stage.store_object_admitted(permit.cas_guard(), &cas, &attestation.to_value())?;
+        stage.protect_object_hash_admitted(permit.cas_guard(), &attestation_hash)?;
+        self.with_state_db(|db| {
+            db.advance_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+                &attestation_hash,
+                None,
+                signer.as_ref(),
+                permit.cas_guard(),
+            )
+        })?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(
+                %error,
+                operation_id = %target_operation.operation_id,
+                "worker handoff terminal completion published while temporary roots remained recoverable"
+            );
+        }
+        Ok(attestation_hash)
+    }
+
+    /// Publish the permanent target-side abort fence through the existing CAS
+    /// staging and node-signed generic-head authorities. Replays must reproduce
+    /// the exact source operation and abort head.
+    pub fn publish_worker_handoff_abort_fence(
+        &self,
+        target_operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        abort_chain_head_hash: &str,
+    ) -> Result<String> {
+        self.publish_worker_handoff_abort_fence_evidence(
+            target_operation,
+            abort_chain_head_hash,
+            None,
+        )
+    }
+
+    /// Advance an already-authorized abort fence to its terminal cleanup
+    /// receipt. This signed generic head remains replay authority after the
+    /// operational sync-job reaches its ordinary retention horizon.
+    pub fn publish_worker_handoff_abort_terminal_receipt(
+        &self,
+        target_operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        abort_chain_head_hash: &str,
+        disposition: &str,
+    ) -> Result<String> {
+        self.publish_worker_handoff_abort_fence_evidence(
+            target_operation,
+            abort_chain_head_hash,
+            Some(disposition.to_owned()),
+        )
+    }
+
+    fn publish_worker_handoff_abort_fence_evidence(
+        &self,
+        target_operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+        abort_chain_head_hash: &str,
+        terminal_disposition: Option<String>,
+    ) -> Result<String> {
+        let evidence = crate::worker_handoff::WorkerHandoffAbortFenceEvidence::new(
+            target_operation.clone(),
+            abort_chain_head_hash.to_owned(),
+            terminal_disposition,
+        )?;
+        let permit = self.acquire_write_permit()?;
+        let previous = self.with_state_db(|db| {
+            db.read_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+            )
+        })?;
+        let signer = self.lock()?.signer.clone();
+        let attestation = evidence.sign_attestation(signer.as_ref())?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        if let Some(previous) = &previous {
+            if previous.signer != signer.fingerprint() {
+                bail!("worker handoff target branch is not owned by this node");
+            }
+            let value = cas
+                .get_object(&previous.target_hash)?
+                .ok_or_else(|| anyhow!("worker handoff target-branch object is absent"))?;
+            let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
+            let existing =
+                crate::worker_handoff::WorkerHandoffAbortFenceEvidence::from_attestation(
+                    &attestation,
+                    &signer.verifying_key(),
+                )
+                .context("worker handoff abort cannot replace the competing target branch")?;
+            if existing.target_operation != evidence.target_operation
+                || existing.abort_chain_head_hash != evidence.abort_chain_head_hash
+            {
+                bail!("worker handoff abort fence contradicts its existing operation");
+            }
+            if evidence.terminal_disposition.is_none()
+                || existing.terminal_disposition == evidence.terminal_disposition
+            {
+                return Ok(previous.target_hash.clone());
+            }
+            if existing.terminal_disposition.is_some() {
+                bail!("worker handoff abort receipt changed its terminal disposition");
+            }
+        } else if evidence.terminal_disposition.is_some() {
+            bail!("worker handoff abort terminal receipt has no provisional branch fence");
+        }
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(permit.cas_guard(), "worker-handoff-abort-fence")?;
+        let attestation_hash =
+            stage.store_object_admitted(permit.cas_guard(), &cas, &attestation.to_value())?;
+        stage.protect_object_hash_admitted(permit.cas_guard(), &attestation_hash)?;
+        self.with_state_db(|db| {
+            db.advance_generic_head_ref(
+                crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                &target_operation.operation_id,
+                &attestation_hash,
+                previous.as_ref().map(|head| head.target_hash.as_str()),
+                signer.as_ref(),
+                permit.cas_guard(),
+            )
+        })?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(
+                %error,
+                operation_id = %target_operation.operation_id,
+                "worker handoff abort fence published while temporary roots remained recoverable"
+            );
+        }
+        Ok(attestation_hash)
     }
 
     /// Complete a non-authoritative worker-placement preflight. The signed
@@ -5837,6 +6608,37 @@ impl StateStore {
         additional_roots: &[String],
         progress: Option<Value>,
     ) -> Result<ryeos_state::sync::ImportResult> {
+        self.stage_verified_sync_payload_for_existing_job(
+            payload,
+            attribution,
+            job_id,
+            phase,
+            additional_roots,
+            progress,
+            |_| Ok(()),
+        )
+    }
+
+    /// Import a remote payload, prove its caller-owned semantic contract, and
+    /// only then make any of its hashes durable job roots. The verifier runs
+    /// while the exact CAS mutation authority and StateStore lock remain held,
+    /// so rejected bytes cannot race GC or become retry/recovery authority.
+    /// This boundary is deliberately schema-blind: the caller supplies the
+    /// proof over the pinned CAS view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_verified_sync_payload_for_existing_job<F>(
+        &self,
+        payload: &ryeos_state::sync::ExportPayload,
+        attribution: &ryeos_state::sync::ImportAttribution,
+        job_id: &str,
+        phase: &str,
+        additional_roots: &[String],
+        progress: Option<Value>,
+        verify: F,
+    ) -> Result<ryeos_state::sync::ImportResult>
+    where
+        F: FnOnce(&lillux::CasStore) -> Result<()>,
+    {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let job = g
@@ -5860,10 +6662,23 @@ impl StateStore {
         if import.hash_mismatches != 0 {
             bail!("existing sync job import contained digest mismatches");
         }
+        let authority = g.state_db.pinned_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        verify(&cas)?;
         let mut roots = job.roots;
         roots.extend(additional_roots.iter().cloned());
         roots.sort();
         roots.dedup();
+        let mut fetched_hashes = job.fetched_hashes;
+        fetched_hashes.extend(
+            additional_roots
+                .iter()
+                .filter(|root| payload.entries.iter().any(|entry| &entry.hash == *root))
+                .cloned(),
+        );
+        fetched_hashes.sort();
+        fetched_hashes.dedup();
         g.state_db.update_sync_job(
             job_id,
             &ryeos_state::SyncJobUpdate {
@@ -5871,12 +6686,8 @@ impl StateStore {
                 phase: phase.to_owned(),
                 roots: Some(roots),
                 heads: None,
-                uploaded_hashes: Vec::new(),
-                fetched_hashes: additional_roots
-                    .iter()
-                    .filter(|root| payload.entries.iter().any(|entry| &entry.hash == *root))
-                    .cloned()
-                    .collect(),
+                uploaded_hashes: job.uploaded_hashes,
+                fetched_hashes,
                 last_error: None,
                 result: progress,
             },
@@ -5933,11 +6744,8 @@ impl StateStore {
             .state_db
             .get_sync_job(job_id)?
             .ok_or_else(|| anyhow!("target worker handoff job does not exist"))?;
-        if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
-            || !job.roots.iter().any(|hash| hash == transfer_manifest_hash)
-        {
-            bail!("target worker handoff job is not rooted in its transfer manifest");
-        }
+        let current_progress =
+            validate_target_preparation_job_transition(&job, transfer_manifest_hash, progress)?;
         self.state_authority.ensure_guard(permit.cas_guard())?;
         let cas = self.state_authority.cas_store()?;
         if cas.put_object(&target_capsule.to_value())?.hash != capsule_hash {
@@ -5961,17 +6769,29 @@ impl StateStore {
         let mut stored_progress = progress.clone();
         stored_progress.placement_attestation_hash = Some(admission.attestation_hash.clone());
         stored_progress.validate()?;
+        let mut retained_roots = job.roots.clone();
+        retained_roots.extend([
+            transfer_manifest_hash.to_owned(),
+            capsule_hash,
+            seed_hash,
+            admission.attestation_hash.clone(),
+        ]);
+        retained_roots.sort();
+        retained_roots.dedup();
+        if let Some(current) = current_progress
+            && current.phase == crate::worker_handoff::WorkerHandoffPhase::TargetPrepared
+        {
+            if current != stored_progress || retained_roots != job.roots || job.heads.is_empty() {
+                bail!("replayed target preparation differs from its durable publication");
+            }
+            return Ok(admission);
+        }
         g.state_db.update_sync_job(
             job_id,
             &ryeos_state::SyncJobUpdate {
                 state: ryeos_state::SyncJobState::Running,
                 phase: progress.phase.as_str().to_owned(),
-                roots: Some(vec![
-                    transfer_manifest_hash.to_owned(),
-                    capsule_hash,
-                    seed_hash,
-                    admission.attestation_hash.clone(),
-                ]),
+                roots: Some(retained_roots),
                 heads: None,
                 uploaded_hashes: Vec::new(),
                 fetched_hashes: job.roots,
@@ -6034,13 +6854,11 @@ impl StateStore {
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = std::time::Instant::now();
         let caller = std::panic::Location::caller();
-        let (fork_sensitive_descriptors, inner) = cooperate_while_blocking(|| {
-            let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
-            let inner = self
-                .inner
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let inner = cooperate_while_blocking(|| {
+            self.inner
                 .lock()
-                .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))?;
-            Ok::<_, anyhow::Error>((fork_sensitive_descriptors, inner))
+                .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
         })?;
         let waited = started.elapsed();
         if waited >= std::time::Duration::from_millis(100) {
@@ -6091,6 +6909,7 @@ impl StateStore {
 
     /// Acquire a write permit from the write barrier.
     /// Fails if the daemon is quiescing for GC.
+    #[track_caller]
     fn acquire_write_permit(&self) -> Result<StateMutationPermit> {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
@@ -6111,6 +6930,7 @@ impl StateStore {
     /// Serialize a terminal-GC dry-run with ordinary writers using only
     /// already-established lock anchors. This retains the normal barrier and
     /// lock order but cannot create recovery state merely by inspecting it.
+    #[track_caller]
     fn acquire_gc_inspection_permit(&self) -> Result<StateMutationPermit> {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
@@ -6131,6 +6951,7 @@ impl StateStore {
     /// Narrow mutation permit for converging journaled Remove records as part
     /// of the authored offline projection-rebuild bootstrap. It does not widen
     /// the common write gate, so unrelated StateStore mutations remain denied.
+    #[track_caller]
     fn acquire_recovery_cleanup_permit(&self, _dry_run: bool) -> Result<StateMutationPermit> {
         if self.read_only && !self.allow_projection_rebuild {
             bail!("state store is open for strict read-only verification");
@@ -14805,6 +15626,638 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    fn handoff_test_operation(
+        role: crate::worker_handoff::WorkerHandoffJobRole,
+        operation_label: &str,
+        placement_thread_id: &str,
+    ) -> crate::worker_handoff::WorkerSessionHandoffJobOperation {
+        let hash = |label: &str| lillux::sha256_hex(label.as_bytes());
+        crate::worker_handoff::WorkerSessionHandoffJobOperation::new(
+            role,
+            hash(operation_label),
+            hash(&format!("{operation_label}:preflight")),
+            hash(&format!("{operation_label}:preflight-attestation")),
+            "fp:handoff-owner".to_owned(),
+            format!("T-chain-{operation_label}"),
+            "site:origin".to_owned(),
+            "site:source".to_owned(),
+            "site:target".to_owned(),
+            placement_thread_id.to_owned(),
+            format!("T-successor-{operation_label}"),
+            hash(&format!("{operation_label}:source-head")),
+            hash(&format!("{operation_label}:source-event")),
+            hash(&format!("{operation_label}:checkpoint")),
+            hash(&format!("{operation_label}:transfer")),
+            "source".to_owned(),
+            "/source/project".to_owned(),
+            "/target/project".to_owned(),
+            hash(&format!("{operation_label}:route")),
+            "credential:target".to_owned(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn target_handoff_progress(
+        operation_id: &str,
+        phase: crate::worker_handoff::WorkerHandoffPhase,
+    ) -> crate::worker_handoff::WorkerSessionHandoffProgress {
+        let mut progress =
+            crate::worker_handoff::WorkerSessionHandoffProgress::planned(operation_id.to_owned())
+                .unwrap();
+        progress.phase = phase;
+        if !matches!(
+            phase,
+            crate::worker_handoff::WorkerHandoffPhase::Planned
+                | crate::worker_handoff::WorkerHandoffPhase::SourceExported
+                | crate::worker_handoff::WorkerHandoffPhase::AbortAuthorized
+        ) {
+            progress.placement_attestation_hash = Some("a".repeat(64));
+            progress.target_runtime_seed_hash = Some("b".repeat(64));
+            progress.credential_reservation_id = Some("reservation:target".to_owned());
+        }
+        if phase.successor_is_only_authorized_writer() {
+            progress.writer_grant_hash = Some("c".repeat(64));
+            progress.target_chain_head_hash = Some("d".repeat(64));
+        }
+        progress.validate().unwrap();
+        progress
+    }
+
+    fn target_adoption_coordinates(
+        operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+    ) -> (
+        crate::worker_handoff::WorkerPlacementAdoptRequest,
+        crate::worker_handoff::WorkerPlacementAdoptResponse,
+    ) {
+        let request = crate::worker_handoff::WorkerPlacementAdoptRequest {
+            operation_id: operation.operation_id.clone(),
+            chain_root_id: operation.chain_root_id.clone(),
+            target_chain_head_hash: "d".repeat(64),
+            placement_attestation_hash: "a".repeat(64),
+            writer_grant_hash: "c".repeat(64),
+        };
+        let response = crate::worker_handoff::WorkerPlacementAdoptResponse {
+            operation_id: operation.operation_id.clone(),
+            chain_root_id: operation.chain_root_id.clone(),
+            placement_thread_id: operation.successor_placement_thread_id.clone(),
+            target_chain_head_hash: request.target_chain_head_hash.clone(),
+            delivery: "attached".to_owned(),
+        };
+        (request, response)
+    }
+
+    fn seed_projected_target_adoption_job(
+        store: &StateStore,
+        operation: &crate::worker_handoff::WorkerSessionHandoffJobOperation,
+    ) -> String {
+        let progress = target_handoff_progress(
+            &operation.operation_id,
+            crate::worker_handoff::WorkerHandoffPhase::ProcessAttached,
+        );
+        let job_id = format!("worker-handoff-target:{}", operation.operation_id);
+        store
+            .with_state_db(|db| {
+                db.create_sync_job_with_initial_progress(
+                    &ryeos_state::NewSyncJob {
+                        job_id: job_id.clone(),
+                        operation_type: crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+                            .to_owned(),
+                        operation: operation.to_value()?,
+                        peer: Some("source".to_owned()),
+                        roots: vec![
+                            operation.transfer_manifest_hash.clone(),
+                            "a".repeat(64),
+                            "b".repeat(64),
+                            "c".repeat(64),
+                            "d".repeat(64),
+                        ],
+                        // The target sync head remains the source head until
+                        // the permanent adoption receipt is folded terminally.
+                        heads: vec![operation.source_chain_head_hash.clone()],
+                        max_attempts: crate::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
+                    },
+                    ryeos_state::SyncJobState::Running,
+                    progress.phase.as_str(),
+                    Some(&progress.to_value()?),
+                )
+            })
+            .unwrap();
+        job_id
+    }
+
+    #[test]
+    fn target_terminal_outcomes_share_one_irreversible_branch_head() {
+        let adoption_store = test_store();
+        let adoption_operation = handoff_test_operation(
+            crate::worker_handoff::WorkerHandoffJobRole::Target,
+            "adoption-wins",
+            "T-source-adoption-wins",
+        );
+        let adoption_job_id =
+            seed_projected_target_adoption_job(&adoption_store, &adoption_operation);
+        let (request, response) = target_adoption_coordinates(&adoption_operation);
+        adoption_store
+            .publish_worker_handoff_adoption_receipt(
+                &adoption_job_id,
+                &adoption_operation,
+                &request,
+                &response,
+            )
+            .unwrap();
+        assert!(
+            adoption_store
+                .publish_worker_handoff_abort_fence(&adoption_operation, &"e".repeat(64))
+                .unwrap_err()
+                .to_string()
+                .contains("competing target branch")
+        );
+        assert_eq!(
+            adoption_store
+                .worker_handoff_adoption_receipt(&adoption_operation.operation_id)
+                .unwrap()
+                .unwrap()
+                .response,
+            response
+        );
+
+        let abort_store = test_store();
+        let abort_operation = handoff_test_operation(
+            crate::worker_handoff::WorkerHandoffJobRole::Target,
+            "abort-wins",
+            "T-source-abort-wins",
+        );
+        let abort_job_id = seed_projected_target_adoption_job(&abort_store, &abort_operation);
+        let (request, response) = target_adoption_coordinates(&abort_operation);
+        abort_store
+            .publish_worker_handoff_abort_fence(&abort_operation, &"e".repeat(64))
+            .unwrap();
+        assert!(
+            abort_store
+                .publish_worker_handoff_adoption_receipt(
+                    &abort_job_id,
+                    &abort_operation,
+                    &request,
+                    &response,
+                )
+                .is_err()
+        );
+        assert!(
+            abort_store
+                .worker_handoff_abort_fence(&abort_operation.operation_id)
+                .unwrap()
+                .is_some()
+        );
+
+        let completion_store = test_store();
+        let completion_operation = handoff_test_operation(
+            crate::worker_handoff::WorkerHandoffJobRole::Target,
+            "completion-wins",
+            "T-source-completion-wins",
+        );
+        let completion_job_id =
+            seed_projected_target_adoption_job(&completion_store, &completion_operation);
+        let (completion_request, adoption_response) =
+            target_adoption_coordinates(&completion_operation);
+        let completion = crate::worker_handoff::WorkerPlacementCompletionResponse {
+            operation_id: completion_operation.operation_id.clone(),
+            chain_root_id: completion_operation.chain_root_id.clone(),
+            placement_thread_id: completion_operation.successor_placement_thread_id.clone(),
+            target_chain_head_hash: "f".repeat(64),
+            terminal_status: "completed".to_owned(),
+            credential_disposition: "completed_session_released".to_owned(),
+        };
+        let completion_hash = completion_store
+            .publish_worker_handoff_terminal_completion(
+                &completion_operation,
+                &completion_request,
+                &completion,
+            )
+            .unwrap();
+        assert_eq!(
+            completion_store
+                .publish_worker_handoff_terminal_completion(
+                    &completion_operation,
+                    &completion_request,
+                    &completion,
+                )
+                .unwrap(),
+            completion_hash
+        );
+        assert_eq!(
+            completion_store
+                .worker_handoff_terminal_completion(&completion_operation.operation_id)
+                .unwrap()
+                .unwrap()
+                .completion,
+            completion
+        );
+        assert!(
+            completion_store
+                .publish_worker_handoff_adoption_receipt(
+                    &completion_job_id,
+                    &completion_operation,
+                    &completion_request,
+                    &adoption_response,
+                )
+                .is_err()
+        );
+        assert!(
+            completion_store
+                .publish_worker_handoff_abort_fence(&completion_operation, &"e".repeat(64))
+                .is_err()
+        );
+        assert!(
+            completion_store
+                .publish_worker_handoff_terminal_failure(
+                    &completion_operation,
+                    &completion_request,
+                    &crate::worker_handoff::WorkerPlacementFailureResponse {
+                        operation_id: completion_operation.operation_id.clone(),
+                        chain_root_id: completion_operation.chain_root_id.clone(),
+                        placement_thread_id: completion_operation
+                            .successor_placement_thread_id
+                            .clone(),
+                        target_chain_head_hash: "d".repeat(64),
+                        terminal_status: "failed".to_owned(),
+                        credential_disposition: "consumed_session_terminal".to_owned(),
+                    },
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejected_verified_sync_payload_cannot_poison_a_same_process_retry() {
+        let store = test_store();
+        let job_id = "job:verified-sync-retry";
+        store
+            .with_state_db(|db| {
+                db.create_sync_job(&ryeos_state::NewSyncJob {
+                    job_id: job_id.to_owned(),
+                    operation_type: "verified_sync_retry".to_owned(),
+                    operation: serde_json::json!({
+                        "schema": 1,
+                        "operation_type": "verified_sync_retry",
+                    }),
+                    peer: Some("remote".to_owned()),
+                    roots: Vec::new(),
+                    heads: Vec::new(),
+                    max_attempts: 1,
+                })
+            })
+            .unwrap();
+        let value = serde_json::json!({
+            "schema": "ryeos.test.verified_sync_retry.v1",
+            "coordinate": "exact",
+        });
+        let bytes = lillux::canonical_json(&value).unwrap().into_bytes();
+        let hash = lillux::sha256_hex(&bytes);
+        let payload = ryeos_state::sync::ExportPayload {
+            chain_root_id: "T-verified-sync-retry".to_owned(),
+            chain_head_hash: hash.clone(),
+            entries: vec![ryeos_state::sync::SyncEntry {
+                hash: hash.clone(),
+                is_blob: false,
+                data: bytes,
+            }],
+            total_bytes: lillux::canonical_json(&value).unwrap().len(),
+        };
+        let before = store
+            .with_state_db(|db| db.get_sync_job(job_id))
+            .unwrap()
+            .unwrap();
+
+        let rejected = store.stage_verified_sync_payload_for_existing_job(
+            &payload,
+            &ryeos_state::sync::ImportAttribution::default(),
+            job_id,
+            "remote_proof",
+            std::slice::from_ref(&hash),
+            Some(serde_json::json!({"proof":"rejected"})),
+            |_| anyhow::bail!("synthetic semantic proof failure"),
+        );
+        assert!(
+            rejected
+                .unwrap_err()
+                .to_string()
+                .contains("synthetic semantic proof failure")
+        );
+        assert_eq!(
+            store
+                .with_state_db(|db| db.get_sync_job(job_id))
+                .unwrap()
+                .unwrap(),
+            before
+        );
+
+        store
+            .stage_verified_sync_payload_for_existing_job(
+                &payload,
+                &ryeos_state::sync::ImportAttribution::default(),
+                job_id,
+                "remote_proof",
+                std::slice::from_ref(&hash),
+                Some(serde_json::json!({"proof":"accepted"})),
+                |cas| {
+                    anyhow::ensure!(cas.get_object(&hash)?.as_ref() == Some(&value));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let accepted = store
+            .with_state_db(|db| db.get_sync_job(job_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.roots, vec![hash]);
+        assert_eq!(
+            accepted.result,
+            Some(serde_json::json!({"proof":"accepted"}))
+        );
+    }
+
+    #[test]
+    fn concurrent_target_branch_publishers_cannot_overwrite_each_other() {
+        let store = Arc::new(test_store());
+        let operation = handoff_test_operation(
+            crate::worker_handoff::WorkerHandoffJobRole::Target,
+            "concurrent-branch",
+            "T-source-concurrent-branch",
+        );
+        let job_id = seed_projected_target_adoption_job(&store, &operation);
+        let (request, response) = target_adoption_coordinates(&operation);
+        let ready = Arc::new(std::sync::Barrier::new(3));
+        let (adoption, abort) = std::thread::scope(|scope| {
+            let adoption_store = Arc::clone(&store);
+            let adoption_ready = Arc::clone(&ready);
+            let adoption_operation = operation.clone();
+            let adoption_job_id = job_id.clone();
+            let adoption = scope.spawn(move || {
+                adoption_ready.wait();
+                adoption_store.publish_worker_handoff_adoption_receipt(
+                    &adoption_job_id,
+                    &adoption_operation,
+                    &request,
+                    &response,
+                )
+            });
+            let abort_store = Arc::clone(&store);
+            let abort_ready = Arc::clone(&ready);
+            let abort_operation = operation.clone();
+            let abort = scope.spawn(move || {
+                abort_ready.wait();
+                abort_store.publish_worker_handoff_abort_fence(&abort_operation, &"e".repeat(64))
+            });
+            ready.wait();
+            (adoption.join().unwrap(), abort.join().unwrap())
+        });
+        assert_ne!(
+            adoption.is_ok(),
+            abort.is_ok(),
+            "exactly one competing target branch must win"
+        );
+        let head = store
+            .with_state_db(|db| {
+                db.read_generic_head_ref(
+                    crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                    &operation.operation_id,
+                )
+            })
+            .unwrap()
+            .expect("winning target branch head");
+        if adoption.is_ok() {
+            assert_eq!(
+                store
+                    .worker_handoff_adoption_receipt(&operation.operation_id)
+                    .unwrap()
+                    .unwrap()
+                    .response
+                    .operation_id,
+                operation.operation_id
+            );
+        } else {
+            assert_eq!(
+                store
+                    .worker_handoff_abort_fence(&operation.operation_id)
+                    .unwrap()
+                    .unwrap()
+                    .target_operation
+                    .operation_id,
+                operation.operation_id
+            );
+        }
+        assert!(!head.target_hash.is_empty());
+    }
+
+    #[test]
+    fn contradictory_projected_attachment_cannot_publish_a_branch_head() {
+        let store = test_store();
+        let operation = handoff_test_operation(
+            crate::worker_handoff::WorkerHandoffJobRole::Target,
+            "contradictory-adoption",
+            "T-source-contradictory-adoption",
+        );
+        let job_id = seed_projected_target_adoption_job(&store, &operation);
+        let (mut request, mut response) = target_adoption_coordinates(&operation);
+        request.writer_grant_hash = "f".repeat(64);
+        response.target_chain_head_hash = request.target_chain_head_hash.clone();
+
+        assert!(
+            store
+                .publish_worker_handoff_adoption_receipt(&job_id, &operation, &request, &response,)
+                .unwrap_err()
+                .to_string()
+                .contains("projected attachment authority")
+        );
+        assert!(
+            store
+                .with_state_db(|db| {
+                    db.read_generic_head_ref(
+                        crate::worker_handoff::WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE,
+                        &operation.operation_id,
+                    )
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn target_abort_claim_is_durable_for_existing_prepared_job_and_hash_exact() {
+        let store = test_store();
+        let operation = handoff_test_operation(
+            crate::worker_handoff::WorkerHandoffJobRole::Target,
+            "abort-claim",
+            "T-source-abort-claim",
+        );
+        let progress = target_handoff_progress(
+            &operation.operation_id,
+            crate::worker_handoff::WorkerHandoffPhase::TargetPrepared,
+        );
+        let job_id = format!("worker-handoff-target:{}", operation.operation_id);
+        let source_head = operation.source_chain_head_hash.clone();
+        store
+            .with_state_db(|db| {
+                db.create_sync_job_with_initial_progress(
+                    &ryeos_state::NewSyncJob {
+                        job_id: job_id.clone(),
+                        operation_type: crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+                            .to_owned(),
+                        operation: operation.to_value()?,
+                        peer: Some("source".to_owned()),
+                        roots: vec![source_head.clone()],
+                        heads: vec![source_head.clone()],
+                        max_attempts: crate::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
+                    },
+                    ryeos_state::SyncJobState::Running,
+                    progress.phase.as_str(),
+                    Some(&progress.to_value()?),
+                )
+            })
+            .unwrap();
+        let request = ryeos_state::NewSyncJob {
+            job_id: job_id.clone(),
+            operation_type: crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
+            operation: operation.to_value().unwrap(),
+            peer: Some("source".to_owned()),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            max_attempts: crate::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
+        };
+        let abort_head = "e".repeat(64);
+        let claimed = store
+            .claim_worker_handoff_target_abort(&request, &abort_head)
+            .unwrap();
+        assert_eq!(
+            claimed.phase,
+            crate::worker_handoff::WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE
+        );
+        assert_eq!(claimed.heads, vec![abort_head.clone()]);
+        assert_eq!(claimed.roots, vec![source_head]);
+        assert_eq!(
+            crate::worker_handoff::WorkerSessionHandoffProgress::from_value(
+                claimed.result.clone().unwrap()
+            )
+            .unwrap(),
+            progress
+        );
+        assert!(
+            store
+                .claim_worker_handoff_target_abort(&request, &"f".repeat(64))
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .with_state_db(|db| db.get_sync_job(&job_id))
+                .unwrap()
+                .unwrap(),
+            claimed
+        );
+    }
+
+    #[test]
+    fn duplicate_preparation_cannot_regress_post_cut_job_or_roots() {
+        for phase in [
+            crate::worker_handoff::WorkerHandoffPhase::SourceCommitted,
+            crate::worker_handoff::WorkerHandoffPhase::TargetAdopted,
+        ] {
+            let operation = handoff_test_operation(
+                crate::worker_handoff::WorkerHandoffJobRole::Target,
+                phase.as_str(),
+                "T-source-post-cut",
+            );
+            let current = target_handoff_progress(&operation.operation_id, phase);
+            let requested = target_handoff_progress(
+                &operation.operation_id,
+                crate::worker_handoff::WorkerHandoffPhase::TargetPrepared,
+            );
+            let job = ryeos_state::SyncJobRecord {
+                job_id: format!("worker-handoff-target:{}", operation.operation_id),
+                operation_type: crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
+                operation: operation.to_value().unwrap(),
+                peer: Some("source".to_owned()),
+                state: ryeos_state::SyncJobState::Running,
+                phase: phase.as_str().to_owned(),
+                roots: vec![
+                    operation.transfer_manifest_hash.clone(),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    "c".repeat(64),
+                    "d".repeat(64),
+                ],
+                heads: vec!["d".repeat(64)],
+                uploaded_hashes: vec!["d".repeat(64)],
+                fetched_hashes: Vec::new(),
+                attempt_count: 1,
+                max_attempts: crate::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
+                last_error: None,
+                result: Some(current.to_value().unwrap()),
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                updated_at: "2026-01-01T00:00:00Z".to_owned(),
+                finished_at: None,
+            };
+            let before = job.clone();
+            assert!(
+                validate_target_preparation_job_transition(
+                    &job,
+                    &operation.transfer_manifest_hash,
+                    &requested,
+                )
+                .is_err()
+            );
+            assert_eq!(job, before);
+        }
+    }
+
+    #[test]
+    fn active_source_handoff_query_fails_closed_on_duplicate_placement_owner() {
+        let store = test_store();
+        for label in ["source-owner-a", "source-owner-b"] {
+            let operation = handoff_test_operation(
+                crate::worker_handoff::WorkerHandoffJobRole::Source,
+                label,
+                "T-one-source-placement",
+            );
+            let progress = crate::worker_handoff::WorkerSessionHandoffProgress::source_exported(
+                operation.operation_id.clone(),
+            )
+            .unwrap();
+            store
+                .with_state_db(|db| {
+                    db.create_sync_job_with_initial_progress(
+                        &ryeos_state::NewSyncJob {
+                            job_id: format!("worker-handoff-source:{}", operation.operation_id),
+                            operation_type: crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+                                .to_owned(),
+                            operation: operation.to_value()?,
+                            peer: Some("target".to_owned()),
+                            roots: vec![operation.transfer_manifest_hash.clone()],
+                            heads: vec![operation.source_chain_head_hash.clone()],
+                            max_attempts:
+                                crate::worker_handoff::WORKER_SESSION_HANDOFF_MAX_ATTEMPTS,
+                        },
+                        ryeos_state::SyncJobState::Running,
+                        progress.phase.as_str(),
+                        Some(&progress.to_value()?),
+                    )
+                })
+                .unwrap();
+            if label == "source-owner-a" {
+                assert!(
+                    store
+                        .active_source_worker_handoff_for_placement("T-one-source-placement")
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
+        assert!(
+            store
+                .active_source_worker_handoff_for_placement("T-one-source-placement")
+                .is_err()
+        );
     }
 
     #[test]

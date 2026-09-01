@@ -883,21 +883,28 @@ impl PendingTransitionCursor {
 /// write and hold it through durable head publication.
 pub struct CasMutationGuard {
     _file: Rc<File>,
+    // A CAS guard owns a descriptor-backed flock. Keep direct-attachment
+    // forks quiesced until the last clone of that lock authority is released,
+    // regardless of which application layer acquired the guard.
+    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
     exclusive: bool,
     depth: GuardDepth,
     _not_send: std::marker::PhantomData<Rc<()>>,
 }
 
 impl CasMutationGuard {
+    #[track_caller]
     pub(crate) fn acquire_existing_shared_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
         if exclusive_depth != 0 {
             let file = current_guard_file_for_pinned_runtime(runtime)?;
             EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
             return Ok(Self {
                 _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Exclusive,
                 _not_send: std::marker::PhantomData,
@@ -909,6 +916,7 @@ impl CasMutationGuard {
             SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
             return Ok(Self {
                 _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Shared,
                 _not_send: std::marker::PhantomData,
@@ -939,28 +947,33 @@ impl CasMutationGuard {
         SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         Ok(Self {
             _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: false,
             depth: GuardDepth::Shared,
             _not_send: std::marker::PhantomData,
         })
     }
 
+    #[track_caller]
     pub(crate) fn acquire_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
         Self::acquire_exclusive_in_pinned_runtime_mode(runtime, true)
     }
 
+    #[track_caller]
     pub(crate) fn acquire_existing_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
         Self::acquire_exclusive_in_pinned_runtime_mode(runtime, false)
     }
 
+    #[track_caller]
     fn acquire_exclusive_in_pinned_runtime_mode(
         runtime: &lillux::PinnedDirectory,
         create: bool,
     ) -> Result<Self> {
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         if EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
             || SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0
         {
@@ -1002,6 +1015,7 @@ impl CasMutationGuard {
         EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         Ok(Self {
             _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: true,
             depth: GuardDepth::Exclusive,
             _not_send: std::marker::PhantomData,
@@ -1016,6 +1030,7 @@ impl CasMutationGuard {
         Ok(())
     }
 
+    #[track_caller]
     pub fn acquire_shared(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, false, true)
     }
@@ -1023,10 +1038,12 @@ impl CasMutationGuard {
     /// Acquire the established guard in shared mode without creating recovery
     /// state. GC dry-runs use this for per-chain consistency checks before the
     /// later exclusive sweep inspection.
+    #[track_caller]
     pub fn acquire_existing_shared(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, false, false)
     }
 
+    #[track_caller]
     pub fn acquire_exclusive(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, true, true)
     }
@@ -1034,10 +1051,12 @@ impl CasMutationGuard {
     /// Acquire the established guard without creating recovery state. Used by
     /// strict read-only verification, where absence is an error rather than an
     /// invitation to mutate the node merely by inspecting it.
+    #[track_caller]
     pub fn acquire_existing_exclusive(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, true, false)
     }
 
+    #[track_caller]
     pub fn shared_from_cas_root(cas_root: &Path) -> Result<Self> {
         let runtime_state_dir = cas_root
             .parent()
@@ -1045,6 +1064,7 @@ impl CasMutationGuard {
         Self::acquire_shared(runtime_state_dir)
     }
 
+    #[track_caller]
     pub fn exclusive_from_cas_root(cas_root: &Path) -> Result<Self> {
         let runtime_state_dir = cas_root
             .parent()
@@ -1119,7 +1139,9 @@ impl CasMutationGuard {
         Ok(())
     }
 
+    #[track_caller]
     fn acquire(runtime_state_dir: &Path, exclusive: bool, create_if_missing: bool) -> Result<Self> {
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         if exclusive {
             let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
             if exclusive_depth != 0 {
@@ -1127,6 +1149,7 @@ impl CasMutationGuard {
                 EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
                 return Ok(Self {
                     _file: file,
+                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: true,
                     depth: GuardDepth::Exclusive,
                     _not_send: std::marker::PhantomData,
@@ -1145,6 +1168,7 @@ impl CasMutationGuard {
                 EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
                 return Ok(Self {
                     _file: file,
+                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: false,
                     depth: GuardDepth::Exclusive,
                     _not_send: std::marker::PhantomData,
@@ -1156,6 +1180,7 @@ impl CasMutationGuard {
                 SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
                 return Ok(Self {
                     _file: file,
+                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: false,
                     depth: GuardDepth::Shared,
                     _not_send: std::marker::PhantomData,
@@ -1214,6 +1239,7 @@ impl CasMutationGuard {
         };
         Ok(Self {
             _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive,
             depth,
             _not_send: std::marker::PhantomData,

@@ -1040,10 +1040,18 @@ const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
 /// concurrent.
 static DIRECT_ATTACHMENT_FORK_BARRIER: OnceLock<DescriptorForkBarrier> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct DescriptorLeaseLocation {
+    file: &'static str,
+    line: u32,
+    column: u32,
+}
+
 #[derive(Default)]
 struct DescriptorForkBarrierState {
     retained_scopes: usize,
     retained_scope_owners: HashMap<thread::ThreadId, usize>,
+    retained_scope_locations: HashMap<thread::ThreadId, HashMap<DescriptorLeaseLocation, usize>>,
     waiting_forks: usize,
     fork_quiesced: bool,
     pending_fork_control_fds: BTreeSet<i32>,
@@ -1067,6 +1075,7 @@ fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
 /// which a pre-exec attachment child must not inherit.
 pub struct ForkSensitiveDescriptorLease {
     owner: thread::ThreadId,
+    location: DescriptorLeaseLocation,
     retained: bool,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -1077,9 +1086,16 @@ pub struct ForkSensitiveDescriptorLease {
 /// it until those descriptors/locks have been released. Acquisition is
 /// intentionally infallible after poisoning: the barrier protects process
 /// topology, not data whose consistency could be invalidated by a panic.
+#[track_caller]
 pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
+    let caller = std::panic::Location::caller();
+    let location = DescriptorLeaseLocation {
+        file: caller.file(),
+        line: caller.line(),
+        column: caller.column(),
+    };
     let mut state = barrier
         .state
         .lock()
@@ -1100,8 +1116,18 @@ pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
     *owner_scopes = owner_scopes
         .checked_add(1)
         .expect("fork-sensitive descriptor owner count overflow");
+    let location_scopes = state
+        .retained_scope_locations
+        .entry(owner)
+        .or_default()
+        .entry(location)
+        .or_default();
+    *location_scopes = location_scopes
+        .checked_add(1)
+        .expect("fork-sensitive descriptor location count overflow");
     ForkSensitiveDescriptorLease {
         owner,
+        location,
         retained: true,
         _not_send: PhantomData,
     }
@@ -1130,6 +1156,22 @@ impl Drop for ForkSensitiveDescriptorLease {
             .expect("fork-sensitive descriptor owner count underflow");
         if *owner_scopes == 0 {
             state.retained_scope_owners.remove(&self.owner);
+        }
+        let owner_locations = state
+            .retained_scope_locations
+            .get_mut(&self.owner)
+            .expect("fork-sensitive descriptor owner locations were not registered");
+        let location_scopes = owner_locations
+            .get_mut(&self.location)
+            .expect("fork-sensitive descriptor lease location was not registered");
+        *location_scopes = location_scopes
+            .checked_sub(1)
+            .expect("fork-sensitive descriptor location count underflow");
+        if *location_scopes == 0 {
+            owner_locations.remove(&self.location);
+        }
+        if owner_locations.is_empty() {
+            state.retained_scope_locations.remove(&self.owner);
         }
         self.retained = false;
         if state.retained_scopes == 0 {
@@ -1248,7 +1290,39 @@ impl Drop for QuiescedForkSensitiveDescriptors {
     }
 }
 
-fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescriptors, String> {
+fn retained_descriptor_scope_diagnostic(state: &DescriptorForkBarrierState) -> String {
+    let mut owners = state
+        .retained_scope_locations
+        .iter()
+        .map(|(owner, locations)| {
+            let mut locations = locations
+                .iter()
+                .map(|(location, count)| {
+                    format!(
+                        "{}:{}:{} ({} scope{})",
+                        location.file,
+                        location.line,
+                        location.column,
+                        count,
+                        if *count == 1 { "" } else { "s" }
+                    )
+                })
+                .collect::<Vec<_>>();
+            locations.sort();
+            format!("{owner:?}: {}", locations.join(", "))
+        })
+        .collect::<Vec<_>>();
+    owners.sort();
+    if owners.is_empty() {
+        "no retained scope owner was recorded".to_string()
+    } else {
+        owners.join("; ")
+    }
+}
+
+fn quiesce_fork_sensitive_descriptors(
+    deadline: Instant,
+) -> Result<QuiescedForkSensitiveDescriptors, String> {
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
     let mut state = barrier
@@ -1256,10 +1330,10 @@ fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescripto
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.retained_scope_owners.contains_key(&owner) {
-        return Err(
-            "direct attachment fork requested while the calling thread retains fork-sensitive descriptor authority"
-                .to_string(),
-        );
+        return Err(format!(
+            "direct attachment fork requested while the calling thread retains fork-sensitive descriptor authority ({})",
+            retained_descriptor_scope_diagnostic(&state)
+        ));
     }
     state.waiting_forks = state
         .waiting_forks
@@ -1269,10 +1343,25 @@ fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescripto
         || state.retained_scopes != 0
         || barrier.waiting_control_closers.load(Ordering::SeqCst) != 0
     {
-        state = barrier
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            state.waiting_forks = state
+                .waiting_forks
+                .checked_sub(1)
+                .expect("fork-sensitive descriptor waiter count underflow");
+            barrier.changed.notify_all();
+            return Err(format!(
+                "timed out waiting for fork-sensitive descriptor authority to quiesce; retained scopes: {}; fork already quiesced: {}; pending fork-control closers: {}",
+                retained_descriptor_scope_diagnostic(&state),
+                state.fork_quiesced,
+                barrier.waiting_control_closers.load(Ordering::SeqCst)
+            ));
+        }
+        let (next, _) = barrier
             .changed
-            .wait(state)
+            .wait_timeout(state, remaining)
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = next;
     }
     state.waiting_forks = state
         .waiting_forks
@@ -2328,6 +2417,7 @@ pub fn lib_spawn_awaiting_attachment(
         });
     }
     let timeout = request.timeout;
+    let setup_deadline = supervised_setup_deadline(start, timeout);
     let cwd_directory = match request.cwd.take() {
         Some(path) => Some(open_attachment_cwd(&path, start)?),
         None => None,
@@ -2335,12 +2425,13 @@ pub fn lib_spawn_awaiting_attachment(
     // No other direct child may fork while these control pipes are created.
     // Snapshot the control descriptors of already-held children so the new
     // child can close only those known authorities at its final setup hook.
-    let fork_sensitive_descriptors = quiesce_fork_sensitive_descriptors().map_err(|error| {
-        spawn_failure(
-            start,
-            format!("Failed to spawn awaiting attachment: {error}"),
-        )
-    })?;
+    let fork_sensitive_descriptors =
+        quiesce_fork_sensitive_descriptors(setup_deadline).map_err(|error| {
+            spawn_failure(
+                start,
+                format!("Failed to spawn awaiting attachment: {error}"),
+            )
+        })?;
     let inherited_pending_control_fds = fork_sensitive_descriptors.pending_fork_control_fds();
     let (status_reader, status_writer) = attachment_pipe("readiness", start)?;
     let (release_reader, release_writer) = attachment_pipe("release", start)?;
@@ -2369,7 +2460,6 @@ pub fn lib_spawn_awaiting_attachment(
             )
         })?;
 
-    let setup_deadline = supervised_setup_deadline(start, timeout);
     let identity =
         match read_attachment_ready(&status_reader, setup_deadline, ATTACHMENT_IDENTITY_PHASE) {
             Ok(identity) => identity,

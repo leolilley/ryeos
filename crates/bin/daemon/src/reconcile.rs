@@ -1209,6 +1209,25 @@ async fn reconcile_active_threads_inner(
     let mut intents: Vec<ResumeIntent> = Vec::new();
 
     for thread in &running_threads {
+        if let Some((job, operation)) = state
+            .state_store
+            .active_source_worker_handoff_for_placement(&thread.thread_id)?
+        {
+            if operation.chain_root_id != thread.chain_root_id {
+                anyhow::bail!(
+                    "active source handoff {} contradicts placement {} chain authority",
+                    operation.operation_id,
+                    thread.thread_id
+                );
+            }
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                job_id = %job.job_id,
+                operation_id = %operation.operation_id,
+                "active source handoff owns placement recovery; skipping generic thread reconciliation"
+            );
+            continue;
+        }
         if reconcile_in_process_handler(state, mode, thread, &mut reconciled)? {
             continue;
         }
@@ -1235,9 +1254,13 @@ async fn reconcile_active_threads_inner(
         // attaches the worker. That ownership does not depend on a runtime
         // row: a crash may happen before launch metadata is projected at all.
         // Classify the signed continuation edge before inspecting or clearing
-        // volatile launch/process state. Once attachment publishes `running`,
-        // ordinary execution recovery owns the placement again.
+        // volatile launch/process state. A durable stop tombstone is the one
+        // exception: generic stop recovery must terminalize it before target
+        // handoff recovery can release the reservation and settle the job.
+        // Once attachment publishes `running`, ordinary execution recovery
+        // owns the placement again.
         if thread.status == ryeos_state::objects::ThreadStatus::Created.as_str()
+            && thread.runtime.stop_requested_at_ms.is_none()
             && thread.upstream_thread_id.is_some()
             && state
                 .state_store
@@ -2071,6 +2094,15 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
     ryeos_api::handlers::dedicated_sessions::reconcile_approval_outboxes(Arc::new(state.clone()))
         .await
         .context("reconcile hosted approvals before worker detachment")?;
+    let repaired_target_attachments = ryeos_api::handlers::worker_placements::reconcile_observed_target_handoff_attachments_before_detachment(state)
+        .await
+        .context("reconcile target handoff attachments before worker detachment")?;
+    if repaired_target_attachments != 0 {
+        tracing::warn!(
+            repaired_target_attachments,
+            "projected target handoff attachments retained across daemon restart"
+        );
+    }
     reconcile_dedicated_workers(state)?;
     let (sessions_recovered, locks_released) = state
         .state_store

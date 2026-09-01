@@ -66,6 +66,16 @@ pub(crate) fn sync_job_to_json(job: ryeos_state::SyncJobRecord) -> Value {
     })
 }
 
+/// Exact inspection projection. The list surface remains a compact discovery
+/// view; callers that select one durable coordinate may inspect the canonical
+/// operation that owns its retry authority.
+pub(crate) fn sync_job_inspect_to_json(job: ryeos_state::SyncJobRecord) -> Value {
+    let operation = job.operation.clone();
+    let mut value = sync_job_to_json(job);
+    value["operation"] = operation;
+    value
+}
+
 pub(crate) fn sync_job_attempt_to_json(attempt: ryeos_state::SyncJobAttemptRecord) -> Value {
     serde_json::json!({
         "attempt_id": attempt.attempt_id,

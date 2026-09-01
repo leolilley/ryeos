@@ -194,13 +194,13 @@ async fn read_json_checked_with_limit(
 /// Cap on establishing a TCP/TLS connection to a remote. Applies to
 /// every request; without it a dead or filtered remote hangs callers
 /// for the OS connect timeout (minutes).
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(10);
 
 /// Total-request cap for control-plane calls (health, discovery, listings,
 /// signed GETs). Deliberately not applied to generic `signed_post`: execution
 /// and general CAS APIs may legitimately run longer. Bounded bundle transfers
 /// use their own explicit timeout below.
-const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONTROL_PLANE_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 
 /// Total wall-clock cap for one bundle export or bounded bundle-object batch.
 ///
@@ -208,7 +208,8 @@ const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// remain uncapped here. Bundle transfer calls have independently bounded
 /// payloads, so they can also carry a finite liveness bound without changing
 /// the execution API's semantics.
-const BUNDLE_TRANSFER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const BUNDLE_TRANSFER_REQUEST_TIMEOUT: lillux::time::Duration =
+    lillux::time::Duration::from_secs(5 * 60);
 
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
@@ -690,6 +691,25 @@ impl RemoteClient {
         .await
     }
 
+    /// Fetch a bounded object batch under an explicit caller-owned total
+    /// deadline. Exact distributed protocols use this instead of inheriting
+    /// the deliberately unbounded generic CAS request behavior.
+    pub async fn objects_get_with_response_limit_and_total_timeout(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+        max_response_bytes: usize,
+        total_timeout: lillux::time::Duration,
+    ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit_inner(
+            object_hashes,
+            blob_hashes,
+            max_response_bytes,
+            Some(total_timeout),
+        )
+        .await
+    }
+
     /// Fetch one or more bounded object batches for bundle transfer. Every
     /// underlying HTTP request has both a response-byte limit and a total
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
@@ -712,7 +732,7 @@ impl RemoteClient {
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
-        total_timeout: Option<std::time::Duration>,
+        total_timeout: Option<lillux::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
         if typed_hashes_request_body_size(object_hashes, blob_hashes)
             > HASH_REQUEST_BODY_BUDGET_BYTES
@@ -819,6 +839,30 @@ impl RemoteClient {
         let body = closure_request_body(roots, &options);
         let resp = self
             .signed_post_with_response_limit("/objects/closure/get", &body, response_limit)
+            .await?;
+        let response: ObjectsClosureGetResponse =
+            serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
+        response.validate_against_request(roots, options.allow_untransported_large_objects)?;
+        Ok(response)
+    }
+
+    /// Fetch and validate one exact closure under a total wall-clock bound.
+    /// This is opt-in so generic large transfers retain their existing API.
+    pub async fn objects_closure_get_with_total_timeout(
+        &self,
+        roots: &[String],
+        options: ObjectsClosureRequestOptions,
+        total_timeout: lillux::time::Duration,
+    ) -> Result<ObjectsClosureGetResponse> {
+        let response_limit = closure_response_limit(&options)?;
+        let body = closure_request_body(roots, &options);
+        let resp = self
+            .signed_post_with_response_limit_and_timeout(
+                "/objects/closure/get",
+                &body,
+                response_limit,
+                total_timeout,
+            )
             .await?;
         let response: ObjectsClosureGetResponse =
             serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
@@ -1094,6 +1138,38 @@ impl RemoteClient {
         extract_remote_wait_result(response)
     }
 
+    /// Execute one typed wait-mode service under an explicit total deadline.
+    /// Generic remote execution remains unbounded; exact recovery protocols
+    /// opt into this liveness fence so a peer cannot retain their operation
+    /// reservation forever by stalling a response body.
+    pub async fn execute_service_result_with_total_timeout(
+        &self,
+        item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
+        project_path: Option<&str>,
+        parameters: &Value,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        total_timeout: lillux::time::Duration,
+    ) -> Result<Value> {
+        tokio::time::timeout(
+            total_timeout,
+            self.execute_service_result(
+                item_ref,
+                ref_bindings,
+                project_path,
+                parameters,
+                execution_policy,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "remote typed service `{item_ref}` exceeded total timeout of {} seconds",
+                total_timeout.as_secs()
+            )
+        })?
+    }
+
     /// POST /execute with a full method call (`call.method`, `call.args`).
     ///
     /// This is the extended variant used by remote method forwarding,
@@ -1329,7 +1405,7 @@ impl RemoteClient {
         path: &str,
         body: &Value,
         max_response_bytes: usize,
-        total_timeout: std::time::Duration,
+        total_timeout: lillux::time::Duration,
     ) -> Result<Value> {
         tokio::time::timeout(
             total_timeout,
@@ -1338,7 +1414,7 @@ impl RemoteClient {
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "POST {}{} exceeded bundle-transfer timeout of {} seconds",
+                "POST {}{} exceeded total timeout of {} seconds",
                 self.base_url,
                 path,
                 total_timeout.as_secs()
@@ -2585,7 +2661,17 @@ pub struct SyncJobsInspectResponse {
     pub job_id: Option<String>,
     pub job: Option<SyncJobRemoteRecord>,
     #[serde(default)]
+    pub attempt_retention: Option<SyncJobAttemptRetentionRemote>,
+    #[serde(default)]
     pub attempts: Vec<SyncJobAttemptRemoteRecord>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SyncJobAttemptRetentionRemote {
+    pub mode: String,
+    pub cumulative_count: u64,
+    pub retained_count: u64,
+    pub terminal_row_limit: Option<u64>,
 }
 
 impl SyncJobsInspectResponse {
@@ -2594,6 +2680,9 @@ impl SyncJobsInspectResponse {
             "missing" => {
                 if self.job.is_some() {
                     anyhow::bail!("missing sync job response must not include job data");
+                }
+                if self.attempt_retention.is_some() {
+                    anyhow::bail!("missing sync job response must not include attempt retention");
                 }
                 if !self.attempts.is_empty() {
                     anyhow::bail!("missing sync job response must not include attempts");
@@ -2614,6 +2703,18 @@ impl SyncJobsInspectResponse {
                         job.job_id
                     );
                 }
+                let retention = self.attempt_retention.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("found sync job response missing attempt retention")
+                })?;
+                let retained_count = u64::try_from(self.attempts.len())?;
+                if retention.cumulative_count != job.attempt_count
+                    || retention.retained_count != retained_count
+                {
+                    anyhow::bail!(
+                        "sync job attempt retention count mismatch for {}",
+                        job.job_id
+                    );
+                }
                 for attempt in &self.attempts {
                     attempt.validate()?;
                     if attempt.job_id != job_id {
@@ -2624,6 +2725,76 @@ impl SyncJobsInspectResponse {
                             attempt.attempt_id
                         );
                     }
+                }
+                let mut attempt_numbers = self
+                    .attempts
+                    .iter()
+                    .map(|attempt| attempt.attempt_number)
+                    .collect::<Vec<_>>();
+                attempt_numbers.sort_unstable();
+                if job.max_attempts == ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS {
+                    let expected_limit = ryeos_state::SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS;
+                    let running_attempts = self
+                        .attempts
+                        .iter()
+                        .filter(|attempt| attempt.state == "running")
+                        .collect::<Vec<_>>();
+                    let running_count = u64::try_from(running_attempts.len())?;
+                    let terminal_count = retained_count
+                        .checked_sub(running_count)
+                        .ok_or_else(|| anyhow::anyhow!("invalid retained attempt counts"))?;
+                    let cumulative_terminal_count = job
+                        .attempt_count
+                        .checked_sub(running_count)
+                        .ok_or_else(|| anyhow::anyhow!("invalid cumulative attempt counts"))?;
+                    let expected_terminal_count = cumulative_terminal_count.min(expected_limit);
+                    if retention.mode != "bounded_terminal_suffix"
+                        || retention.terminal_row_limit != Some(expected_limit)
+                        || terminal_count != expected_terminal_count
+                        || running_count > 1
+                        || retained_count != expected_terminal_count + running_count
+                        || running_attempts
+                            .first()
+                            .is_some_and(|attempt| attempt.attempt_number != job.attempt_count)
+                    {
+                        anyhow::bail!(
+                            "unbounded sync job response has invalid attempt retention for {}",
+                            job.job_id
+                        );
+                    }
+                    if let Some((&first, &last)) =
+                        attempt_numbers.first().zip(attempt_numbers.last())
+                    {
+                        let expected_first = job
+                            .attempt_count
+                            .checked_sub(retained_count)
+                            .and_then(|value| value.checked_add(1));
+                        if expected_first != Some(first)
+                            || last != job.attempt_count
+                            || !attempt_numbers
+                                .windows(2)
+                                .all(|pair| pair[1] == pair[0] + 1)
+                        {
+                            anyhow::bail!(
+                                "unbounded sync job response does not retain the newest attempt suffix for {}",
+                                job.job_id
+                            );
+                        }
+                    } else if job.attempt_count != 0 {
+                        anyhow::bail!(
+                            "unbounded sync job response lost every attempt diagnostic for {}",
+                            job.job_id
+                        );
+                    }
+                } else if retention.mode != "complete"
+                    || retention.terminal_row_limit.is_some()
+                    || retained_count != job.attempt_count
+                    || !attempt_numbers.iter().copied().eq(1..=job.attempt_count)
+                {
+                    anyhow::bail!(
+                        "bounded sync job response does not contain its complete attempt ledger for {}",
+                        job.job_id
+                    );
                 }
             }
             other => anyhow::bail!("unknown sync job inspect status: {other}"),
@@ -2915,6 +3086,56 @@ pub struct BlobChunkUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exact_remote_call_timeouts_cancel_a_never_finishing_peer() {
+        async fn never_finishes() -> axum::Json<Value> {
+            std::future::pending::<axum::Json<Value>>().await
+        }
+
+        let app = axum::Router::new()
+            .route("/execute", axum::routing::post(never_finishes))
+            .route("/objects/closure/get", axum::routing::post(never_finishes));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let identity =
+            Arc::new(NodeIdentity::create(&directory.path().join("remote-timeout.pem")).unwrap());
+        let client = RemoteClient::new(&format!("http://{address}"), "fp:peer", identity);
+        let timeout = lillux::time::Duration::from_millis(50);
+
+        let execute_error = client
+            .execute_service_result_with_total_timeout(
+                "service:test/never-finishes",
+                &BTreeMap::new(),
+                None,
+                &serde_json::json!({}),
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+                timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(execute_error.to_string().contains("exceeded total timeout"));
+
+        let closure_error = client
+            .objects_closure_get_with_total_timeout(
+                &["a".repeat(64)],
+                ObjectsClosureRequestOptions {
+                    max_response_bytes: Some(4096),
+                    ..ObjectsClosureRequestOptions::default()
+                },
+                timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(closure_error.to_string().contains("exceeded total timeout"));
+        server.abort();
+    }
 
     fn public_key_response(seed: u8) -> PublicKeyResponse {
         let signing_key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
@@ -3418,6 +3639,12 @@ mod tests {
                 "updated_at": "2026-05-30T00:00:01Z",
                 "finished_at": "2026-05-30T00:00:01Z"
             },
+            "attempt_retention": {
+                "mode": "complete",
+                "cumulative_count": 1,
+                "retained_count": 1,
+                "terminal_row_limit": null
+            },
             "attempts": [{
                 "attempt_id": "attempt-a",
                 "job_id": "job-a",
@@ -3458,6 +3685,12 @@ mod tests {
                     "updated_at": "2026-05-30T00:00:01Z",
                     "finished_at": "2026-05-30T00:00:01Z"
                 },
+                "attempt_retention": {
+                    "mode": "complete",
+                    "cumulative_count": 1,
+                    "retained_count": 1,
+                    "terminal_row_limit": null
+                },
                 "attempts": [{
                     "attempt_id": "attempt-b",
                     "job_id": "job-b",
@@ -3478,6 +3711,104 @@ mod tests {
                 .validate_against_request("job-a")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn sync_jobs_inspect_response_validates_unbounded_retained_suffix() {
+        let attempts = (37_u64..=100)
+            .map(|attempt_number| {
+                serde_json::json!({
+                    "attempt_id": format!("attempt-{attempt_number}"),
+                    "job_id": "job-unbounded",
+                    "attempt_number": attempt_number,
+                    "worker_id": null,
+                    "state": "failed",
+                    "phase": "peer_contact",
+                    "started_at": "2026-05-30T00:00:00Z",
+                    "updated_at": "2026-05-30T00:00:01Z",
+                    "finished_at": "2026-05-30T00:00:01Z",
+                    "error": "peer unavailable",
+                    "result": null
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut value = serde_json::json!({
+            "status": "found",
+            "job": {
+                "job_id": "job-unbounded",
+                "operation_type": "worker_session_handoff",
+                "peer": "target",
+                "state": "retryable",
+                "phase": "peer_contact",
+                "roots": [],
+                "heads": [],
+                "uploaded_hashes": [],
+                "fetched_hashes": [],
+                "attempt_count": 100,
+                "max_attempts": 0,
+                "last_error": "peer unavailable",
+                "result": null,
+                "created_at": "2026-05-30T00:00:00Z",
+                "updated_at": "2026-05-30T00:00:01Z",
+                "finished_at": null
+            },
+            "attempt_retention": {
+                "mode": "bounded_terminal_suffix",
+                "cumulative_count": 100,
+                "retained_count": 64,
+                "terminal_row_limit": 64
+            },
+            "attempts": attempts
+        });
+        let response: SyncJobsInspectResponse = serde_json::from_value(value.clone()).unwrap();
+        response.validate_against_request("job-unbounded").unwrap();
+
+        let mut with_running_reservation = value.clone();
+        with_running_reservation["job"]["attempt_count"] = serde_json::json!(101);
+        with_running_reservation["attempt_retention"]["cumulative_count"] = serde_json::json!(101);
+        with_running_reservation["attempt_retention"]["retained_count"] = serde_json::json!(65);
+        with_running_reservation["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "attempt_id": "attempt-101",
+                "job_id": "job-unbounded",
+                "attempt_number": 101,
+                "worker_id": "recovery-worker",
+                "state": "running",
+                "phase": "peer_contact",
+                "started_at": "2026-05-30T00:00:02Z",
+                "updated_at": "2026-05-30T00:00:02Z",
+                "finished_at": null,
+                "error": null,
+                "result": null
+            }));
+        let response: SyncJobsInspectResponse =
+            serde_json::from_value(with_running_reservation).unwrap();
+        response.validate_against_request("job-unbounded").unwrap();
+
+        let mut too_short = value.clone();
+        too_short["attempts"].as_array_mut().unwrap().remove(0);
+        too_short["attempt_retention"]["retained_count"] = serde_json::json!(63);
+        let invalid: SyncJobsInspectResponse = serde_json::from_value(too_short).unwrap();
+        assert!(invalid.validate_against_request("job-unbounded").is_err());
+
+        let mut too_many_terminal_rows = value.clone();
+        let mut extra = too_many_terminal_rows["attempts"][0].clone();
+        extra["attempt_id"] = serde_json::json!("attempt-36");
+        extra["attempt_number"] = serde_json::json!(36);
+        too_many_terminal_rows["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, extra);
+        too_many_terminal_rows["attempt_retention"]["retained_count"] = serde_json::json!(65);
+        let invalid: SyncJobsInspectResponse =
+            serde_json::from_value(too_many_terminal_rows).unwrap();
+        assert!(invalid.validate_against_request("job-unbounded").is_err());
+
+        value["attempts"][0]["attempt_number"] = serde_json::json!(36);
+        let invalid: SyncJobsInspectResponse = serde_json::from_value(value).unwrap();
+        assert!(invalid.validate_against_request("job-unbounded").is_err());
     }
 
     #[test]

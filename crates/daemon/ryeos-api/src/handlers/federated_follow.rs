@@ -255,7 +255,7 @@ async fn deliver_locked(
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         return serde_json::to_value(response).map_err(internal);
     }
-    if job.attempt_count >= job.max_attempts {
+    if job.attempts_exhausted() {
         terminalize_exhausted_delivery_job(&state, &job).map_err(internal)?;
         return Err(internal(
             "remote follow parent delivery exhausted its admitted attempts",
@@ -554,7 +554,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                         continue;
                     }
                 };
-            if job.attempt_count >= job.max_attempts {
+            if job.attempts_exhausted() {
                 terminalize_exhausted_delivery_job(state, &job)?;
                 continue;
             }
@@ -714,7 +714,8 @@ fn retry_would_exhaust_delivery(
     attempt_count: u64,
     max_attempts: u64,
 ) -> bool {
-    requested_state == ryeos_state::SyncJobState::Retryable && attempt_count >= max_attempts
+    requested_state == ryeos_state::SyncJobState::Retryable
+        && ryeos_state::sync_job_attempts_exhausted(attempt_count, max_attempts)
 }
 
 fn validate_target_delivery_job_binding(
@@ -733,7 +734,7 @@ fn validate_target_delivery_job_binding(
             ]
         || job.heads != vec![request.target_chain_head_hash.clone()]
         || job.max_attempts != 16
-        || job.attempt_count > job.max_attempts
+        || !job.attempt_count_is_valid()
     {
         bail!("remote follow delivery job changed its retained authority");
     }
