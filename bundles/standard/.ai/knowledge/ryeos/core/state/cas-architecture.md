@@ -108,11 +108,13 @@ signed chain heads: CAS-entry attribution, admission-attestation lookup rows,
 sync jobs and attempts, and provider-neutral credential-profile ownership,
 lifecycle, confirmed account evidence, generation, and deletion tombstones.
 Opaque provider credential bytes remain in the profile's node-private artifact
-home. RuntimeDb retains a revisioned live projection only so profile leases and
-hosted-session transitions remain one SQLite transaction; the higher monotonic
-profile revision repairs a process-crash gap between the two stores. The
-operational database is never selected through `generation.json`, copied,
-replaced, or removed by projection rebuild or generation cleanup.
+home. RuntimeDb retains a revisioned live projection so profile leases and
+hosted-session transitions can share its transaction, but OperationalDb is the
+only credential authority preserved across an explicit runtime-history schema
+cutover. The cutover never decodes a predecessor runtime projection; it rebuilds
+the exact-current projection from stable operational records. The operational
+database is never selected through `generation.json`, copied, replaced, or
+removed by projection rebuild or generation cleanup.
 `state/operational.initialized` fails closed if an established operational
 database later disappears.
 

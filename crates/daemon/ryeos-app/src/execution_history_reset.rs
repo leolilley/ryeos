@@ -284,10 +284,9 @@ fn run_execution_history_reset_inner(
     }
 
     // Credential-profile lifecycle authority is stable node state, not
-    // execution history. Validate OperationalDb first, then fold in the exact
-    // independently versioned runtime projection before replacing a
-    // predecessor RuntimeDb. The projection can be one committed revision
-    // ahead after a crash between the runtime and operational commits.
+    // execution history. OperationalDb is the only authority carried across
+    // this cutover; a predecessor RuntimeDb is deliberately opaque and its
+    // credential projection is never decoded as a compatibility format.
     let operational_db =
         ryeos_state::OperationalDb::open_existing_current_with_namespace_authority(
             &runtime_directory,
@@ -298,18 +297,9 @@ fn run_execution_history_reset_inner(
     operational_db
         .credential_profiles()
         .context("validate stable credential-profile authority before history retirement")?;
-    let runtime_profiles = runtime_db
-        .credential_profiles_for_explicit_history_reset(&config.db_path)
-        .context("extract credential-profile projection before history retirement")?;
-    for profile in runtime_profiles {
-        operational_db
-            .merge_credential_profile(&operational_credential_profile(profile))
-            .context("preserve stable credential profile")?;
-    }
     // An enrolling ceremony is owned by worker/session history that this
-    // operation retires. Normalize only after the revision fold, so a stale
-    // predecessor projection cannot overwrite newer stable authority. The
-    // invalidation is itself a monotonic stable-authority transition.
+    // operation retires. Its invalidation is itself a monotonic transition in
+    // the stable authority and happens before any runtime-schema mutation.
     for profile in operational_db.credential_profiles()? {
         if profile.state != "enrolling" {
             continue;
@@ -448,25 +438,6 @@ fn run_execution_history_reset_inner(
             superseded_instances_deleted: authoritative.superseded_projection_instances,
         },
     })
-}
-
-fn operational_credential_profile(
-    profile: crate::runtime_db::CredentialProfileRecord,
-) -> ryeos_state::OperationalCredentialProfileRecord {
-    ryeos_state::OperationalCredentialProfileRecord {
-        profile_id: profile.profile_id,
-        owner_principal: profile.owner_principal,
-        home_id: profile.home_id,
-        authority_revision: profile.authority_revision,
-        credential_generation: profile.credential_generation,
-        state: profile.state,
-        active_login_id: profile.active_login_id,
-        login_epoch: profile.login_epoch,
-        login_expires_at_ms: profile.login_expires_at_ms,
-        sanitized_account: profile.sanitized_account,
-        created_at_ms: profile.created_at_ms,
-        updated_at_ms: profile.updated_at_ms,
-    }
 }
 
 fn publish_progress(

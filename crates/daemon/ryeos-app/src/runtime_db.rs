@@ -1243,8 +1243,8 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // root identity set or the v3 signed-adapter lifecycle contract.
 // Epoch 12 makes credential_profile an explicitly revisioned live projection
 // of stable operational authority. The revision permits deterministic repair
-// after a crash between runtime and operational SQLite commits, while the
-// explicit history cut extracts predecessor profile rows before replacement.
+// while this exact runtime schema is open. An explicit predecessor-schema
+// cutover preserves only OperationalDb authority and never decodes this table.
 // Epoch 13 separates stable worker chain addressing from exact placement and
 // boot-epoch fences throughout the hosted-worker projection.
 // Epoch 14 admits only the portable outer exact-program/capsule contract and
@@ -2882,17 +2882,6 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     }
 }
 
-fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
-    let mut statement = conn.prepare(
-        "SELECT name FROM sqlite_master
-         WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-    )?;
-    let tables = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    Ok(tables)
-}
-
 const PROJECT_AUTHORITY_ENVELOPE_KIND: &str = "execution_project_authority";
 // Epoch 3 adds the exact principal/project/base destination for explicit
 // retained-current-HEAD publication. There is deliberately no compatibility
@@ -2930,6 +2919,7 @@ fn incompatible_runtime_execution_schema(reason: String, predecessor: bool) -> a
     }
 }
 
+#[cfg(test)]
 fn requires_execution_schema_cutover(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -2941,6 +2931,7 @@ fn requires_execution_schema_cutover(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(test)]
 fn is_newer_execution_schema(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -3142,178 +3133,6 @@ fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<St
     lillux::canonical_json(&value).context("canonicalize current launch metadata")
 }
 
-fn optional_runtime_text_rows(
-    conn: &Connection,
-    table: &'static str,
-    identity_column: &'static str,
-    value_column: &'static str,
-) -> Result<Vec<(String, String)>> {
-    let object_type = conn
-        .query_row(
-            "SELECT type FROM sqlite_master WHERE name=?1",
-            [table],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .with_context(|| format!("inspect runtime schema object `{table}`"))?;
-    let Some(object_type) = object_type else {
-        return Ok(Vec::new());
-    };
-    if object_type != "table" {
-        bail!(
-            "runtime schema object `{table}` is {object_type:?}, not a table; refusing destructive reset"
-        );
-    }
-
-    let columns = {
-        let mut statement = conn
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .with_context(|| format!("inspect runtime table `{table}`"))?;
-        statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?
-    };
-    if !columns.contains(value_column) {
-        return Ok(Vec::new());
-    }
-    if !columns.contains(identity_column) {
-        bail!(
-            "runtime table `{table}` contains `{value_column}` without `{identity_column}`; refusing destructive reset"
-        );
-    }
-
-    let mut statement = conn
-        .prepare(&format!(
-            "SELECT {identity_column}, {value_column}
-               FROM {table}
-              WHERE {value_column} IS NOT NULL
-              ORDER BY {identity_column}"
-        ))
-        .with_context(|| format!("inspect runtime authority rows in `{table}`"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .with_context(|| format!("read runtime authority rows from `{table}`"))?;
-    Ok(rows)
-}
-
-fn reject_newer_runtime_execution_epochs(conn: &Connection) -> Result<()> {
-    let mut launch_rows = Vec::new();
-    launch_rows.extend(
-        optional_runtime_text_rows(conn, "thread_runtime", "thread_id", "launch_metadata")?
-            .into_iter()
-            .map(|(owner_id, raw)| ("thread_runtime", owner_id, raw)),
-    );
-    launch_rows.extend(
-        optional_runtime_text_rows(
-            conn,
-            "runtime_action_intent",
-            "operation_id",
-            "launch_metadata",
-        )?
-        .into_iter()
-        .map(|(owner_id, raw)| ("runtime_action_intent", owner_id, raw)),
-    );
-    launch_rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    for (owner, owner_id, raw) in launch_rows {
-        let value: Value = serde_json::from_str(&raw)
-            .with_context(|| format!("inspect launch schema for {owner} row `{owner_id}`"))?;
-        let object = value.as_object().ok_or_else(|| {
-            anyhow!("launch metadata for {owner} row `{owner_id}` must be an object")
-        })?;
-        let schema_version = object
-            .get("schema_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                anyhow!(
-                    "launch metadata for {owner} row `{owner_id}` has no numeric schema_version"
-                )
-            })?;
-        if schema_version > u64::from(LAUNCH_METADATA_SCHEMA_VERSION) {
-            return Err(incompatible_runtime_execution_schema(
-                format!(
-                    "launch metadata for {owner} row `{owner_id}` is newer than the exact current contract: stored schema_version={schema_version}, current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
-                ),
-                false,
-            ));
-        }
-        if let Some(capsule_schema) = object
-            .get("admitted_launch_capsule_schema")
-            .and_then(Value::as_u64)
-        {
-            let current = u64::from(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
-            if capsule_schema > current {
-                return Err(incompatible_runtime_execution_schema(
-                    format!(
-                        "launch metadata for {owner} row `{owner_id}` carries a newer admitted launch capsule: stored schema={capsule_schema}, current schema={current}"
-                    ),
-                    false,
-                ));
-            }
-        }
-    }
-
-    let mut authority_rows = Vec::new();
-    authority_rows.extend(
-        optional_runtime_text_rows(
-            conn,
-            "runtime_action_intent",
-            "operation_id",
-            "child_project_authority",
-        )?
-        .into_iter()
-        .map(|(owner_id, raw)| ("runtime_action_intent", owner_id, raw)),
-    );
-    authority_rows.extend(
-        optional_runtime_text_rows(
-            conn,
-            "follow_waiter",
-            "follow_key",
-            "child_project_authority",
-        )?
-        .into_iter()
-        .map(|(owner_id, raw)| ("follow_waiter", owner_id, raw)),
-    );
-    authority_rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    for (owner, owner_id, raw) in authority_rows {
-        let value: Value = serde_json::from_str(&raw)
-            .with_context(|| format!("inspect project authority for {owner} row `{owner_id}`"))?;
-        let object = value.as_object().ok_or_else(|| {
-            anyhow!("project authority for {owner} row `{owner_id}` must be an object")
-        })?;
-        let kind = object.get("kind").and_then(Value::as_str).ok_or_else(|| {
-            anyhow!("project authority for {owner} row `{owner_id}` has no string kind")
-        })?;
-        if matches!(kind, "projectless" | "live_project" | "pinned_generation") {
-            continue;
-        }
-        if kind != PROJECT_AUTHORITY_ENVELOPE_KIND {
-            bail!(
-                "project authority for {owner} row `{owner_id}` has an unrecognized outer kind {kind:?}; refusing destructive reset"
-            );
-        }
-        let schema_epoch = object
-            .get("schema_epoch")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                anyhow!(
-                    "project authority for {owner} row `{owner_id}` has no numeric schema_epoch"
-                )
-            })?;
-        if schema_epoch > u64::from(PROJECT_AUTHORITY_SCHEMA_EPOCH) {
-            return Err(incompatible_runtime_execution_schema(
-                format!(
-                    "project authority for {owner} row `{owner_id}` is newer than the exact current contract: stored schema_epoch={schema_epoch}, current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
-                ),
-                false,
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn initialize_current_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .context("begin atomic runtime schema initialization")?;
@@ -3328,14 +3147,6 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
         .unchecked_transaction()
         .context("begin atomic runtime schema/data validation")?;
     let stored_epoch = runtime_operator_schema_epoch(&tx, path)?;
-    if stored_epoch > RUNTIME_OPERATOR_SCHEMA_EPOCH {
-        return Err(incompatible_runtime_operator_schema(stored_epoch));
-    }
-    // A predecessor store becomes destructive-reset eligible only after every
-    // recognized authority-bearing column has been checked for a future epoch.
-    // Missing predecessor tables/columns prove absence at that known location;
-    // malformed or unrecognized authority fails closed.
-    reject_newer_runtime_execution_epochs(&tx)?;
     if stored_epoch != RUNTIME_OPERATOR_SCHEMA_EPOCH {
         return Err(incompatible_runtime_operator_schema(stored_epoch));
     }
@@ -3443,10 +3254,66 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
         .context("finish atomic runtime schema/data validation")
 }
 
+fn quote_sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn discard_predecessor_runtime_schema(tx: &Transaction<'_>) -> Result<()> {
+    let objects = {
+        let mut statement = tx.prepare(
+            "SELECT type, name
+               FROM sqlite_master
+              WHERE name NOT LIKE 'sqlite_%'
+                AND type IN ('trigger', 'view', 'index', 'table')
+              ORDER BY CASE type
+                         WHEN 'trigger' THEN 0
+                         WHEN 'view' THEN 1
+                         WHEN 'index' THEN 2
+                         WHEN 'table' THEN 3
+                         ELSE 4
+                       END,
+                       name",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (object_type, name) in objects {
+        let keyword = match object_type.as_str() {
+            "trigger" => "TRIGGER",
+            "view" => "VIEW",
+            "index" => "INDEX",
+            "table" => "TABLE",
+            _ => unreachable!("schema query admits only known object types"),
+        };
+        tx.execute_batch(&format!(
+            "DROP {keyword} IF EXISTS {};",
+            quote_sqlite_identifier(&name)
+        ))
+        .with_context(|| {
+            format!("drop predecessor runtime {object_type} `{name}` during explicit reset")
+        })?;
+    }
+    let remaining: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+          WHERE name NOT LIKE 'sqlite_%'
+            AND type IN ('trigger', 'view', 'index', 'table')",
+        [],
+        |row| row.get(0),
+    )?;
+    if remaining != 0 {
+        bail!("predecessor runtime schema was not completely discarded");
+    }
+    Ok(())
+}
+
 /// Destructively replace an owned predecessor runtime schema with the exact
 /// current empty schema. This is not an open-time migration: the only caller is
-/// the explicitly confirmed offline all-thread-history reset. No predecessor
-/// row or continuation fact is interpreted or carried forward.
+/// the explicitly confirmed offline all-thread-history reset. Ownership and
+/// the outer epoch are proven before mutation; no predecessor schema object,
+/// row, or embedded authority is interpreted or carried forward.
 fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
     let operator_epoch = runtime_operator_schema_epoch(conn, path)?;
     if operator_epoch >= RUNTIME_OPERATOR_SCHEMA_EPOCH {
@@ -3465,37 +3332,33 @@ fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
         );
     }
 
-    let spec = runtime_schema_spec();
-    let expected_tables = spec
-        .tables
-        .iter()
-        .map(|table| table.name.to_string())
-        .collect::<BTreeSet<_>>();
-    let actual_tables = runtime_user_tables(conn)?;
-    let unexpected_tables = actual_tables
-        .difference(&expected_tables)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if !unexpected_tables.is_empty() {
-        bail!(
-            "owned runtime database contains unexpected tables {:?}; refusing destructive reset of {}",
-            unexpected_tables,
-            path.display()
-        );
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .context("disable predecessor foreign-key enforcement during explicit reset")?;
+    let reset = (|| {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+            .context("begin atomic explicit runtime reset")?;
+        discard_predecessor_runtime_schema(&tx)?;
+        sqlite_schema::init_owned(&tx, &runtime_schema_spec(), SCHEMA_SQL, path)?;
+        tx.execute("DELETE FROM sqlite_sequence", [])
+            .context("clear runtime sequence state during explicit reset")?;
+        assert_current_runtime_schema(&tx, path)?;
+        tx.commit()
+            .context("commit atomic explicit runtime reset")?;
+        Ok(())
+    })();
+    let restore_foreign_keys = conn
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .context("restore runtime foreign-key enforcement after explicit reset");
+    match (reset, restore_foreign_keys) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(error)) => return Err(error),
+        (Err(error), Err(restore_error)) => {
+            return Err(error.context(format!(
+                "also failed to restore runtime foreign-key enforcement: {restore_error:#}"
+            )));
+        }
     }
-
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
-        .context("begin atomic explicit runtime reset")?;
-    for table in actual_tables.iter().rev() {
-        tx.execute_batch(&format!("DROP TABLE \"{table}\";"))
-            .with_context(|| format!("drop owned runtime table `{table}` during explicit reset"))?;
-    }
-    sqlite_schema::init_owned(&tx, &spec, SCHEMA_SQL, path)?;
-    tx.execute("DELETE FROM sqlite_sequence", [])
-        .context("clear runtime sequence state during explicit reset")?;
-    assert_current_runtime_schema(&tx, path)?;
-    tx.commit()
-        .context("commit atomic explicit runtime reset")?;
     tracing::warn!(database = %path.display(), "explicitly reset incompatible runtime history without migration");
     Ok(())
 }
@@ -3795,6 +3658,7 @@ struct IncompatibleRuntimeOperatorSchema {
 }
 
 impl IncompatibleRuntimeOperatorSchema {
+    #[cfg(test)]
     fn is_predecessor(&self) -> bool {
         self.stored < self.current
     }
@@ -9209,33 +9073,32 @@ impl RuntimeDb {
         let mut reset_required = false;
         if created {
             initialize_current_runtime_schema(&conn, path)?;
-        } else if let Err(error) = validate_current_runtime_store(&conn, path) {
-            if !mode.explicit_history_reset() {
-                if is_newer_execution_schema(&error) {
-                    return Err(error);
+        } else {
+            let stored_epoch = runtime_operator_schema_epoch(&conn, path)?;
+            if stored_epoch > RUNTIME_OPERATOR_SCHEMA_EPOCH {
+                let error = incompatible_runtime_operator_schema(stored_epoch);
+                if mode.explicit_history_reset() {
+                    return Err(error).context(
+                        "runtime database belongs to a newer RyeOS runtime epoch; refusing destructive reset",
+                    );
                 }
-                if requires_execution_schema_cutover(&error) {
+                return Err(error);
+            }
+            if stored_epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH {
+                let error = incompatible_runtime_operator_schema(stored_epoch);
+                if !mode.explicit_history_reset() {
                     return Err(error).context(format!(
                         "runtime database contains predecessor execution authority and requires the explicit no-backcompat reset ({})",
                         path.display()
                     ));
                 }
-                return Err(error);
+                // Do not inspect or mutate the predecessor schema. Offline
+                // reset first publishes the authoritative cross-store discard
+                // intent, then replaces this pinned store wholesale.
+                reset_required = true;
+            } else {
+                validate_current_runtime_store(&conn, path)?;
             }
-            if is_newer_execution_schema(&error) {
-                return Err(error).context(
-                    "runtime database contains execution authority newer than this RyeOS binary; refusing destructive reset",
-                );
-            }
-            if !requires_execution_schema_cutover(&error) {
-                return Err(error).context(
-                    "runtime database validation failed without a proven predecessor schema epoch; refusing destructive reset",
-                );
-            }
-            // Do not mutate yet. Offline GC first publishes the authoritative
-            // cross-store discard intent; only then may it call
-            // `apply_explicit_history_reset` on this pinned handle.
-            reset_required = true;
         }
         if reset_required {
             let integrity: String = conn
@@ -9339,132 +9202,6 @@ impl RuntimeDb {
 
     pub fn requires_explicit_history_reset(&self) -> bool {
         self.reset_required
-    }
-
-    /// Extract only the independently versioned credential-profile authority
-    /// before an explicitly confirmed execution-history schema replacement.
-    /// No thread/placement row is decoded or carried forward. Epochs 6–11 used
-    /// the original profile shape. Epochs 12 onward made the table a revisioned
-    /// projection of OperationalDb authority, but that projection must still be
-    /// folded before reset: it can be one committed revision ahead after a
-    /// crash between the runtime and operational commits. Older epochs predate
-    /// credential profiles.
-    pub fn credential_profiles_for_explicit_history_reset(
-        &self,
-        path: &Path,
-    ) -> Result<Vec<CredentialProfileRecord>> {
-        if !self.reset_required {
-            return self.credential_profile_projections();
-        }
-        let epoch = runtime_operator_schema_epoch(&self.conn, path)?;
-        if epoch < 6 {
-            return Ok(Vec::new());
-        }
-        if epoch >= RUNTIME_OPERATOR_SCHEMA_EPOCH {
-            bail!(
-                "runtime epoch {epoch} is not a predecessor of the current credential-profile contract"
-            );
-        }
-        let revisioned = epoch >= 12;
-        let mut expected = BTreeSet::from([
-            "profile_id",
-            "owner_principal",
-            "home_id",
-            "credential_generation",
-            "state",
-            "active_login_id",
-            "login_epoch",
-            "login_expires_at_ms",
-            "sanitized_account_json",
-            "lock_owner",
-            "created_at_ms",
-            "updated_at_ms",
-        ])
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-        if revisioned {
-            expected.insert("authority_revision".to_owned());
-        }
-        let actual = {
-            let mut statement = self.conn.prepare("PRAGMA table_info(credential_profile)")?;
-            statement
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<rusqlite::Result<BTreeSet<_>>>()?
-        };
-        if actual != expected {
-            bail!(
-                "runtime epoch {epoch} credential-profile table has an unrecognized shape; refusing authority extraction"
-            );
-        }
-        let authority_revision = if revisioned {
-            "authority_revision"
-        } else {
-            "1"
-        };
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT profile_id, owner_principal, home_id, credential_generation, state,
-                    active_login_id, login_epoch, login_expires_at_ms,
-                    sanitized_account_json, created_at_ms, updated_at_ms,
-                    {authority_revision}
-               FROM credential_profile ORDER BY profile_id"
-        ))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
-            .map(|row| {
-                let mut state = row.4;
-                let mut active_login_id = row.5;
-                let mut login_expires_at_ms = row.7;
-                let mut sanitized_account = row
-                    .8
-                    .map(|raw| serde_json::from_str(&raw))
-                    .transpose()
-                    .context("decode predecessor sanitized credential account")?;
-                // An enrolling ceremony depended on a worker/session that the
-                // explicit history reset retires. Preserve its monotonic epoch
-                // but invalidate the incomplete ceremony. Confirming evidence
-                // is caller-visible and independently confirmable, so it stays.
-                if !revisioned && state == "enrolling" {
-                    state = "unauthenticated".to_string();
-                    active_login_id = None;
-                    login_expires_at_ms = None;
-                    sanitized_account = None;
-                }
-                Ok(CredentialProfileRecord {
-                    profile_id: row.0,
-                    owner_principal: row.1,
-                    home_id: row.2,
-                    authority_revision: u64::try_from(row.11)
-                        .context("negative predecessor credential authority revision")?,
-                    credential_generation: u64::try_from(row.3)?,
-                    state,
-                    active_login_id,
-                    login_epoch: u64::try_from(row.6)?,
-                    login_expires_at_ms,
-                    sanitized_account,
-                    lock_owner: None,
-                    created_at_ms: row.9,
-                    updated_at_ms: row.10,
-                })
-            })
-            .collect()
     }
 
     /// Apply the already-confirmed destructive schema cutover. Callers must
@@ -15704,172 +15441,34 @@ mod tests {
     }
 
     #[test]
-    fn newer_project_authority_vetoes_mixed_epoch_reset() {
+    fn predecessor_reset_never_decodes_embedded_authority_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
-        let newer = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH + 1,
-            "authority": {"deliberately": "newer"}
-        }))
-        .unwrap();
-        for (operation_id, authority) in [
-            ("a-predecessor", predecessor.as_str()),
-            ("z-newer", newer.as_str()),
-        ] {
-            db.conn
-                .execute(
-                    "INSERT INTO runtime_action_intent(
-                         operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
-                         child_project_authority, created_at_ms
-                     ) VALUES (?1, 'T-chain', 'T-parent', 'detached', ?1, ?1, ?2, 1)",
-                    params![operation_id, authority],
-                )
-                .unwrap();
-        }
-        db.conn
-            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
-            .expect("mark the mixed store as predecessor-layout");
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("a newer row must veto reset even after a predecessor row");
-        let message = format!("{error:#}");
-        assert!(message.contains("z-newer"));
-        assert!(message.contains("newer"));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
-
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_action_intent
-                  WHERE operation_id IN ('a-predecessor', 'z-newer')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, 2);
-    }
-
-    #[test]
-    fn newer_capsule_epoch_vetoes_reset_even_without_a_current_sealed_request() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
         db.conn
             .execute(
                 "INSERT INTO runtime_action_intent(
                      operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
                  ) VALUES (
-                     'a-predecessor', 'T-chain', 'T-parent', 'detached',
-                     'request', 'T-child', ?1, 1
+                     'opaque-row', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', 'not-json-and-never-decoded', 1
                  )",
-                params![predecessor],
-            )
-            .unwrap();
-        db.insert_thread_runtime("T-newer-capsule", "T-newer-capsule")
-            .unwrap();
-        let newer_capsule = lillux::canonical_json(&serde_json::json!({
-            "schema_version": LAUNCH_METADATA_SCHEMA_VERSION,
-            "admitted_launch_capsule_schema":
-                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION + 1,
-            "sealed_root_request": null
-        }))
-        .unwrap();
-        db.conn
-            .execute(
-                "UPDATE thread_runtime SET launch_metadata=?1 WHERE thread_id='T-newer-capsule'",
-                params![newer_capsule],
-            )
-            .unwrap();
-        db.conn
-            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
-            .expect("mark the mixed store as predecessor-layout");
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("a newer nested capsule epoch must veto reset");
-        let message = format!("{error:#}");
-        assert!(message.contains("T-newer-capsule"));
-        assert!(message.contains("newer admitted launch capsule"));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
-    }
-
-    #[test]
-    fn unrecognized_project_authority_kind_vetoes_mixed_epoch_reset() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
-        let unrecognized = lillux::canonical_json(&serde_json::json!({
-            "kind": "future_project_authority",
-            "authority": {"deliberately": "opaque"}
-        }))
-        .unwrap();
-        for (operation_id, authority) in [
-            ("a-predecessor", predecessor.as_str()),
-            ("z-unrecognized", unrecognized.as_str()),
-        ] {
-            db.conn
-                .execute(
-                    "INSERT INTO runtime_action_intent(
-                         operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
-                         child_project_authority, created_at_ms
-                     ) VALUES (?1, 'T-chain', 'T-parent', 'detached', ?1, ?1, ?2, 1)",
-                    params![operation_id, authority],
-                )
-                .unwrap();
-        }
-        db.conn
-            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
-            .expect("mark the mixed store as predecessor-layout");
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("an unrecognized authority kind must veto reset");
-        let message = format!("{error:#}");
-        assert!(message.contains("z-unrecognized"));
-        assert!(message.contains("unrecognized outer kind"));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
-
-        let retained: i64 = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM runtime_action_intent
-                  WHERE operation_id IN ('a-predecessor', 'z-unrecognized')",
                 [],
-                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(retained, 2);
+        db.conn
+            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
+            .expect("mark the store as an owned predecessor");
+        drop(db);
+
+        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+        assert!(reset.requires_explicit_history_reset());
+        reset.apply_explicit_history_reset(&path).unwrap();
+        assert_eq!(
+            reset.discard_all_thread_history(true).unwrap().total_rows(),
+            0
+        );
     }
 
     #[test]
@@ -15901,7 +15500,10 @@ mod tests {
             .err()
             .expect("an older daemon must not erase newer runtime authority");
         let message = format!("{error:#}");
-        assert!(message.contains("newer than this RyeOS binary"));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            PROJECT_AUTHORITY_SCHEMA_EPOCH + 1
+        )));
         assert!(
             !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
@@ -15940,6 +15542,13 @@ mod tests {
                      'request', 'T-child', ?1, 1
                  )",
                 params![predecessor],
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
             )
             .unwrap();
         drop(db);
@@ -17343,7 +16952,7 @@ mod tests {
     }
 
     #[test]
-    fn unwrapped_detached_project_authority_requires_reset_without_mutation() {
+    fn predecessor_detached_project_authority_is_not_decoded_during_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -17364,6 +16973,13 @@ mod tests {
                 params![predecessor],
             )
             .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
         drop(db);
 
         let error = RuntimeDb::open(&path)
@@ -17371,9 +16987,11 @@ mod tests {
             .expect("unwrapped detached authority must require explicit reset");
         let message = format!("{error:#}");
         assert!(message.contains("explicit no-backcompat reset"));
-        assert!(message.contains("stored project authority is not the exact current contract"));
-        assert!(message.contains("stored kind=\"projectless\""));
-        assert!(!message.contains("missing field `authority`"));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
+        )));
+        assert!(!message.contains("stored project authority"));
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
@@ -17387,7 +17005,7 @@ mod tests {
     }
 
     #[test]
-    fn unwrapped_follow_project_authority_requires_reset_without_mutation() {
+    fn predecessor_follow_project_authority_is_not_decoded_during_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -17407,6 +17025,13 @@ mod tests {
                 params![predecessor],
             )
             .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
         drop(db);
 
         let error = RuntimeDb::open(&path)
@@ -17414,9 +17039,11 @@ mod tests {
             .expect("unwrapped follow authority must require explicit reset");
         let message = format!("{error:#}");
         assert!(message.contains("explicit no-backcompat reset"));
-        assert!(message.contains("stored project authority is not the exact current contract"));
-        assert!(message.contains("stored kind=\"projectless\""));
-        assert!(!message.contains("missing field `authority`"));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
+        )));
+        assert!(!message.contains("stored project authority"));
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
@@ -17543,11 +17170,40 @@ mod tests {
     }
 
     #[test]
-    fn explicit_history_reset_replaces_predecessor_runtime_schema_without_migrating_rows() {
+    fn explicit_history_reset_replaces_any_owned_predecessor_schema_without_interpretation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
-        rewrite_as_recognized_runtime_predecessor(&db, "waiting", Some("T-successor"));
+        db.conn
+            .execute_batch(
+                "CREATE TABLE \"retired parent\" (id INTEGER PRIMARY KEY);
+                 CREATE TABLE \"retired \"\"runtime\"\" table\" (
+                     parent_id INTEGER NOT NULL REFERENCES \"retired parent\"(id),
+                     value TEXT NOT NULL
+                 );
+                 CREATE INDEX \"retired index\"
+                     ON \"retired \"\"runtime\"\" table\"(value);
+                 CREATE VIEW \"retired view\" AS
+                     SELECT value FROM \"retired \"\"runtime\"\" table\";
+                 CREATE TRIGGER \"retired trigger\"
+                     AFTER INSERT ON \"retired \"\"runtime\"\" table\"
+                     BEGIN
+                         UPDATE \"retired \"\"runtime\"\" table\"
+                            SET value = NEW.value
+                          WHERE rowid = NEW.rowid;
+                     END;
+                 INSERT INTO \"retired parent\"(id) VALUES (1);
+                 INSERT INTO \"retired \"\"runtime\"\" table\"(parent_id, value)
+                     VALUES (1, 'opaque predecessor state');",
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
         drop(db);
 
         let directory = lillux::PinnedDirectory::open(tmp.path())
@@ -17581,115 +17237,53 @@ mod tests {
     }
 
     #[test]
-    fn explicit_history_reset_extracts_only_stable_credential_authority() {
+    fn explicit_history_reset_rebuilds_credentials_only_from_stable_authority() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
-        db.create_credential_profile(NewCredentialProfile {
-            profile_id: "profile-stable",
-            owner_principal: "fp:operator",
-            home_id: "credential-stable",
-        })
-        .unwrap();
         db.conn
-            .execute(
-                "UPDATE credential_profile
-                    SET state='active', credential_generation=4,
-                        sanitized_account_json=?1, login_epoch=3,
-                        authority_revision=7
-                  WHERE profile_id='profile-stable'",
-                [serde_json::json!({"account_id":"account-stable"}).to_string()],
+            .execute_batch(
+                "DROP INDEX idx_credential_profile_owner_state;
+                 DROP TABLE credential_profile;
+                 CREATE TABLE credential_profile (
+                     deliberately_unknown_predecessor_shape BLOB NOT NULL
+                 );
+                 INSERT INTO credential_profile VALUES (x'00');",
             )
             .unwrap();
-        // Reproduce the exact epoch-11 credential table: the stable revision
-        // was introduced only by epoch 12. No session/history row is decoded.
         db.conn
-            .execute_batch("ALTER TABLE credential_profile DROP COLUMN authority_revision")
-            .unwrap();
-        let epoch_11_app_id = (RUNTIME_OPERATOR_APP_ID_PREFIX | 11) as i32;
-        db.conn
-            .pragma_update(None, "application_id", epoch_11_app_id)
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
             .unwrap();
         drop(db);
 
         let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
-        let extracted = reset
-            .credential_profiles_for_explicit_history_reset(&path)
-            .unwrap();
-        assert_eq!(extracted.len(), 1);
-        let profile = &extracted[0];
-        assert_eq!(profile.profile_id, "profile-stable");
-        assert_eq!(profile.credential_generation, 4);
-        assert_eq!(profile.state, "active");
-        assert_eq!(profile.login_epoch, 3);
-        assert_eq!(profile.lock_owner, None);
-        assert_eq!(profile.authority_revision, 1);
-
         let stable = ryeos_state::OperationalCredentialProfileRecord {
-            profile_id: profile.profile_id.clone(),
-            owner_principal: profile.owner_principal.clone(),
-            home_id: profile.home_id.clone(),
-            authority_revision: profile.authority_revision,
-            credential_generation: profile.credential_generation,
-            state: profile.state.clone(),
-            active_login_id: profile.active_login_id.clone(),
-            login_epoch: profile.login_epoch,
-            login_expires_at_ms: profile.login_expires_at_ms,
-            sanitized_account: profile.sanitized_account.clone(),
-            created_at_ms: profile.created_at_ms,
-            updated_at_ms: profile.updated_at_ms,
+            profile_id: "profile-stable".to_owned(),
+            owner_principal: "fp:operator".to_owned(),
+            home_id: "credential-stable".to_owned(),
+            authority_revision: 7,
+            credential_generation: 4,
+            state: "active".to_owned(),
+            active_login_id: None,
+            login_epoch: 3,
+            login_expires_at_ms: None,
+            sanitized_account: Some(serde_json::json!({"account_id":"account-stable"})),
+            created_at_ms: 1,
+            updated_at_ms: 2,
         };
         reset.apply_explicit_history_reset(&path).unwrap();
+        assert!(reset.credential_profile_projections().unwrap().is_empty());
         reset
             .reconcile_credential_profile_projection(&stable)
             .unwrap();
         let restored = reset.credential_profile("profile-stable").unwrap().unwrap();
         assert_eq!(restored.state, "active");
         assert_eq!(restored.credential_generation, 4);
-        assert_eq!(restored.authority_revision, 1);
-    }
-
-    #[test]
-    fn explicit_history_reset_extracts_revisioned_predecessor_projection() {
-        for epoch in 12..RUNTIME_OPERATOR_SCHEMA_EPOCH {
-            let tmp = TempDir::new().unwrap();
-            let path = tmp.path().join(format!("runtime-{epoch}.db"));
-            let db = RuntimeDb::open(&path).unwrap();
-            db.create_credential_profile(NewCredentialProfile {
-                profile_id: "profile-revisioned",
-                owner_principal: "fp:operator",
-                home_id: "credential-revisioned",
-            })
-            .unwrap();
-            db.conn
-                .execute(
-                    "UPDATE credential_profile
-                        SET state='active', credential_generation=4,
-                            sanitized_account_json=?1, login_epoch=3,
-                            authority_revision=7
-                      WHERE profile_id='profile-revisioned'",
-                    [serde_json::json!({"account_id":"account-revisioned"}).to_string()],
-                )
-                .unwrap();
-            let predecessor_app_id = (RUNTIME_OPERATOR_APP_ID_PREFIX | epoch) as i32;
-            db.conn
-                .pragma_update(None, "application_id", predecessor_app_id)
-                .unwrap();
-            drop(db);
-
-            let reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
-            let extracted = reset
-                .credential_profiles_for_explicit_history_reset(&path)
-                .unwrap();
-            assert_eq!(extracted.len(), 1, "epoch {epoch}");
-            let profile = &extracted[0];
-            assert_eq!(profile.profile_id, "profile-revisioned", "epoch {epoch}");
-            assert_eq!(profile.credential_generation, 4, "epoch {epoch}");
-            assert_eq!(profile.state, "active", "epoch {epoch}");
-            assert_eq!(profile.login_epoch, 3, "epoch {epoch}");
-            assert_eq!(profile.lock_owner, None, "epoch {epoch}");
-            assert_eq!(profile.authority_revision, 7, "epoch {epoch}");
-        }
+        assert_eq!(restored.authority_revision, 7);
     }
 
     #[test]

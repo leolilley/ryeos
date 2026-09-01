@@ -98,19 +98,24 @@ the principal, operator continuations rebind it only from a fresh authenticated
 handler, and remote placement clears source-node handler authority. There is no
 epoch-18 reader, handler-context reconstruction fallback, alternate inline
 ledger, operation-ID compatibility alias, or migration. No execution-history
-reader or migration for epochs 1 through 18 remains. The
-explicit reset may extract only the provider-neutral credential-profile table
-from epochs 6 through 11. From epoch 12 onward OperationalDb is the stable
-profile authority, but the exact revisioned runtime projection is folded into
-it before replacement because a crash between the runtime commit and stable
-commit can leave that projection one authority revision ahead. Only the known
-credential table shape is decoded; reset never decodes or carries forward an
-execution/thread row. A surviving `enrolling` state is invalidated after the
-revision fold because its ceremony history is being retired, and that
-invalidation advances stable authority monotonically. The empty current
-runtime projection is then rebuilt from the validated stable records. Earlier
-history requires the explicit retirement ceremony below; normal startup never
-rewrites it.
+reader or migration for epochs 1 through 18 remains. An explicit reset
+classifies ownership and ordering solely from the outer runtime application-ID
+family and epoch. Once the store is proven to be an intact, strictly older
+RyeOS RuntimeDb, every predecessor table, index, view, trigger, row, and
+embedded authority remains opaque and the complete schema is discarded. Reset
+must not compare a predecessor layout with the current table set or grow a
+historical schema allowlist.
+
+OperationalDb is the only credential-profile authority carried through the
+cutover. Reset validates and captures its exact current records before
+publishing destructive intent, monotonically invalidates any `enrolling`
+ceremony whose session history is being retired, creates an empty exact-current
+RuntimeDb, and rebuilds the runtime projection from those stable records. It
+never extracts or merges a predecessor RuntimeDb credential table. A runtime
+credential transition not durably acknowledged in OperationalDb is not
+preservation authority across an explicitly confirmed whole-history cutover.
+Earlier history requires the explicit retirement ceremony below; normal
+startup never rewrites it.
 
 `operational.sqlite3` owns stable credential-profile ownership, lifecycle,
 confirmed account evidence, generation, and tombstones in addition to its
@@ -187,6 +192,13 @@ lock without rewriting it, copies the descriptor-pinned SQLite database and
 sidecars into a disposable inspection directory for runtime accounting, does
 the same for the scheduler database and sidecars, and opens SQLite only on
 those copies; the source runtime namespace is never a SQLite write target.
+
+The confirmed reset accepts any intact, strictly older database in the owned
+runtime application-ID family. Unknown predecessor schema objects are expected
+at this boundary; they block ordinary open but never block the explicit
+retirement operation. Unowned databases, a newer runtime epoch, or corruption
+still fail closed without mutation. This invariant is tested with deliberately
+unknown schema objects rather than fixtures for individual historical epochs.
 
 Normal initialization and package installation never invoke this destructive
 transaction implicitly. After installing a release with a new clean-cut
