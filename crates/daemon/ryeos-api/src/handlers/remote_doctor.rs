@@ -111,10 +111,20 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
         }
     };
 
-    let public_key = match client.get_public_key().await {
+    let (public_key, configured_identity_matches) = match client.get_public_key().await {
         Ok(value) => {
-            let live_binding_ok = value.validate_identity_binding().is_ok();
+            let live_binding = value.validate_identity_binding();
+            let live_binding_ok = live_binding.is_ok();
+            let configured_identity = value.validate_configured_identity(&remote_cfg);
+            let configured_identity_matches = configured_identity.is_ok();
+            let configured_identity_error = configured_identity
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"));
+            let configured_principal_matches = value.principal_id == remote_cfg.principal_id;
             let pinned_key_matches = value.signing_key == remote_cfg.signing_key;
+            let configured_site_matches = value.site_id == remote_cfg.site_id;
+            let configured_vault_matches = value.vault_fingerprint == remote_cfg.vault_fingerprint;
             let pinned_fingerprint = remote_cfg
                 .pinned_signing_key()
                 .map(|key| lillux::crypto::fingerprint(&key))
@@ -122,29 +132,52 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             let pinned_fingerprint_matches = value.fingerprint == pinned_fingerprint;
             checks.push(serde_json::json!({
                 "name": "remote_identity",
-                "ok": live_binding_ok && pinned_key_matches && pinned_fingerprint_matches,
+                "ok": configured_identity_matches,
                 "principal_id": value.principal_id,
+                "configured_principal_id": remote_cfg.principal_id,
+                "configured_principal_matches": configured_principal_matches,
                 "fingerprint": value.fingerprint,
+                "site_id": value.site_id,
+                "configured_site_id": remote_cfg.site_id,
+                "configured_site_matches": configured_site_matches,
                 "vault_fingerprint": value.vault_fingerprint,
+                "configured_vault_fingerprint": remote_cfg.vault_fingerprint,
+                "configured_vault_matches": configured_vault_matches,
                 "live_identity_binding_ok": live_binding_ok,
                 "pinned_fingerprint": pinned_fingerprint,
-                "pinned_identity_matches": live_binding_ok && pinned_key_matches && pinned_fingerprint_matches,
+                "pinned_key_matches": pinned_key_matches,
+                "pinned_fingerprint_matches": pinned_fingerprint_matches,
+                "pinned_identity_matches": configured_identity_matches,
+                "detail": configured_identity_error,
             }));
-            if !(live_binding_ok && pinned_key_matches && pinned_fingerprint_matches) {
+            if !configured_identity_matches {
                 next_steps.push(serde_json::json!({
                     "name": "review_remote_identity_pin",
                     "command": format!("ryeos remote configure {} --url {}", req.remote, remote_cfg.url),
-                    "note": "The live remote identity differs from the pinned local descriptor/config. Only reconfigure if you expect this key change.",
+                    "note": "The live remote identity differs from the configured principal/key/site/vault coordinate. Only reconfigure if you expect this complete identity change.",
                 }));
             }
-            Some(serde_json::json!({
-                "principal_id": value.principal_id,
-                "fingerprint": value.fingerprint,
-                "vault_fingerprint": value.vault_fingerprint,
-                "live_identity_binding_ok": live_binding_ok,
-                "pinned_fingerprint": pinned_fingerprint,
-                "pinned_identity_matches": live_binding_ok && pinned_key_matches && pinned_fingerprint_matches,
-            }))
+            (
+                Some(serde_json::json!({
+                    "principal_id": value.principal_id,
+                    "configured_principal_id": remote_cfg.principal_id,
+                    "configured_principal_matches": configured_principal_matches,
+                    "fingerprint": value.fingerprint,
+                    "site_id": value.site_id,
+                    "configured_site_id": remote_cfg.site_id,
+                    "configured_site_matches": configured_site_matches,
+                    "vault_fingerprint": value.vault_fingerprint,
+                    "configured_vault_fingerprint": remote_cfg.vault_fingerprint,
+                    "configured_vault_matches": configured_vault_matches,
+                    "live_identity_binding_ok": live_binding_ok,
+                    "pinned_fingerprint": pinned_fingerprint,
+                    "pinned_key_matches": pinned_key_matches,
+                    "pinned_fingerprint_matches": pinned_fingerprint_matches,
+                    "pinned_identity_matches": configured_identity_matches,
+                    "detail": configured_identity_error,
+                })),
+                configured_identity_matches,
+            )
         }
         Err(e) => {
             checks.push(serde_json::json!({
@@ -152,32 +185,47 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
                 "ok": false,
                 "detail": format!("{e:#}"),
             }));
-            None
+            (None, false)
         }
     };
 
-    let auth_probe = match client.threads_list(1).await {
-        Ok(_) => {
-            checks.push(serde_json::json!({
-                "name": "signed_authorization",
-                "ok": true,
-            }));
-            serde_json::json!({ "authorized": true, "signed_probe": "ok" })
+    let auth_probe = if configured_identity_matches {
+        match client.threads_list(1).await {
+            Ok(_) => {
+                checks.push(serde_json::json!({
+                    "name": "signed_authorization",
+                    "ok": true,
+                }));
+                serde_json::json!({ "authorized": true, "signed_probe": "ok" })
+            }
+            Err(e) => {
+                let detail = format!("{e:#}");
+                checks.push(serde_json::json!({
+                    "name": "signed_authorization",
+                    "ok": false,
+                    "detail": detail,
+                }));
+                next_steps.push(serde_json::json!({
+                    "name": "authorize_local_node_on_remote",
+                    "command": authorize_command(&local_public_key, &local_fingerprint),
+                    "note": "Run this on the remote host or use `ryeos remote authorize` from an already-authorized client.",
+                }));
+                serde_json::json!({ "authorized": false, "detail": detail })
+            }
         }
-        Err(e) => {
-            let detail = format!("{e:#}");
-            checks.push(serde_json::json!({
-                "name": "signed_authorization",
-                "ok": false,
-                "detail": detail,
-            }));
-            next_steps.push(serde_json::json!({
-                "name": "authorize_local_node_on_remote",
-                "command": authorize_command(&local_public_key, &local_fingerprint),
-                "note": "Run this on the remote host or use `ryeos remote authorize` from an already-authorized client.",
-            }));
-            serde_json::json!({ "authorized": false, "detail": detail })
-        }
+    } else {
+        let detail =
+            "signed probe skipped because the live identity does not match the configured remote";
+        checks.push(serde_json::json!({
+            "name": "signed_authorization",
+            "ok": false,
+            "detail": detail,
+        }));
+        serde_json::json!({
+            "authorized": false,
+            "signed_probe": "skipped_identity_mismatch",
+            "detail": detail,
+        })
     };
 
     let project = if let Some(project_path) = req.project {
@@ -190,22 +238,31 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
                     "remote_project_path": binding.remote_project_path,
                     "sync_scope": binding.sync_scope,
                 }));
-                let status = match client.project_status(&binding.remote_project_path).await {
-                    Ok(status) => {
-                        checks.push(serde_json::json!({
-                            "name": "remote_project_status",
-                            "ok": true,
-                        }));
-                        Some(status)
+                let status = if configured_identity_matches {
+                    match client.project_status(&binding.remote_project_path).await {
+                        Ok(status) => {
+                            checks.push(serde_json::json!({
+                                "name": "remote_project_status",
+                                "ok": true,
+                            }));
+                            Some(status)
+                        }
+                        Err(e) => {
+                            checks.push(serde_json::json!({
+                                "name": "remote_project_status",
+                                "ok": false,
+                                "detail": format!("{e:#}"),
+                            }));
+                            None
+                        }
                     }
-                    Err(e) => {
-                        checks.push(serde_json::json!({
-                            "name": "remote_project_status",
-                            "ok": false,
-                            "detail": format!("{e:#}"),
-                        }));
-                        None
-                    }
+                } else {
+                    checks.push(serde_json::json!({
+                        "name": "remote_project_status",
+                        "ok": false,
+                        "detail": "signed project probe skipped because the live identity does not match the configured remote",
+                    }));
+                    None
                 };
                 if binding.sync_scope == config::ProjectSyncScope::AiOnly {
                     next_steps.push(serde_json::json!({
@@ -262,6 +319,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             "name": req.remote,
             "url": remote_cfg.url,
             "configured_principal_id": remote_cfg.principal_id,
+            "configured_site_id": remote_cfg.site_id,
             "health": health,
             "identity": public_key,
         },

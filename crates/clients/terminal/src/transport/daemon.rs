@@ -2,8 +2,8 @@
 //!
 //! Reuses the transport layer from ryeos-cli: discovery, signing, and the
 //! shared TLS-capable (`reqwest`) signed client. Both the CLI and this client
-//! speak one transport, so an `https://` node negotiates TLS and an http→https
-//! edge redirect is handled at discovery — never on a signed request.
+//! speak one transport, so an `https://` node negotiates TLS and neither
+//! audience discovery nor a signed request can move to another origin.
 
 use ryeos_cli::error::CliTransportError;
 use ryeos_cli::transport::discovery::discover_audience;
@@ -92,13 +92,11 @@ impl DaemonClient {
         let mut base_url = resolve_daemon_url(&app_root).await?;
         let signer = Signer::resolve(&app_root).ok();
 
-        // Discovery is an unsigned GET that may follow an http→https redirect;
-        // it reports the EFFECTIVE base the daemon answered on. Subsequent
-        // SIGNED requests target that base directly (a signed request must
-        // never rely on a redirect — see `signed_client`).
+        // Discovery and signed requests share one normalized base and both
+        // refuse redirects; the configured origin cannot move between them.
         let audience = if signer.is_some() {
             let discovered = discover_audience(&base_url).await?;
-            base_url = discovered.effective_base_url;
+            base_url = discovered.base_url;
             discovered.principal_id
         } else {
             String::new()

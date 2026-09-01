@@ -39,12 +39,20 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .clone()
         .or_else(|| descriptor.as_ref().and_then(|d| d.name.clone()))
         .context("remote name required: pass a remote name or descriptor.name")?;
-    let remote_url = req
+    let remote_url_input = req
         .url
         .clone()
         .or_else(|| descriptor.as_ref().map(|d| d.url.clone()))
         .context("remote URL required: pass --url or descriptor.url")?;
-    config::validate_url(&remote_url)?;
+    let remote_url = config::normalize_url(&remote_url_input)?;
+    if let Some(descriptor) = descriptor.as_ref()
+        && descriptor.url != remote_url
+    {
+        anyhow::bail!(
+            "remote descriptor URL is not canonical; expected '{}'",
+            remote_url,
+        );
+    }
 
     // Discover the remote's public key
     let client = RemoteClient::new(&remote_url, "", state.identity.clone());

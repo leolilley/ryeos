@@ -686,10 +686,7 @@ async fn follow_stream_descriptor(
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let headers = signer.sign("GET", path, &[], &discovered.principal_id)?;
-    let url = format!(
-        "{}{path}",
-        discovered.effective_base_url.trim_end_matches('/')
-    );
+    let url = format!("{}{path}", discovered.base_url.trim_end_matches('/'));
 
     let mut terminal: Option<Result<(), StreamTerminalFailure>> = None;
     presenter.stream_with_previous(
@@ -1553,15 +1550,14 @@ async fn post_to_daemon(
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
 
-    // Discover the daemon's principal_id (audience) and the effective base URL
-    // after any redirects. Signed dispatch targets that base directly — never
-    // a redirect, which could downgrade the POST and break the signature.
+    // Discover the daemon's principal_id at the exact validated base URL.
+    // Discovery and signed dispatch both refuse redirects.
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
     let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
 
-    let url = format!("{}{}", discovered.effective_base_url, route_path);
+    let url = format!("{}{}", discovered.base_url, route_path);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
 }
@@ -1586,7 +1582,7 @@ async fn post_to_daemon_streaming(
     let route_path = "/execute/stream";
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
     let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
-    let url = format!("{}{route_path}", discovered.effective_base_url);
+    let url = format!("{}{route_path}", discovered.base_url);
 
     // Track the explicit terminal outcome: `Some(Ok)` success, `Some(Err)`
     // failure, `None` means the stream ended without any terminal event.
@@ -1651,7 +1647,7 @@ async fn post_to_daemon_streaming(
     })?;
     let result_path = format!("/threads/{tid}");
     let headers = signer.sign("GET", &result_path, &[], &discovered.principal_id)?;
-    let url = format!("{}{result_path}", discovered.effective_base_url);
+    let url = format!("{}{result_path}", discovered.base_url);
     let payload = crate::transport::http::get_json(&url, &headers)
         .await
         .map_err(|e| CliError::Local {
@@ -2973,6 +2969,69 @@ mod tests {
                 "/tmp",
             ])
         );
+    }
+
+    #[test]
+    fn signed_remote_execute_command_binds_qualification_objects() {
+        let mut command: CommandDef = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/remote-execute.yaml"
+        )))
+        .expect("signed remote-execute command descriptor");
+        command.name = "remote-execute".to_string();
+        let project = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "remote",
+                "execute",
+                "stronger",
+                "tool:qualification/run",
+                "--ref-bindings",
+                r#"{"model":"worker:models/qualified"}"#,
+                "--parameters",
+                r#"{"probe":true}"#,
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(project.path()),
+        )
+        .unwrap();
+        let contract = InvocationInputContract::from_lightweight_schema_value(&serde_json::json!({
+            "remote": "string?",
+            "item_ref": "string",
+            "ref_bindings": "object",
+            "project": "string?",
+            "parameters": "object?",
+        }))
+        .unwrap()
+        .unwrap();
+        let parameters = ryeos_runtime::arg_binder::normalize_params_with_contract(
+            resolved.parameters,
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.item_ref, "service:remote/execute");
+        assert!(resolved.ref_bindings.is_empty());
+        assert_eq!(parameters["remote"], "stronger");
+        assert_eq!(parameters["item_ref"], "tool:qualification/run");
+        assert_eq!(
+            parameters["ref_bindings"],
+            serde_json::json!({"model": "worker:models/qualified"})
+        );
+        assert_eq!(parameters["parameters"], serde_json::json!({"probe": true}));
+        assert_eq!(
+            parameters["project"],
+            project
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(parameters.get("no_stream").is_none());
+        assert!(parameters.get("_args").is_none());
     }
 
     #[test]

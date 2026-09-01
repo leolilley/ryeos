@@ -206,7 +206,10 @@ pub async fn handle(
     .await
     .map_err(remote_forward_error_to_handler_error)?;
 
-    // Return composite response matching the existing shape.
+    Ok(remote_execute_response(forward_result))
+}
+
+fn remote_execute_response(forward_result: forward::RemoteForwardResult) -> Value {
     let pull = forward_result.pull_summary.as_ref().map(|summary| {
         serde_json::json!({
             "snapshot_hash": summary.snapshot_hash,
@@ -215,7 +218,8 @@ pub async fn handle(
             "files_deleted": summary.files_deleted,
         })
     });
-    Ok(serde_json::json!({
+    serde_json::json!({
+        "job_id": forward_result.job_id,
         "push": {
             "snapshot_hash": forward_result.push_summary.pushed_snapshot_hash,
             "tree_entries": forward_result.push_summary.tree_entries,
@@ -227,7 +231,7 @@ pub async fn handle(
             "result": forward_result.remote_result,
         },
         "pull": pull,
-    }))
+    })
 }
 
 fn destination_execution_policy(
@@ -362,3 +366,31 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_response_retains_exact_source_job_coordinate() {
+        let value = remote_execute_response(forward::RemoteForwardResult {
+            job_id: "remote-execute:test".to_string(),
+            remote_result: serde_json::json!({"status": "completed"}),
+            push_summary: forward::PushSummary {
+                pushed_snapshot_hash: "sha256:source".to_string(),
+                tree_entries: 1,
+                blobs_uploaded: 1,
+                blobs_skipped: 0,
+            },
+            result_snapshot_hash: Some("sha256:result".to_string()),
+            pull_summary: Some(forward::PullSummary {
+                snapshot_hash: "sha256:result".to_string(),
+                cas_objects_fetched: 1,
+                files_updated: 1,
+                files_deleted: 0,
+            }),
+        });
+
+        assert_eq!(value["job_id"], "remote-execute:test");
+    }
+}

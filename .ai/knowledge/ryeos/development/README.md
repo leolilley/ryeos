@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-23T23:14:20Z:298b991bccde6d925f7067dd0ff9f1779a6c3c2f506c1f61bbdee51f544dc123:YTj3el7upN3vtIkEgwAtTxHpSwhx23c4a2nR1v+n+BdDPaiIgwukeV5YJAk+5DsEhsyohTuvgAA4dCDbU2A4CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T21:21:33Z:fe8cf363e0d6716fe435faf4847bedd1a35254e7eea3f61e0627a5770057c52a:H9kGHVMne2ipv7s/qMQomi4bhW/c8PIE1Gq4lrzrfCUw1sNhDsj1WmkPZM0nSE/4/WvlilHFAbN41ugbPgwBDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
 title: "RyeOS Repository Development Knowledge"
 description: "Scope and index for contributor-facing knowledge used to change, test, review, and release the RyeOS repository"
 entry_type: reference
-version: "1.0.0"
+version: "1.0.1"
 ```
 
 # RyeOS Repository Development Knowledge
@@ -36,8 +36,9 @@ contributor guide rather than duplicating the product documentation.
 
 - `architecture` and `dependency-constitution`: repository layout, ownership,
   and dependency direction.
-- `dev-workflow`, `build-and-test`, `ui-development`, `mcp-setup`, and
-  `source-local-bundle-development`: contributor workflows.
+- `dev-workflow`, `build-and-test`, `remote-development-and-qualification`,
+  `ui-development`, `mcp-setup`, and `source-local-bundle-development`:
+  contributor workflows.
 - `signing`, `release-process`, and `bundle-format-migrations`: publication and
   migration procedures for repository changes.
 - `persistence-schema-evolution` and `filesystem-durability`: implementation

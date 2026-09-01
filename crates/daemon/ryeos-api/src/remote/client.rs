@@ -1778,6 +1778,44 @@ impl PublicKeyResponse {
         }
         Ok(key)
     }
+
+    /// Prove that this live discovery response is the complete identity pinned
+    /// by one configured remote before releasing credentials or making signed
+    /// requests through that endpoint.
+    pub fn validate_configured_identity(
+        &self,
+        configured: &super::config::RemoteConfig,
+    ) -> Result<lillux::crypto::VerifyingKey> {
+        let live_key = self.validate_identity_binding()?;
+        let pinned_key = configured
+            .pinned_signing_key()
+            .context("invalid configured remote identity")?;
+        let pinned_fingerprint = lillux::crypto::fingerprint(&pinned_key);
+        let mut mismatches = Vec::new();
+        if self.principal_id != configured.principal_id {
+            mismatches.push("principal_id");
+        }
+        if live_key != pinned_key || self.signing_key != configured.signing_key {
+            mismatches.push("signing_key");
+        }
+        if self.fingerprint != pinned_fingerprint {
+            mismatches.push("fingerprint");
+        }
+        if self.site_id != configured.site_id {
+            mismatches.push("site_id");
+        }
+        if self.vault_fingerprint != configured.vault_fingerprint {
+            mismatches.push("vault_fingerprint");
+        }
+        if !mismatches.is_empty() {
+            anyhow::bail!(
+                "live identity for configured remote '{}' differs in {}; refusing authenticated contact",
+                configured.name,
+                mismatches.join(", "),
+            );
+        }
+        Ok(live_key)
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]

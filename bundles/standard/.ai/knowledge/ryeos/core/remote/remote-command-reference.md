@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:bb521c1a78af3b59ae626ca8efdcc4999330fdefc0b202a210584cbaea969dff:NRcaXqwO7Zql5acrc3XVlDtVDj2yjMfj0dL3ihJwO7IHNk+goIfz7AA9Ig4IHd5yjKqbzDeH4Ms8FBybwr7kDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T22:15:11Z:9beb0240b005f66accaf15c7056218d2977b370e59dbecdaea3a34272b5066b6:ryiWdiwYyOSzt2TT7qwqOEQgOZ+7nGYKSbUrQSH3YP3i8BG4aIj79IcUnJr1VoSNodvQzK52U7hUH1SeON4YDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
-version: "1.0.0"
+version: "1.0.3"
 description: >
   Manpage-style reference for ryeos remote commands, including local
   capabilities, remote authorized-key scopes, routes, examples, and
@@ -47,8 +47,8 @@ to delegated callers.
 | `ryeos admission-token` | local tool execution | none | none |
 | `ryeos remote admit` | `ryeos.execute.service.remote/admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
 | `ryeos remote list` | `ryeos.execute.service.remote/list` | none | none |
-| `ryeos remote status` | `ryeos.execute.service.remote/status` | none | `GET /health`, `GET /public-key` |
-| `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
+| `ryeos remote status` | `ryeos.execute.service.remote/status` | signed auth probe only after the complete configured identity matches | `GET /health`, `GET /public-key`, then `GET /threads?limit=1` only on an exact identity match |
+| `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied, both only after the complete configured identity matches | `GET /health`, `GET /public-key`, then `GET /threads?limit=1` and optionally `POST /project/status` only on an exact identity match |
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
@@ -92,17 +92,29 @@ ryeos remote configure --remote prod --url https://ryeos.example.com
 ryeos remote configure --descriptor ./prod.remote.yaml
 ```
 
-The command fetches the remote node public key, principal id, vault
-fingerprint, and ingest-ignore rules. Results are stored in
+The command fetches the remote node public key, principal id, canonical site
+ID, vault fingerprint, and ingest-ignore rules. Results are stored in
 `<system_space_dir>/.ai/config/remotes/remotes.yaml`.
 
+The URL is one canonical, credential-free base URL. User information, query,
+fragment, control/whitespace characters, and a trailing slash are not part of
+configured authority. Direct operator input is normalized before contact and
+persistence; a signed descriptor must already contain the exact canonical
+form. Non-loopback URLs require HTTPS. Public audience discovery and every
+signed request refuse redirects, so the configured URL must address the target
+directly rather than an origin-changing redirector.
+
 When `--descriptor` is supplied, the descriptor is a trust/discovery pin,
-not a credential. `remote configure` still fetches the live `/public-key`
-document and refuses to write config if the live node key or fingerprint
-does not match the descriptor.
+not a credential. It pins only the node signing key and its fingerprint.
+`remote configure` still fetches the live `/public-key` document, refuses to
+write config if those descriptor pins differ, and records the live principal,
+key/fingerprint, site ID, and vault fingerprint as the complete configured
+identity used by later contact.
 
 Failure modes:
 
+- fails if the URL contains credentials or non-base components, is not
+  canonical in a signed descriptor, uses non-loopback HTTP, or redirects
 - fails if the remote cannot be reached
 - fails if `/public-key` or `/ingest-ignore` returns invalid data
 - fails if a descriptor pins a different node key/fingerprint than the
@@ -160,10 +172,16 @@ ryeos remote admit \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
 ```
 
-Before sending the token, the command fetches the live remote identity
-and verifies it still matches the locally pinned remote config. The
-target consumes the token and writes a normal node-signed authorized-key
+Before sending the token, the command fetches the live remote identity and
+requires the principal, signing key, key fingerprint, canonical site ID, and
+vault fingerprint to match the locally configured coordinate exactly. Any
+mismatch refuses the operation before the one-time token is released. The
+target then consumes the token and writes a normal node-signed authorized-key
 grant for the caller node key.
+
+Because the token is a credential delivered by the target operator, admission
+resolves the named remote only from operator-owned config. Project remote
+entries cannot select or shadow the token destination.
 
 ## `ryeos remote list`
 
@@ -173,7 +191,9 @@ List locally configured remotes.
 ryeos remote list
 ```
 
-This is local-only and does not contact remote daemons.
+This is local-only and does not contact remote daemons. Each entry includes the
+configured canonical site ID so callers can select an exact placement target
+without treating the list as live identity testimony.
 
 ## `ryeos remote status`
 
@@ -183,10 +203,14 @@ Check a remote's public identity and health.
 ryeos remote status --remote prod
 ```
 
-Uses unauthenticated discovery routes and a non-fatal signed probe. It
-is useful for confirming URL reachability, key material, local node
-identity, current authorization status, project bindings, and the
-bootstrap `authorize-client` command to run on the remote host.
+Uses unauthenticated discovery routes first. It compares the live principal,
+signing key/fingerprint, canonical site ID, and vault fingerprint with the
+complete configured coordinate. Only an exact match permits the non-fatal
+signed authorization probe; any mismatch is reported and all authenticated
+contact is skipped. The report is useful for confirming URL reachability,
+identity coordinates, local node identity, current authorization status,
+project bindings, and the bootstrap `authorize-client` command to run on the
+remote host.
 
 ## `ryeos remote authorize`
 
@@ -363,6 +387,24 @@ Execution phases:
 Clean-base guard: if local tracked files changed since the push, the
 pull-back apply aborts without partial writes.
 
+On success, the response includes the exact durable source-local sync-job
+coordinate alongside the push, remote result, and pull summaries:
+
+```json
+{
+  "job_id": "remote-execute:<uuid>",
+  "push": { "snapshot_hash": "<source-snapshot>" },
+  "remote": { "snapshot_hash": "<result-snapshot>", "result": {} },
+  "pull": { "snapshot_hash": "<result-snapshot>" }
+}
+```
+
+Use that `job_id` with `service:sync/jobs/inspect` when exact source-side
+operation and attempt evidence is required. The inspected canonical operation
+retains the item ref, exact `ref_bindings`, target site, and remote project
+path. `service:sync/jobs/list` is only a bounded discovery view and deliberately
+omits the canonical operation.
+
 ## `ryeos remote run`
 
 Execute an item against a configured remote project without pushing or
@@ -413,7 +455,11 @@ ryeos remote doctor prod --project /absolute/path/to/project
 The report includes local node identity, remote configuration, remote
 health/identity discovery, a signed authorization probe, project binding
 status when `--project` is supplied, and next-step commands for bootstrap
-authorization, binding, `sync-project-ai`, and `remote run`.
+authorization, binding, `sync-project-ai`, and `remote run`. The live principal,
+signing key/fingerprint, canonical site ID, and vault fingerprint must all
+match the configured coordinate before doctor makes either the signed thread
+probe or the signed project-status probe. On mismatch it reports both probes as
+skipped and makes no authenticated contact.
 
 ## `ryeos remote threads`
 

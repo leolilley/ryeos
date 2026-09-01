@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:08Z:9bf226cc467bd6248c18a98cbd77d51df3d1b3987fa9dd5ae1ade629ecf36819:0cqxiFHVQ7cCNHCYsz1+cdJRoKuOXyErhcvOeFy/3zTM9hq3uAX9g9T4w0AttmWkHqnroI8jfGqM0NYGbBKkDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-01T22:15:11Z:ffa1aa74e192591a35bba37a52a850858986e7774134574a9792a5809d9be649:T2rFFyP8dw+kdyXjIjwUulnRif1jUHSyXRntmJ/rR7G7esCU0O521kHybMCQ9jxhPIkWGqyodIOKiD9kML6EDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - admit
@@ -6,10 +6,6 @@ description: Claim a one-time admission token on a configured remote node
 forms:
 - slots:
   - field: remote
-project:
-  resolution: optional
-  bind_parameter: project
-  no_project_flag: true
 dispatch:
   kind: execute_ref
   execute: service:remote/admit

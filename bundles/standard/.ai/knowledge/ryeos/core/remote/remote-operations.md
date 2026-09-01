@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:fd3e43e2a4f08ab349332577c3c1ce5f2b07776c8db7806d5ce27e64bc146d2a:8ZVF8/HnD2UBQ7o3RYdpqKzYxpp197BB5u6JM9naWTOxNLbEdcUdCZ4x0UaW+pQxqjuBs7FVXcDchzf9DG0oCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T22:15:11Z:a679fb5022f0569059816cbba18445bfb6aa4d2da4d3d22d037db582b7088bcd:kRVQ2YB1IL/sNztW7aP0kx3LrfuXEBk8rSwQvEN8RV6gtzUEUMy0m/PKUxTLNc6ZVTaL+oq9zRf9cdQCPQ13DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.7.0"
+version: "3.7.3"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -186,10 +186,26 @@ conversion and refuses if the daemon is live.
    ryeos remote configure --descriptor ./production.remote.yaml
    ```
 
-   This discovers the remote's public key, principal id, vault
-   fingerprint, and ingest-ignore rules. Descriptor import is a trust pin
-   only; it is verified against the live `/public-key` document before
-   local config is written.
+   This discovers the remote's public key, principal id, canonical site ID,
+   vault fingerprint, and ingest-ignore rules. A descriptor is a trust pin
+   only: it contains the signing key and fingerprint, which are verified
+   against the live `/public-key` document before the complete discovered
+   identity is written to local config.
+
+   The configured endpoint is one canonical, credential-free base URL. It has
+   no user information, query, fragment, control/whitespace characters, or
+   trailing slash. Direct operator input is normalized before contact and
+   persistence; a signed descriptor must already use the canonical form.
+   Audience discovery and all signed requests refuse redirects, so configure
+   the final target origin directly.
+
+   `remote status` and `remote doctor` compare the live principal, signing
+   key/fingerprint, site ID, and vault fingerprint with that configured
+   coordinate before making signed probes. A mismatch skips all authenticated
+   thread/project contact. `remote admit` applies the same check before it
+   releases a one-time token to the target. Admission selects only an
+   operator-owned remote config; a project entry cannot shadow its credential
+   destination.
 
 ### Publishing a descriptor
 
@@ -336,11 +352,21 @@ the vault protocol itself.
 **Production deployments must terminate TLS in front of `ryeosd`.**
 HTTP without TLS is only acceptable for loopback addresses.
 
-## Async Limitations
+Remote clients never follow HTTP redirects. This applies both to public
+audience discovery and signed requests: a redirect cannot move the configured
+origin, audience, authorization header, or request body. Configure the final,
+canonical base URL directly. URLs containing credentials, query, or fragment
+are rejected rather than retained in config or diagnostics.
 
-v1 is **synchronous only**. Remote execute blocks until completion and
-results are pulled back. Asynchronous execution is deferred to a future
-release.
+## Async Boundaries
+
+`remote execute` is deliberately synchronous: it blocks through
+push/execute/pull so project results return under the clean-base guard. Durable
+accepted execution is available separately through `remote run` with an exact
+caller-retained `launch_id` and retained-current-HEAD policy. That path exposes
+launch/thread status and cancellation but does not recursively materialize its
+project result back to the source; it is not an asynchronous form of
+`remote execute`.
 
 ## Bundle Synchronization
 
@@ -537,12 +563,19 @@ The JSON response from `remote execute` reports the counts:
 
 ```json
 {
+  "job_id": "remote-execute:<uuid>",
   "pull": {
     "files_updated": 3,
     "files_deleted": 1
   }
 }
 ```
+
+The returned `job_id` is the exact source-local durable operation coordinate.
+Inspect it through `service:sync/jobs/inspect` for the canonical operation,
+including the item ref, exact `ref_bindings`, target site, and remote project
+path, plus retained attempts. The bounded `service:sync/jobs/list` projection
+is for discovery and does not expose the canonical operation.
 
 ## Hybrid Binary Resolution
 

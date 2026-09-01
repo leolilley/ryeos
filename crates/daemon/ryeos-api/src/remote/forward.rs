@@ -72,6 +72,8 @@ pub struct RemoteForwardRequest<'a> {
 
 /// Result from the shared unary forward helper.
 pub struct RemoteForwardResult {
+    /// Durable source-local job coordinate for this exact forward operation.
+    pub job_id: String,
     /// The full remote execute response JSON.
     pub remote_result: Value,
     /// Push summary.
@@ -326,6 +328,7 @@ pub async fn execute_unary_forward(
                 "acting_principal": req.acting_principal,
                 "target_site_id": req.remote.remote.site_id,
                 "item_ref": req.item_ref,
+                "ref_bindings": req.ref_bindings,
                 "source_snapshot_hash": req.source_snapshot_hash,
                 "remote_project_path": req.remote_project_path,
             }),
@@ -578,6 +581,7 @@ pub async fn execute_unary_forward(
             },
         )?;
         return Ok(RemoteForwardResult {
+            job_id,
             remote_result,
             push_summary: PushSummary {
                 pushed_snapshot_hash: push_result.snapshot_hash,
@@ -709,6 +713,7 @@ pub async fn execute_unary_forward(
     )?;
 
     Ok(RemoteForwardResult {
+        job_id,
         remote_result,
         push_summary: PushSummary {
             pushed_snapshot_hash: push_result.snapshot_hash,

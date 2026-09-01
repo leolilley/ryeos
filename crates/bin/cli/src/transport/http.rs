@@ -23,7 +23,7 @@ const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// (301/302/303), which would silently invalidate the signature. With
 /// redirects off, a 3xx instead surfaces as an error (via the caller's status
 /// check), failing loud. The canonical https origin is reached in one hop
-/// because callers target discovery's post-redirect `effective_base_url`.
+/// because discovery and signed dispatch share one exact validated base URL.
 pub fn signed_client() -> Result<reqwest::Client, CliTransportError> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)

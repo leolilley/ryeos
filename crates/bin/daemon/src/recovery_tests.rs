@@ -1280,8 +1280,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     state
         .state_store
         .admit_dedicated_session(NewDedicatedSession {
-            session_id,
-            root_thread_id: session_id,
+            placement_thread_id: session_id,
+            chain_root_id: session_id,
             owner_principal: "fp:test",
             admitted_capsule_hash: &capsule_hash,
             workspace_id,
@@ -1311,7 +1311,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
             control_channel_identity: "fd:fixture-dead".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "dead-daemon-generation".to_owned(),
-            session_id: session_id.to_owned(),
+            placement_thread_id: session_id.to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: now,
             updated_at_ms: now,
@@ -1329,7 +1329,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     let command = state
         .state_store
         .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-            session_id,
+            placement_thread_id: session_id,
             idempotency_key: "command-hosted-root-replay",
             worker_boot_epoch: 1,
             command_kind: "route",
@@ -1373,7 +1373,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
 
     let committed_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "schema":"ryeos.hosted_command_fact.v1",
-        "session_id":session_id,
+        "chain_root_id":session_id,
+        "placement_thread_id":session_id,
         "command_sequence":command.command_sequence,
         "request_digest":request_digest,
         "event_type":"hosted_command.committed",
@@ -1382,7 +1383,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     let response_digest = ryeos_state::objects::canonical_value_digest(&response_batch).unwrap();
     let response_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "schema":"ryeos.hosted_command_fact.v1",
-        "session_id":session_id,
+        "chain_root_id":session_id,
+        "placement_thread_id":session_id,
         "command_sequence":command.command_sequence,
         "request_digest":request_digest,
         "event_type":"hosted_worker_command_observation_batch",
@@ -1390,7 +1392,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     .unwrap();
     let observation_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "schema":"ryeos.hosted_observation_batch_operation.v1",
-        "session_id":session_id,
+        "chain_root_id":session_id,
+        "placement_thread_id":session_id,
         "worker_boot_epoch":1,
         "batch_digest":observation_digest,
         "first_sequence":1,
@@ -1410,7 +1413,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "schema":1,
                         "origin":"daemon_observed_io",
                         "operation_id":committed_operation,
-                        "session_id":session_id,
+                        "chain_root_id":session_id,
+                        "placement_thread_id":session_id,
                         "command_sequence":command.command_sequence,
                         "request_digest":request_digest,
                         "worker_boot_epoch":1,
@@ -1430,7 +1434,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "schema":1,
                         "origin":"daemon_observed_io",
                         "operation_id":response_operation,
-                        "session_id":session_id,
+                        "chain_root_id":session_id,
+                        "placement_thread_id":session_id,
                         "command_sequence":command.command_sequence,
                         "request_digest":request_digest,
                         "worker_boot_epoch":1,
@@ -1445,7 +1450,8 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "schema":1,
                         "origin":"daemon_observed_io",
                         "operation_id":observation_operation,
-                        "session_id":session_id,
+                        "chain_root_id":session_id,
+                        "placement_thread_id":session_id,
                         "worker_boot_epoch":1,
                         "batch_digest":observation_digest,
                         "first_sequence":1,
@@ -1465,7 +1471,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     let recovered_command = state
         .state_store
         .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-            session_id,
+            placement_thread_id: session_id,
             idempotency_key: "command-hosted-root-replay",
             worker_boot_epoch: 1,
             command_kind: "route",

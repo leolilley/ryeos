@@ -104,3 +104,44 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_state::{SyncJobRecord, SyncJobState};
+
+    fn job() -> SyncJobRecord {
+        SyncJobRecord {
+            job_id: "remote-execute:test".to_string(),
+            operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "remote_execute",
+                "item_ref": "tool:qualification/run",
+            }),
+            peer: Some("https://target.example".to_string()),
+            state: SyncJobState::Completed,
+            phase: "completed".to_string(),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            uploaded_hashes: vec!["sha256:source".to_string()],
+            fetched_hashes: vec!["sha256:result".to_string()],
+            attempt_count: 1,
+            max_attempts: 1,
+            last_error: None,
+            result: None,
+            created_at: "2026-09-01T00:00:00Z".to_string(),
+            updated_at: "2026-09-01T00:00:01Z".to_string(),
+            finished_at: Some("2026-09-01T00:00:01Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn list_is_discovery_while_inspect_retains_exact_operation() {
+        let listed = sync_job_to_json(job());
+        assert!(listed.get("operation").is_none());
+
+        let inspected = sync_job_inspect_to_json(job());
+        assert_eq!(inspected["operation"]["item_ref"], "tool:qualification/run");
+    }
+}

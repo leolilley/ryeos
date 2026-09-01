@@ -99,6 +99,9 @@ jobs:
       - name: Check shell terminal presentation
         run: ./scripts/pkg/test-ryeos-terminal.sh
 
+      - name: Check configured-remote qualification contract
+        run: ./scripts/dev/test-qualify-configured-remote.sh
+
       - name: Check removed compatibility vocabulary
         run: ./scripts/lint-no-content-wrap.sh
 

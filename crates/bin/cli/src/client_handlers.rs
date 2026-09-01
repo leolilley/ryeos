@@ -78,7 +78,7 @@ pub(crate) async fn export_artifact(
             )?;
             let url = format!(
                 "{}/objects/get",
-                discovered.effective_base_url.trim_end_matches('/')
+                discovered.base_url.trim_end_matches('/')
             );
             let response = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
             let chunk = response

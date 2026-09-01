@@ -44,6 +44,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "name": r.name,
                 "url": r.url,
                 "principal_id": r.principal_id,
+                "site_id": r.site_id,
                 "scope": loaded.scope.label(),
                 "config_path": loaded.config_path,
             })

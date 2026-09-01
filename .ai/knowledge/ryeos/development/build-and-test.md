@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-01T19:44:25Z:a0f39b68214faf14b2b060f2acd262803bb1f83c96563eaeaf6210f2ee0cc16a:OadCXi1oxDay3Qhj6eRo0aVxgbPZnQSvy8KbC0SMK8tbG5AoMoziB9+wYPBSXhFWqtQsIWB95/w8RPoASQ/2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T21:21:33Z:2ec5fc70b48e6b60ac4e3b24d7cb056e0d1d9f70538ddfa72287dba59d9e416d:zgLurCnjLNHHvFMUyontwKlf/6Rcz95jn8Zer23UvWP5QOvug+LEdUN5tb2cSzO2sD3fYeEgdwXCbOkyVnd0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.4.2"
+version: "1.4.4"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -26,8 +26,11 @@ test, refresh bundles, or install this checkout locally.
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 | Verify core/standard source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
 | Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/standard` |
+| Stronger-host build and configured-remote qualification | See `development/remote-development-and-qualification.md` |
 
-Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
+Prereqs: Rust stable, `cargo-nextest`, Python 3, Linux, and usually `HOSTNAME`
+set. The configured-remote qualification helper additionally uses Git,
+`realpath`, and the standard GNU hashing/find utilities named in its runbook.
 
 ## Canonical gate
 
@@ -231,5 +234,6 @@ work around it by adding kind-specific CLI dispatch logic.
 |---|---|---|
 | `scripts/gate.sh` | canonical validation | nextest by default; builds/signs bundles first only with `--refresh-bundles` |
 | `scripts/populate-bundles.sh` | bundle authoring refresh | derived state only; safe to rerun |
+| `scripts/dev/qualify-configured-remote.sh` | generic full-project remote round-trip probe | requires an already-running, configured, exactly authorized remote with the exact binding; retains integrity-only operational evidence outside the project |
 | `scripts/pkg/install-local-direct.sh` | fast local packaged install | uses `/usr/bin` + `/usr/share/ryeos`; populates only with explicit `--populate` |
 | `scripts/smoke-execute-stream.sh` | signed `/execute/stream` SSE smoke | needs URL, key, audience |
