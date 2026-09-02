@@ -359,9 +359,40 @@ async fn dispatch_managed_subprocess(
 
     if request.validate_only {
         let external_content = validate_managed_effective_program(&prepared, request, ctx, state)?;
-        let admission_ready = external_content
+        let root_ready = external_content
             .as_ref()
             .is_none_or(|preview| preview.ready_for_admission);
+        let root_admission = prepared.resolved.root_admission.as_ref().ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "managed static validation has no exact root admission"
+            ))
+        })?;
+        let applicability = crate::dispatch::LaunchContractApplicability::ManagedEnvelope {
+            runtime: Box::new(verified_runtime.clone()),
+        };
+        let launch_contract = crate::dispatch::prepare_admitted_launch_contract(
+            &applicability,
+            root_admission,
+            &request.ref_bindings,
+            &request.lifecycle_authority,
+            &request.provenance,
+            ctx,
+            state,
+        )
+        .await?
+        .ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "managed static validation produced no prepared launch contract"
+            ))
+        })?;
+        let dependencies = crate::execution::persistent_session::preview_prepared_dependencies(
+            state,
+            &ctx.engine,
+            &launch_contract,
+        )
+        .map_err(DispatchError::Internal)?;
+        let dependencies_ready = dependencies.admission_ready;
+        let admission_ready = root_ready && dependencies_ready;
         return Ok(json!({
             "validated": true,
             "admission_ready": admission_ready,
@@ -369,6 +400,13 @@ async fn dispatch_managed_subprocess(
             "kind": &prepared.resolved.resolved_item.kind,
             "executor_ref": &prepared.executor_ref,
             "external_content": external_content,
+            "runtime_preparation": {
+                "runtime_ref": verified_runtime.canonical_ref.to_string(),
+                "binding_records": dependencies.binding_records,
+                "execution_dependencies": dependencies.execution_dependencies,
+                "content_dependencies": dependencies.content_dependencies,
+                "admission_ready": dependencies_ready,
+            },
         }));
     }
 

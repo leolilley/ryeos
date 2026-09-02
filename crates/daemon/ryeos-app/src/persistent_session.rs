@@ -876,6 +876,40 @@ impl PersistentSessionPool {
         Ok(Self { inner, streams })
     }
 
+    /// Read-only policy and lifecycle eligibility check for an exact prepared
+    /// session contract. This does not reserve capacity, create a pool group,
+    /// mint a lease, or promise that transient capacity will still be
+    /// available when execution reaches its authoritative reservation.
+    pub fn validate_contract_eligibility(
+        &self,
+        lifecycle: &PersistentSessionLifecycleContract,
+        wire: &PersistentSessionWireContract,
+    ) -> Result<()> {
+        if !self.inner.enabled {
+            bail!("persistent sessions are disabled by node policy");
+        }
+        self.ensure_admission_open()?;
+        lifecycle.validate()?;
+        wire.validate()?;
+        if lifecycle.real_uid_process_limit > self.inner.limits.max_real_uid_process_limit
+            || lifecycle.max_address_space_bytes > self.inner.limits.max_total_address_space_bytes
+            || lifecycle.max_cpu_seconds > self.inner.limits.max_total_cpu_seconds
+        {
+            bail!("persistent-session resource request exceeds node policy");
+        }
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reason) = state.cleanup_unproved.as_deref() {
+            bail!(
+                "persistent-session ownership is quarantined after unproved process cleanup: {reason}"
+            );
+        }
+        Ok(())
+    }
+
     /// Reserve node-wide capacity for one session-owned process. This shares
     /// the same aggregate admission counters as pooled persistent workers but
     /// never grants request reuse or cross-session lookup.
@@ -3994,6 +4028,28 @@ while True:
             Ok(_) => panic!("disabled pool unexpectedly reserved stream capacity"),
             Err(error) => error,
         };
+        assert!(error.to_string().contains("disabled by node policy"));
+    }
+
+    #[test]
+    fn read_only_contract_eligibility_observes_policy_without_reserving() {
+        let pool = PersistentSessionPool::with_limits(narrow_stream_limits()).unwrap();
+        pool.validate_contract_eligibility(&test_lifecycle(), &test_wire())
+            .unwrap();
+        assert!(pool.inner.state.lock().unwrap().groups.is_empty());
+
+        let mut excessive = test_lifecycle();
+        excessive.real_uid_process_limit = 2;
+        let error = pool
+            .validate_contract_eligibility(&excessive, &test_wire())
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds node policy"));
+        assert!(pool.inner.state.lock().unwrap().groups.is_empty());
+
+        let disabled = PersistentSessionPool::disabled();
+        let error = disabled
+            .validate_contract_eligibility(&test_lifecycle(), &test_wire())
+            .unwrap_err();
         assert!(error.to_string().contains("disabled by node policy"));
     }
 

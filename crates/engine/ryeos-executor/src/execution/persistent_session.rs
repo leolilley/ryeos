@@ -31,7 +31,45 @@ use ryeos_state::objects::{
 
 use super::launch_preparation::{
     PreparedContentDependency, PreparedExecutionDependency, PreparedRuntimeLaunch,
+    RefBindingLaunchRecord,
 };
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PersistentSessionEligibilityPreview {
+    pub(crate) ready_for_admission: bool,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ExecutionDependencyValidationPreview {
+    pub(crate) canonical_ref: String,
+    pub(crate) resolution: ryeos_engine::resolution::AsLaunchedResolutionDigest,
+    pub(crate) effective_definition_digest: String,
+    pub(crate) source: Option<ryeos_app::source_closure_admission::SourceClosureValidationPreview>,
+    pub(crate) external_content:
+        Option<ryeos_app::external_content_admission::ExternalContentValidationPreview>,
+    pub(crate) session: Option<PersistentSessionEligibilityPreview>,
+    pub(crate) admission_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ContentDependencyValidationPreview {
+    pub(crate) binding: String,
+    pub(crate) canonical_ref: String,
+    pub(crate) resolution: ryeos_engine::resolution::AsLaunchedResolutionDigest,
+    pub(crate) targets: Vec<String>,
+    pub(crate) external_content:
+        ryeos_app::external_content_admission::ExternalContentValidationPreview,
+    pub(crate) admission_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PreparedDependencyValidationPreview {
+    pub(crate) binding_records: BTreeMap<String, RefBindingLaunchRecord>,
+    pub(crate) execution_dependencies: BTreeMap<String, ExecutionDependencyValidationPreview>,
+    pub(crate) content_dependencies: BTreeMap<String, ContentDependencyValidationPreview>,
+    pub(crate) admission_ready: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -290,6 +328,127 @@ pub(crate) fn admit_or_verify_prepared_sessions(
     Ok(AdmittedSessionPublications { publications })
 }
 
+/// Project the preparer-selected dependencies through current read-side
+/// source, content-binding, target, and node session-policy authority. The
+/// projection deliberately excludes prepared runtime data, secrets, host
+/// paths, capsules, and leases; live launch repeats authoritative admission.
+pub(crate) fn preview_prepared_dependencies(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    prepared: &PreparedRuntimeLaunch,
+) -> Result<PreparedDependencyValidationPreview> {
+    let roots = engine.resolution_roots(None);
+    let mut execution_dependencies = BTreeMap::new();
+    let mut content_dependencies = BTreeMap::new();
+    let mut admission_ready = true;
+
+    for (name, dependency) in &prepared.execution_dependencies {
+        dependency
+            .validate()
+            .with_context(|| format!("validate prepared execution dependency `{name}`"))?;
+        let verified = dependency.captured_verified_subject()?;
+        let kind = verified.resolved.kind.as_str();
+        let source = ryeos_app::source_closure_admission::preview_source_closure(
+            state,
+            engine,
+            kind,
+            &dependency.resolution,
+            &roots,
+            None,
+            None,
+        )?;
+        let external_content =
+            ryeos_app::external_content_admission::preview_external_content_pins(
+                state,
+                engine,
+                kind,
+                &dependency.resolution,
+                &roots,
+            )?;
+        let session = if let Some((declaration, protocol)) = session_contract(engine, dependency)? {
+            let lifecycle = lifecycle_contract(&declaration)?;
+            let wire = wire_contract(&protocol)?;
+            Some(
+                match state
+                    .persistent_sessions
+                    .validate_contract_eligibility(&lifecycle, &wire)
+                {
+                    Ok(()) => PersistentSessionEligibilityPreview {
+                        ready_for_admission: true,
+                        status: "ready".to_owned(),
+                    },
+                    Err(error) => PersistentSessionEligibilityPreview {
+                        ready_for_admission: false,
+                        status: error.to_string(),
+                    },
+                },
+            )
+        } else {
+            None
+        };
+        let ready = source
+            .as_ref()
+            .is_none_or(|preview| preview.ready_for_admission)
+            && external_content
+                .as_ref()
+                .is_none_or(|preview| preview.ready_for_admission)
+            && session
+                .as_ref()
+                .is_none_or(|preview| preview.ready_for_admission);
+        admission_ready &= ready;
+        execution_dependencies.insert(
+            name.clone(),
+            ExecutionDependencyValidationPreview {
+                canonical_ref: dependency.canonical_ref.clone(),
+                resolution: dependency.resolution.as_launched_digest(),
+                effective_definition_digest: dependency
+                    .resolution
+                    .effective_definition_digest()
+                    .map_err(|error| anyhow!(error))?
+                    .as_str()
+                    .to_owned(),
+                source,
+                external_content,
+                session,
+                admission_ready: ready,
+            },
+        );
+    }
+
+    for (name, dependency) in &prepared.content_dependencies {
+        dependency
+            .validate()
+            .with_context(|| format!("validate prepared content dependency `{name}`"))?;
+        let resolution = dependency.resolution.restore();
+        let external_content =
+            ryeos_app::external_content_admission::preview_portable_content_dependency(
+                state,
+                &resolution,
+                &dependency.external_content_policy,
+            )?;
+        let ready = external_content.ready_for_admission;
+        admission_ready &= ready;
+        content_dependencies.insert(
+            name.clone(),
+            ContentDependencyValidationPreview {
+                binding: dependency.binding.clone(),
+                canonical_ref: dependency.canonical_ref.clone(),
+                resolution: resolution.as_launched_digest(),
+                targets: dependency.targets.clone(),
+                external_content,
+                admission_ready: ready,
+            },
+        );
+    }
+
+    Ok(PreparedDependencyValidationPreview {
+        binding_records: prepared.binding_records.clone(),
+        execution_dependencies,
+        content_dependencies,
+        admission_ready,
+    })
+}
+
 type TargetContentSets =
     BTreeMap<String, ryeos_engine::external_realization::RealizedExternalContentSet>;
 type TargetExecutableSearch = BTreeMap<String, Vec<ExecutableSearchPathEntry>>;
@@ -498,7 +657,7 @@ fn manifest_materializes_directory<'a>(
     false
 }
 
-fn session_contract(
+pub(crate) fn session_contract(
     engine: &ryeos_engine::engine::Engine,
     dependency: &PreparedExecutionDependency,
 ) -> Result<Option<(PersistentSessionDecl, VerifiedProtocol)>> {
@@ -1550,7 +1709,7 @@ fn dependency_plan_principal(node_fingerprint: &str, item_ref: &str) -> Result<E
     }))
 }
 
-fn lifecycle_contract(
+pub(crate) fn lifecycle_contract(
     declaration: &PersistentSessionDecl,
 ) -> Result<PersistentSessionLifecycleContract> {
     let contract = PersistentSessionLifecycleContract {
@@ -1567,7 +1726,7 @@ fn lifecycle_contract(
     Ok(contract)
 }
 
-fn wire_contract(protocol: &VerifiedProtocol) -> Result<PersistentSessionWireContract> {
+pub(crate) fn wire_contract(protocol: &VerifiedProtocol) -> Result<PersistentSessionWireContract> {
     let session = validate_persistent_session_protocol(&protocol.descriptor)
         .map_err(|error| anyhow!(error))?;
     let contract = PersistentSessionWireContract {

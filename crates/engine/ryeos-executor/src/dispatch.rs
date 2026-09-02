@@ -4558,10 +4558,38 @@ pub async fn admit_launch_contract(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<(), DispatchError> {
+    prepare_admitted_launch_contract(
+        applicability,
+        root_admission,
+        ref_bindings,
+        lifecycle_authority,
+        provenance,
+        ctx,
+        state,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Prepare the exact launch contract admitted by the threadless execution
+/// boundary and return its path-free dependency authority to read-side
+/// callers. Execution and static validation share this one cache and secret
+/// admission path; callers must not persist or serialize the opaque prepared
+/// runtime payload itself.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_admitted_launch_contract(
+    applicability: &LaunchContractApplicability,
+    root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+    ref_bindings: &BTreeMap<String, String>,
+    lifecycle_authority: &ryeos_state::objects::ExecutionLifecycleAuthority,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Option<crate::execution::launch_preparation::PreparedRuntimeLaunch>, DispatchError> {
     let runtime = match applicability {
         LaunchContractApplicability::NonEnvelope { class } => {
             if ref_bindings.is_empty() {
-                return Ok(());
+                return Ok(None);
             }
             return Err(DispatchError::RefBindingNotApplicable {
                 class: class.as_str().to_owned(),
@@ -4692,8 +4720,8 @@ pub async fn admit_launch_contract(
     names.extend(
         prepared
             .required_secrets
-            .into_iter()
-            .map(|secret| secret.name),
+            .iter()
+            .map(|secret| secret.name.clone()),
     );
     names.sort();
     names.dedup();
@@ -4705,7 +4733,7 @@ pub async fn admit_launch_contract(
         &names,
         &dotenv_dirs,
     )
-    .map(|_| ())
+    .map(|_| Some(prepared))
     .map_err(|error| match error {
         ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
             let name = names

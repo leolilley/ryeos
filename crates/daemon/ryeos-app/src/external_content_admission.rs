@@ -18,6 +18,7 @@ use ryeos_state::{
     ExternalContentCaptureKind, LaunchCaptureBudget, MAX_CAPTURE_FILE_BYTES, PendingCasPublication,
 };
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::state::AppState;
 
@@ -33,7 +34,8 @@ pub struct AdmittedExternalRealizations {
 pub struct ExternalContentPinPreview {
     pub id: String,
     pub expected_digest: Option<String>,
-    pub observed_digest: String,
+    pub observed_digest: Option<String>,
+    pub binding_digest: Option<String>,
     pub status: String,
 }
 
@@ -72,7 +74,7 @@ pub fn preview_external_content_pins(
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
     for declaration in declarations {
-        let observed_digest = match declaration.locator.as_ref() {
+        let (observed_digest, binding_digest, status, ready) = match declaration.locator.as_ref() {
             Some(locator) => {
                 let base_path = resolve_named_root(engine, roots, &locator.root)?;
                 let base = lillux::PinnedDirectory::open(&base_path)?.ok_or_else(|| {
@@ -94,38 +96,184 @@ pub fn preview_external_content_pins(
                     &mut budget,
                     &mut sink,
                 )?;
-                ryeos_state::external_content_manifest_digest(&manifest)?
+                let observed = ryeos_state::external_content_manifest_digest(&manifest)?;
+                let status = match declaration.mode {
+                    ryeos_engine::external_content::ExternalContentMode::Captured => "captured",
+                    ryeos_engine::external_content::ExternalContentMode::Pinned
+                        if declaration.digest.as_deref() == Some(observed.as_str()) =>
+                    {
+                        "matched"
+                    }
+                    ryeos_engine::external_content::ExternalContentMode::Pinned => "mismatched",
+                };
+                let ready = status != "mismatched";
+                (Some(observed), None, status, ready)
             }
-            None => declaration.digest.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "locator-free external content `{}` has no retained digest",
-                    declaration.id
-                )
-            })?,
+            None => preview_retained_external_content(state, contract, &resolution, &declaration)?,
         };
-        let status = match declaration.mode {
-            ryeos_engine::external_content::ExternalContentMode::Captured => "captured",
-            ryeos_engine::external_content::ExternalContentMode::Pinned
-                if declaration.digest.as_deref() == Some(observed_digest.as_str()) =>
-            {
-                "matched"
-            }
-            ryeos_engine::external_content::ExternalContentMode::Pinned => {
-                ready_for_admission = false;
-                "mismatched"
-            }
-        };
+        ready_for_admission &= ready;
         previews.push(ExternalContentPinPreview {
             id: declaration.id,
             expected_digest: declaration.digest,
             observed_digest,
-            status: status.to_string(),
+            binding_digest,
+            status: status.to_owned(),
         });
     }
     Ok(Some(ExternalContentValidationPreview {
         declarations: previews,
         ready_for_admission,
     }))
+}
+
+/// Preview one preparer-selected portable content dependency through the same
+/// retained-manifest and exact-binding checks used by ordinary declarations.
+/// Prepared content dependencies are deliberately locator-free, so this path
+/// never opens an ambient named root and never stages a publication.
+pub fn preview_portable_content_dependency(
+    state: &AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    policy: &ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
+) -> anyhow::Result<ExternalContentValidationPreview> {
+    let contract = policy.declaration_contract();
+    let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
+    let declarations = ryeos_engine::external_content::declarations_from_composed(
+        &resolution.composed.composed,
+        Some(&contract),
+        declarer,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("content dependency has no external_content declaration"))?;
+    if declarations.is_empty() {
+        anyhow::bail!("content dependency has no external_content declaration");
+    }
+    let mut previews = Vec::with_capacity(declarations.len());
+    let mut ready_for_admission = true;
+    for declaration in declarations {
+        if declaration.locator.is_some() {
+            anyhow::bail!(
+                "portable content dependency `{}` contains an ambient locator",
+                declaration.id
+            );
+        }
+        let (observed_digest, binding_digest, status, ready) =
+            preview_retained_external_content(state, Some(&contract), resolution, &declaration)?;
+        ready_for_admission &= ready;
+        previews.push(ExternalContentPinPreview {
+            id: declaration.id,
+            expected_digest: declaration.digest,
+            observed_digest,
+            binding_digest,
+            status: status.to_owned(),
+        });
+    }
+    Ok(ExternalContentValidationPreview {
+        declarations: previews,
+        ready_for_admission,
+    })
+}
+
+fn preview_retained_external_content(
+    state: &AppState,
+    contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    declaration: &ExternalContentDeclaration,
+) -> anyhow::Result<(Option<String>, Option<String>, &'static str, bool)> {
+    if declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned {
+        anyhow::bail!(
+            "locator-free external content `{}` is not pinned",
+            declaration.id
+        );
+    }
+    let digest = declaration.digest.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "locator-free external content `{}` has no retained digest",
+            declaration.id
+        )
+    })?;
+    let publisher = resolution
+        .root
+        .signer_fingerprint
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "locator-free external-content consumer has no verified publisher fingerprint"
+            )
+        })?;
+    let authority = pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let Some(value) = cas.get_object(digest)? else {
+        return Ok((None, None, "missing_manifest", false));
+    };
+    match value.get("kind").and_then(Value::as_str) {
+        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+            let verified = ryeos_state::VerifiedExternalContentClosure::load(&cas, digest)?;
+            if declaration.kind == ExternalContentKind::File
+                && !verified.manifest().is_file_shaped()
+            {
+                anyhow::bail!(
+                    "external content `{}` declares a file but manifest {digest} is not file-shaped",
+                    declaration.id
+                );
+            }
+        }
+        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+            if contract
+                .and_then(|contract| contract.large_content.as_ref())
+                .is_none()
+            {
+                anyhow::bail!(
+                    "external content `{}` names a large manifest without a signed large-content grant",
+                    declaration.id
+                );
+            }
+            let manifest = ryeos_state::objects::load_if_large_content_manifest(&cas, digest)?
+                .ok_or_else(|| anyhow::anyhow!("large-content manifest changed kind"))?;
+            if declaration.kind == ExternalContentKind::File && !manifest.is_file_shaped() {
+                anyhow::bail!(
+                    "external content `{}` declares a file but manifest {digest} is not file-shaped",
+                    declaration.id
+                );
+            }
+            let store = authority.large_object_store()?;
+            for entry in &manifest.entries {
+                if entry.file_sha256.is_some() {
+                    store.verify_manifest_commitment(entry)?;
+                }
+            }
+            let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+                &cas,
+                [digest.to_owned()],
+                ryeos_state::object_closure::ObjectClosureLimits::default(),
+            )?;
+            if !closure.is_complete() {
+                anyhow::bail!("large-content realization closure is incomplete");
+            }
+        }
+        Some(other) => anyhow::bail!(
+            "external content `{}` manifest {digest} has unsupported kind `{other}`",
+            declaration.id
+        ),
+        None => anyhow::bail!(
+            "external content `{}` manifest {digest} is untyped",
+            declaration.id
+        ),
+    }
+    let binding = crate::operator_external_content::active_binding_from_store(
+        &state.state_store,
+        &cas,
+        digest,
+        &resolution.root.resolved_ref,
+        publisher,
+    )?;
+    drop(guard);
+    match binding {
+        Some((binding_digest, _)) => {
+            Ok((Some(digest.to_owned()), Some(binding_digest), "ready", true))
+        }
+        None => Ok((Some(digest.to_owned()), None, "missing_binding", false)),
+    }
 }
 
 impl AdmittedExternalRealizations {

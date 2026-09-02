@@ -1026,14 +1026,37 @@ pub fn require_active_binding_from_store(
     consumer_ref: &str,
     publisher_fingerprint: &str,
 ) -> anyhow::Result<ryeos_state::objects::ExternalContentBinding> {
+    active_binding_from_store(
+        state_store,
+        cas,
+        manifest_hash,
+        consumer_ref,
+        publisher_fingerprint,
+    )?
+    .map(|(_, binding)| binding)
+    .ok_or_else(|| anyhow::anyhow!("external-content consumer has no active operator binding"))
+}
+
+/// Inspect one exact consumer binding without changing its head or retaining
+/// any CAS root. Absence and a well-formed released head are ordinary
+/// not-ready states; corrupt or contradictory retained authority is an error.
+pub fn active_binding_from_store(
+    state_store: &crate::state_store::StateStore,
+    cas: &lillux::CasStore,
+    manifest_hash: &str,
+    consumer_ref: &str,
+    publisher_fingerprint: &str,
+) -> anyhow::Result<Option<(String, ryeos_state::objects::ExternalContentBinding)>> {
     let binding_id = ryeos_state::objects::ExternalContentBinding::derive_binding_id(
         manifest_hash,
         consumer_ref,
         publisher_fingerprint,
     )?;
-    let head = state_store
+    let Some(head) = state_store
         .with_state_db(|db| db.read_generic_head_ref(BINDING_HEAD_NAMESPACE, &binding_id))?
-        .ok_or_else(|| anyhow::anyhow!("external-content consumer has no operator binding"))?;
+    else {
+        return Ok(None);
+    };
     let value = cas
         .get_object(&head.target_hash)?
         .ok_or_else(|| anyhow::anyhow!("external-content binding head target is absent"))?;
@@ -1047,8 +1070,7 @@ pub fn require_active_binding_from_store(
                 .map(str::to_owned)
         })
         .ok_or_else(|| anyhow::anyhow!("external-content binding manifest is absent or untyped"))?;
-    if binding.state != ryeos_state::objects::ExternalContentBindingState::Active
-        || binding.binding_id != binding_id
+    if binding.binding_id != binding_id
         || binding.manifest_hash != manifest_hash
         || binding.consumer_ref != consumer_ref
         || binding.publisher_fingerprint != publisher_fingerprint
@@ -1056,7 +1078,12 @@ pub fn require_active_binding_from_store(
     {
         bail!("external-content binding does not authorize this consumer");
     }
-    Ok(binding)
+    match binding.state {
+        ryeos_state::objects::ExternalContentBindingState::Active => {
+            Ok(Some((head.target_hash, binding)))
+        }
+        ryeos_state::objects::ExternalContentBindingState::Released => Ok(None),
+    }
 }
 
 struct ResolvedConsumer {
