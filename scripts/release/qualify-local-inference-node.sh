@@ -148,27 +148,36 @@ done < <(ryeos_bundle_set_names full)
 node_started=0
 cleanup() {
     local status="$1"
+    local stop_failed=0
     # Raw CLI diagnostics are transient parser input only. They may contain
     # host paths from an unrelated failure and are never qualification
     # evidence, including when a failed node is retained for diagnosis.
     rm -f -- "$qualification_root/.released-binding-launch-refusal.raw"
     if [[ "$node_started" -eq 1 ]]; then
-        HOME="$home_root" RYEOS_APP_ROOT="$node_root" \
+        if HOME="$home_root" RYEOS_APP_ROOT="$node_root" \
             PATH="$(dirname "$ryeos_bin"):$PATH" \
-            "$ryeos_bin" stop --app-root "$node_root" >/dev/null 2>&1 || true
+            "$ryeos_bin" stop --app-root "$node_root" >/dev/null 2>&1; then
+            node_started=0
+        else
+            stop_failed=1
+            if [[ "$status" -eq 0 ]]; then
+                status=1
+                echo "local-inference qualification cleanup could not prove node stop" >&2
+            fi
+        fi
     fi
-    if [[ "$status" -ne 0 || "$keep" -eq 1 ]]; then
+    if [[ "$status" -ne 0 || "$stop_failed" -eq 1 || "$keep" -eq 1 ]]; then
         echo "local-inference node qualification retained at $qualification_root" >&2
     else
         rm -rf -- "$qualification_root"
     fi
-    return "$status"
+    trap - EXIT
+    exit "$status"
 }
 trap 'cleanup "$?"' EXIT
 
 python3 - "$contract" "$policy_root/external-content.json" \
-    "$policy_root/persistent-sessions.json" "$archive_root" \
-    "$minimum_free_bytes" <<'PY'
+    "$archive_root" "$minimum_free_bytes" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -177,8 +186,8 @@ import sys
 contract = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 realizations = contract["realizations"]
 bounds = [item["bounds"] for item in realizations]
-archive_root = sys.argv[4]
-minimum_free_bytes = int(sys.argv[5])
+archive_root = sys.argv[3]
+minimum_free_bytes = int(sys.argv[4])
 if minimum_free_bytes > 2**63 - 1:
     raise SystemExit("minimum-free-bytes exceeds RyeOS's signed integer policy range")
 roots = {}
@@ -225,24 +234,7 @@ external = {
         },
     },
 }
-persistent = {
-    "schema": 1,
-    "enabled": True,
-    "limits": {
-        "max_pool_groups": 4,
-        "max_total_processes": 4,
-        "max_total_address_space_bytes": 64 * 1024**3,
-        "max_total_cpu_seconds": 14400,
-        "max_real_uid_process_limit": 4096,
-        "max_open_streams": 32,
-        "max_active_streams": 4,
-        "max_active_streams_per_subject": 1,
-        "max_stream_backlog_bytes": 16 * 1024**2,
-        "max_total_backlog_bytes": 64 * 1024**2,
-    },
-}
 Path(sys.argv[2]).write_text(json.dumps(external, indent=2) + "\n", encoding="utf-8")
-Path(sys.argv[3]).write_text(json.dumps(persistent, indent=2) + "\n", encoding="utf-8")
 PY
 
 # This project is qualification input, not local-inference bundle content. It
@@ -279,12 +271,7 @@ tools = {
 from pathlib import Path
 
 def execute(params: dict, project_path: str) -> dict:
-    expected = {
-        "cancellation_grace_secs": 5,
-        "cancellation_mode": "graceful",
-        "project_path": project_path,
-        "timeout": 86400,
-    }
+    expected = {}
     if params != expected:
         raise ValueError(f"read received undeclared caller arguments: {params!r}")
     value = Path(project_path, "qualification-input.txt").read_text(encoding="utf-8")
@@ -307,12 +294,7 @@ def execute(params: dict, project_path: str) -> dict:
 from pathlib import Path
 
 def execute(params: dict, project_path: str) -> dict:
-    expected = {
-        "cancellation_grace_secs": 5,
-        "cancellation_mode": "graceful",
-        "project_path": project_path,
-        "timeout": 86400,
-    }
+    expected = {}
     if params != expected:
         raise ValueError(f"mutate received undeclared caller arguments: {params!r}")
     root = Path(project_path)
@@ -339,12 +321,7 @@ def execute(params: dict, project_path: str) -> dict:
 from pathlib import Path
 
 def execute(params: dict, project_path: str) -> dict:
-    expected = {
-        "cancellation_grace_secs": 5,
-        "cancellation_mode": "graceful",
-        "project_path": project_path,
-        "timeout": 86400,
-    }
+    expected = {}
     if params != expected:
         raise ValueError(f"verify received undeclared caller arguments: {params!r}")
     root = Path(project_path)
@@ -449,6 +426,75 @@ config:
 )
 PY
 
+snapshot_persistent_session_policy() {
+    local phase="$1"
+    local evidence_file="$2"
+    local expected_body="${3:-}"
+    local export_body="${4:-}"
+    python3 - "$node_root/.ai/node/policies/persistent_sessions.yaml" \
+        "$phase" "$evidence_file" "$expected_body" "$export_body" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+import yaml
+
+policy_path = Path(sys.argv[1])
+phase = sys.argv[2]
+evidence_path = Path(sys.argv[3])
+expected_path = Path(sys.argv[4]) if sys.argv[4] else None
+export_path = Path(sys.argv[5]) if sys.argv[5] else None
+raw = policy_path.read_bytes()
+try:
+    header_bytes, body_bytes = raw.split(b"\n", 1)
+except ValueError as error:
+    raise SystemExit("persistent-session policy has no signed body") from error
+header = header_bytes.decode("utf-8")
+match = re.fullmatch(
+    r"# ryeos:signed:(.+):([0-9a-f]{64}):([^:]+):([0-9a-f]{64})",
+    header,
+)
+if match is None:
+    raise SystemExit("persistent-session policy has no canonical signed header")
+timestamp, content_hash, signature, signer_fingerprint = match.groups()
+if hashlib.sha256(body_bytes).hexdigest() != content_hash:
+    raise SystemExit("persistent-session signed content hash does not match its body")
+body = yaml.safe_load(body_bytes.decode("utf-8"))
+if not isinstance(body, dict) or body.get("schema") != 1 or not body.get("enabled"):
+    raise SystemExit("persistent-session policy is not the enabled v1 contract")
+limits = body.get("limits")
+if not isinstance(limits, dict) or not limits:
+    raise SystemExit("persistent-session policy has no closed limits")
+if expected_path is not None:
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    if body != expected:
+        raise SystemExit(f"{phase} persistent-session policy differs from expected semantics")
+canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+evidence = {
+    "schema": "ryeos.local_inference_persistent_session_policy_snapshot.v1",
+    "phase": phase,
+    "section": "persistent_sessions",
+    "signed_content_hash": content_hash,
+    "semantic_digest": hashlib.sha256(canonical).hexdigest(),
+    "signed_at": timestamp,
+    "signer_fingerprint": signer_fingerprint,
+    "signature": signature,
+    "body": body,
+}
+evidence_path.write_text(
+    json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+if export_path is not None:
+    export_path.write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+PY
+}
+
 init_args=(
     init --non-interactive --app-root "$node_root" --source "$qualification_source"
     --node-profile full
@@ -457,6 +503,11 @@ if [[ -n "$trust_file" ]]; then
     init_args+=(--trust-file "$trust_file")
 fi
 HOME="$home_root" "$ryeos_bin" "${init_args[@]}" >/dev/null
+snapshot_persistent_session_policy \
+    initialized-baseline \
+    "$qualification_root/persistent-policy-baseline.json" \
+    "" \
+    "$policy_root/persistent-sessions.json"
 if [[ -n "$archive_root" ]]; then
     HOME="$home_root" "$ryeos_bin" node policy-apply external_content \
         "$policy_root/external-content.json" --app-root "$node_root" --json \
@@ -852,15 +903,18 @@ PY
 
 snapshot_provider_bank() {
     local evidence_file="$1"
-    local expected_count="$2"
-    python3 - "$node_root" "$evidence_file" "$expected_count" "$qualification_root" <<'PY'
+    local validation_mode="$2"
+    python3 - "$node_root" "$evidence_file" "$validation_mode" "$qualification_root" <<'PY'
 import json
 from pathlib import Path
 import sqlite3
 import sys
 
 node = Path(sys.argv[1])
-expected_count = int(sys.argv[3])
+validation_mode = sys.argv[3]
+if validation_mode not in ("exact-profiles", "state-only"):
+    raise SystemExit(f"unknown provider-bank snapshot mode: {validation_mode}")
+expected_count = 2
 qualification_root = Path(sys.argv[4])
 accounting_path = node / ".ai/state/accounting.sqlite3"
 operational_path = node / ".ai/state/operational.sqlite3"
@@ -919,6 +973,22 @@ for item in observation_rows:
         payload = payload.decode("utf-8")
     item["payload"] = json.loads(payload)
     observations.append(item)
+if validation_mode == "state-only":
+    evidence = {
+        "attempts": attempts,
+        "operations": operations,
+        "provider_records": records,
+        "provider_call_objects": sorted(
+            provider_calls,
+            key=lambda record: (record["cache_key"], record["kind"]),
+        ),
+        "provider_observations": observations,
+    }
+    Path(sys.argv[2]).write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    raise SystemExit(0)
 if len(attempts) != expected_count:
     raise SystemExit(
         f"expected {expected_count} provider attempts, observed {len(attempts)}"
@@ -1347,91 +1417,32 @@ if len(set(resolution_identities)) != 2:
     raise SystemExit("activated exact profiles share a dependency resolution identity")
 PY
 
-HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
-    --project "$project_root" sign \
-    tool:qualification/read \
-    tool:qualification/mutate \
-    tool:qualification/verify \
-    config:ryeos-runtime/execution \
-    directive:qualification/live_tool_loop \
-    graph:qualification/live_tool_follow \
-    > "$qualification_root/project-signing.json"
-
-thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
-    "$qualification_root/threads-before-execution-4096.json"
-HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
-    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-    --no-project --no-stream --input '{}' > "$qualification_root/executed-4096.json"
-assert_json_path "$qualification_root/executed-4096.json" status completed
-assert_json_path "$qualification_root/executed-4096.json" success true
-assert_json_path "$qualification_root/executed-4096.json" result OK
-assert_json_missing "$qualification_root/executed-4096.json" error
-thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
-    "$qualification_root/threads-after-execution-4096.json"
-write_new_thread_proof_for_item \
-    "$qualification_root/threads-before-execution-4096.json" \
-    "$qualification_root/threads-after-execution-4096.json" \
-    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke completed \
-    "$qualification_root/execution-thread-4096.json"
-worker_pids > "$qualification_root/worker-pids-4096.txt"
-[[ -s "$qualification_root/worker-pids-4096.txt" ]] || {
-    echo "4096 profile left no resident admitted worker" >&2
-    exit 1
-}
-
-stop_node
-[[ -z "$(worker_pids)" ]] || {
-    echo "4096 profile worker survived the proved node stop" >&2
-    exit 1
-}
-start_node
-thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
-    "$qualification_root/threads-before-execution-2048.json"
-HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
-    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
-    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
-    --no-project --no-stream --input '{}' > "$qualification_root/executed-2048.json"
-assert_json_path "$qualification_root/executed-2048.json" status completed
-assert_json_path "$qualification_root/executed-2048.json" success true
-assert_json_path "$qualification_root/executed-2048.json" result OK
-assert_json_missing "$qualification_root/executed-2048.json" error
-thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
-    "$qualification_root/threads-after-execution-2048.json"
-write_new_thread_proof_for_item \
-    "$qualification_root/threads-before-execution-2048.json" \
-    "$qualification_root/threads-after-execution-2048.json" \
-    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke completed \
-    "$qualification_root/execution-thread-2048.json"
-worker_pids > "$qualification_root/worker-pids-2048.txt"
-[[ -s "$qualification_root/worker-pids-2048.txt" ]] || {
-    echo "2048 profile left no resident admitted worker" >&2
-    exit 1
-}
-stop_node
-[[ -z "$(worker_pids)" ]] || {
-    echo "2048 profile worker survived the proved node stop" >&2
-    exit 1
-}
-snapshot_provider_bank "$qualification_root/bank-before-replay.json" 2
-python3 - "$policy_root/persistent-sessions.json" <<'PY'
+# Prove that the node-owned persistent-session capacity is projected during
+# static admission without launching a thread or contacting a worker. This is
+# deliberately performed before provider execution and then restored: session
+# policy contributes to the admitted worker capsule, so changing it between an
+# executed call and its replay would correctly change the provider-effect
+# coordinate and turn the purported replay into a cache miss.
+python3 - "$policy_root/persistent-sessions.json" \
+    "$policy_root/persistent-sessions-refusal.json" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-path = Path(sys.argv[1])
-policy = json.loads(path.read_text(encoding="utf-8"))
+source, refusal = map(Path, sys.argv[1:3])
+policy = json.loads(source.read_text(encoding="utf-8"))
 policy["limits"]["max_total_address_space_bytes"] = 1
-path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+refusal.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
 PY
+stop_node
 HOME="$home_root" "$ryeos_bin" node policy-apply persistent_sessions \
-    "$policy_root/persistent-sessions.json" --app-root "$node_root" --json \
-    > "$qualification_root/replay-zero-capacity-policy-result.json"
+    "$policy_root/persistent-sessions-refusal.json" --app-root "$node_root" --json \
+    > "$qualification_root/refusal-policy-result.json"
+snapshot_persistent_session_policy \
+    resource-refusal \
+    "$qualification_root/persistent-policy-refusal.json" \
+    "$policy_root/persistent-sessions-refusal.json"
 start_node
-[[ -z "$(worker_pids)" ]] || {
-    echo "daemon restart contacted local inference before a request" >&2
-    exit 1
-}
 thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
     "$qualification_root/threads-before-refusal-validation.json"
 for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
@@ -1501,6 +1512,125 @@ for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
     ):
         raise SystemExit(f"refusal policy was not projected for {profile}: {session!r}")
 PY
+stop_node
+HOME="$home_root" "$ryeos_bin" node policy-apply persistent_sessions \
+    "$policy_root/persistent-sessions.json" --app-root "$node_root" --json \
+    > "$qualification_root/restored-policy-result.json"
+snapshot_persistent_session_policy \
+    restored-baseline \
+    "$qualification_root/persistent-policy-restored.json" \
+    "$policy_root/persistent-sessions.json"
+python3 - "$qualification_root" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+baseline = json.loads((root / "persistent-policy-baseline.json").read_text())
+refusal = json.loads((root / "persistent-policy-refusal.json").read_text())
+restored = json.loads((root / "persistent-policy-restored.json").read_text())
+if restored["body"] != baseline["body"]:
+    raise SystemExit("restored persistent-session policy is not the initialized baseline")
+if restored["semantic_digest"] != baseline["semantic_digest"]:
+    raise SystemExit("restored persistent-session semantic identity moved")
+if restored["signed_content_hash"] != baseline["signed_content_hash"]:
+    raise SystemExit("restored persistent-session signed content identity moved")
+if len({item["signer_fingerprint"] for item in (baseline, refusal, restored)}) != 1:
+    raise SystemExit("persistent-session transition changed node signing authority")
+expected_refusal = json.loads(json.dumps(baseline["body"]))
+expected_refusal["limits"]["max_total_address_space_bytes"] = 1
+if refusal["body"] != expected_refusal:
+    raise SystemExit("refusal policy changed more than the exact capacity under test")
+proof = {
+    "schema": "ryeos.local_inference_persistent_session_policy_transition.v1",
+    "changed_field": "limits.max_total_address_space_bytes",
+    "baseline": baseline,
+    "refusal": refusal,
+    "restored": restored,
+}
+(root / "persistent-policy-transition.json").write_text(
+    json.dumps(proof, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+start_node
+[[ -z "$(worker_pids)" ]] || {
+    echo "restoring session policy contacted a local-inference worker" >&2
+    exit 1
+}
+
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
+    --project "$project_root" sign \
+    tool:qualification/read \
+    tool:qualification/mutate \
+    tool:qualification/verify \
+    config:ryeos-runtime/execution \
+    directive:qualification/live_tool_loop \
+    graph:qualification/live_tool_follow \
+    > "$qualification_root/project-signing.json"
+
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-execution-4096.json"
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --no-project --no-stream --input '{}' > "$qualification_root/executed-4096.json"
+assert_json_path "$qualification_root/executed-4096.json" status completed
+assert_json_path "$qualification_root/executed-4096.json" success true
+assert_json_path "$qualification_root/executed-4096.json" result OK
+assert_json_missing "$qualification_root/executed-4096.json" error
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-execution-4096.json"
+write_new_thread_proof_for_item \
+    "$qualification_root/threads-before-execution-4096.json" \
+    "$qualification_root/threads-after-execution-4096.json" \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke completed \
+    "$qualification_root/execution-thread-4096.json"
+worker_pids > "$qualification_root/worker-pids-4096.txt"
+[[ -s "$qualification_root/worker-pids-4096.txt" ]] || {
+    echo "4096 profile left no resident admitted worker" >&2
+    exit 1
+}
+
+stop_node
+[[ -z "$(worker_pids)" ]] || {
+    echo "4096 profile worker survived the proved node stop" >&2
+    exit 1
+}
+start_node
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-execution-2048.json"
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
+    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
+    --no-project --no-stream --input '{}' > "$qualification_root/executed-2048.json"
+assert_json_path "$qualification_root/executed-2048.json" status completed
+assert_json_path "$qualification_root/executed-2048.json" success true
+assert_json_path "$qualification_root/executed-2048.json" result OK
+assert_json_missing "$qualification_root/executed-2048.json" error
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-execution-2048.json"
+write_new_thread_proof_for_item \
+    "$qualification_root/threads-before-execution-2048.json" \
+    "$qualification_root/threads-after-execution-2048.json" \
+    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke completed \
+    "$qualification_root/execution-thread-2048.json"
+worker_pids > "$qualification_root/worker-pids-2048.txt"
+[[ -s "$qualification_root/worker-pids-2048.txt" ]] || {
+    echo "2048 profile left no resident admitted worker" >&2
+    exit 1
+}
+stop_node
+[[ -z "$(worker_pids)" ]] || {
+    echo "2048 profile worker survived the proved node stop" >&2
+    exit 1
+}
+snapshot_provider_bank "$qualification_root/bank-before-replay.json" exact-profiles
+start_node
+[[ -z "$(worker_pids)" ]] || {
+    echo "daemon restart contacted local inference before a request" >&2
+    exit 1
+}
 python3 - "$qualification_root/bank-before-replay.json" <<'PY'
 import datetime
 import json
@@ -1522,6 +1652,8 @@ while datetime.datetime.now(datetime.timezone.utc) < target:
         raise SystemExit("clock did not advance beyond replay timestamp precision")
     time.sleep(0.05)
 PY
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-replay-4096.json"
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
     directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
     --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
@@ -1530,6 +1662,15 @@ assert_json_path "$qualification_root/replayed-4096.json" status completed
 assert_json_path "$qualification_root/replayed-4096.json" success true
 assert_json_path "$qualification_root/replayed-4096.json" result OK
 assert_json_missing "$qualification_root/replayed-4096.json" error
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-replay-4096.json"
+write_new_thread_proof_for_item \
+    "$qualification_root/threads-before-replay-4096.json" \
+    "$qualification_root/threads-after-replay-4096.json" \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke completed \
+    "$qualification_root/replay-thread-4096.json"
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-replay-2048.json"
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
     directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
     --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
@@ -1538,12 +1679,19 @@ assert_json_path "$qualification_root/replayed-2048.json" status completed
 assert_json_path "$qualification_root/replayed-2048.json" success true
 assert_json_path "$qualification_root/replayed-2048.json" result OK
 assert_json_missing "$qualification_root/replayed-2048.json" error
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-replay-2048.json"
+write_new_thread_proof_for_item \
+    "$qualification_root/threads-before-replay-2048.json" \
+    "$qualification_root/threads-after-replay-2048.json" \
+    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke completed \
+    "$qualification_root/replay-thread-2048.json"
 [[ -z "$(worker_pids)" ]] || {
     echo "provider replay spawned or contacted a local-inference worker" >&2
     exit 1
 }
 stop_node
-snapshot_provider_bank "$qualification_root/bank-after-replay.json" 2
+snapshot_provider_bank "$qualification_root/bank-after-replay.json" exact-profiles
 
 python3 - "$qualification_root" <<'PY'
 import json
@@ -1581,6 +1729,17 @@ observations_by_hash = {}
 for item in final_observations:
     observations_by_hash.setdefault(item["payload"].get("record_hash"), []).append(item)
 attempt_ids = {item["attempt_id"] for item in before["attempts"]}
+expected_replay_threads = {
+    profile: json.loads(
+        (root / f"replay-thread-{profile.rsplit('-', 1)[-1]}.json").read_text()
+    )["selected_thread_id"]
+    for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048")
+}
+provider_calls_by_cache_key = {
+    item["cache_key"]: item for item in after["provider_call_objects"]
+}
+if set(provider_calls_by_cache_key) != set(before_records):
+    raise SystemExit("provider-call objects do not exactly cover replay records")
 for record in before_records.values():
     pair = observations_by_hash.get(record["record_hash"], [])
     if len(pair) != 2:
@@ -1601,6 +1760,16 @@ for record in before_records.values():
         raise SystemExit("second provider observation is not replay evidence")
     if replayed["payload"]["publication"] != "not_applicable":
         raise SystemExit("replayed provider observation falsely claims publication")
+    provider_id = provider_calls_by_cache_key[record["cache_key"]]["coordinate"][
+        "provider_id"
+    ]
+    expected_replay_thread = expected_replay_threads.get(provider_id)
+    if expected_replay_thread is None:
+        raise SystemExit("replayed provider record names an unexpected provider coordinate")
+    if replayed["thread_id"] != expected_replay_thread:
+        raise SystemExit(
+            f"provider {provider_id} replay observation belongs to the wrong replay thread"
+        )
     replay_source = replayed["payload"].get("replayed_from")
     if not isinstance(replay_source, dict):
         raise SystemExit("replayed provider observation omits its exact source")
@@ -1610,26 +1779,12 @@ for record in before_records.values():
         raise SystemExit("replayed provider observation names an unknown source attempt")
 PY
 
-# Restore the actual session ceiling and qualify the directive-native tool
-# path. The preceding zero-capacity phase already proved exact provider replay
-# before worker contact; this phase deliberately performs new useful local work
-# in a pinned private project generation.
-python3 - "$policy_root/persistent-sessions.json" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-policy = json.loads(path.read_text(encoding="utf-8"))
-policy["limits"]["max_total_address_space_bytes"] = 64 * 1024**3
-path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
-PY
-HOME="$home_root" "$ryeos_bin" node policy-apply persistent_sessions \
-    "$policy_root/persistent-sessions.json" --app-root "$node_root" --json \
-    > "$qualification_root/live-tool-policy-result.json"
+# Qualify the directive-native tool path under the same restored node policy.
+# This phase deliberately performs new useful local work in a pinned private
+# project generation after zero-contact provider replay has been proved.
 start_node
 [[ -z "$(worker_pids)" ]] || {
-    echo "capacity restoration contacted local inference before a request" >&2
+    echo "post-replay restart contacted local inference before a request" >&2
     exit 1
 }
 
@@ -1944,7 +2099,7 @@ if thread_ids(root / "threads-before-release-ready-validation.json") != thread_i
 ):
     raise SystemExit("release-ready validation changed thread inventory")
 PY
-snapshot_provider_bank "$qualification_root/bank-before-release-refusal.json" 2
+snapshot_provider_bank "$qualification_root/bank-before-release-refusal.json" state-only
 thread_service service:external-content/release \
     "{\"binding_id\":\"$binding_id\"}" \
     "$qualification_root/released-binding-4096.json"
@@ -1965,7 +2120,7 @@ fi
 }
 thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
     "$qualification_root/threads-after-release-refusal.json"
-snapshot_provider_bank "$qualification_root/bank-after-release-refusal.json" 2
+snapshot_provider_bank "$qualification_root/bank-after-release-refusal.json" state-only
 python3 - "$qualification_root" "$released_refusal_raw" <<'PY'
 import json
 from pathlib import Path
@@ -2158,6 +2313,9 @@ summary = {
     "external_content_policy": json.loads(
         (root / "external-policy-evidence.json").read_text()
     ),
+    "persistent_session_policy_transition": json.loads(
+        (root / "persistent-policy-transition.json").read_text()
+    ),
     "activations": {
         "qwen3-0.6b-cpu-4096": {
             "first": json.loads((root / "activation-first.json").read_text()),
@@ -2215,6 +2373,14 @@ summary = {
     "replayed": {
         "qwen3-0.6b-cpu-4096": json.loads((root / "replayed-4096.json").read_text()),
         "qwen3-0.6b-cpu-2048": json.loads((root / "replayed-2048.json").read_text()),
+    },
+    "replay_threads": {
+        "qwen3-0.6b-cpu-4096": json.loads(
+            (root / "replay-thread-4096.json").read_text()
+        ),
+        "qwen3-0.6b-cpu-2048": json.loads(
+            (root / "replay-thread-2048.json").read_text()
+        ),
     },
     "worker_pids_after_replay": [],
     "live_tool_loop": json.loads((root / "live-tool-executed.json").read_text()),

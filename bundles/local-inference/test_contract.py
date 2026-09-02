@@ -409,7 +409,7 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("local-inference-offline-qualification.json", source_qualifier)
         self.assertIn("local-inference-online-qualification.json", source_qualifier)
         self.assertIn("--archive-root", qualifier)
-        self.assertIn("minimum_free_bytes = int(sys.argv[5])", qualifier)
+        self.assertIn("minimum_free_bytes = int(sys.argv[4])", qualifier)
         self.assertIn('source "$repository_root/scripts/pkg/bundle-sets.sh"', qualifier)
         self.assertIn("ryeos_bundle_set_names full", qualifier)
         self.assertIn('--source "$qualification_source"', qualifier)
@@ -461,7 +461,55 @@ class LocalInferenceContractTests(unittest.TestCase):
             "provider_config_value_digest",
         ):
             self.assertIn(field, qualifier)
-        self.assertIn('snapshot_provider_bank "$qualification_root/bank-before-replay.json" 2', qualifier)
+        self.assertIn(
+            'snapshot_provider_bank "$qualification_root/bank-before-replay.json" exact-profiles',
+            qualifier,
+        )
+        refusal_position = qualifier.index(
+            '"$policy_root/persistent-sessions-refusal.json" --app-root'
+        )
+        restore_position = qualifier.index(
+            '"$policy_root/persistent-sessions.json" --app-root',
+            refusal_position,
+        )
+        execution_position = qualifier.index(
+            '"$qualification_root/executed-4096.json"'
+        )
+        bank_position = qualifier.index(
+            'snapshot_provider_bank "$qualification_root/bank-before-replay.json" exact-profiles'
+        )
+        replay_position = qualifier.index(
+            '"$qualification_root/replayed-4096.json"'
+        )
+        self.assertLess(refusal_position, restore_position)
+        self.assertLess(restore_position, execution_position)
+        self.assertLess(execution_position, bank_position)
+        self.assertLess(bank_position, replay_position)
+        self.assertNotIn("replay-zero-capacity", qualifier)
+        self.assertIn(
+            'snapshot_provider_bank "$qualification_root/bank-before-release-refusal.json" state-only',
+            qualifier,
+        )
+        self.assertIn(
+            'snapshot_provider_bank "$qualification_root/bank-after-release-refusal.json" state-only',
+            qualifier,
+        )
+        self.assertIn('validation_mode == "state-only"', qualifier)
+        self.assertIn('"persistent_session_policy_transition": json.loads(', qualifier)
+        for policy_proof in (
+            'snapshot_persistent_session_policy',
+            'persistent-policy-baseline.json',
+            'persistent-policy-refusal.json',
+            'persistent-policy-restored.json',
+            'persistent-policy-transition.json',
+            '"schema": "ryeos.local_inference_persistent_session_policy_snapshot.v1"',
+            '"schema": "ryeos.local_inference_persistent_session_policy_transition.v1"',
+            'restored["body"] != baseline["body"]',
+            'restored["signed_content_hash"] != baseline["signed_content_hash"]',
+            'refusal["body"] != expected_refusal',
+        ):
+            self.assertIn(policy_proof, qualifier)
+        self.assertNotIn('persistent = {', qualifier)
         self.assertIn("directive:qualification/live_tool_loop", qualifier)
         self.assertIn("graph:qualification/live_tool_follow", qualifier)
         self.assertIn("--pin-project --retain-child-results", qualifier)
@@ -472,11 +520,18 @@ class LocalInferenceContractTests(unittest.TestCase):
             qualifier.count("- ryeos.execute.tool.qualification/read"), 2,
             "both the live directive and its follow parent must hold read authority",
         )
-        self.assertIn(
-            '"cancellation_mode": "graceful"',
-            qualifier,
-            "zero-argument Python tools must distinguish runtime-injected controls",
+        self.assertEqual(
+            qualifier.count("expected = {}"),
+            3,
+            "zero-argument tools must receive only their declared empty input",
         )
+        for implicit_runtime_input in (
+            '"cancellation_grace_secs": 5',
+            '"cancellation_mode": "graceful"',
+            '"project_path": project_path',
+            '"timeout": 86400',
+        ):
+            self.assertNotIn(implicit_runtime_input, qualifier)
         self.assertIn("tool_concurrency: 1", qualifier)
         self.assertIn('category: "ryeos-runtime"', qualifier)
         self.assertIn("config:ryeos-runtime/execution", qualifier)
@@ -536,8 +591,27 @@ class LocalInferenceContractTests(unittest.TestCase):
             '"new_threads": [',
             '"selected_thread_id": thread_id',
             '"execution_threads": {',
+            'threads-before-replay-4096.json',
+            'threads-after-replay-4096.json',
+            'threads-before-replay-2048.json',
+            'threads-after-replay-2048.json',
+            'replay-thread-{profile.rsplit(\'-\', 1)[-1]}.json',
+            'expected_replay_threads = {',
+            'provider_calls_by_cache_key = {',
+            'provider_calls_by_cache_key[record["cache_key"]]["coordinate"]',
+            'replayed["thread_id"] != expected_replay_thread',
+            '"replay_threads": {',
         ):
             self.assertIn(required_join, qualifier)
+
+        # Cleanup is part of the release result: a successful body cannot
+        # suppress a failed exact-node stop and then delete the live root.
+        self.assertIn('local stop_failed=0', qualifier)
+        self.assertIn('status=1', qualifier)
+        self.assertIn('cleanup could not prove node stop', qualifier)
+        self.assertIn('trap - EXIT', qualifier)
+        self.assertIn('exit "$status"', qualifier)
+        self.assertNotIn('"$ryeos_bin" stop --app-root "$node_root" >/dev/null 2>&1 || true', qualifier)
 
         # The cache/lease negative must occur in one daemon generation and
         # without a validation between release and launch.
