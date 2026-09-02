@@ -72,16 +72,20 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
         repository.join("bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad");
     let observed = captured_directory_digest(&worker_root);
 
-    let worker_item = std::fs::read_to_string(
-        repository.join("bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml"),
-    )
-    .unwrap();
-    let body = lillux::signature::strip_signature_lines(&worker_item);
-    let value: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
-    let declared = value["source"]["digest"]
-        .as_str()
-        .expect("worker item declares its adjacent source digest");
-    assert_eq!(observed, declared);
+    for profile in ["qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"] {
+        let worker_item = std::fs::read_to_string(
+            repository
+                .join("bundles/local-inference/.ai/workers/local-inference")
+                .join(format!("{profile}.yaml")),
+        )
+        .unwrap();
+        let body = lillux::signature::strip_signature_lines(&worker_item);
+        let value: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
+        let declared = value["source"]["digest"]
+            .as_str()
+            .expect("worker item declares its adjacent source digest");
+        assert_eq!(observed, declared, "{profile}");
+    }
 }
 
 #[test]
@@ -90,38 +94,6 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         .ancestors()
         .nth(3)
         .expect("ryeos-state lives below the repository root");
-    let worker_item = std::fs::read_to_string(
-        repository.join("bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml"),
-    )
-    .unwrap();
-    let body = lillux::signature::strip_signature_lines(&worker_item);
-    let worker: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
-    let declared = worker["external_content"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .filter(|entry| entry.get("locator").is_none())
-        .map(|entry| {
-            (
-                entry["id"].as_str().unwrap().to_owned(),
-                entry["digest"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let fixture: serde_yaml::Value =
-        serde_yaml::from_str(&lillux::signature::strip_signature_lines(
-            &std::fs::read_to_string(repository.join(
-                "bundles/local-inference/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
-            ))
-            .unwrap(),
-        ))
-        .unwrap();
-    assert_eq!(
-        fixture["consumer_ref"].as_str(),
-        Some("worker:local-inference/local-tinygrad")
-    );
-    assert!(fixture.get("persistent_session_policy").is_none());
     let release: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             repository.join("scripts/release/local-inference-qwen3-0.6b-v1.json"),
@@ -135,6 +107,51 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         .iter()
         .map(|entry| (entry["component"].as_str().unwrap(), entry))
         .collect::<BTreeMap<_, _>>();
+    for profile in ["qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"] {
+        let worker_item = std::fs::read_to_string(
+            repository
+                .join("bundles/local-inference/.ai/workers/local-inference")
+                .join(format!("{profile}.yaml")),
+        )
+        .unwrap();
+        let body = lillux::signature::strip_signature_lines(&worker_item);
+        let worker: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
+        let declared = worker["external_content"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.get("locator").is_none())
+            .map(|entry| {
+                (
+                    entry["id"].as_str().unwrap().to_owned(),
+                    entry["digest"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let fixture: serde_yaml::Value =
+            serde_yaml::from_str(&lillux::signature::strip_signature_lines(
+                &std::fs::read_to_string(
+                    repository
+                        .join("bundles/local-inference/.ai/config/ryeos-runtime")
+                        .join(format!("{profile}-activation.yaml")),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            fixture["consumer_ref"].as_str(),
+            Some(format!("worker:local-inference/{profile}").as_str())
+        );
+        assert!(fixture.get("persistent_session_policy").is_none());
+        assert_activation_matches_release(&fixture, &declared, &releases);
+    }
+}
+
+fn assert_activation_matches_release(
+    fixture: &serde_yaml::Value,
+    declared: &BTreeMap<String, String>,
+    releases: &BTreeMap<&str, &serde_json::Value>,
+) {
     let sources = fixture["sources"]
         .as_sequence()
         .unwrap()
@@ -165,5 +182,5 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
             (id.to_owned(), declared[id].to_owned())
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(captured, declared);
+    assert_eq!(&captured, declared);
 }

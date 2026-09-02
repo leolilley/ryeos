@@ -366,7 +366,7 @@ for name, content in tools.items():
 description: "Bounded live Qwen fixture for directive-native RyeOS tool execution."
 version: "1.0.0"
 model:
-  provider: local-tinygrad
+  provider: qwen3-0.6b-cpu-4096
   name: qwen3-0.6b
   context_window: 2048
   sampling:
@@ -785,13 +785,15 @@ PY
 
 snapshot_provider_bank() {
     local evidence_file="$1"
-    python3 - "$node_root" "$evidence_file" <<'PY'
+    local expected_count="$2"
+    python3 - "$node_root" "$evidence_file" "$expected_count" <<'PY'
 import json
 from pathlib import Path
 import sqlite3
 import sys
 
 node = Path(sys.argv[1])
+expected_count = int(sys.argv[3])
 accounting_path = node / ".ai/state/accounting.sqlite3"
 operational_path = node / ".ai/state/operational.sqlite3"
 generation = json.loads(
@@ -838,9 +840,10 @@ for item in observation_rows:
         payload = payload.decode("utf-8")
     item["payload"] = json.loads(payload)
     observations.append(item)
-if len(attempts) != 1:
-    raise SystemExit(f"expected one provider attempt, observed {len(attempts)}")
-attempt = attempts[0]
+if len(attempts) != expected_count:
+    raise SystemExit(
+        f"expected {expected_count} provider attempts, observed {len(attempts)}"
+    )
 expected_attempt = {
     "state": "reconciled",
     "reserved_usd_nanos": 0,
@@ -849,35 +852,42 @@ expected_attempt = {
     "charge_basis": "explicitly_free",
     "reconciliation_reason": "explicitly_free_contract",
 }
-for field, expected in expected_attempt.items():
-    if attempt[field] != expected:
-        raise SystemExit(
-            f"provider attempt {field}: expected={expected!r}, observed={attempt[field]!r}"
-        )
-if attempt["settled_at_ms"] is None:
-    raise SystemExit("provider attempt is terminal without settled_at_ms")
+for attempt in attempts:
+    for field, expected in expected_attempt.items():
+        if attempt[field] != expected:
+            raise SystemExit(
+                f"provider attempt {field}: expected={expected!r}, observed={attempt[field]!r}"
+            )
+    if attempt["settled_at_ms"] is None:
+        raise SystemExit("provider attempt is terminal without settled_at_ms")
 publication = [
     item for item in operations
     if item["operation_kind"] == "provider_call_publication"
     and item["transition_sequence"] == 1
 ]
-if len(publication) != 1:
+if len(publication) != expected_count:
     raise SystemExit(
-        f"expected one provider_call_publication operation, observed {len(publication)}"
+        f"expected {expected_count} provider_call_publication operations, observed {len(publication)}"
     )
-if len(records) != 1:
-    raise SystemExit(f"expected one provider replay record, observed {len(records)}")
-proof = json.loads(publication[0]["response_json"])
-record = records[0]
-for field in ("cache_key", "answer_digest", "record_hash"):
-    if proof.get(field) != record[field]:
-        raise SystemExit(
-            f"provider publication proof {field} contradicts replay record"
-        )
+if len(records) != expected_count:
+    raise SystemExit(
+        f"expected {expected_count} provider replay records, observed {len(records)}"
+    )
+records_by_hash = {record["record_hash"]: record for record in records}
+for operation in publication:
+    proof = json.loads(operation["response_json"])
+    record = records_by_hash.get(proof.get("record_hash"))
+    if record is None:
+        raise SystemExit("provider publication names no retained replay record")
+    for field in ("cache_key", "answer_digest", "record_hash"):
+        if proof.get(field) != record[field]:
+            raise SystemExit(
+                f"provider publication proof {field} contradicts replay record"
+            )
 evidence = {
     "attempts": attempts,
     "operations": operations,
-    "provider_record": record,
+    "provider_records": records,
     "provider_observations": observations,
 }
 Path(sys.argv[2]).write_text(
@@ -888,9 +898,87 @@ PY
 }
 
 start_node
+
+# Static admission must run the signed launch preparer and identify both exact
+# workers before activation, while creating no thread, worker, session, lease,
+# reservation, or content publication.
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-validation.json"
+for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
+    directive="directive:local-inference/examples/${profile//[-.]/_}_smoke"
+    HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
+        "$directive" --ref-binding "model=$directive" --no-project --input '{}' \
+        > "$qualification_root/validation-before-$profile.json"
+done
+[[ -z "$(worker_pids)" ]] || {
+    echo "static validation launched a local-inference worker" >&2
+    exit 1
+}
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-validation.json"
+python3 - "$qualification_root" before <<'PY'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+def thread_ids(path):
+    value = json.loads(path.read_text())
+    found = set()
+    def walk(item):
+        if isinstance(item, dict):
+            thread_id = item.get("thread_id")
+            if isinstance(thread_id, str):
+                found.add(thread_id)
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+    walk(value)
+    return found
+
+before = thread_ids(root / "threads-before-validation.json")
+after = thread_ids(root / "threads-after-validation.json")
+if before != after:
+    raise SystemExit(f"static validation changed thread inventory: {before} -> {after}")
+
+for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
+    value = json.loads((root / f"validation-before-{profile}.json").read_text())
+    def find(item):
+        if isinstance(item, dict):
+            if "runtime_preparation" in item and "admission_ready" in item:
+                return item
+            for child in item.values():
+                found = find(child)
+                if found is not None:
+                    return found
+        elif isinstance(item, list):
+            for child in item:
+                found = find(child)
+                if found is not None:
+                    return found
+        return None
+    result = find(value)
+    if result is None:
+        raise SystemExit(f"validation omitted runtime preparation for {profile}")
+    dependencies = result["runtime_preparation"]["execution_dependencies"]
+    if len(dependencies) != 1:
+        raise SystemExit(f"validation selected {len(dependencies)} workers for {profile}")
+    dependency = next(iter(dependencies.values()))
+    if dependency["canonical_ref"] != f"worker:local-inference/{profile}":
+        raise SystemExit(f"validation selected wrong worker for {profile}: {dependency!r}")
+    pins = dependency["external_content"]["declarations"]
+    if {item["id"] for item in pins} != {"runtime", "tinygrad", "toolchain", "model"}:
+        raise SystemExit(f"validation omitted exact pins for {profile}")
+    if result["admission_ready"] or dependency["admission_ready"]:
+        raise SystemExit(f"unactivated profile {profile} was reported ready")
+PY
+
 activation_args=(
     external-content activate
-    config:ryeos-runtime/local-tinygrad-activation
+    config:ryeos-runtime/qwen3-0.6b-cpu-4096-activation
 )
 if [[ -n "$archive_root" ]]; then
     activation_args+=(offline local-inference-archives)
@@ -958,6 +1046,78 @@ verify_managed_cache "$qualification_root/managed-cache-idempotent.json"
 cmp "$qualification_root/managed-cache-first.json" \
     "$qualification_root/managed-cache-idempotent.json"
 
+activation_args=(
+    external-content activate
+    config:ryeos-runtime/qwen3-0.6b-cpu-2048-activation
+)
+if [[ -n "$archive_root" ]]; then
+    activation_args+=(offline local-inference-archives)
+else
+    activation_args+=(online)
+fi
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
+    "${activation_args[@]}" \
+    > "$qualification_root/activation-2048-first.json"
+assert_json_path "$qualification_root/activation-2048-first.json" state running
+assert_json_path "$qualification_root/activation-2048-first.json" idempotent false
+activation_2048_job="$(activation_job_id "$qualification_root/activation-2048-first.json")"
+wait_activation_terminal "$activation_2048_job" \
+    "$qualification_root/activation-2048-terminal-db.json"
+thread_service service:sync/jobs/inspect \
+    "{\"job_id\":\"$activation_2048_job\"}" \
+    "$qualification_root/activation-2048-job-inspect.json"
+assert_json_path "$qualification_root/activation-2048-job-inspect.json" job.state completed
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
+    "${activation_args[@]}" \
+    > "$qualification_root/activation-2048-idempotent.json"
+assert_json_path "$qualification_root/activation-2048-idempotent.json" idempotent true
+assert_json_path "$qualification_root/activation-2048-idempotent.json" state completed
+
+# Both exact consumer bindings now exist. Re-run threadless validation and
+# prove readiness without creating an execution thread or resident worker.
+for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
+    directive="directive:local-inference/examples/${profile//[-.]/_}_smoke"
+    HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
+        "$directive" --ref-binding "model=$directive" --no-project --input '{}' \
+        > "$qualification_root/validation-after-$profile.json"
+done
+[[ -z "$(worker_pids)" ]] || {
+    echo "ready static validation launched a local-inference worker" >&2
+    exit 1
+}
+python3 - "$qualification_root" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
+    value = json.loads((root / f"validation-after-{profile}.json").read_text())
+    def find(item):
+        if isinstance(item, dict):
+            if "runtime_preparation" in item and "admission_ready" in item:
+                return item
+            for child in item.values():
+                found = find(child)
+                if found is not None:
+                    return found
+        elif isinstance(item, list):
+            for child in item:
+                found = find(child)
+                if found is not None:
+                    return found
+        return None
+    result = find(value)
+    if result is None or not result["admission_ready"]:
+        raise SystemExit(f"activated profile {profile} was not ready: {value!r}")
+    dependency = next(iter(result["runtime_preparation"]["execution_dependencies"].values()))
+    if not dependency["admission_ready"]:
+        raise SystemExit(f"activated dependency {profile} was not ready")
+    pins = dependency["external_content"]["declarations"]
+    if any(item["status"] != "ready" or item["binding_digest"] is None for item in pins):
+        raise SystemExit(f"activated dependency {profile} lacks exact binding readiness")
+PY
+
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
     --project "$project_root" sign \
     tool:qualification/read \
@@ -968,30 +1128,45 @@ HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
     graph:qualification/live_tool_follow \
     > "$qualification_root/project-signing.json"
 
-HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
-    directive:local-inference/examples/tinygrad_smoke \
-    --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
-    --no-project --input '{}' > "$qualification_root/validation.json"
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
-    directive:local-inference/examples/tinygrad_smoke \
-    --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
-    --no-project --no-stream --input '{}' > "$qualification_root/executed.json"
-assert_json_path "$qualification_root/executed.json" status completed
-assert_json_path "$qualification_root/executed.json" success true
-assert_json_path "$qualification_root/executed.json" result OK
-assert_json_missing "$qualification_root/executed.json" error
-worker_pids > "$qualification_root/first-worker-pids.txt"
-[[ -s "$qualification_root/first-worker-pids.txt" ]] || {
-    echo "first local-inference execution left no resident admitted worker" >&2
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --no-project --no-stream --input '{}' > "$qualification_root/executed-4096.json"
+assert_json_path "$qualification_root/executed-4096.json" status completed
+assert_json_path "$qualification_root/executed-4096.json" success true
+assert_json_path "$qualification_root/executed-4096.json" result OK
+assert_json_missing "$qualification_root/executed-4096.json" error
+worker_pids > "$qualification_root/worker-pids-4096.txt"
+[[ -s "$qualification_root/worker-pids-4096.txt" ]] || {
+    echo "4096 profile left no resident admitted worker" >&2
     exit 1
 }
 
 stop_node
 [[ -z "$(worker_pids)" ]] || {
-    echo "local-inference worker survived the proved node stop" >&2
+    echo "4096 profile worker survived the proved node stop" >&2
     exit 1
 }
-snapshot_provider_bank "$qualification_root/bank-before-replay.json"
+start_node
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
+    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
+    --no-project --no-stream --input '{}' > "$qualification_root/executed-2048.json"
+assert_json_path "$qualification_root/executed-2048.json" status completed
+assert_json_path "$qualification_root/executed-2048.json" success true
+assert_json_path "$qualification_root/executed-2048.json" result OK
+assert_json_missing "$qualification_root/executed-2048.json" error
+worker_pids > "$qualification_root/worker-pids-2048.txt"
+[[ -s "$qualification_root/worker-pids-2048.txt" ]] || {
+    echo "2048 profile left no resident admitted worker" >&2
+    exit 1
+}
+stop_node
+[[ -z "$(worker_pids)" ]] || {
+    echo "2048 profile worker survived the proved node stop" >&2
+    exit 1
+}
+snapshot_provider_bank "$qualification_root/bank-before-replay.json" 2
 python3 - "$policy_root/persistent-sessions.json" <<'PY'
 import json
 from pathlib import Path
@@ -1018,8 +1193,11 @@ import sys
 import time
 
 bank = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-recorded = datetime.datetime.fromisoformat(
-    bank["provider_record"]["last_replayed_at"].replace("Z", "+00:00")
+recorded = max(
+    datetime.datetime.fromisoformat(
+        record["last_replayed_at"].replace("Z", "+00:00")
+    )
+    for record in bank["provider_records"]
 )
 target = recorded + datetime.timedelta(seconds=1)
 deadline = time.monotonic() + 2.0
@@ -1029,19 +1207,27 @@ while datetime.datetime.now(datetime.timezone.utc) < target:
     time.sleep(0.05)
 PY
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
-    directive:local-inference/examples/tinygrad_smoke \
-    --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
-    --no-project --no-stream --input '{}' > "$qualification_root/replayed.json"
-assert_json_path "$qualification_root/replayed.json" status completed
-assert_json_path "$qualification_root/replayed.json" success true
-assert_json_path "$qualification_root/replayed.json" result OK
-assert_json_missing "$qualification_root/replayed.json" error
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --no-project --no-stream --input '{}' > "$qualification_root/replayed-4096.json"
+assert_json_path "$qualification_root/replayed-4096.json" status completed
+assert_json_path "$qualification_root/replayed-4096.json" success true
+assert_json_path "$qualification_root/replayed-4096.json" result OK
+assert_json_missing "$qualification_root/replayed-4096.json" error
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
+    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
+    --no-project --no-stream --input '{}' > "$qualification_root/replayed-2048.json"
+assert_json_path "$qualification_root/replayed-2048.json" status completed
+assert_json_path "$qualification_root/replayed-2048.json" success true
+assert_json_path "$qualification_root/replayed-2048.json" result OK
+assert_json_missing "$qualification_root/replayed-2048.json" error
 [[ -z "$(worker_pids)" ]] || {
     echo "provider replay spawned or contacted a local-inference worker" >&2
     exit 1
 }
 stop_node
-snapshot_provider_bank "$qualification_root/bank-after-replay.json"
+snapshot_provider_bank "$qualification_root/bank-after-replay.json" 2
 
 python3 - "$qualification_root" <<'PY'
 import json
@@ -1055,48 +1241,57 @@ if before["attempts"] != after["attempts"]:
     raise SystemExit("provider replay changed or created an accounting reservation")
 if before["operations"] != after["operations"]:
     raise SystemExit("provider replay changed or created an accounting operation")
-before_record = before["provider_record"]
-after_record = after["provider_record"]
-for field in ("cache_key", "answer_digest", "record_hash", "produced_at"):
-    if before_record[field] != after_record[field]:
-        raise SystemExit(f"provider replay changed immutable replay field {field}")
-if after_record["last_replayed_at"] <= before_record["last_replayed_at"]:
-    raise SystemExit("provider replay did not advance replay retention evidence")
+before_records = {item["cache_key"]: item for item in before["provider_records"]}
+after_records = {item["cache_key"]: item for item in after["provider_records"]}
+if set(before_records) != set(after_records) or len(before_records) != 2:
+    raise SystemExit("provider replay record identity set changed")
+for cache_key, before_record in before_records.items():
+    after_record = after_records[cache_key]
+    for field in ("cache_key", "answer_digest", "record_hash", "produced_at"):
+        if before_record[field] != after_record[field]:
+            raise SystemExit(f"provider replay changed immutable replay field {field}")
+    if after_record["last_replayed_at"] <= before_record["last_replayed_at"]:
+        raise SystemExit("provider replay did not advance replay retention evidence")
 
 first_observations = before["provider_observations"]
 final_observations = after["provider_observations"]
-if len(first_observations) != 1 or len(final_observations) != 2:
+if len(first_observations) != 2 or len(final_observations) != 4:
     raise SystemExit(
-        "expected exactly one executed and one replayed provider observation"
+        "expected exactly two executed and two replayed provider observations"
     )
-if final_observations[0] != first_observations[0]:
-    raise SystemExit("provider replay changed the first terminal observation")
-executed = first_observations[0]
-replayed = final_observations[1]
-for item in (executed, replayed):
-    if item["durability"] != "durable" or item["thread_status"] != "completed":
-        raise SystemExit("provider observation is not attached to a completed durable thread")
-    if item["payload"]["record_hash"] != before_record["record_hash"]:
-        raise SystemExit("provider observation contradicts the banked record hash")
-    if item["payload"]["answer_digest"] != before_record["answer_digest"]:
-        raise SystemExit("provider observation contradicts the banked answer digest")
-if executed["payload"]["source"] != "executed":
-    raise SystemExit("first provider observation is not executed evidence")
-if executed["payload"]["publication"] not in ("inserted", "folded"):
-    raise SystemExit("first provider observation did not confirm publication")
-if executed["payload"].get("replayed_from") is not None:
-    raise SystemExit("executed provider observation falsely names a replay source")
-if replayed["payload"]["source"] != "replay":
-    raise SystemExit("second provider observation is not replay evidence")
-if replayed["payload"]["publication"] != "not_applicable":
-    raise SystemExit("replayed provider observation falsely claims publication")
-replay_source = replayed["payload"].get("replayed_from")
-if not isinstance(replay_source, dict):
-    raise SystemExit("replayed provider observation omits its exact source")
-if replay_source.get("produced_by_thread") != executed["thread_id"]:
-    raise SystemExit("replayed provider observation names the wrong source thread")
-if replay_source.get("attempt_id") != before["attempts"][0]["attempt_id"]:
-    raise SystemExit("replayed provider observation names the wrong source attempt")
+if final_observations[:2] != first_observations:
+    raise SystemExit("provider replay changed a terminal executed observation")
+observations_by_hash = {}
+for item in final_observations:
+    observations_by_hash.setdefault(item["payload"].get("record_hash"), []).append(item)
+attempt_ids = {item["attempt_id"] for item in before["attempts"]}
+for record in before_records.values():
+    pair = observations_by_hash.get(record["record_hash"], [])
+    if len(pair) != 2:
+        raise SystemExit("provider record does not have one execution and one replay")
+    executed, replayed = pair
+    for item in pair:
+        if item["durability"] != "durable" or item["thread_status"] != "completed":
+            raise SystemExit("provider observation is not attached to a completed durable thread")
+        if item["payload"]["answer_digest"] != record["answer_digest"]:
+            raise SystemExit("provider observation contradicts the banked answer digest")
+    if executed["payload"]["source"] != "executed":
+        raise SystemExit("first provider observation is not executed evidence")
+    if executed["payload"]["publication"] not in ("inserted", "folded"):
+        raise SystemExit("first provider observation did not confirm publication")
+    if executed["payload"].get("replayed_from") is not None:
+        raise SystemExit("executed provider observation falsely names a replay source")
+    if replayed["payload"]["source"] != "replay":
+        raise SystemExit("second provider observation is not replay evidence")
+    if replayed["payload"]["publication"] != "not_applicable":
+        raise SystemExit("replayed provider observation falsely claims publication")
+    replay_source = replayed["payload"].get("replayed_from")
+    if not isinstance(replay_source, dict):
+        raise SystemExit("replayed provider observation omits its exact source")
+    if replay_source.get("produced_by_thread") != executed["thread_id"]:
+        raise SystemExit("replayed provider observation names the wrong source thread")
+    if replay_source.get("attempt_id") not in attempt_ids:
+        raise SystemExit("replayed provider observation names an unknown source attempt")
 PY
 
 # Restore the actual session ceiling and qualify the directive-native tool
@@ -1370,20 +1565,35 @@ summary = {
     "external_content_policy": json.loads(
         (root / "external-policy-evidence.json").read_text()
     ),
-    "activation": json.loads((root / "activation-first.json").read_text()),
-    "idempotent_activation": json.loads(
-        (root / "activation-idempotent.json").read_text()
-    ),
+    "activations": {
+        "qwen3-0.6b-cpu-4096": {
+            "first": json.loads((root / "activation-first.json").read_text()),
+            "idempotent": json.loads((root / "activation-idempotent.json").read_text()),
+        },
+        "qwen3-0.6b-cpu-2048": {
+            "first": json.loads((root / "activation-2048-first.json").read_text()),
+            "idempotent": json.loads((root / "activation-2048-idempotent.json").read_text()),
+        },
+    },
     "managed_cache": json.loads((root / "managed-cache-first.json").read_text()),
-    "first_worker_pids": (root / "first-worker-pids.txt").read_text().split(),
+    "worker_pids": {
+        "qwen3-0.6b-cpu-4096": (root / "worker-pids-4096.txt").read_text().split(),
+        "qwen3-0.6b-cpu-2048": (root / "worker-pids-2048.txt").read_text().split(),
+    },
     "bank_before_replay": json.loads(
         (root / "bank-before-replay.json").read_text()
     ),
     "bank_after_replay": json.loads(
         (root / "bank-after-replay.json").read_text()
     ),
-    "executed": json.loads((root / "executed.json").read_text()),
-    "replayed": json.loads((root / "replayed.json").read_text()),
+    "executed": {
+        "qwen3-0.6b-cpu-4096": json.loads((root / "executed-4096.json").read_text()),
+        "qwen3-0.6b-cpu-2048": json.loads((root / "executed-2048.json").read_text()),
+    },
+    "replayed": {
+        "qwen3-0.6b-cpu-4096": json.loads((root / "replayed-4096.json").read_text()),
+        "qwen3-0.6b-cpu-2048": json.loads((root / "replayed-2048.json").read_text()),
+    },
     "worker_pids_after_replay": [],
     "live_tool_loop": json.loads((root / "live-tool-executed.json").read_text()),
     "graph_follow": json.loads((root / "live-tool-and-graph-evidence.json").read_text()),

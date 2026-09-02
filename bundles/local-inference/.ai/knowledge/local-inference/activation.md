@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T12:56:53Z:5ace257bec64f8c2e4d4bbc6d30a82f1e56ec88a01fac174fbe0f91b92656b41:2m0uRRdAvcupCRU3e8L4gPhu1cmKzB+QUKiywFuBxQJRsZVkyYWMOVZf+FMBlGAinGu5MEk0LmhMFLheDyXRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T13:27:39Z:87bfc0dcd963b50f49fe1d57f1c7b676ab8b14bf667e1919310b296939b383bc:G08nne15FJZLJ7axpNo3w+br+GfXcR3uWa5rkDhYU60Z8oKzqXbSLn/DULWuHKEOMdWb3mgeZDPslWNeJ8Q2CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
-version: "1.3.0"
+version: "1.4.0"
 description: >
   Node policy, managed activation, execution evidence, and recovery contract
   for the admitted Qwen3 tinygrad fixture.
@@ -29,9 +29,17 @@ acquisition and persistent-process baseline; reinstalling an existing node
 preserves that node's current policy generation. Bubblewrap is optional node
 hardening and is not an activation prerequisite.
 
-The shipped worker:local-inference/local-tinygrad and
-provider:local-tinygrad are the bounded Qwen3-0.6B CPU fixture. They are
-recorded, not sealed.
+The bundle ships two exact recorded Qwen3-0.6B CPU profiles:
+
+- worker:local-inference/qwen3-0.6b-cpu-4096 through
+  provider:qwen3-0.6b-cpu-4096; and
+- worker:local-inference/qwen3-0.6b-cpu-2048 through
+  provider:qwen3-0.6b-cpu-2048.
+
+They share the same implementation source and four immutable realization
+pins. Their signed real-UID process ceilings differ, so the worker contributor,
+effective program, persistent-session pool identity, restart authority, and
+provider coordinate differ. Neither profile is sealed.
 
 ## Exact execution boundary
 
@@ -44,7 +52,7 @@ realizations are:
 - the exact compiler/linker closure; and
 - the exact model, tokenizer, configuration, template, and provenance bytes.
 
-config:ryeos-runtime/local-tinygrad-activation uses the generic
+The two profile-specific activation declarations use the generic
 ryeos.external_content_activation.v3 whole-archive-tree shape. Each signed
 source is an immutable, publisher-produced final tree. Node activation performs
 no package installation, stripping, patching, template expansion, generated
@@ -106,10 +114,11 @@ managed_activation:
     max_attempts: 3
 ~~~
 
-The two HTTPS hosts are separately node-admitted because an immutable GitHub
-release URL redirects to GitHub's release-asset host. RyeOS follows at most the
-node-owned redirect ceiling, rechecks canonical HTTPS and the host allowlist on
-every hop, and still requires the exact signed archive digest.
+The three HTTPS hosts are the exact installed-bundle union: immutable GitHub
+release URLs may redirect to GitHub's release-asset host, while the installed
+Codex workload uses releases.openai.com. RyeOS follows at most the node-owned
+redirect ceiling, rechecks canonical HTTPS and the host allowlist on every hop,
+and still requires each exact signed archive digest.
 
 The 8 GiB residual free-space floor above is an operator recommendation, not
 workload identity. The publisher-authored `full` and `full-sandbox` baseline
@@ -153,10 +162,13 @@ an ordinary fresh install. Policy absence or invalid bounds are refusals.
 
 ## One-command activation
 
-Start the node, then run as its configured local operator:
+Start the node, then run both profile-specific activations as its configured
+local operator. The second operation reuses the verified four manifests but
+publishes distinct consumer bindings:
 
 ~~~text
-ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation online
+ryeos external-content activate config:ryeos-runtime/qwen3-0.6b-cpu-4096-activation online
+ryeos external-content activate config:ryeos-runtime/qwen3-0.6b-cpu-2048-activation online
 ~~~
 
 The command first returns a durable coordinate such as
@@ -198,7 +210,7 @@ Offline activation has two explicit forms. Cache-only activation requires every
 exact digest to have settled previously:
 
 ~~~text
-ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation offline
+ryeos external-content activate config:ryeos-runtime/qwen3-0.6b-cpu-4096-activation offline
 ~~~
 
 An offline artifact set may instead be supplied through one node-owned
@@ -207,7 +219,7 @@ operator applies its exact path/device/inode policy while the node is stopped:
 
 ~~~text
 ryeos external-content activate \
-  config:ryeos-runtime/local-tinygrad-activation \
+  config:ryeos-runtime/qwen3-0.6b-cpu-4096-activation \
   offline local-inference-archives
 ~~~
 
@@ -221,25 +233,30 @@ or falls back online. A missing, linked, oversized, or wrong archive refuses.
 
 ## Validation, bank, restart, and replay
 
-Validate the signed fixture threadlessly, then execute:
+Validate both signed profiles threadlessly, then execute them sequentially:
 
 ~~~text
-ryeos validate directive:local-inference/examples/tinygrad_smoke \
-  --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
+ryeos validate directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+  --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
   --no-project --input '{}'
 
-ryeos execute directive:local-inference/examples/tinygrad_smoke \
-  --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
+ryeos execute directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+  --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
   --no-project --no-stream --input '{}'
 ~~~
 
 The directive runtime requires its signed model declaration as the `model`
 launch binding. This binding selects the same trusted directive; it is not a
-caller-selected provider, model name, worker, or realization.
+caller-selected provider, model name, worker, or realization. Static validation
+invokes the same signed bounded launch preparer used by execution and reports
+the selected worker's canonical ref, as-launched resolution digest, source and
+four exact content/binding readiness records, and session-policy eligibility.
+It never launches the workload, creates a session or lease, or publishes
+authority.
 
 The first run must:
 
-- resolve provider:local-tinygrad and the exact admitted worker;
+- resolve the profile's exact provider and admitted worker;
 - launch from the daemon-owned private view under the reported isolation mode;
 - settle an ExplicitlyFree attempt at exactly zero;
 - retain the daemon-owned terminal observation; and

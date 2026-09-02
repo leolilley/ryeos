@@ -1487,7 +1487,7 @@ mod tests {
             billing_principal_digest: digest("principal"),
             credential_authority_generation: "none".to_owned(),
             pricing_contract_subject_digest: digest("local-recorded"),
-            provider_id: "local-tinygrad".to_owned(),
+            provider_id: "fixture-local-recorded".to_owned(),
             model_name: "fixture".to_owned(),
             matched_profile: None,
             spend_bound: SpendBoundAuthority::ExplicitlyFree {

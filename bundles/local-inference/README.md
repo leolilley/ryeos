@@ -33,11 +33,13 @@ records whether confinement and isolated networking were actually enforced.
 
 Installing bundle bytes does not acquire model/runtime content. A fresh
 `full` or `full-sandbox` initialization explicitly publishes the bounded
-publisher-authored acquisition and persistent-session baseline needed by this
-fixture, so it can be activated with one generic operation:
+publisher-authored acquisition and persistent-session baseline needed by the
+two exact fixture profiles. Activate either profile with the same generic
+operation:
 
 ```text
-ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation online
+ryeos external-content activate config:ryeos-runtime/qwen3-0.6b-cpu-4096-activation online
+ryeos external-content activate config:ryeos-runtime/qwen3-0.6b-cpu-2048-activation online
 ```
 
 Activation submission returns a durable sync-job coordinate promptly. Observe
@@ -62,7 +64,7 @@ selected node-policy archive root:
 
 ```text
 ryeos external-content activate \
-  config:ryeos-runtime/local-tinygrad-activation \
+  config:ryeos-runtime/qwen3-0.6b-cpu-4096-activation \
   offline local-inference-archives
 ```
 
@@ -70,6 +72,9 @@ That root is removable/offline acquisition authority only. RyeOS verifies the
 same signed archives and then uses its private digest-keyed cache; it is not a
 lasting workload root, assembly directory, or manual binding path.
 
-The shipped Qwen3-0.6B CPU route is a bounded recorded-class contract fixture.
-It is not a sealed qualification and does not define the future production
-model, device, context, trace, or training architecture.
+The two Qwen3-0.6B CPU routes share the same source and four immutable
+realizations but own distinct signed worker contributors and persistent-session
+identities through exact real-UID process ceilings of 4096 and 2048. They are
+bounded recorded-class contract fixtures, not sealed qualification, and do not
+define the future production model, device, context, trace, or training
+architecture.

@@ -5591,7 +5591,7 @@ owner = "ryeos-dev"
     #[test]
     fn retained_local_observation_reconstructs_the_complete_terminal_without_delta_replay() {
         let provider_value: Value = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/local-inference/.ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml"
+            "../../../../../bundles/local-inference/.ai/config/ryeos-runtime/model-providers/qwen3-0.6b-cpu-4096.yaml"
         ))
         .expect("shipped local worker provider YAML");
         let provider: ProviderConfig =
@@ -5630,7 +5630,7 @@ owner = "ryeos-dev"
         let input = StreamingCallInput {
             client: &client,
             provider: &provider,
-            provider_id: "local-tinygrad",
+            provider_id: "qwen3-0.6b-cpu-4096",
             matched_profile: None,
             config_hash: "fixture",
             execution: &execution,

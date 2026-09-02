@@ -17,10 +17,27 @@ import yaml
 
 BUNDLE = Path(__file__).resolve().parent
 REPOSITORY = BUNDLE.parent.parent
-ACTIVATION_PATH = (
-    BUNDLE / ".ai/config/ryeos-runtime/local-tinygrad-activation.yaml"
-)
-WORKER_PATH = BUNDLE / ".ai/workers/local-inference/local-tinygrad.yaml"
+PROFILE_SPECS = {
+    "qwen3-0.6b-cpu-4096": 4096,
+    "qwen3-0.6b-cpu-2048": 2048,
+}
+ACTIVATION_PATHS = {
+    profile: BUNDLE / f".ai/config/ryeos-runtime/{profile}-activation.yaml"
+    for profile in PROFILE_SPECS
+}
+WORKER_PATHS = {
+    profile: BUNDLE / f".ai/workers/local-inference/{profile}.yaml"
+    for profile in PROFILE_SPECS
+}
+PROVIDER_PATHS = {
+    profile: BUNDLE / f".ai/config/ryeos-runtime/model-providers/{profile}.yaml"
+    for profile in PROFILE_SPECS
+}
+DIRECTIVE_PATHS = {
+    profile: BUNDLE
+    / f".ai/directives/local-inference/examples/{profile.replace('-', '_').replace('.', '_')}_smoke.md"
+    for profile in PROFILE_SPECS
+}
 WORKER_SOURCE = BUNDLE / ".ai/workers/local-inference/lib/local-tinygrad"
 RELEASE_PATH = (
     REPOSITORY / "scripts/release/local-inference-qwen3-0.6b-v1.json"
@@ -86,92 +103,104 @@ def worker_source_manifest_digest() -> str:
 class LocalInferenceContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.activation = yaml.safe_load(
-            ACTIVATION_PATH.read_text(encoding="utf-8")
-        )
-        cls.worker = yaml.safe_load(WORKER_PATH.read_text(encoding="utf-8"))
+        cls.activations = {
+            profile: yaml.safe_load(path.read_text(encoding="utf-8"))
+            for profile, path in ACTIVATION_PATHS.items()
+        }
+        cls.workers = {
+            profile: yaml.safe_load(path.read_text(encoding="utf-8"))
+            for profile, path in WORKER_PATHS.items()
+        }
+        cls.providers = {
+            profile: yaml.safe_load(path.read_text(encoding="utf-8"))
+            for profile, path in PROVIDER_PATHS.items()
+        }
         cls.release = json.loads(RELEASE_PATH.read_text(encoding="utf-8"))
 
     def test_activation_is_a_closed_whole_tree_recipe(self) -> None:
-        self.assertEqual(
-            self.activation["schema"],
-            "ryeos.external_content_activation.v3",
-        )
-        self.assertEqual(
-            self.activation["consumer_ref"],
-            "worker:local-inference/local-tinygrad",
-        )
-        self.assertNotIn("persistent_session_policy", self.activation)
-        self.assertEqual(len(self.activation["sources"]), 4)
-        self.assertEqual(len(self.activation["components"]), 4)
-        self.assertTrue(
-            all(not source.get("members") for source in self.activation["sources"])
-        )
-        self.assertTrue(
-            all(
-                component["shape"]["kind"] == "whole_archive_tree"
-                for component in self.activation["components"]
+        for profile, activation in self.activations.items():
+            self.assertEqual(
+                activation["schema"],
+                "ryeos.external_content_activation.v3",
             )
-        )
-        serialized = ACTIVATION_PATH.read_text(encoding="utf-8")
-        for forbidden in (
-            "command:",
-            "transform:",
-            "named_root",
-            "assembly",
-            "manifest_schema",
-            "expected_manifest_hash",
-        ):
-            self.assertNotIn(forbidden, serialized)
+            self.assertEqual(
+                activation["consumer_ref"],
+                f"worker:local-inference/{profile}",
+            )
+            self.assertNotIn("persistent_session_policy", activation)
+            self.assertEqual(len(activation["sources"]), 4)
+            self.assertEqual(len(activation["components"]), 4)
+            self.assertTrue(
+                all(not source.get("members") for source in activation["sources"])
+            )
+            self.assertTrue(
+                all(
+                    component["shape"]["kind"] == "whole_archive_tree"
+                    for component in activation["components"]
+                )
+            )
+            serialized = ACTIVATION_PATHS[profile].read_text(encoding="utf-8")
+            for forbidden in (
+                "command:",
+                "transform:",
+                "named_root",
+                "assembly",
+                "manifest_schema",
+                "expected_manifest_hash",
+            ):
+                self.assertNotIn(forbidden, serialized)
 
     def test_release_pins_and_consumer_manifest_authority_agree(self) -> None:
         releases = {
             realization["component"]: realization
             for realization in self.release["realizations"]
         }
-        sources = {
-            source["id"].removesuffix("_archive"): source
-            for source in self.activation["sources"]
-        }
-        components = {
-            component["id"]: component
-            for component in self.activation["components"]
-        }
-        declarations = {
-            declaration["id"]: declaration
-            for declaration in self.worker["external_content"]
-        }
-        self.assertEqual(set(releases), set(sources))
-        self.assertEqual(set(releases), set(components))
-        self.assertEqual(set(releases), set(declarations))
+        for profile in PROFILE_SPECS:
+            activation = self.activations[profile]
+            worker = self.workers[profile]
+            sources = {
+                source["id"].removesuffix("_archive"): source
+                for source in activation["sources"]
+            }
+            components = {
+                component["id"]: component
+                for component in activation["components"]
+            }
+            declarations = {
+                declaration["id"]: declaration
+                for declaration in worker["external_content"]
+            }
+            self.assertEqual(set(releases), set(sources))
+            self.assertEqual(set(releases), set(components))
+            self.assertEqual(set(releases), set(declarations))
 
-        for component_id, release in releases.items():
-            source = sources[component_id]
-            component = components[component_id]
-            shape = component["shape"]
-            self.assertEqual(source["url"], release["url"])
-            self.assertEqual(source["sha256"], release["sha256"])
-            self.assertEqual(
-                source["maximum_compressed_bytes"],
-                release["maximum_compressed_bytes"],
-            )
-            self.assertEqual(
-                source["maximum_expanded_bytes"],
-                release["maximum_expanded_bytes"],
-            )
-            self.assertEqual(
-                source["maximum_entries"], release["maximum_entries"]
-            )
-            self.assertEqual(component["storage"], release["storage"])
-            self.assertEqual(shape["source"], f"{component_id}_archive")
-            self.assertEqual(shape["prefix"], release["prefix"])
-            self.assertEqual(shape["bounds"], release["bounds"])
-            self.assertEqual(
-                declarations[component_id]["digest"],
-                release["manifest_hash"],
-            )
-            self.assertEqual(declarations[component_id]["kind"], "tree")
-            self.assertEqual(declarations[component_id]["mode"], "pinned")
+            for component_id, release in releases.items():
+                source = sources[component_id]
+                component = components[component_id]
+                shape = component["shape"]
+                self.assertEqual(source["url"], release["url"])
+                self.assertEqual(source["sha256"], release["sha256"])
+                self.assertEqual(
+                    source["maximum_compressed_bytes"],
+                    release["maximum_compressed_bytes"],
+                )
+                self.assertEqual(
+                    source["maximum_expanded_bytes"],
+                    release["maximum_expanded_bytes"],
+                )
+                self.assertEqual(
+                    source["maximum_entries"], release["maximum_entries"]
+                )
+                self.assertEqual(component["storage"], release["storage"])
+                self.assertEqual(shape["source"], f"{component_id}_archive")
+                self.assertEqual(shape["prefix"], release["prefix"])
+                self.assertEqual(shape["bounds"], release["bounds"])
+                self.assertEqual(
+                    declarations[component_id]["digest"],
+                    release["manifest_hash"],
+                )
+                self.assertEqual(declarations[component_id]["kind"], "tree")
+                self.assertEqual(declarations[component_id]["mode"], "pinned")
 
     def test_release_contract_has_exact_aggregate_node_ceilings(self) -> None:
         realizations = self.release["realizations"]
@@ -302,16 +331,54 @@ class LocalInferenceContractTests(unittest.TestCase):
             self.assertEqual(sessions["limits"]["max_real_uid_process_limit"], 4096, path)
 
     def test_worker_source_digest_covers_the_complete_source_closure(self) -> None:
-        source = WORKER_PATH.read_text(encoding="utf-8")
-        match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)
-        self.assertIsNotNone(match, "worker source digest is absent")
-        self.assertEqual(match.group(1), worker_source_manifest_digest())
+        for path in WORKER_PATHS.values():
+            source = path.read_text(encoding="utf-8")
+            match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)
+            self.assertIsNotNone(match, "worker source digest is absent")
+            self.assertEqual(match.group(1), worker_source_manifest_digest())
 
     def test_worker_declares_its_shared_real_uid_process_ceiling(self) -> None:
+        for profile, process_limit in PROFILE_SPECS.items():
+            self.assertEqual(
+                self.workers[profile]["session_resources"],
+                {"real_uid_process_limit": process_limit},
+            )
+
+    def test_profile_selection_is_signed_and_has_no_predecessor_alias(self) -> None:
+        for profile, provider in self.providers.items():
+            self.assertEqual(
+                provider["transport"]["execute"],
+                f"worker:local-inference/{profile}",
+            )
+            directive = DIRECTIVE_PATHS[profile].read_text(encoding="utf-8")
+            self.assertIn(f"provider: {profile}", directive)
+        for predecessor in (
+            BUNDLE / ".ai/workers/local-inference/local-tinygrad.yaml",
+            BUNDLE / ".ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
+            BUNDLE / ".ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml",
+            BUNDLE / ".ai/directives/local-inference/examples/tinygrad_smoke.md",
+        ):
+            self.assertFalse(predecessor.exists(), predecessor)
+
+    def test_two_profiles_share_realizations_but_move_signed_worker_identity(self) -> None:
+        names = list(PROFILE_SPECS)
+        first_worker = self.workers[names[0]]
+        second_worker = self.workers[names[1]]
+        self.assertEqual(first_worker["source"], second_worker["source"])
         self.assertEqual(
-            self.worker["session_resources"],
-            {"real_uid_process_limit": 4096},
+            first_worker["external_content"], second_worker["external_content"]
         )
+        self.assertEqual(first_worker["config"], second_worker["config"])
+        self.assertNotEqual(
+            first_worker["session_resources"], second_worker["session_resources"]
+        )
+        first_activation = dict(self.activations[names[0]])
+        second_activation = dict(self.activations[names[1]])
+        self.assertNotEqual(
+            first_activation.pop("consumer_ref"),
+            second_activation.pop("consumer_ref"),
+        )
+        self.assertEqual(first_activation, second_activation)
 
     def test_release_qualification_starts_the_real_duplex_session(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -354,6 +421,19 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("provider_attempt_reservation", qualifier)
         self.assertIn("namespace='provider.call'", qualifier)
         self.assertIn("provider_call_observation_recorded", qualifier)
+        for profile in PROFILE_SPECS:
+            self.assertIn(
+                f"config:ryeos-runtime/{profile}-activation", qualifier
+            )
+            self.assertIn(
+                f"directive:local-inference/examples/{profile.replace('-', '_').replace('.', '_')}_smoke",
+                qualifier,
+            )
+            self.assertIn(f"validation-before-$profile.json", qualifier)
+            self.assertIn(f"validation-after-$profile.json", qualifier)
+        self.assertIn("runtime_preparation", qualifier)
+        self.assertIn("static validation changed thread inventory", qualifier)
+        self.assertIn('snapshot_provider_bank "$qualification_root/bank-before-replay.json" 2', qualifier)
         self.assertIn("directive:qualification/live_tool_loop", qualifier)
         self.assertIn("graph:qualification/live_tool_follow", qualifier)
         self.assertIn("--pin-project --retain-child-results", qualifier)

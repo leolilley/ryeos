@@ -1,0 +1,78 @@
+# ryeos:signed:2026-09-02T13:27:39Z:02178a587669f52f5d827ebd45d997fc67be13b32eadddfcf25b1d4ef0f19d7a:SWwSQz6HwjteuJqeYI2Hhn6cOOs6sXKFwgd+4c2AcjMHHj6WXrEGGXtplcHKmjIuCRUd7C4LM1XLeTWhB3qXBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime"
+schema: ryeos.external_content_activation.v3
+consumer_ref: worker:local-inference/qwen3-0.6b-cpu-4096
+sources:
+  - id: runtime_archive
+    url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-runtime-v1.tar.gz
+    sha256: 7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef
+    maximum_compressed_bytes: 24389591
+    maximum_expanded_bytes: 72448000
+    maximum_entries: 4481
+    archive_format: tar_gzip
+  - id: tinygrad_archive
+    url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-tinygrad-v1.tar.gz
+    sha256: accc141e942323c8b865c776b5c1425792e86a1c4981fdf4d711d80db2ac5780
+    maximum_compressed_bytes: 2616072
+    maximum_expanded_bytes: 17233920
+    maximum_entries: 277
+    archive_format: tar_gzip
+  - id: toolchain_archive
+    url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-toolchain-v1.tar.gz
+    sha256: 5ca0c1141b4400505e46305ba3e620d316aecf17d758e3be406c26da914ebb55
+    maximum_compressed_bytes: 105775834
+    maximum_expanded_bytes: 288829440
+    maximum_entries: 70
+    archive_format: tar_gzip
+  - id: model_archive
+    url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-model-v1.tar.gz
+    sha256: fe0ace6724a2d8e83f3f051a3b5d8c4c792cdf2108c26be1b6bcca7bfb2d9e20
+    maximum_compressed_bytes: 1196656785
+    maximum_expanded_bytes: 1514762240
+    maximum_entries: 8
+    archive_format: tar_gzip
+components:
+  - id: runtime
+    storage: content
+    shape:
+      kind: whole_archive_tree
+      source: runtime_archive
+      prefix: ryeos-local-inference-qwen3-0.6b-runtime-v1
+      bounds:
+        maximum_entries: 4480
+        maximum_depth: 11
+        maximum_file_bytes: 22166488
+        maximum_total_bytes: 68732630
+  - id: tinygrad
+    storage: content
+    shape:
+      kind: whole_archive_tree
+      source: tinygrad_archive
+      prefix: ryeos-local-inference-qwen3-0.6b-tinygrad-v1
+      bounds:
+        maximum_entries: 276
+        maximum_depth: 10
+        maximum_file_bytes: 1540491
+        maximum_total_bytes: 17008626
+  - id: toolchain
+    storage: large_content
+    shape:
+      kind: whole_archive_tree
+      source: toolchain_archive
+      prefix: ryeos-local-inference-qwen3-0.6b-toolchain-v1
+      bounds:
+        maximum_entries: 69
+        maximum_depth: 6
+        maximum_file_bytes: 178432672
+        maximum_total_bytes: 288769924
+  - id: model
+    storage: large_content
+    shape:
+      kind: whole_archive_tree
+      source: model_archive
+      prefix: ryeos-local-inference-qwen3-0.6b-model-v1
+      bounds:
+        maximum_entries: 7
+        maximum_depth: 1
+        maximum_file_bytes: 1503300328
+        maximum_total_bytes: 1514745854

@@ -888,52 +888,56 @@ mod tests {
             .ancestors()
             .nth(3)
             .expect("ryeos-app lives below the repository root");
-        let activation_path = repository.join(
-            "bundles/local-inference/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
-        );
-        let activation_value: Value =
-            serde_yaml::from_str(&lillux::signature::strip_signature_lines(
-                &std::fs::read_to_string(&activation_path).unwrap(),
-            ))
-            .unwrap();
-        let activation = ManagedExternalContentActivation::from_value(&activation_value).unwrap();
-        let worker_path = repository
-            .join("bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml");
-        let worker: Value = serde_yaml::from_str(&lillux::signature::strip_signature_lines(
-            &std::fs::read_to_string(&worker_path).unwrap(),
-        ))
-        .unwrap();
-        let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
-            serde_json::from_value(worker["external_content"].clone()).unwrap();
-
         let policy_table = crate::node_policy::NodePolicyTable::new();
-        for profile_name in ["full", "full-sandbox"] {
-            let profile_path = repository
-                .join("bundles/.ai/node/init/profiles")
-                .join(format!("{profile_name}.yaml"));
-            let profile: crate::node_policy::generation::NodeInitProfile =
+        for worker_profile in ["qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"] {
+            let activation_path = repository
+                .join("bundles/local-inference/.ai/config/ryeos-runtime")
+                .join(format!("{worker_profile}-activation.yaml"));
+            let activation_value: Value =
                 serde_yaml::from_str(&lillux::signature::strip_signature_lines(
-                    &std::fs::read_to_string(&profile_path).unwrap(),
+                    &std::fs::read_to_string(&activation_path).unwrap(),
                 ))
                 .unwrap();
-            let generation = profile
-                .validated_generation(&policy_table, &profile_path)
-                .unwrap();
-            let external: crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord =
-                serde_json::from_value(generation.policies()["external_content"].clone()).unwrap();
-            activation
-                .admit(
-                    AcquisitionMode::Online,
-                    external.managed_activation.require_enabled().unwrap(),
-                    &external.limits,
-                    &declarations,
-                    true,
-                )
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{profile_name} does not admit the shipped local-inference activation: {error:#}"
+            let activation =
+                ManagedExternalContentActivation::from_value(&activation_value).unwrap();
+            let worker_path = repository
+                .join("bundles/local-inference/.ai/workers/local-inference")
+                .join(format!("{worker_profile}.yaml"));
+            let worker: Value = serde_yaml::from_str(&lillux::signature::strip_signature_lines(
+                &std::fs::read_to_string(&worker_path).unwrap(),
+            ))
+            .unwrap();
+            let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
+                serde_json::from_value(worker["external_content"].clone()).unwrap();
+
+            for node_profile in ["full", "full-sandbox"] {
+                let profile_path = repository
+                    .join("bundles/.ai/node/init/profiles")
+                    .join(format!("{node_profile}.yaml"));
+                let profile: crate::node_policy::generation::NodeInitProfile =
+                    serde_yaml::from_str(&lillux::signature::strip_signature_lines(
+                        &std::fs::read_to_string(&profile_path).unwrap(),
+                    ))
+                    .unwrap();
+                let generation = profile
+                    .validated_generation(&policy_table, &profile_path)
+                    .unwrap();
+                let external: crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord =
+                    serde_json::from_value(generation.policies()["external_content"].clone()).unwrap();
+                activation
+                    .admit(
+                        AcquisitionMode::Online,
+                        external.managed_activation.require_enabled().unwrap(),
+                        &external.limits,
+                        &declarations,
+                        true,
                     )
-                });
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{node_profile} does not admit local-inference profile {worker_profile}: {error:#}"
+                        )
+                    });
+            }
         }
     }
 

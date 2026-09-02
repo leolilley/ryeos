@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-13T03:35:01Z:12f460c2f97b6c8a66205b01902afd332deeed0a9809ec3ac382a3357ae3b279:+SLiDh1iyqT/X57VBqYmeOMTQOsGyWRrrTGPWgTb9kehnDAVCn2yDorK677UcPO5/q/mP9KCBD2AfxxNdQeFDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-02T13:27:39Z:b2d6d2c459b0010076afae38a8339084b80b9bcb3dc17d7185433345eb2c0706:2EwekbalPEtTi5Q1LRKAnxYEdO+cu1Kp52F+AfUz15/dJ0fjgHb7cnvFpjXIiQMcS79f8MfxGiqVrPVugUdNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 transport:
   kind: admitted_local_worker
-  execute: worker:local-inference/local-tinygrad
+  execute: worker:local-inference/qwen3-0.6b-cpu-2048
   effect_class_ceiling: recorded
 auth: {}
 schemas:
@@ -64,8 +64,8 @@ pricing:
   output_per_million: "0"
 extra:
   setup:
-    display_name: Local Tinygrad
-    priority: 85
+    display_name: Qwen3 0.6B CPU / nproc 2048
+    priority: 84
     credential: null
     models:
       - {name: qwen3-0.6b, display_name: Qwen3 0.6B, context_window: 2048}

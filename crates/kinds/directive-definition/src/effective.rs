@@ -278,7 +278,7 @@ mod tests {
             "family": "chat_completions",
             "transport": {
                 "kind": "admitted_local_worker",
-                "execute": "worker:local-inference/local-tinygrad",
+                "execute": "worker:fixtures/local-recorded",
                 "effect_class_ceiling": "recorded"
             }
         }))

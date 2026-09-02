@@ -910,7 +910,7 @@ mod tests {
                 provider_family: "chat_completions".to_owned(),
                 provider_config_hash: "provider-config".to_owned(),
                 provider_config_value_digest: "2".repeat(64),
-                provider_id: "local-tinygrad".to_owned(),
+                provider_id: "fixture-local-recorded".to_owned(),
                 profile_id: None,
                 model_name: "qwen3-0.6b".to_owned(),
                 credential_binding_hmac: "3".repeat(64),
@@ -919,7 +919,7 @@ mod tests {
                 admitted_effect_class: Some(EffectClass::Recorded),
             },
             TransportCoordinate::AdmittedLocalWorker {
-                worker_ref: "worker:local-inference/local-tinygrad".to_owned(),
+                worker_ref: "worker:fixtures/local-recorded".to_owned(),
                 effective_definition_digest: "5".repeat(64),
                 capsule_hash: "6".repeat(64),
                 execution_realization_hash: "7".repeat(64),

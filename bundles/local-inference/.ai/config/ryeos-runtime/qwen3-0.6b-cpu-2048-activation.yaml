@@ -1,7 +1,7 @@
-# ryeos:signed:2026-08-29T15:18:03Z:760d77ced55b7c6fae0363c4b98b6608bb1dce087d979887ff76cfef8615989c:2bBUIPGBSbTirlMNImmqm9XUhanBYSm//3uCv4paPk3732VUVshKUaeEqJArpIx/JdC4TjYmsjJuJxgEwpK/Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-02T13:27:39Z:638a1147c4412291d2cddd77763f4ca9e9e79efa9c420038e51780a7fda377b6:U9m4d9ShKlFhN3qWolcmrzrXnaFrtlok94oEnxYwtUmQA56WrdoCK5sle8oxvGgGf38LkVnCRTmthFsSTEhUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 schema: ryeos.external_content_activation.v3
-consumer_ref: worker:local-inference/local-tinygrad
+consumer_ref: worker:local-inference/qwen3-0.6b-cpu-2048
 sources:
   - id: runtime_archive
     url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-runtime-v1.tar.gz
