@@ -114,6 +114,52 @@ fn requests_terminal_project_generation(policy: &ExecutionPolicy) -> bool {
     )
 }
 
+/// Require the successful terminal evidence promised by a wait-mode remote
+/// execution before interpreting any project-publication fields.
+///
+/// `/execute` deliberately returns an authenticated result envelope even when
+/// the workload fails. That is a settled remote execution, not a missing
+/// publication: preserve the envelope in the source job and report its exact
+/// lifecycle outcome instead of falling through to snapshot extraction.
+fn validate_remote_wait_completion(response: &Value) -> Result<(), String> {
+    let thread = response
+        .get("thread")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "remote wait response omitted thread evidence".to_string())?;
+    let status = thread
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "remote wait thread evidence omitted status".to_string())?;
+    let Some(status_kind) = ryeos_state::objects::ThreadStatus::from_str_lossy(status) else {
+        return Err(format!(
+            "remote wait thread evidence reported unknown status '{status}'"
+        ));
+    };
+    if status_kind == ryeos_state::objects::ThreadStatus::Completed {
+        return Ok(());
+    }
+
+    let thread_id = thread
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let outcome_code = response
+        .pointer("/result/outcome_code")
+        .and_then(Value::as_str);
+    let outcome = outcome_code
+        .map(|code| format!(" with outcome_code '{code}'"))
+        .unwrap_or_default();
+    if status_kind.is_terminal() {
+        Err(format!(
+            "remote wait execution '{thread_id}' terminated with status '{status}'{outcome}"
+        ))
+    } else {
+        Err(format!(
+            "remote wait execution '{thread_id}' returned before terminal settlement with status '{status}'"
+        ))
+    }
+}
+
 /// Errors from the unary forward pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteForwardError {
@@ -550,6 +596,31 @@ pub async fn execute_unary_forward(
             return Err(RemoteForwardError::ExecuteFailed(message));
         }
     };
+
+    if let Err(message) = validate_remote_wait_completion(&remote_result) {
+        finish_sync_job_attempt_and_update_job(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "remote_execute_failed".to_string(),
+                error: Some(message.clone()),
+                result: Some(remote_result.clone()),
+            },
+            &job_id,
+            SyncJobUpdate {
+                state: SyncJobState::Failed,
+                phase: "remote_execute_failed".to_string(),
+                roots: Some(vec![push_result.snapshot_hash.clone()]),
+                heads: None,
+                uploaded_hashes: vec![push_result.snapshot_hash.clone()],
+                fetched_hashes: Vec::new(),
+                last_error: Some(message.clone()),
+                result: Some(remote_result.clone()),
+            },
+        )?;
+        return Err(RemoteForwardError::ExecuteFailed(message));
+    }
 
     // Read-only and discard executions intentionally produce no terminal
     // project generation. Their remote result is already complete; requiring
@@ -1127,5 +1198,56 @@ mod tests {
             validate_forward_policy_authority(&policy, None),
             Err(RemoteForwardError::ExecutionPolicyInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn completed_remote_wait_execution_admits_publication_processing() {
+        let response = serde_json::json!({
+            "thread": {
+                "thread_id": "T-completed",
+                "status": "completed",
+            },
+            "result": {
+                "outcome_code": "success",
+            },
+        });
+
+        validate_remote_wait_completion(&response).unwrap();
+    }
+
+    #[test]
+    fn failed_remote_wait_execution_retains_exact_terminal_outcome() {
+        let response = serde_json::json!({
+            "thread": {
+                "thread_id": "T-failed",
+                "status": "failed",
+            },
+            "result": {
+                "outcome_code": "exit:1",
+                "error": {"stderr": "boom"},
+            },
+        });
+
+        let error = validate_remote_wait_completion(&response).unwrap_err();
+        assert!(error.contains("T-failed"), "got: {error}");
+        assert!(error.contains("status 'failed'"), "got: {error}");
+        assert!(error.contains("outcome_code 'exit:1'"), "got: {error}");
+    }
+
+    #[test]
+    fn nonterminal_or_malformed_remote_wait_evidence_fails_closed() {
+        for response in [
+            serde_json::json!({
+                "thread": {"thread_id": "T-running", "status": "running"},
+                "result": {},
+            }),
+            serde_json::json!({
+                "thread": {"thread_id": "T-unknown", "status": "mystery"},
+                "result": {},
+            }),
+            serde_json::json!({"result": {}}),
+        ] {
+            assert!(validate_remote_wait_completion(&response).is_err());
+        }
     }
 }
