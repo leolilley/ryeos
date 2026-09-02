@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:0a2b9252ea9f6f9b1f470592feda21080453d8a6694303e1640f34535d97ce60:IHF/sRI64HHBHscImguH/58hrLAR3uop+hO9yGVKb8wfjlsj7zWJGI/DolqeKvqLUOkEwXIVSXDHWk2ZsWHeCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T21:49:18Z:a7633264ed70a527a434b7399ac99393b337b7aef4659c2688c708c315595f69:MY0N/POn2yxpNPQdnMNQ3rg2WWU6JRXEksQtDMeG5AgYQVnl0/vi0bCE0FNaQDj4BthaPhZqEO0oqfK2evDdCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -109,7 +109,7 @@ Created by `ryeos init`. Lives in the system space
     │       ├── signing/private_key.pem  # operator Ed25519 signing key (0600)
     │       └── trusted/<fp>.toml        # trusted publisher/operator/node keys
     ├── node/
-    │   ├── config.yaml                  # daemon bind address, db_path, auth config
+    │   ├── config.yaml                  # daemon bootstrap paths and listener addresses
     │   ├── isolation.yaml                 # create-once strict execution policy
     │   ├── identity/
     │   │   ├── private_key.pem          # node Ed25519 signing key (0600)

@@ -281,6 +281,8 @@ fn run_init_internal(
 
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
+    ryeos_app::config::retire_pre_node_policy_config(&opts.app_root)
+        .context("retire predecessor daemon policy fields")?;
 
     // Operator config root (`<app_root>/.ai/config`) — the single trust
     // source for `ryeos init`. Bundles are never a trust source.

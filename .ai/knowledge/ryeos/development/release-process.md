@@ -404,7 +404,9 @@ The script will:
 3. install `ryeos` and `ryeosd` into `/usr/bin`;
 4. optionally install `lillux` if it was built;
 5. install the selected bundle sources under `/usr/share/ryeos`;
-6. move stale PATH shadows from `/usr/local/bin` and `~/.local/bin`;
+6. move stale PATH shadows of installed user-facing binaries from
+   `/usr/local/bin`, `~/.local/bin`, and `~/.cargo/bin`, preserving the
+   user-local entries in timestamped backups;
 7. run `ryeos init --source /usr/share/ryeos ...`;
 8. restart the daemon only if it was running before the install.
 

@@ -37,7 +37,8 @@ Options:
                         targeted --crates package list or explicit --all.
   --no-init             Install files but do not run ryeos init
   --no-daemon-restart   Do not stop/restart an already-running daemon
-  --keep-shadows        Do not move /usr/local/bin or ~/.local/bin RyeOS shadows
+  --keep-shadows        Do not move /usr/local/bin, ~/.local/bin, or ~/.cargo/bin
+                        shadows of installed RyeOS user-facing binaries
   --trust-source-publishers
                         Explicitly trust the publisher documents copied from
                         this checkout. Required to initialize dev/custom-signed
@@ -515,10 +516,12 @@ required_bins=(
     ryeos
 )
 
-# PKGBUILD installs lillux when a full package build has produced it, but
-# populate-bundles.sh does not currently build it. Treat it as optional for
-# this fast direct-copy helper so the CLI/init path is not blocked.
+# A complete `--populate --all` now builds lillux with the other user-facing
+# binaries. Focused population may legitimately retain no prior lillux build,
+# so this direct-copy development helper still treats it as optional rather
+# than broadening a targeted repair into another package build.
 optional_bins=(lillux)
+installed_user_bins=("${required_bins[@]}")
 
 if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
@@ -671,6 +674,7 @@ done
 for b in "${optional_bins[@]}"; do
     if [[ -x "$target_dir/$b" ]]; then
         sudo install -Dm755 "$target_dir/$b" "$bin_dir/$b"
+        installed_user_bins+=("$b")
     else
         ryeos_term_note "optional binary not built, skipping: $b"
     fi
@@ -724,27 +728,40 @@ if [[ $cleanup_shadows -eq 1 ]]; then
     stamp="$(date +%Y%m%d%H%M%S)"
     user_backup_dir="$invoking_user_home/.local/bin/ryeos-shadow-backups-$stamp"
     made_user_backup=0
-    for b in "${required_bins[@]}" "${optional_bins[@]}"; do
+    for b in "${installed_user_bins[@]}"; do
         if [[ -e "/usr/local/bin/$b" || -L "/usr/local/bin/$b" ]]; then
             sudo mv "/usr/local/bin/$b" "/usr/local/bin/$b.bak.$stamp"
         fi
         if [[ -e "$invoking_user_home/.local/bin/$b" || -L "$invoking_user_home/.local/bin/$b" ]]; then
             if [[ $made_user_backup -eq 0 ]]; then
-                mkdir -p "$user_backup_dir"
+                sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir"
                 made_user_backup=1
             fi
-            mv "$invoking_user_home/.local/bin/$b" "$user_backup_dir/$b"
+            sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir/local-bin"
+            sudo -H -u "$invoking_user" mv \
+                "$invoking_user_home/.local/bin/$b" "$user_backup_dir/local-bin/$b"
+        fi
+        if [[ -e "$invoking_user_home/.cargo/bin/$b" || -L "$invoking_user_home/.cargo/bin/$b" ]]; then
+            if [[ $made_user_backup -eq 0 ]]; then
+                sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir"
+                made_user_backup=1
+            fi
+            sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir/cargo-bin"
+            sudo -H -u "$invoking_user" mv \
+                "$invoking_user_home/.cargo/bin/$b" "$user_backup_dir/cargo-bin/$b"
         fi
     done
 fi
 
 hash -r 2>/dev/null || true
 
-resolved="$(command -v ryeos || true)"
-if [[ "$resolved" != "$bin_dir/ryeos" ]]; then
-    type -a ryeos 2>/dev/null || true
-    die "expected ryeos on PATH to resolve to $bin_dir/ryeos, got: ${resolved:-not found}"
-fi
+for b in "${installed_user_bins[@]}"; do
+    resolved="$(command -v "$b" || true)"
+    if [[ "$resolved" != "$bin_dir/$b" ]]; then
+        type -a "$b" 2>/dev/null || true
+        die "expected $b on PATH to resolve to $bin_dir/$b, got: ${resolved:-not found}"
+    fi
+done
 
 if [[ $run_init -eq 1 ]]; then
     # The node lives in the INVOKING USER's XDG data dir, not root's. Run init as that

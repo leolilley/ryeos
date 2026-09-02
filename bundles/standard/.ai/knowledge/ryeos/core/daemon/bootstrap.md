@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T10:47:09Z:7b329cd88fb608e33d4bddc991e14cbd9e637bce57199dc6c970f18cff51b211:sIx/I6064MYh+PW6gP4HbMEyHfIIS7O4SSADEneNyUdnKdQUMz01O+l/Y0SEhfzKyON19irlgsD7xCa8ztnEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T21:49:18Z:ad053f3bc00614e86e4895934a31243a27a3411628cbf3b7c908d84000cd5c5d:+iOzt5D0YJ9ny20CCnVexPZm95rpZuNDfMQsyEWxZK92RJgjdsjOATGAFfV3bpx/mt+t6/QBbL9lLMWuPCbvCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]
@@ -31,11 +31,13 @@ to operator trust and never regenerates the node key, because that would
 invalidate the node trust doc in the node trust store.
 
 Daemon-local artifacts repaired by startup include layout dirs, default
-daemon config, public identity derived from node key, vault public/key
+daemon bootstrap config, public identity derived from node key, vault public/key
 files, and the node-signed authorized-key entry for the local user key.
 The trust directory is derived from resolved `config.user_signing_key_path`
 layout `<user_root>/.ai/config/keys/{signing,trusted}/`, not by
-re-reading `roots::user_root()`.
+re-reading `roots::user_root()`. Semantic authentication, execution,
+accounting, isolation, retention, and hosted-session settings live only in the
+complete node-policy generation, never in daemon `config.yaml`.
 
 ## Startup gate
 
