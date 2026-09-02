@@ -1,11 +1,8 @@
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use lillux::crypto::{DecodePrivateKey, EncodePrivateKey};
 use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -47,33 +44,18 @@ pub struct PublicIdentityDoc {
 impl NodeIdentity {
     /// Generate a new signing key and persist. Errors if key already exists.
     pub fn create(key_path: &Path) -> Result<Self> {
-        if key_path.exists() {
-            bail!("signing key already exists at {}", key_path.display());
-        }
-        if let Some(parent) = key_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let signing_key = SigningKey::generate(&mut OsRng);
-        let pem = signing_key
-            .to_pkcs8_pem(Default::default())
-            .context("failed to serialize signing key")?;
-        fs::write(key_path, pem.as_bytes())
-            .with_context(|| format!("failed to write signing key {}", key_path.display()))?;
+        let signing_key = lillux::crypto::create_signing_key(key_path)?;
         Self::from_signing_key(signing_key)
     }
 
     /// Load existing signing key. Errors if missing.
     pub fn load(key_path: &Path) -> Result<Self> {
-        // Zeroizing: the PEM buffer holds the private key; wipe it once
-        // the SigningKey (which zeroizes itself on drop) is built.
-        let pem = zeroize::Zeroizing::new(fs::read_to_string(key_path).with_context(|| {
+        let signing_key = lillux::crypto::load_signing_key(key_path).with_context(|| {
             format!(
                 "signing key not found at {} — run 'ryeos init' first",
                 key_path.display()
             )
-        })?);
-        let signing_key = SigningKey::from_pkcs8_pem(&pem)
-            .with_context(|| format!("failed to decode signing key {}", key_path.display()))?;
+        })?;
         Self::from_signing_key(signing_key)
     }
 
@@ -96,25 +78,62 @@ impl NodeIdentity {
     /// Like [`Self::write_public_identity`] but takes the timestamp explicitly,
     /// for byte-deterministic test fixtures.
     pub fn write_public_identity_at(&self, path: &Path, now: &str) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let doc = self.build_public_identity_at(now)?;
         let json = serde_json::to_vec_pretty(&doc)?;
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, &json)?;
-        fs::rename(&tmp, path)?;
+        let parent_path = path
+            .parent()
+            .context("public identity path has no parent")?;
+        let name = path
+            .file_name()
+            .context("public identity path has no filename")?;
+        let parent = lillux::PinnedDirectory::open_or_create(parent_path)?;
+        let incumbent = parent.open_pinned_regular(name, false)?;
+        let state = incumbent
+            .as_ref()
+            .map(|file| {
+                let observation = file.observation()?;
+                let bytes = file.read_stable_bounded(&observation, 1024 * 1024)?;
+                Ok::<_, anyhow::Error>((observation, bytes))
+            })
+            .transpose()?;
+        match state {
+            Some((observation, incumbent_bytes)) => parent
+                .replace_pinned_bytes_if_matches_atomic(
+                    name,
+                    incumbent.as_ref(),
+                    move |current| {
+                        let current_observation = current.observation()?;
+                        anyhow::ensure!(
+                            current_observation.matches_quarantined_incumbent(&observation),
+                            "public identity changed before publication"
+                        );
+                        anyhow::ensure!(
+                            current.read_stable_bounded(&current_observation, 1024 * 1024)?
+                                == incumbent_bytes,
+                            "public identity bytes changed before publication"
+                        );
+                        Ok(())
+                    },
+                    &json,
+                    0o644,
+                )
+                .map_err(anyhow::Error::from)?,
+            None => parent
+                .replace_pinned_bytes_if_matches_atomic(name, None, |_| Ok(()), &json, 0o644)
+                .map_err(anyhow::Error::from)?,
+        }
         Ok(())
     }
 
     /// Load a persisted public identity document.
     pub fn load_public_identity(path: &Path) -> Result<PublicIdentityDoc> {
-        let data = fs::read(path).with_context(|| {
-            format!(
-                "public identity not found at {} — run 'ryeos init' first",
-                path.display()
-            )
-        })?;
+        let data =
+            lillux::read_regular_file_bounded_no_follow(path, 1024 * 1024).with_context(|| {
+                format!(
+                    "public identity not found at {} — run 'ryeos init' first",
+                    path.display()
+                )
+            })?;
         serde_json::from_slice(&data).context("failed to parse public identity document")
     }
 
@@ -151,6 +170,14 @@ impl NodeIdentity {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Stable federation site identity derived from the node signing
+    /// authority. It is independent of hostnames, app-root paths, and local
+    /// supervisor labels, so moving or renaming a host cannot silently change
+    /// execution-chain authority.
+    pub fn site_id(&self) -> String {
+        format!("site:{}", self.fingerprint)
     }
 
     pub fn verifying_key(&self) -> &VerifyingKey {
@@ -692,13 +719,12 @@ fn publish_authorized_key_bytes(
     expected_file_hash: Option<Option<&str>>,
 ) -> Result<()> {
     let name = format!("{fingerprint}.toml");
-    let mut expected = directory.open_regular(std::ffi::OsStr::new(&name), false)?;
+    let expected = directory.open_pinned_regular(std::ffi::OsStr::new(&name), false)?;
     let expected_state = expected
-        .as_mut()
+        .as_ref()
         .map(|file| {
-            let observation = lillux::observe_open_regular_file(file)?;
-            let bytes =
-                lillux::read_open_regular_file_stable_bounded(file, &observation, 1024 * 1024)?;
+            let observation = file.observation()?;
+            let bytes = file.read_stable_bounded(&observation, 1024 * 1024)?;
             Ok::<_, anyhow::Error>((observation, bytes))
         })
         .transpose()?;
@@ -715,18 +741,12 @@ fn publish_authorized_key_bytes(
     let validation = expected_state.as_ref().map(|(observation, bytes)| {
         let observation = observation.clone();
         let bytes = bytes.clone();
-        move |current: &std::fs::File| {
-            let current_observation = lillux::observe_open_regular_file(current)?;
+        move |current: &lillux::PinnedRegularFile| {
+            let current_observation = current.observation()?;
             if !current_observation.matches_quarantined_incumbent(&observation) {
                 bail!("authorized-key grant metadata changed before publication");
             }
-            let mut current = current.try_clone()?;
-            let current = lillux::read_open_regular_file_stable_bounded(
-                &mut current,
-                &current_observation,
-                1024 * 1024,
-            )?;
-            if current != bytes {
+            if current.read_stable_bounded(&current_observation, 1024 * 1024)? != bytes {
                 bail!("authorized-key grant bytes changed before publication");
             }
             Ok(())
@@ -734,14 +754,14 @@ fn publish_authorized_key_bytes(
     });
     directory.ensure_path_binding()?;
     let result = match validation {
-        Some(validate) => directory.replace_bytes_if_matches_atomic(
+        Some(validate) => directory.replace_pinned_bytes_if_matches_atomic(
             std::ffi::OsStr::new(&name),
             expected.as_ref(),
             validate,
             signed,
             0o600,
         ),
-        None => directory.replace_bytes_if_matches_atomic(
+        None => directory.replace_pinned_bytes_if_matches_atomic(
             std::ffi::OsStr::new(&name),
             None,
             |_| Ok(()),

@@ -900,7 +900,7 @@ fn open_offline_archive_root(
 
 fn reconcile_activation_cache(cache: &lillux::PinnedDirectory) -> Result<()> {
     for entry in cache.regular_files_bounded(CACHE_RECONCILIATION_ENTRY_LIMIT)? {
-        let Some(name) = entry.name.to_str() else {
+        let Some(name) = entry.name().to_str() else {
             bail!("managed activation cache contains a non-UTF8 entry");
         };
         if lillux::valid_hash(name) {
@@ -910,7 +910,7 @@ fn reconcile_activation_cache(cache: &lillux::PinnedDirectory) -> Result<()> {
             bail!("managed activation cache contains an unexpected entry");
         }
         cache
-            .remove_if_same(&entry.name, &entry.file)
+            .remove_pinned_regular_if_same(&entry)
             .context("remove managed activation cache crash orphan")?;
     }
     cache.ensure_path_binding()?;
@@ -929,7 +929,7 @@ fn reset_activation_staging(staging: &lillux::PinnedDirectory) -> Result<()> {
 fn require_staging_capacity(
     staging: &lillux::PinnedDirectory,
     activation: &ResolvedManagedExternalContentActivation,
-    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     let component_ceiling = activation
         .components
@@ -1051,13 +1051,13 @@ fn obtain_archive(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
     mode: AcquisitionMode,
-    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
     offline_archive_root: Option<&lillux::PinnedDirectory>,
 ) -> Result<lillux::PinnedRegularFile> {
     let name = OsStr::new(&source.sha256);
     if let Some(mut existing) = cache.open_pinned_regular(name, false)? {
         let verified = verify_open_file(
-            &mut existing.file,
+            &mut existing,
             source.maximum_compressed_bytes,
             &source.sha256,
             "cached managed activation archive",
@@ -1069,7 +1069,7 @@ fn obtain_archive(
             }
             Err(error) => {
                 cache
-                    .remove_if_same(name, &existing.file)
+                    .remove_pinned_regular_if_same(&existing)
                     .context("remove invalid managed activation cache entry")?;
                 if mode == AcquisitionMode::Offline {
                     return Err(error).context(
@@ -1165,7 +1165,6 @@ fn obtain_archive(
     };
     retain_verified_archive(
         cache,
-        name,
         archive,
         source.maximum_compressed_bytes,
         &source.sha256,
@@ -1197,7 +1196,7 @@ fn import_offline_archive(
     cache: &lillux::PinnedDirectory,
     root: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
-    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<lillux::PinnedRegularFile> {
     let archive_name = offline_archive_name(source)?;
     let archive_name = OsStr::new(&archive_name);
@@ -1208,12 +1207,12 @@ fn import_offline_archive(
             anyhow::anyhow!("offline activation archive is absent from the admitted root")
         })?;
     verify_open_file(
-        &mut input.file,
+        &mut input,
         source.maximum_compressed_bytes,
         &source.sha256,
         "offline managed activation source archive",
     )?;
-    input.file.seek(SeekFrom::Start(0))?;
+    input.seek(SeekFrom::Start(0))?;
     root.ensure_path_binding()?;
 
     reserve_archive_cache(cache, source, policy, CACHE_ENTRY_LIMIT)?;
@@ -1230,7 +1229,7 @@ fn import_offline_archive(
     let cache_name = OsStr::new(&source.sha256);
     let created = cache.atomic_create_pinned_regular_from_reader(
         cache_name,
-        &mut input.file,
+        &mut input,
         source.maximum_compressed_bytes,
         0o600,
     )?;
@@ -1243,7 +1242,6 @@ fn import_offline_archive(
     };
     retain_verified_archive(
         cache,
-        cache_name,
         archive,
         source.maximum_compressed_bytes,
         &source.sha256,
@@ -1273,17 +1271,17 @@ fn offline_archive_name(source: &ManagedActivationSource) -> Result<String> {
 fn reserve_archive_cache(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
-    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
     entry_limit: usize,
 ) -> Result<()> {
     if entry_limit == 0 {
         bail!("managed archive cache entry limit is zero");
     }
     let mut entries = cache.regular_files_bounded(CACHE_RECONCILIATION_ENTRY_LIMIT)?;
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries.sort_by(|left, right| left.name().cmp(right.name()));
     let mut retained = entries.iter().try_fold(0u64, |total, entry| {
         total
-            .checked_add(entry.file.metadata()?.len())
+            .checked_add(entry.size()?)
             .ok_or_else(|| anyhow::anyhow!("managed archive cache byte count overflow"))
     })?;
     let mut retained_entries = entries.len();
@@ -1295,9 +1293,9 @@ fn reserve_archive_cache(
         if fits_entries && fits_bytes {
             break;
         }
-        let size = entry.file.metadata()?.len();
+        let size = entry.size()?;
         cache
-            .remove_if_same(&entry.name, &entry.file)
+            .remove_pinned_regular_if_same(&entry)
             .context("evict rebuildable managed activation archive")?;
         retained = retained
             .checked_sub(size)
@@ -1320,15 +1318,14 @@ fn reserve_archive_cache(
 
 fn retain_verified_archive(
     cache: &lillux::PinnedDirectory,
-    name: &OsStr,
     mut archive: lillux::PinnedRegularFile,
     maximum_bytes: u64,
     expected_sha256: &str,
     label: &str,
 ) -> Result<lillux::PinnedRegularFile> {
-    if let Err(error) = verify_open_file(&mut archive.file, maximum_bytes, expected_sha256, label) {
+    if let Err(error) = verify_open_file(&mut archive, maximum_bytes, expected_sha256, label) {
         cache
-            .remove_if_same(name, &archive.file)
+            .remove_pinned_regular_if_same(&archive)
             .context("remove invalid newly published managed activation archive")?;
         return Err(error);
     }
@@ -1338,7 +1335,7 @@ fn retain_verified_archive(
 
 fn admit_redirect_url(
     url: &reqwest::Url,
-    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     if url.scheme() != "https"
         || !url.username().is_empty()
@@ -1367,10 +1364,10 @@ fn extract_archive(
     source: &ManagedActivationSource,
     activation: &ResolvedManagedExternalContentActivation,
     staging: &lillux::PinnedDirectory,
-    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
-    archive_file.file.seek(SeekFrom::Start(0))?;
-    let decoder = flate2::read::MultiGzDecoder::new(archive_file.file);
+    archive_file.seek(SeekFrom::Start(0))?;
+    let decoder = flate2::read::MultiGzDecoder::new(archive_file);
     let bounded = decoder.take(source.maximum_expanded_bytes.saturating_add(1));
     let mut archive = tar::Archive::new(bounded);
     let selected = source
@@ -1985,7 +1982,7 @@ impl<R: Read> Read for DigestingReader<'_, R> {
 }
 
 fn verify_open_file(
-    file: &mut std::fs::File,
+    file: &mut (impl std::io::Read + std::io::Seek),
     maximum_bytes: u64,
     expected_sha256: &str,
     label: &str,
@@ -2095,25 +2092,22 @@ fn settle_retryable_attempt_failure(
 fn managed_policy(
     state: &AppState,
 ) -> Result<
-    &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+    &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 > {
     state
-        .node_config
-        .external_content_import_policy
-        .as_ref()
-        .and_then(|policy| policy.managed_activation.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .managed_activation
+        .require_enabled()
 }
 
 fn external_content_policy(
     state: &AppState,
-) -> Result<&ryeos_app::node_config::sections::external_content::ExternalContentImportPolicyRecord>
+) -> Result<&ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>
 {
     state
-        .node_config
-        .external_content_import_policy
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("node has no external-content import policy"))
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
 }
 
 fn bounded_error(value: &str) -> String {
@@ -2392,9 +2386,9 @@ mod tests {
     }
 
     fn test_policy()
-    -> ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy
+    -> ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy
     {
-        ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy {
+        ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy {
             allow_online: false,
             allowed_https_hosts: vec!["releases.example.test".to_owned()],
             max_redirects: 0,
@@ -2964,9 +2958,8 @@ mod tests {
             .unwrap()
             .0;
 
-        let error =
-            retain_verified_archive(&cache, name, archive, 1024, &digest, "downloaded fixture")
-                .unwrap_err();
+        let error = retain_verified_archive(&cache, archive, 1024, &digest, "downloaded fixture")
+            .unwrap_err();
 
         assert!(error.to_string().contains("digest changed"));
         assert!(cache.open_regular(name, false).unwrap().is_none());
@@ -3802,7 +3795,7 @@ mod tests {
             members: Vec::new(),
         };
 
-        let mut imported = obtain_archive(
+        let imported = obtain_archive(
             &cache,
             &source,
             AcquisitionMode::Offline,
@@ -3810,8 +3803,7 @@ mod tests {
             Some(&source_directory),
         )
         .unwrap();
-        let mut observed = Vec::new();
-        imported.file.read_to_end(&mut observed).unwrap();
+        let observed = imported.read_bounded(4096).unwrap();
         assert_eq!(observed, bytes);
         assert!(
             cache

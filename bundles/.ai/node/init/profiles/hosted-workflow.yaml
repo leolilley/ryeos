@@ -1,0 +1,212 @@
+# ryeos:signed:2026-09-02T08:05:36Z:85656ccfca8d34d8857cf8cff3cffa8abc5ce535e7a6f8810a606a2973504777:d800MguOLjijAXIs+JipsCb4ElYVQkcWVfuPiZ9VceCXUV5fSnF4VWe1LkP5s8SXnkWKHm9nMreTgDmWCh8ECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+schema: 1
+exact_bundles:
+  - central-auth
+  - codex
+  - core
+  - hosted-node
+  - standard
+policies:
+  accounting:
+    schema: 1
+    issue_acceptance_window_ms: 60000
+  command_registration:
+    schema: 1
+    claim_rules:
+      - claim:
+          kind: command.root
+          value: help
+        required_caps:
+          - ryeos.register.command.root.help
+      - claim:
+          kind: command.root
+          value: init
+        required_caps:
+          - ryeos.register.command.root.init
+      - claim:
+          kind: command.root
+          value: start
+        required_caps:
+          - ryeos.register.command.root.start
+      - claim:
+          kind: command.root
+          value: stop
+        required_caps:
+          - ryeos.register.command.root.stop
+      - claim:
+          kind: command.root
+          value: node
+        required_caps:
+          - ryeos.register.command.root.node
+      - claim:
+          kind: command.root
+          value: system
+        required_caps:
+          - ryeos.register.command.root.system
+      - claim:
+          kind: command.root
+          value: identity
+        required_caps:
+          - ryeos.register.command.root.identity
+      - claim:
+          kind: command.root
+          value: execute
+        required_caps:
+          - ryeos.register.command.root.execute
+      - claim:
+          kind: command.root
+          value: codex
+        required_caps:
+          - ryeos.register.command.root.codex
+      - claim:
+          kind: command.dispatch.kind
+          value: direct_execute_item_ref
+        required_caps:
+          - ryeos.register.command.dispatch.direct_execute_item_ref
+      - claim:
+          kind: command.dispatch.kind
+          value: local_handler
+        required_caps:
+          - ryeos.register.command.dispatch.local_handler
+    system_source_caps:
+      - ryeos.register.command.dispatch.direct_execute_item_ref
+      - ryeos.register.command.dispatch.local_handler
+      - ryeos.register.command.root.execute
+      - ryeos.register.command.root.help
+      - ryeos.register.command.root.identity
+      - ryeos.register.command.root.init
+      - ryeos.register.command.root.node
+      - ryeos.register.command.root.start
+      - ryeos.register.command.root.stop
+      - ryeos.register.command.root.system
+    bundle_source_caps:
+      central-auth: []
+      codex:
+        - ryeos.register.command.root.codex
+      core:
+        - ryeos.register.command.dispatch.direct_execute_item_ref
+        - ryeos.register.command.dispatch.local_handler
+        - ryeos.register.command.root.execute
+        - ryeos.register.command.root.help
+        - ryeos.register.command.root.identity
+        - ryeos.register.command.root.init
+        - ryeos.register.command.root.node
+        - ryeos.register.command.root.start
+        - ryeos.register.command.root.stop
+        - ryeos.register.command.root.system
+      hosted-node: []
+      standard:
+        - ryeos.register.command.dispatch.direct_execute_item_ref
+  execution:
+    schema: 1
+    max_live_fanout: 8
+    max_private_materialization_copy_bytes: 17179869184
+    host_env_passthrough: []
+  thread_history:
+    schema: 1
+    default_retention: durable
+    item_authored_retention: allow
+    minimum_terminal_for: null
+  maintenance:
+    schema: 1
+    schedules:
+      - schedule_id: maintenance-gc
+        item_ref: service:maintenance/gc
+        ref_bindings: {}
+        schedule_type: cron
+        expression: "0 0 4 * * *"
+        timezone: UTC
+        misfire_policy: skip
+        overlap_policy: skip
+        lateness_grace_secs: 60
+        initial_enabled: true
+        params:
+          compact: true
+          policy:
+            manual_pushes: 10
+            auto_snapshots: 30
+          deep: true
+          schedule_fire_max_age_days: 30
+          schedule_fire_max_count: 500
+          sync_job_retention_days: 14
+          seat_lease_grace_seconds: 600
+          durable_cas_upload_max_age_seconds: 21600
+        capabilities:
+          - ryeos.execute.service.maintenance/gc
+  hosted:
+    schema: 1
+    admission_enabled: true
+    admission_token_ttl_secs: 600
+    allow_loopback_http: true
+  isolation:
+    schema: 1
+    policy:
+      version: 1
+      mode: disabled
+      backend: null
+      filesystem:
+        readable:
+          - "{node_public_identity}"
+          - "{daemon_socket}"
+          - "{bundle_roots}"
+          - "{node_trusted_keys}"
+          - "{verified_code}"
+        writable:
+          - "{project}"
+          - "{checkpoint_dir}"
+      network:
+        mode: host
+      environment:
+        allow:
+          - "*"
+      limits:
+        open_files: 1024
+        stdout_bytes: 8388608
+        stderr_bytes: 8388608
+        verified_artifact_file_bytes: 67108864
+        verified_artifact_total_bytes: 268435456
+        verified_artifact_files: 4096
+  ingest_ignore:
+    schema: 1
+    additional_patterns: []
+  external_content:
+    schema: 1
+    roots: {}
+    limits:
+      max_depth: 8
+      max_entries: 64
+      max_file_bytes: 268435456
+      max_total_bytes: 536870912
+      store_budget_bytes: 1073741824
+      minimum_free_bytes: 1073741824
+    managed_activation:
+      enabled: true
+      limits:
+        allow_online: true
+        allowed_https_hosts:
+          - releases.openai.com
+        max_redirects: 0
+        max_archives: 1
+        max_compressed_bytes: 134217728
+        max_expanded_bytes: 335544320
+        max_members: 64
+        max_member_bytes: 268435456
+        max_concurrent_activations: 1
+        cache_budget_bytes: 536870912
+        store_budget_bytes: 1073741824
+        minimum_free_bytes: 1073741824
+        max_attempts: 3
+  persistent_sessions:
+    schema: 1
+    enabled: true
+    limits:
+      max_pool_groups: 4
+      max_total_processes: 4
+      max_total_address_space_bytes: 68719476736
+      max_total_cpu_seconds: 14400
+      max_real_uid_process_limit: 64
+      max_open_streams: 32
+      max_active_streams: 4
+      max_active_streams_per_subject: 1
+      max_stream_backlog_bytes: 16777216
+      max_total_backlog_bytes: 67108864

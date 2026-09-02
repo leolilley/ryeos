@@ -66,6 +66,26 @@ expect_rejected validate_source_publisher_trust "$root_trust" 0 "$official_finge
 validate_source_publisher_trust "$root_trust" 1 "$official_fingerprint"
 expect_rejected validate_source_publisher_trust "$tmp/missing.toml" 1 "$official_fingerprint"
 
+# The direct installer proposes its mapped profile only for first publication.
+# Any present occupant—including a malformed file—must instead reach RyeOS's
+# signed complete-generation validator without a profile fallback.
+install_policy_root="$tmp/install-policy-root"
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full
+[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile full" ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 1 ]]
+mkdir -p "$install_policy_root/.ai/node/policies"
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full
+[[ ${#INSTALL_INIT_PROFILE_ARGS[@]} -eq 0 ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
+rm -rf "$install_policy_root/.ai/node/policies"
+: > "$install_policy_root/.ai/node/policies"
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full
+[[ ${#INSTALL_INIT_PROFILE_ARGS[@]} -eq 0 ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
+
 # Repeated documents from one selected publisher are all validated but produce
 # one operator-facing trust decision instead of one line per bundle.
 trust_output="$(

@@ -115,6 +115,7 @@ pub struct MintAdmissionTokenParams {
 }
 
 #[derive(serde::Serialize)]
+#[derive(Debug)]
 pub struct MintAdmissionTokenResult {
     /// One-time bearer token. Show once to the local node being admitted.
     pub token: String,
@@ -246,13 +247,21 @@ pub fn run_mint_admission_token(
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
     }
-    if let Some(policy) = load_hosted_policy(&params.app_root)?
-        && params.ttl_secs > policy.admission.token_ttl_secs
-    {
+    let policy = load_hosted_policy(&params.app_root)?;
+    if !policy.admission_enabled {
+        bail!(
+            "hosted-node admission is disabled by policy from {}",
+            policy.source_file.display()
+        );
+    }
+    let maximum_token_ttl_secs = policy
+        .admission_token_ttl_secs
+        .context("enabled hosted-node admission policy is missing its bounded token TTL")?;
+    if params.ttl_secs > maximum_token_ttl_secs {
         bail!(
             "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
             params.ttl_secs,
-            policy.admission.token_ttl_secs,
+            maximum_token_ttl_secs,
             policy.source_file.display()
         );
     }
@@ -364,36 +373,20 @@ mod tests {
 
     fn write_hosted_policy(
         app_root: &std::path::Path,
+        admission_enabled: bool,
         token_ttl_secs: u64,
         key: &lillux::crypto::SigningKey,
     ) {
-        let path = app_root.join(".ai/node/hosted/policy.yaml");
+        let path = app_root.join(".ai/node/policies/hosted.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let ttl = admission_enabled
+            .then(|| format!("admission_token_ttl_secs: {token_ttl_secs}\n"))
+            .unwrap_or_default();
         let body = format!(
             r#"
-version: "0.1.0"
-schema_version: "1.0.0"
-description: "test hosted policy"
-transport:
-  public_https_required: true
-  loopback_http_allowed: true
-admission:
-  mode: "one_time_token"
-  token_ttl_secs: {token_ttl_secs}
-  reject_wildcard_scopes: true
-  token_delivery: "out_of_band"
-descriptor:
-  require_live_identity_match: true
-  advertised_capabilities: []
-authorization:
-  authority: "target_node_authorized_keys"
-  central_bearer_tokens_allowed: false
-  implicit_cross_node_authority_allowed: false
-operations:
-  audit_admission_events: true
-  audit_grant_changes: true
-  prefer_isolated_node_per_principal: true
-  shared_daemon_multitenancy_enabled: false
+schema: 1
+admission_enabled: {admission_enabled}
+{ttl}allow_loopback_http: true
 "#
         );
         std::fs::write(path, lillux::signature::sign_content(&body, key, "#", None)).unwrap();
@@ -445,6 +438,10 @@ system_source_caps:
             lillux::signature::sign_content(policy, node_identity.signing_key(), "#", None),
         )
         .unwrap();
+        crate::actions::hosted_policy::write_required_non_hosted_test_policies(
+            app_root,
+            node_identity.signing_key(),
+        );
     }
 
     #[test]
@@ -577,7 +574,7 @@ system_source_caps:
     fn mint_admission_token_rejects_ttl_above_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), 60, &fixture.key);
+        write_hosted_policy(tmp.path(), true, 60, &fixture.key);
 
         let err = match run_mint_admission_token(MintAdmissionTokenParams {
             app_root: tmp.path().to_path_buf(),
@@ -591,6 +588,26 @@ system_source_caps:
 
         assert!(
             err.to_string().contains("hosted-node policy maximum"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn mint_admission_token_refuses_when_hosted_admission_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), false, 60, &fixture.key);
+
+        let err = run_mint_admission_token(MintAdmissionTokenParams {
+            app_root: tmp.path().to_path_buf(),
+            scopes: vec!["ryeos.execute.service.threads".into()],
+            label: None,
+            ttl_secs: 60,
+        })
+        .expect_err("explicitly disabled hosted admission must block token minting");
+
+        assert!(
+            format!("{err:#}").contains("hosted-node admission is disabled"),
             "got: {err:#}"
         );
     }

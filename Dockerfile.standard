@@ -4,8 +4,8 @@
 #
 # Bakes the exact standard set: core + central-auth + standard. This provides
 # project sync/CAS/remote APIs, central authorization, and the scheduler,
-# graph/directive/knowledge schemas, services, and runtimes. Hosted-node
-# policy, ryeos-ui, and web can be installed later when needed.
+# graph/directive/knowledge schemas, services, and runtimes. The hosted-node
+# admission bundle, ryeos-ui, and web can be installed later when needed.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -79,6 +79,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
 
 # Re-declared here: build-stage ARGs do not carry across FROM boundaries.

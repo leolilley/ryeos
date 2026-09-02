@@ -7,6 +7,7 @@ source "$ROOT/scripts/pkg/bundle-sets.sh"
 
 mapfile -t full < <(ryeos_bundle_set_names full)
 mapfile -t sandbox < <(ryeos_bundle_set_names full-sandbox)
+mapfile -t hosted_workflow < <(ryeos_bundle_set_names hosted-workflow)
 mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
 mapfile -t sandbox_bin_managed < <(ryeos_bundle_set_bin_managed_names full-sandbox)
 
@@ -20,9 +21,88 @@ contains() {
   return 1
 }
 
-for set_name in full full-sandbox central-host standard hosted-node hosted-workflow; do
+verify_dev_signed_profile() (
+  set -euo pipefail
+  local profile_file="$1" tmp key expected_fp header claimed_hash signature signer_fp actual_hash
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  key="$ROOT/.dev-keys/PUBLISHER_DEV.pem"
+  [[ -s "$key" ]]
+  expected_fp="$(
+    openssl pkey -in "$key" -pubout -outform DER 2>/dev/null \
+      | tail -c 32 \
+      | sha256sum \
+      | cut -d' ' -f1
+  )"
+  [[ "$(grep -c '^# ryeos:signed:' "$profile_file")" -eq 1 ]]
+  header="$(head -n 1 "$profile_file")"
+  [[ "$header" =~ ^#\ ryeos:signed:.+:([0-9a-f]{64}):([^:]+):([0-9a-f]{64})$ ]]
+  claimed_hash="${BASH_REMATCH[1]}"
+  signature="${BASH_REMATCH[2]}"
+  signer_fp="${BASH_REMATCH[3]}"
+  [[ "$signer_fp" == "$expected_fp" ]]
+  sed '/^# ryeos:signed:/d' "$profile_file" > "$tmp/body"
+  actual_hash="$(sha256sum "$tmp/body" | cut -d' ' -f1)"
+  [[ "$actual_hash" == "$claimed_hash" ]]
+  printf '%s' "$claimed_hash" > "$tmp/hash"
+  printf '%s' "$signature" | base64 -d > "$tmp/signature"
+  [[ "$(wc -c < "$tmp/signature")" -eq 64 ]]
+  openssl pkey -in "$key" -pubout -out "$tmp/public.pem" 2>/dev/null
+  openssl pkeyutl \
+    -verify \
+    -pubin \
+    -inkey "$tmp/public.pem" \
+    -rawin \
+    -in "$tmp/hash" \
+    -sigfile "$tmp/signature" >/dev/null 2>&1
+)
+
+mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
+[[ "${bundle_set_ids[*]}" == "full full-sandbox central-host standard hosted-node hosted-workflow" ]]
+for set_name in "${bundle_set_ids[@]}"; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains central-auth "${members[@]}"
+done
+
+[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex" ]]
+for set_name in "${bundle_set_ids[@]}"; do
+  [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
+done
+! ryeos_bundle_set_node_init_profile unknown
+
+mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
+[[ "${node_init_profiles[*]}" == "${bundle_set_ids[*]}" ]]
+node_init_profile_dir="$ROOT/bundles/.ai/node/init/profiles"
+[[ -d "$node_init_profile_dir" && ! -L "$node_init_profile_dir" ]]
+ryeos_validate_node_init_root "$ROOT/bundles/.ai/node/init"
+[[ -z "$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]
+[[ -z "$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)" ]]
+expected_node_init_profiles="$(ryeos_node_init_profile_file_names | sort)"
+actual_node_init_profiles="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+if [[ "$actual_node_init_profiles" != "$expected_node_init_profiles" ]]; then
+  printf 'node init-profile inventory mismatch\nexpected:\n%s\nactual:\n%s\n' \
+    "$expected_node_init_profiles" "$actual_node_init_profiles" >&2
+  exit 1
+fi
+
+(
+  invalid_init_root="$(mktemp -d)"
+  trap 'rm -rf "$invalid_init_root"' EXIT
+  mkdir -p "$invalid_init_root/profiles" "$invalid_init_root/legacy-seed"
+  ! ryeos_validate_node_init_root "$invalid_init_root" >/dev/null 2>&1
+)
+
+for set_name in "${bundle_set_ids[@]}"; do
+  node_init_profile="$node_init_profile_dir/$set_name.yaml"
+  ryeos_validate_node_init_profile "$set_name" "$node_init_profile"
+  verify_dev_signed_profile "$node_init_profile"
+  expected_exact_bundles="$(ryeos_bundle_set_names "$set_name" | sort)"
+  actual_exact_bundles="$(
+    sed -n '/^exact_bundles:/,/^policies:/p' "$node_init_profile" \
+      | sed -nE 's/^  - ([A-Za-z0-9_-]+)$/\1/p' \
+      | sort
+  )"
+  [[ "$actual_exact_bundles" == "$expected_exact_bundles" ]]
 done
 
 contains local-inference "${full[@]}"
@@ -54,10 +134,12 @@ mkdir -p \
   "$scope_tmp/repo/scripts/lib" \
   "$scope_tmp/repo/scripts/pkg" \
   "$scope_tmp/repo/bundles/core/.ai/refs" \
+  "$scope_tmp/repo/bundles/.ai/node/init/profiles" \
   "$scope_tmp/target"
 cp "$ROOT/scripts/populate-bundles.sh" "$scope_tmp/repo/scripts/populate-bundles.sh"
 cp "$ROOT/scripts/lib/ryeos-terminal.sh" "$scope_tmp/repo/scripts/lib/ryeos-terminal.sh"
 cp "$ROOT/scripts/pkg/bundle-sets.sh" "$scope_tmp/repo/scripts/pkg/bundle-sets.sh"
+cp "$node_init_profile_dir"/*.yaml "$scope_tmp/repo/bundles/.ai/node/init/profiles/"
 touch "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 openssl genpkey -algorithm ED25519 -out "$scope_tmp/publisher.pem" 2>/dev/null
 

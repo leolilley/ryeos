@@ -33,9 +33,6 @@ pub struct Cli {
     pub uds_path: Option<PathBuf>,
 
     #[arg(long)]
-    pub require_auth: bool,
-
-    #[arg(long)]
     pub authorized_keys_dir: Option<PathBuf>,
 
     /// Resolve stored config conflicts in favor of explicit CLI values.
@@ -58,7 +55,6 @@ impl Cli {
             bind: self.bind,
             db_path: self.db_path.clone(),
             uds_path: self.uds_path.clone(),
-            require_auth: self.require_auth,
             authorized_keys_dir: self.authorized_keys_dir.clone(),
             force: self.force,
         }

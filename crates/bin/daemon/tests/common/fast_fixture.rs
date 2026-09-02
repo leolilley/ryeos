@@ -248,7 +248,7 @@ pub fn install_signed_bundle_binary(
 ///
 /// ```text
 /// <state>/.ai/node/identity/private_key.pem            (deterministic node Ed25519)
-/// <state>/.ai/node/isolation.yaml                        (node isolation policy)
+/// <state>/.ai/node/policies/isolation.yaml               (node isolation policy)
 /// <state>/.ai/node/command_registration/default.yaml   (deterministic node-signed seed)
 /// <state>/.ai/node/vault/private_key.pem               (deterministic vault X25519)
 /// <state>/.ai/node/vault/public_key.pem
@@ -322,14 +322,6 @@ pub fn populate_initialized_state_with_node_key(
         .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
         .context("create fast-fixture thread-projection recovery authority")?;
 
-    fs::write(
-        state_path.join(AI_DIR).join("node").join("isolation.yaml"),
-        "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable:\n    - \"{node_public_identity}\"\n    - \"{daemon_socket}\"\n    - \"{bundle_roots}\"\n    - \"{node_trusted_keys}\"\n    - \"{verified_code}\"\n  writable:\n    - \"{project}\"\n    - \"{checkpoint_dir}\"\n\
-         network:\n  mode: host\nenvironment:\n  allow:\n    - \"*\"\n\
-         limits:\n  open_files: 1024\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
-    )
-    .context("write node isolation policy")?;
-
     // ── Node Ed25519 identity ──
     let node_identity_dir = state_path.join(AI_DIR).join("node").join("identity");
     write_pem_signing_key(&node_identity_dir.join("private_key.pem"), &node)
@@ -346,15 +338,10 @@ pub fn populate_initialized_state_with_node_key(
         .write_public_identity_at(&public_identity_path, FAST_FIXTURE_TIME)
         .context("write node public identity")?;
 
-    // ── Node-owned command registration policy ──
-    //
-    // Real `ryeos init` verifies the publisher-signed seed policy from
-    // bundles/.ai/node/init/command-registration and re-signs it with the node
-    // identity. The node-config loader intentionally requires this section and
-    // requires the node signer, so the fast fixture mirrors that fail-closed
-    // boot contract rather than making command registration optional.
-    materialize_seed_command_registration_policy(state_path, &node)
-        .context("materialize command registration policy")?;
+    // Mirror first publication from the explicit full init profile: every
+    // registered compiler receives exactly one node-signed policy member.
+    materialize_seed_node_policy_generation(state_path, &node)
+        .context("materialize complete node policy generation")?;
 
     // ── Operator Ed25519 identity ──
     write_pem_signing_key(
@@ -374,21 +361,6 @@ pub fn populate_initialized_state_with_node_key(
         .context("write vault secret key")?;
     lillux::vault::write_public_key(&vault_dir.join("public_key.pem"), &vault.public_key())
         .context("write vault public key")?;
-
-    // ── Ingest ignore config (mirrors ryeos init step 8b) ──
-    let ignore_dir = state_path.join(AI_DIR).join("node").join("ingest");
-    fs::create_dir_all(&ignore_dir).with_context(|| format!("create {}", ignore_dir.display()))?;
-    let builtin = ryeos_app::ignore::builtin_patterns();
-    let patterns_yaml = builtin
-        .iter()
-        .map(|p| format!("  - {:?}", p))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(
-        ignore_dir.join("ignore.yaml"),
-        format!("patterns:\n{}\n", patterns_yaml),
-    )
-    .context("write ignore config")?;
 
     // ── Self-signed trust docs (publisher + node + operator) ──
     let trust_dir = state_path
@@ -437,55 +409,10 @@ pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -
     Ok(())
 }
 
-/// The `command_registration_caps` the node-init bundle-registration grants
-/// assign to `bundle_name`, read from the same signed source the real install
-/// materializes from (`bundles/.ai/node/init/bundle-registration-grants/
-/// default.yaml`). Empty when the bundle declares no grants. Mirroring
-/// production here is what lets a fixture-registered bundle register a command
-/// whose dispatch kind is gated behind a registration capability — e.g.
-/// standard's `graph validate`, which dispatches `direct_execute_item_ref`.
-fn bundle_registration_caps(bundle_name: &str) -> Result<Vec<String>> {
-    #[derive(serde::Deserialize)]
-    struct Grants {
-        #[serde(default)]
-        bundles: std::collections::BTreeMap<String, BundleGrant>,
-    }
-    #[derive(serde::Deserialize)]
-    struct BundleGrant {
-        #[serde(default)]
-        command_registration_caps: Vec<String>,
-    }
-    let source = super::workspace_root()
-        .join("bundles")
-        .join(AI_DIR)
-        .join("node")
-        .join("init")
-        .join("bundle-registration-grants")
-        .join("default.yaml");
-    let raw = fs::read_to_string(&source)
-        .with_context(|| format!("read bundle registration grants {}", source.display()))?;
-    let grants: Grants = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse bundle registration grants {}", source.display()))?;
-    Ok(grants
-        .bundles
-        .get(bundle_name)
-        .map(|g| g.command_registration_caps.clone())
-        .unwrap_or_default())
-}
-
-/// Render a signed-ready `kind: node` bundle record body for `bundle_name`,
-/// including any `command_registration_caps` the node-init grants assign it —
-/// the same shape the real install writes to `.ai/node/bundles/<name>.yaml`.
-fn node_bundle_record_body(bundle_name: &str, path: &Path) -> Result<String> {
-    let mut body = format!("kind: node\npath: {}\n", path.display());
-    let caps = bundle_registration_caps(bundle_name)?;
-    if !caps.is_empty() {
-        body.push_str("command_registration_caps:\n");
-        for cap in &caps {
-            body.push_str(&format!("  - {cap}\n"));
-        }
-    }
-    Ok(body)
+/// Render the exact current bundle-registration shape. Command-registration
+/// authority belongs only to the node policy generation.
+fn node_bundle_record_body(_bundle_name: &str, path: &Path) -> Result<String> {
+    Ok(format!("kind: node\npath: {}\n", path.display()))
 }
 
 /// Register a synthetic bundle root using the exact current signed node-bundle
@@ -562,6 +489,7 @@ pub fn register_fixture_bundle(
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
+    authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
     Ok(())
 }
 
@@ -611,6 +539,7 @@ pub fn register_config_fixture_bundle(
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(registration_dir.join(format!("{bundle_name}.yaml")), signed)?;
+    authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
     Ok(())
 }
 
@@ -736,7 +665,7 @@ pem = "ed25519:{key_b64}"
     Ok(())
 }
 
-fn materialize_seed_command_registration_policy(
+fn materialize_seed_node_policy_generation(
     state_path: &Path,
     node: &SigningKey,
 ) -> Result<()> {
@@ -745,18 +674,53 @@ fn materialize_seed_command_registration_policy(
         .join(AI_DIR)
         .join("node")
         .join("init")
-        .join("command-registration")
-        .join("default.yaml");
+        .join("profiles")
+        .join("full.yaml");
     let raw = fs::read_to_string(&source)
-        .with_context(|| format!("read command registration seed {}", source.display()))?;
+        .with_context(|| format!("read node init profile {}", source.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let signed = lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
+    let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+        serde_yaml::from_str(&body)
+            .with_context(|| format!("parse node init profile {}", source.display()))?;
     let target_dir = state_path
         .join(AI_DIR)
         .join("node")
-        .join("command_registration");
+        .join("policies");
     fs::create_dir_all(&target_dir).with_context(|| format!("create {}", target_dir.display()))?;
-    fs::write(target_dir.join("default.yaml"), signed)
-        .context("write command registration policy")?;
+    for (name, policy) in profile.policies() {
+        let body = serde_yaml::to_string(policy)
+            .with_context(|| format!("serialize `{name}` test node policy"))?;
+        let signed =
+            lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
+        fs::write(target_dir.join(format!("{name}.yaml")), signed)
+            .with_context(|| format!("write `{name}` test node policy"))?;
+    }
     Ok(())
+}
+
+fn authorize_fixture_bundle(
+    state_path: &Path,
+    bundle_name: &str,
+    node: &SigningKey,
+) -> Result<()> {
+    let path = state_path
+        .join(AI_DIR)
+        .join("node")
+        .join("policies")
+        .join("command_registration.yaml");
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("read test command-registration policy {}", path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_json::Value = serde_yaml::from_str(&body)
+        .context("parse test command-registration policy")?;
+    let bundle_caps = policy
+        .get_mut("bundle_source_caps")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("test command-registration policy has no bundle_source_caps mapping")?;
+    bundle_caps
+        .entry(bundle_name.to_owned())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let body = serde_yaml::to_string(&policy).context("serialize test command policy")?;
+    let signed = lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
+    fs::write(&path, signed).context("publish test command policy")
 }

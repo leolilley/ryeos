@@ -8,17 +8,15 @@
 //! is automatically released when the file descriptor is closed (process exit,
 //! including panic).
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 
 /// RAII guard for the operator state lock.
 ///
 /// Holds the lock file open for the lifetime of the guard. Drop releases.
 pub struct StateLock {
-    _file: File,
+    inner: lillux::ExactExclusiveFileLock,
 }
 
 impl std::fmt::Debug for StateLock {
@@ -34,111 +32,38 @@ impl StateLock {
     /// Returns `Ok(StateLock)` if the lock was acquired.
     /// Returns an error if another process holds the lock.
     pub fn acquire(lock_path: &Path) -> Result<Self> {
-        // Ensure parent directory exists
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create state lock directory {}", parent.display()))?;
-        }
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)
-            .with_context(|| format!("open state lock file {}", lock_path.display()))?;
-
-        // Non-blocking exclusive lock
-        match flock_exclusive_nb(&file) {
-            Ok(()) => {
-                // Write our PID for diagnostics only after acquiring the lock.
-                // A contending process must not truncate the active daemon's
-                // holder PID before it discovers the flock is unavailable.
-                #[cfg(unix)]
-                {
-                    file.set_len(0).with_context(|| {
-                        format!("truncate state lock file {}", lock_path.display())
-                    })?;
-                    file.rewind().with_context(|| {
-                        format!("rewind state lock file {}", lock_path.display())
-                    })?;
-                    writeln!(&mut file, "{}", std::process::id()).with_context(|| {
-                        format!("write state lock holder pid {}", lock_path.display())
-                    })?;
-                }
-                Ok(StateLock { _file: file })
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Another process holds the lock. Read its PID without
-                // having mutated the file.
-                let holder_pid = fs::read_to_string(lock_path)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string());
-                bail!(
-                    "state lock held by another process (pid: {}); stop the daemon or other standalone service before proceeding",
-                    holder_pid
-                );
-            }
-            Err(e) => Err(e).with_context(|| format!("acquire state lock {}", lock_path.display())),
-        }
+        Ok(Self {
+            inner: lillux::ExactExclusiveFileLock::acquire(lock_path)?,
+        })
     }
 
     /// Acquire the already-existing operator lock without creating or writing
     /// any filesystem entry. Read-only inspections use this to prove daemon
     /// exclusion without changing the inspected state namespace.
     pub fn acquire_existing_read_only(lock_path: &Path) -> Result<Self> {
-        let file = File::open(lock_path)
-            .with_context(|| format!("open existing state lock file {}", lock_path.display()))?;
-        match flock_exclusive_nb(&file) {
-            Ok(()) => Ok(StateLock { _file: file }),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                let holder_pid = fs::read_to_string(lock_path)
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string());
-                bail!(
-                    "state lock held by another process (pid: {}); stop the daemon or other standalone service before proceeding",
-                    holder_pid
-                );
-            }
-            Err(error) => Err(error)
-                .with_context(|| format!("acquire existing state lock {}", lock_path.display())),
-        }
+        Ok(Self {
+            inner: lillux::ExactExclusiveFileLock::acquire_existing_read_only(lock_path)?,
+        })
     }
-}
 
-#[cfg(unix)]
-fn flock_exclusive_nb(file: &File) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let fd = file.as_raw_fd();
-    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if result == -1 {
-        let err = io::Error::last_os_error();
-        // Map EWOULDBLOCK to WouldBlock kind
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, err));
-        }
-        return Err(err);
+    /// Require this guard to protect the exact operational lock of `app_root`.
+    pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        self.inner.ensure_path_binding(&default_lock_path(app_root))
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn flock_exclusive_nb(file: &File) -> io::Result<()> {
-    // Non-Unix: no-op (no flock). This module is Unix-only in practice.
-    Ok(())
 }
 
 /// Return the default lock path for a given state directory.
 pub fn default_lock_path(app_root: &Path) -> PathBuf {
-    app_root.join(".ai").join("state").join("operator.lock")
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("operator.lock")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use tempfile::TempDir;
 

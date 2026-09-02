@@ -33,6 +33,7 @@ const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;
 const DURABLE_UPLOAD_SCHEMA: u32 = 2;
+const MAX_RECOVERY_RECORD_BYTES: u64 = 1024 * 1024;
 const REMOTE_PULL_JOURNAL_KEY: &str = "remote-pull-journal.key";
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1514,14 +1515,14 @@ impl RecoveryStore {
         };
         let entries = directory.regular_files()?;
         for entry in &entries {
-            if entry.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
                 anyhow::bail!(
                     "unexpected pending transition file: {}",
-                    entry.path.display()
+                    entry.path().display()
                 );
             }
             let chain_root_id = entry
-                .path
+                .path()
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("non-UTF8 pending transition filename"))?;
@@ -1530,9 +1531,9 @@ impl RecoveryStore {
         if !dry_run {
             for entry in &entries {
                 directory
-                    .remove_if_same(&entry.name, &entry.file)
+                    .remove_pinned_regular_if_same(entry)
                     .with_context(|| {
-                        format!("discard pending transition {}", entry.path.display())
+                        format!("discard pending transition {}", entry.path().display())
                     })?;
             }
         }
@@ -1719,22 +1720,21 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
                 _ => anyhow::bail!(
                     "unexpected durable CAS upload entry: {}",
-                    entry.path.display()
+                    entry.path().display()
                 ),
             }
         }
 
         let mut settled = 0;
         for record_entry in records {
-            let observed =
-                self.read_durable_upload_file(record_entry.file.try_clone()?, &record_entry.path)?;
+            let observed = self.read_durable_upload_pinned(&record_entry)?;
             // Upload identity is immutable after creation. Filter on the
             // enumerated inode before taking a stage lock so this exact
             // publication cannot block behind unrelated project/import work.
@@ -1760,17 +1760,16 @@ impl RecoveryStore {
                     observed.staging_id
                 )
             })?;
-            lock_exclusive(
-                &lock_entry.file,
-                "lock durable upload for publication settlement",
-            )?;
+            lock_entry
+                .lock_exclusive()
+                .context("lock durable upload for publication settlement")?;
             // The record is atomically replaced as it advances. Re-open it
             // only after acquiring the stage lock so settlement never acts on
             // the stale inode observed during namespace enumeration.
             let current_file = directory
-                .open_regular(&record_entry.name, false)?
+                .open_pinned_regular(record_entry.name(), false)?
                 .ok_or_else(|| anyhow::anyhow!("durable CAS upload record disappeared"))?;
-            let record = self.read_durable_upload_file(current_file, &record_entry.path)?;
+            let record = self.read_durable_upload_pinned(&current_file)?;
             if record.owner_principal != owner_principal
                 || record.purpose != purpose
                 || record.publication_key != *publication_key
@@ -1789,7 +1788,7 @@ impl RecoveryStore {
                 recovery: self.clone(),
                 directory: directory.try_clone()?,
                 record,
-                lock_file: Some(lock_entry.file),
+                lock_file: Some(lock_entry.try_clone_descriptor()?),
             };
             stage.protect_cas_closure(
                 cas_mutation_guard,
@@ -1800,7 +1799,10 @@ impl RecoveryStore {
             settled += 1;
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
+            anyhow::bail!(
+                "orphan durable CAS upload lock: {}",
+                orphan.path().display()
+            );
         }
         Ok(settled)
     }
@@ -1825,21 +1827,20 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
                 _ => anyhow::bail!(
                     "unexpected durable CAS upload entry: {}",
-                    entry.path.display()
+                    entry.path().display()
                 ),
             }
         }
         let mut retired = 0;
         for record_entry in records {
-            let record =
-                self.read_durable_upload_file(record_entry.file.try_clone()?, &record_entry.path)?;
+            let record = self.read_durable_upload_pinned(&record_entry)?;
             let lock_name = std::ffi::OsString::from(format!("{}.lock", record.staging_id));
             let lock_entry = locks.remove(&lock_name).ok_or_else(|| {
                 anyhow::anyhow!("durable CAS upload {} has no lock file", record.staging_id)
@@ -1847,7 +1848,10 @@ impl RecoveryStore {
             if record.created_at.as_str() >= created_before {
                 continue;
             }
-            if !try_lock_exclusive(&lock_entry.file, "lock durable upload for retirement")? {
+            if !lock_entry
+                .try_lock_exclusive()
+                .context("lock durable upload for retirement")?
+            {
                 tracing::debug!(
                     staging_id = %record.staging_id,
                     "preserving active durable CAS upload past the retirement cutoff"
@@ -1856,15 +1860,18 @@ impl RecoveryStore {
             }
             self.retire_durable_blob_parts(&record.staging_id)?;
             directory
-                .remove_if_same(&record_entry.name, &record_entry.file)
+                .remove_pinned_regular_if_same(&record_entry)
                 .context("retire durable CAS upload record")?;
             directory
-                .remove_if_same(&lock_entry.name, &lock_entry.file)
+                .remove_pinned_regular_if_same(&lock_entry)
                 .context("retire durable CAS upload lock")?;
             retired += 1;
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
+            anyhow::bail!(
+                "orphan durable CAS upload lock: {}",
+                orphan.path().display()
+            );
         }
         Ok(retired)
     }
@@ -1906,12 +1913,15 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
-                _ => anyhow::bail!("unexpected staged CAS root entry: {}", entry.path.display()),
+                _ => anyhow::bail!(
+                    "unexpected staged CAS root entry: {}",
+                    entry.path().display()
+                ),
             }
         }
         let mut object_hashes = BTreeSet::new();
@@ -1919,7 +1929,7 @@ impl RecoveryStore {
         let mut large_object_hashes = BTreeSet::new();
         for record_entry in records {
             let lease_id = record_entry
-                .path
+                .path()
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("non-UTF8 staged CAS root filename"))?;
@@ -1928,56 +1938,33 @@ impl RecoveryStore {
             let lock_entry = locks
                 .remove(&lock_name)
                 .ok_or_else(|| anyhow::anyhow!("staged CAS root {lease_id} has no lock file"))?;
-            #[cfg(unix)]
-            let active = {
-                use std::os::fd::AsRawFd;
-                let result = unsafe {
-                    libc::flock(lock_entry.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-                };
-                if result == 0 {
-                    false
-                } else {
-                    let error = std::io::Error::last_os_error();
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        true
-                    } else {
-                        return Err(error).context("inspect staged CAS root lease lock");
-                    }
-                }
-            };
-            #[cfg(not(unix))]
-            anyhow::bail!("staged CAS root locking is unavailable on this platform");
+            let active = !lock_entry
+                .try_lock_exclusive()
+                .context("inspect staged CAS root lease lock")?;
             if !active {
                 self.retire_staged_blob_parts(lease_id)?;
                 directory
-                    .remove_if_same(&record_entry.name, &record_entry.file)
+                    .remove_pinned_regular_if_same(&record_entry)
                     .context("remove abandoned staged CAS roots")?;
                 directory
-                    .remove_if_same(&lock_entry.name, &lock_entry.file)
+                    .remove_pinned_regular_if_same(&lock_entry)
                     .context("remove abandoned staged CAS root lock")?;
                 continue;
             }
-            let record =
-                self.read_staged_roots_file(record_entry.file.try_clone()?, &record_entry.path)?;
+            let record = self.read_staged_roots_pinned(&record_entry)?;
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
             large_object_hashes.extend(record.large_object_hashes);
         }
         for (_name, lock_entry) in locks {
-            #[cfg(unix)]
+            if lock_entry
+                .try_lock_exclusive()
+                .context("inspect orphan staged CAS root lock")?
             {
-                use std::os::fd::AsRawFd;
-                if unsafe {
-                    libc::flock(lock_entry.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-                } == 0
-                {
-                    directory
-                        .remove_if_same(&lock_entry.name, &lock_entry.file)
-                        .context("remove orphan staged CAS root lock")?;
-                }
+                directory
+                    .remove_pinned_regular_if_same(&lock_entry)
+                    .context("remove orphan staged CAS root lock")?;
             }
-            #[cfg(not(unix))]
-            anyhow::bail!("staged CAS root locking is unavailable on this platform");
         }
         self.collect_durable_upload_roots(
             &mut object_hashes,
@@ -2016,16 +2003,19 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
-                _ => anyhow::bail!("unexpected staged CAS root entry: {}", entry.path.display()),
+                _ => anyhow::bail!(
+                    "unexpected staged CAS root entry: {}",
+                    entry.path().display()
+                ),
             }
         }
         for entry in records {
-            let record = self.read_staged_roots_file(entry.file, &entry.path)?;
+            let record = self.read_staged_roots_pinned(&entry)?;
             let lock_name = std::ffi::OsString::from(format!("{}.lock", record.lease_id));
             if locks.remove(&lock_name).is_none() {
                 anyhow::bail!("staged CAS root {} has no lock file", record.lease_id);
@@ -2035,7 +2025,7 @@ impl RecoveryStore {
             large_object_hashes.extend(record.large_object_hashes);
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan staged CAS root lock: {}", orphan.path.display());
+            anyhow::bail!("orphan staged CAS root lock: {}", orphan.path().display());
         }
         self.collect_durable_upload_roots(
             &mut object_hashes,
@@ -2108,7 +2098,7 @@ impl RecoveryStore {
         let entries = directory.regular_files()?;
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
-            let path = &entry.path;
+            let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 anyhow::bail!("unexpected pending transition file: {}", path.display());
             }
@@ -2117,7 +2107,7 @@ impl RecoveryStore {
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("non-UTF8 pending transition filename"))?;
             validate_chain_root_id(stem)?;
-            records.push(decode_pending_file(entry.file, stem)?);
+            records.push(decode_pending_pinned(&entry, stem)?);
         }
         records.sort_by(|left, right| left.chain_root_id.cmp(&right.chain_root_id));
         Ok(records)
@@ -2141,7 +2131,7 @@ impl RecoveryStore {
         if let Some(directory) = directory.as_ref() {
             for entry in directory.regular_files()? {
                 check()?;
-                entries.push(entry.name);
+                entries.push(entry.name().to_os_string());
             }
         }
         check()?;
@@ -2415,19 +2405,19 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
                 _ => anyhow::bail!(
                     "unexpected durable CAS upload entry: {}",
-                    entry.path.display()
+                    entry.path().display()
                 ),
             }
         }
         for entry in records {
-            let record = self.read_durable_upload_file(entry.file, &entry.path)?;
+            let record = self.read_durable_upload_pinned(&entry)?;
             let lock_name = std::ffi::OsString::from(format!("{}.lock", record.staging_id));
             if locks.remove(&lock_name).is_none() {
                 anyhow::bail!("durable CAS upload {} has no lock file", record.staging_id);
@@ -2437,7 +2427,10 @@ impl RecoveryStore {
             large_object_hashes.extend(record.large_object_hashes);
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
+            anyhow::bail!(
+                "orphan durable CAS upload lock: {}",
+                orphan.path().display()
+            );
         }
         Ok(())
     }
@@ -2475,8 +2468,12 @@ impl RecoveryStore {
             .context("durably write staged CAS roots")
     }
 
-    fn read_staged_roots_file(&self, file: File, path: &Path) -> Result<StagedCasRootsRecord> {
-        decode_staged_roots(file, path)
+    fn read_staged_roots_pinned(
+        &self,
+        file: &lillux::PinnedRegularFile,
+    ) -> Result<StagedCasRootsRecord> {
+        let bytes = file.read_bounded(MAX_RECOVERY_RECORD_BYTES)?;
+        decode_staged_roots_bytes(&bytes, file.path())
     }
 
     fn write_durable_upload(
@@ -2499,13 +2496,19 @@ impl RecoveryStore {
     fn read_durable_upload_file(&self, file: File, path: &Path) -> Result<DurableCasUploadRecord> {
         decode_durable_upload(file, path)
     }
+
+    fn read_durable_upload_pinned(
+        &self,
+        file: &lillux::PinnedRegularFile,
+    ) -> Result<DurableCasUploadRecord> {
+        let bytes = file.read_bounded(MAX_RECOVERY_RECORD_BYTES)?;
+        decode_durable_upload_bytes(&bytes, file.path())
+    }
 }
 
-fn decode_staged_roots(mut file: File, path: &Path) -> Result<StagedCasRootsRecord> {
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+fn decode_staged_roots_bytes(bytes: &[u8], path: &Path) -> Result<StagedCasRootsRecord> {
     let record: StagedCasRootsRecord =
-        serde_json::from_slice(&bytes).context("decode staged CAS roots")?;
+        serde_json::from_slice(bytes).context("decode staged CAS roots")?;
     if record.schema != STAGED_ROOTS_SCHEMA {
         anyhow::bail!("unsupported staged CAS roots schema: {}", record.schema);
     }
@@ -2527,11 +2530,14 @@ fn decode_staged_roots(mut file: File, path: &Path) -> Result<StagedCasRootsReco
     Ok(record)
 }
 
-fn decode_durable_upload(mut file: File, path: &Path) -> Result<DurableCasUploadRecord> {
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+fn decode_durable_upload(file: File, path: &Path) -> Result<DurableCasUploadRecord> {
+    let bytes = lillux::read_open_regular_file_bounded(file, MAX_RECOVERY_RECORD_BYTES)?;
+    decode_durable_upload_bytes(&bytes, path)
+}
+
+fn decode_durable_upload_bytes(bytes: &[u8], path: &Path) -> Result<DurableCasUploadRecord> {
     let record: DurableCasUploadRecord =
-        serde_json::from_slice(&bytes).context("decode durable CAS upload stage")?;
+        serde_json::from_slice(bytes).context("decode durable CAS upload stage")?;
     validate_durable_upload_record(&record)?;
     if path.file_stem().and_then(|value| value.to_str()) != Some(record.staging_id.as_str()) {
         anyhow::bail!("durable CAS upload path/record mismatch");
@@ -2636,27 +2642,6 @@ fn lock_exclusive(file: &File, label: &str) -> Result<()> {
     }
 }
 
-fn try_lock_exclusive(file: &File, label: &str) -> Result<bool> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(true);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            Ok(false)
-        } else {
-            Err(error).with_context(|| label.to_string())
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, label);
-        anyhow::bail!("staged CAS root locking is unavailable on this platform")
-    }
-}
-
 fn secure_open_regular(path: &Path, writable: bool) -> Result<Option<File>> {
     let parent_path = path
         .parent()
@@ -2670,9 +2655,23 @@ fn secure_open_regular(path: &Path, writable: bool) -> Result<Option<File>> {
     parent.open_regular(name, writable)
 }
 
-fn decode_pending_file(mut file: File, chain_root_id: &str) -> Result<PendingChainHeadTransition> {
+fn decode_pending_file(file: File, chain_root_id: &str) -> Result<PendingChainHeadTransition> {
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(MAX_RECOVERY_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("read pending chain transition")?;
+    if bytes.len() as u64 > MAX_RECOVERY_RECORD_BYTES {
+        anyhow::bail!("pending chain transition exceeds byte limit");
+    }
+    decode_pending_bytes(&bytes, chain_root_id)
+}
+
+fn decode_pending_pinned(
+    file: &lillux::PinnedRegularFile,
+    chain_root_id: &str,
+) -> Result<PendingChainHeadTransition> {
+    let bytes = file
+        .read_bounded(MAX_RECOVERY_RECORD_BYTES)
         .context("read pending chain transition")?;
     decode_pending_bytes(&bytes, chain_root_id)
 }

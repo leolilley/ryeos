@@ -879,7 +879,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "init" => (
             "ryeos init",
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
-            "ryeos init [--non-interactive | --json] [OPTIONS]",
+            "ryeos init [--non-interactive | --json] [--node-profile <NAME>] [OPTIONS]",
         ),
         "setup" => (
             "ryeos setup",
@@ -973,6 +973,10 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
                 "--trust-file <FILE>",
                 "Additional publisher trust document (repeatable)",
             ),
+            (
+                "--node-profile <NAME>",
+                "Publisher-signed source-root init profile (required on fresh nodes)",
+            ),
             ("--app-root <DIR>", "Application root"),
         ],
         "setup" => &[("--app-root <DIR>", "Application root")],
@@ -1059,10 +1063,6 @@ mod tests {
                 source_file: PathBuf::from("/tmp/remote-doctor.yaml"),
                 provenance: ryeos_runtime::CommandProvenance::default(),
             }],
-            hosted_node_policies: vec![],
-            command_registration_policy: Default::default(),
-            external_content_import_policy: None,
-            persistent_session_policy: None,
         };
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
         let command = crate::node_descriptors::find_command(&snapshot, &tokens).unwrap();

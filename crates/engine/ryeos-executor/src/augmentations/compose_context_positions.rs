@@ -550,7 +550,9 @@ pub async fn run(
             )
             .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             runtime_verified,
-            &state.node_history_policy,
+            state
+                .node_history_policy()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             child_thread_kind.to_string(),
             BTreeMap::new(),
             None,
@@ -2392,10 +2394,7 @@ mod tests {
             app_root: temp.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: temp.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: temp.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
         let identity =
             ryeos_app::identity::NodeIdentity::create(&key_path).expect("test node identity");
@@ -2452,10 +2451,6 @@ mod tests {
             bundles: Vec::new(),
             routes: Vec::new(),
             commands: Vec::new(),
-            hosted_node_policies: Vec::new(),
-            command_registration_policy: Default::default(),
-            external_content_import_policy: None,
-            persistent_session_policy: None,
         };
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
@@ -2486,9 +2481,10 @@ mod tests {
             services: Arc::new(ryeos_app::service_registry::ServiceRegistry::new()),
             service_descriptors: &[],
             node_config: Arc::new(node_config),
-            node_history_policy: Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(
-                ),
+            node_policy: Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: Arc::new(

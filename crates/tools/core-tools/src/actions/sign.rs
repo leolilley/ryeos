@@ -1032,9 +1032,9 @@ pub fn load_operator_signing_key(runtime_root: &Path) -> Result<SigningKey> {
             .ok_or_else(|| anyhow!("operator signing-key directory is unavailable"))?;
     }
     let key = parent
-        .open_regular(std::ffi::OsStr::new("private_key.pem"), false)?
+        .open_pinned_regular(std::ffi::OsStr::new("private_key.pem"), false)?
         .ok_or_else(|| anyhow!("operator signing key is unavailable"))?;
-    let signing_key = lillux::crypto::load_signing_key_from_open_file(key)
+    let signing_key = lillux::crypto::load_signing_key_from_pinned_file(&key)
         .context("load stable operator signing key")?;
     parent.ensure_path_binding()?;
     root.ensure_path_binding()?;

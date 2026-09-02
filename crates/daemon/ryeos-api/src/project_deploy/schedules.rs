@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use ryeos_app::node_config::writer;
+use ryeos_app::node_document;
 use ryeos_scheduler::types::ScheduleSpecRecord;
 use serde::Deserialize;
 use serde_json::Value;
@@ -943,7 +943,7 @@ fn write_reconciled_schedule(
         },
     });
 
-    let bytes = writer::render_signed_node_item(
+    let bytes = node_document::render_signed_item(
         "schedules",
         &schedule.schedule_id,
         &body,

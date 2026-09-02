@@ -42,7 +42,7 @@ struct GcRunInput<'a> {
     signer: &'a NodeIdentitySigner,
     params: &'a GcParams,
     external_content_limits:
-        Option<ryeos_app::node_config::sections::external_content::ExternalContentImportLimits>,
+        ryeos_app::node_policy::sections::external_content::ExternalContentImportLimits,
     state_store: &'a ryeos_app::state_store::StateStore,
     accounting: Option<&'a ryeos_app::accounting_db::AccountingDb>,
     scheduler_db: &'a ryeos_scheduler::SchedulerDb,
@@ -210,10 +210,10 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let params_clone = params.clone();
     let external_content_limits = state
-        .node_config
-        .external_content_import_policy
-        .as_ref()
-        .map(|policy| policy.limits.clone());
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .limits
+        .clone();
     let state_store = state.state_store.clone();
     let accounting = state.accounting.clone();
     let scheduler_db = state.scheduler_db.clone();
@@ -518,41 +518,40 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         &operational_roots,
     )
     .context("GC pipeline failed")?;
-    if let Some(limits) = external_content_limits {
-        let store = if params.dry_run {
-            ryeos_state::LargeObjectStore::open_under(state_authority.runtime_directory())?
-        } else {
-            Some(state_authority.large_object_store()?)
-        };
-        if let Some(store) = store {
-            let capacity = store.filesystem_capacity()?;
-            let stored_bytes = store.total_stored_bytes()?;
-            let reserve_shortfall = limits
-                .minimum_free_bytes
-                .saturating_sub(capacity.available_bytes);
-            let reserve_budget = stored_bytes.saturating_sub(reserve_shortfall);
-            let effective_budget = limits.store_budget_bytes.min(reserve_budget);
-            let sweep = store.sweep_to_budget_with_mode(
-                effective_budget,
-                &result.reachable_large_object_hashes,
-                params.dry_run,
-            )?;
-            let staging = store.sweep_abandoned_staging_with_mode(params.dry_run)?;
-            result.inspected_large_objects = sweep.inspected_objects;
-            result.deleted_large_objects = sweep.evicted.len();
-            result.deleted_large_object_staging_files = staging.files;
-            result.preserved_rooted_large_objects = sweep.retained_roots;
-            result.preserved_leased_large_objects = sweep.retained_leased;
-            result.freed_large_object_bytes = sweep
-                .evicted
-                .iter()
-                .fold(staging.bytes, |total, (_, bytes)| {
-                    total.saturating_add(*bytes)
-                });
-            result.freed_bytes = result
-                .freed_bytes
-                .saturating_add(result.freed_large_object_bytes);
-        }
+    let limits = external_content_limits;
+    let store = if params.dry_run {
+        ryeos_state::LargeObjectStore::open_under(state_authority.runtime_directory())?
+    } else {
+        Some(state_authority.large_object_store()?)
+    };
+    if let Some(store) = store {
+        let capacity = store.filesystem_capacity()?;
+        let stored_bytes = store.total_stored_bytes()?;
+        let reserve_shortfall = limits
+            .minimum_free_bytes
+            .saturating_sub(capacity.available_bytes);
+        let reserve_budget = stored_bytes.saturating_sub(reserve_shortfall);
+        let effective_budget = limits.store_budget_bytes.min(reserve_budget);
+        let sweep = store.sweep_to_budget_with_mode(
+            effective_budget,
+            &result.reachable_large_object_hashes,
+            params.dry_run,
+        )?;
+        let staging = store.sweep_abandoned_staging_with_mode(params.dry_run)?;
+        result.inspected_large_objects = sweep.inspected_objects;
+        result.deleted_large_objects = sweep.evicted.len();
+        result.deleted_large_object_staging_files = staging.files;
+        result.preserved_rooted_large_objects = sweep.retained_roots;
+        result.preserved_leased_large_objects = sweep.retained_leased;
+        result.freed_large_object_bytes = sweep
+            .evicted
+            .iter()
+            .fold(staging.bytes, |total, (_, bytes)| {
+                total.saturating_add(*bytes)
+            });
+        result.freed_bytes = result
+            .freed_bytes
+            .saturating_add(result.freed_large_object_bytes);
     }
     result.deleted_runtime_files = runtime_cleanup
         .deleted_runtime_files

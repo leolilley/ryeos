@@ -1091,19 +1091,35 @@ fn run_doctor(
     })
     .context("load config for offline doctor engine")?;
     let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root);
+    let policy_snapshot = (|| -> anyhow::Result<_> {
+        let trust = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)?;
+        ryeos_app::node_policy::load_snapshot(
+            &app_root,
+            &trust,
+            &ryeos_app::node_policy::NodePolicyTable::new(),
+        )
+    })();
     // A failed engine build is non-fatal: the static checks still run and the
     // import dry-run reports `unavailable` (e.g. when doctoring a bundle that
     // provides its own parsers, where the offline engine can't bootstrap them).
-    let engine = match &isolation {
-        Ok(isolation) => ryeos_app::engine_init::build_engine_for_roots(
-            &config,
-            &dependency_roots,
-            Some(&source_path),
-            None,
-            std::sync::Arc::clone(isolation),
-        ),
-        Err(error) => Err(anyhow::anyhow!(
+    let engine = match (&isolation, &policy_snapshot) {
+        (Ok(isolation), Ok(snapshot)) => snapshot
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .and_then(|execution_policy| {
+                ryeos_app::engine_init::build_engine_for_roots(
+                    &config,
+                    &dependency_roots,
+                    Some(&source_path),
+                    None,
+                    std::sync::Arc::clone(isolation),
+                    execution_policy,
+                )
+            }),
+        (Err(error), _) => Err(anyhow::anyhow!(
             "node isolation policy unavailable for engine handlers: {error}"
+        )),
+        (_, Err(error)) => Err(anyhow::anyhow!(
+            "node execution policy unavailable for engine handlers: {error}"
         )),
     };
     let engine_err = engine

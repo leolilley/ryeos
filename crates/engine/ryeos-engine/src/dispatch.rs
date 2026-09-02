@@ -694,10 +694,10 @@ mod tests {
 
     fn test_engine_context() -> EngineContext {
         let app_root = tempdir();
-        let policy_dir = app_root.join(".ai/node");
+        let policy_dir = app_root.join(".ai/test-fixtures");
         fs::create_dir_all(&policy_dir).unwrap();
         fs::write(
-            policy_dir.join("isolation.yaml"),
+            policy_dir.join("isolation-policy.yaml"),
             "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
@@ -1202,7 +1202,7 @@ mod tests {
 
         let ctx = test_engine_context();
         fs::write(
-            ctx.app_root.join(".ai/node/isolation.yaml"),
+            ctx.app_root.join(".ai/test-fixtures/isolation-policy.yaml"),
             "version: 1\nmode: enforce\nbackend:\n  bundle: example-isolation-backend\n  implementation: example\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();

@@ -42,27 +42,7 @@ pub struct Config {
     /// Operator signing key — used for operator edits in project/config space.
     /// Defaults to `<app_root>/.ai/config/keys/signing/private_key.pem`.
     pub operator_signing_key_path: PathBuf,
-    pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
-    /// Comma-separated list of host-env var names that tool subprocesses
-    /// may reference via `${VAR}` in their `env_config.env` values.
-    /// This is distinct from `required_secrets`: declared secrets can
-    /// be resolved from host env by name without appearing here.
-    /// Also set via `RYEOS_TOOL_ENV_PASSTHROUGH` env var (env var wins).
-    /// Empty by default — most deployments don't need passthrough.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_env_passthrough: Vec<String>,
-    /// Maximum issue-to-provider-acceptance interval, in milliseconds. A
-    /// time-bounded spend certificate must remain valid through this window
-    /// beyond the durable `Issued` boundary or the daemon releases the
-    /// reservation unissued instead of permitting provider contact. Never
-    /// runtime-supplied; zero is rejected at load.
-    #[serde(default = "default_accounting_issue_acceptance_window_ms")]
-    pub accounting_issue_acceptance_window_ms: u64,
-}
-
-fn default_accounting_issue_acceptance_window_ms() -> u64 {
-    60_000
 }
 
 /// Plain-data inputs for [`Config::load`]. Constructed by the daemon
@@ -75,7 +55,6 @@ pub struct ConfigSources {
     pub bind: Option<SocketAddr>,
     pub db_path: Option<PathBuf>,
     pub uds_path: Option<PathBuf>,
-    pub require_auth: bool,
     pub authorized_keys_dir: Option<PathBuf>,
     pub force: bool,
 }
@@ -89,10 +68,7 @@ struct PartialConfig {
     app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
     operator_signing_key_path: Option<PathBuf>,
-    require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
-    tool_env_passthrough: Option<Vec<String>>,
-    accounting_issue_acceptance_window_ms: Option<u64>,
 }
 
 impl Config {
@@ -214,11 +190,6 @@ impl Config {
                 .as_ref()
                 .map(|_| canonical_operator_key_path.clone())
                 .unwrap_or(canonical_operator_key_path),
-            require_auth: sources.require_auth
-                || file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.require_auth)
-                    .unwrap_or(false),
             authorized_keys_dir: sources
                 .authorized_keys_dir
                 .clone()
@@ -228,33 +199,6 @@ impl Config {
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
                 .unwrap_or_else(|| resolved_runtime_root.authorized_keys_dir()),
-            // tool_env_passthrough: config file list is the base.
-            // RYEOS_TOOL_ENV_PASSTHROUGH env var (comma-separated)
-            // overrides if set — mirrors Docker usage where the env
-            // var is more convenient than editing config.yaml.
-            tool_env_passthrough: if let Ok(raw) = env::var("RYEOS_TOOL_ENV_PASSTHROUGH") {
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            } else {
-                file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.tool_env_passthrough.clone())
-                    .unwrap_or_default()
-            },
-            accounting_issue_acceptance_window_ms: {
-                let window = file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.accounting_issue_acceptance_window_ms)
-                    .unwrap_or_else(default_accounting_issue_acceptance_window_ms);
-                anyhow::ensure!(
-                    window > 0,
-                    "accounting_issue_acceptance_window_ms must be positive"
-                );
-                window
-            },
         };
 
         Ok(cfg)
@@ -283,10 +227,7 @@ impl Config {
             app_root: app_root.clone(),
             node_signing_key_path: runtime_root.node_signing_key_path(),
             operator_signing_key_path: runtime_root.operator_signing_key_path(),
-            require_auth: false,
             authorized_keys_dir: runtime_root.authorized_keys_dir(),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: default_accounting_issue_acceptance_window_ms(),
         })
     }
 }

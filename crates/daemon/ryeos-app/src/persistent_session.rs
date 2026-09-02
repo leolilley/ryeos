@@ -37,6 +37,9 @@ pub struct PersistentSessionPoolLimits {
     pub max_total_processes: usize,
     pub max_total_address_space_bytes: u64,
     pub max_total_cpu_seconds: u64,
+    /// Maximum per-worker RLIMIT_NPROC that a signed workload contract may
+    /// request for the worker's real UID.
+    pub max_real_uid_process_limit: u64,
     pub max_open_streams: usize,
     pub max_active_streams: usize,
     pub max_active_streams_per_subject: usize,
@@ -51,6 +54,7 @@ impl Default for PersistentSessionPoolLimits {
             max_total_processes: 8,
             max_total_address_space_bytes: 32 * 1024 * 1024 * 1024,
             max_total_cpu_seconds: 8 * 60 * 60,
+            max_real_uid_process_limit: 4096,
             max_open_streams: 256,
             max_active_streams: 32,
             max_active_streams_per_subject: 4,
@@ -70,6 +74,8 @@ impl PersistentSessionPoolLimits {
             || self.max_total_address_space_bytes > 4 * 1024 * 1024 * 1024 * 1024
             || self.max_total_cpu_seconds == 0
             || self.max_total_cpu_seconds > 365 * 24 * 60 * 60
+            || self.max_real_uid_process_limit == 0
+            || self.max_real_uid_process_limit > 4096
             || self.max_open_streams == 0
             || self.max_open_streams > 4096
             || self.max_active_streams == 0
@@ -886,6 +892,9 @@ impl PersistentSessionPool {
         validate_exclusive_session_id(session_id)?;
         lifecycle.validate()?;
         wire.validate()?;
+        if lifecycle.real_uid_process_limit > self.inner.limits.max_real_uid_process_limit {
+            bail!("persistent-session real-UID process request exceeds node policy");
+        }
         let contract = GroupContract {
             lifecycle: lifecycle.clone(),
             wire: wire.clone(),
@@ -1452,6 +1461,9 @@ impl PersistentSessionPool {
             lifecycle: lifecycle.clone(),
             wire: wire.clone(),
         };
+        if lifecycle.real_uid_process_limit > self.inner.limits.max_real_uid_process_limit {
+            bail!("persistent-session real-UID process request exceeds node policy");
+        }
         loop {
             self.ensure_admission_open()?;
             if cancelled() {
@@ -3222,6 +3234,7 @@ while True:
             max_total_processes: 1,
             max_total_address_space_bytes: 64 * 1024 * 1024,
             max_total_cpu_seconds: 1,
+            max_real_uid_process_limit: 1,
             max_open_streams: 4,
             max_active_streams: 2,
             max_active_streams_per_subject: 1,

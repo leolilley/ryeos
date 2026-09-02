@@ -83,6 +83,12 @@ pub async fn try_offline_dispatch(
         })?;
     let snapshot = crate::node_descriptors::load_verified_snapshot_with_trust(app_root, node_trust)
         .map_err(local_err)?;
+    let node_policy =
+        crate::node_descriptors::load_verified_policy_snapshot_with_trust(app_root, node_trust)
+            .map_err(local_err)?;
+    let command_registration = node_policy
+        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .map_err(local_err)?;
 
     // 1. Consume bundle and command records from that same generation.
     let bundle_roots: Vec<PathBuf> = snapshot
@@ -97,7 +103,7 @@ pub async fn try_offline_dispatch(
     // 2. Resolve the command from the verified snapshot.
     let registry = CommandRegistry::from_records(
         &snapshot.commands,
-        &snapshot.command_registration_policy.policy,
+        &command_registration.runtime_policy(),
     )
     .map_err(|error| CliError::Local {
         detail: format!("load verified node commands: {error:#}"),
@@ -136,6 +142,9 @@ pub async fn try_offline_dispatch(
         project_path,
         &bundle_roots,
         std::sync::Arc::clone(&isolation),
+        node_policy
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .map_err(local_err)?,
     )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
@@ -212,6 +221,7 @@ fn boot_engine(
     project_path: &str,
     bundle_roots: &[PathBuf],
     isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
+    execution_policy: &ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -225,6 +235,7 @@ fn boot_engine(
         project_root.as_deref(),
         None, // no trust overlay
         isolation,
+        execution_policy,
     )
     .map_err(local_err)
 }
@@ -1228,7 +1239,7 @@ mod tests {
                 &core_key,
             );
             this.write_manifest();
-            this.write_command_registration_policy();
+            this.write_node_policy_generation();
             this.write_registration();
             this.write_core_bundle_registration(&core_bundle);
             for handler_bin in [
@@ -1319,54 +1330,42 @@ mod tests {
             self.write_bundle_registration("test", &self.bundle);
         }
 
-        fn write_command_registration_policy(&self) {
-            self.write_signed(
-                &self
-                    .system
-                    .join(ryeos_engine::AI_DIR)
-                    .join("node")
-                    .join("command_registration")
-                    .join("default.yaml"),
-                "claim_rules:\n  - claim:\n      kind: command.root\n      value: execute\n    required_caps:\n      - ryeos.register.command.root.execute\n  - claim:\n      kind: command.dispatch.kind\n      value: direct_execute_item_ref\n    required_caps:\n      - ryeos.register.command.dispatch.direct_execute_item_ref\nsystem_source_caps:\n  - ryeos.register.command.root.execute\n  - ryeos.register.command.dispatch.direct_execute_item_ref\n",
-            );
+        fn write_node_policy_generation(&self) {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../bundles/.ai/node/init/profiles/full.yaml");
+            let raw = std::fs::read_to_string(&source).unwrap();
+            let body = lillux::signature::strip_signature_lines(&raw);
+            let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+                serde_yaml::from_str(&body).unwrap();
+            for (name, source_policy) in profile.policies() {
+                let mut policy = source_policy.clone();
+                if name == "command_registration" {
+                    policy["bundle_source_caps"]["test"] = serde_json::json!([]);
+                }
+                self.write_signed(
+                    &self
+                        .system
+                        .join(ryeos_engine::AI_DIR)
+                        .join("node")
+                        .join("policies")
+                        .join(format!("{name}.yaml")),
+                    &serde_yaml::to_string(&policy).unwrap(),
+                );
+            }
         }
 
         fn write_core_bundle_registration(&self, core_bundle: &Path) {
-            self.write_bundle_registration_with_caps(
-                "core",
-                core_bundle,
-                &[
-                    "ryeos.register.command.root.execute",
-                    "ryeos.register.command.dispatch.direct_execute_item_ref",
-                ],
-            );
+            self.write_bundle_registration("core", core_bundle);
         }
 
         fn write_bundle_registration(&self, id: &str, bundle_root: &Path) {
-            self.write_bundle_registration_with_caps(id, bundle_root, &[]);
-        }
-
-        fn write_bundle_registration_with_caps(
-            &self,
-            id: &str,
-            bundle_root: &Path,
-            command_registration_caps: &[&str],
-        ) {
             let path = self
                 .system
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
                 .join("bundles")
                 .join(format!("{id}.yaml"));
-            let mut body = format!("kind: node\npath: {}\n", bundle_root.display());
-            if !command_registration_caps.is_empty() {
-                body.push_str("command_registration_caps:\n");
-                for cap in command_registration_caps {
-                    body.push_str("  - ");
-                    body.push_str(cap);
-                    body.push('\n');
-                }
-            }
+            let body = format!("kind: node\npath: {}\n", bundle_root.display());
             self.write_signed(&path, &body);
         }
 

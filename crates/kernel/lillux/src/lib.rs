@@ -34,12 +34,15 @@ pub use cas::{
     CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
     atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path, valid_hash,
 };
-pub use locks::{ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock};
+pub use locks::{
+    ExactExclusiveFileLock, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
+};
 pub use secure_fs::{
     DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree,
     OpenRegularFileObservation, PinnedDirectory, PinnedDirectoryEntry,
     PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity, PinnedDirectoryLock, PinnedEntryType,
-    PinnedRegularFile, collect_directory_tree_no_follow, collect_regular_files_no_follow,
+    PinnedRegularFile, collect_directory_tree_no_follow,
+    collect_pinned_regular_files_no_follow_bounded, collect_regular_files_no_follow,
     digest_open_regular_file_stable_exact, ensure_open_regular_file_unchanged,
     inspect_optional_entry_no_follow, matches_regular_file_identity,
     normalized_portable_regular_mode, observe_open_regular_file,

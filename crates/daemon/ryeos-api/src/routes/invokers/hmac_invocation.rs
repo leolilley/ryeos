@@ -1275,10 +1275,7 @@ mod tests {
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
         let signer = std::sync::Arc::new(
@@ -1335,10 +1332,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![],
-            hosted_node_policies: vec![],
-            command_registration_policy: Default::default(),
-            external_content_import_policy: None,
-            persistent_session_policy: None,
         };
         let test_command_registry = std::sync::Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
@@ -1375,8 +1368,10 @@ mod tests {
             services: std::sync::Arc::new(crate::registry::build_service_registry()),
             service_descriptors: crate::handlers::ALL,
             node_config: std::sync::Arc::new(snapshot.clone()),
-            node_history_policy: std::sync::Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            node_policy: std::sync::Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![std::sync::Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                )]),
             ),
             vault: std::sync::Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: test_command_registry,

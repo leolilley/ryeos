@@ -13,15 +13,14 @@ post_install() {
     echo "ryeos bundles installed to /usr/share/ryeos"
     echo
     echo "Initialize with:"
-    echo "  ryeos init"
+    echo "  ryeos init --node-profile full"
     echo
     echo "The packaged bundle artifact is signed by the official publisher."
     echo "ryeos init verifies it against the publisher key built into the binary;"
     echo "no packaged trust-file override is used."
     echo
-    echo "The node isolation policy defaults to mode: disabled."
-    echo "No isolation backend is installed by default."
-    echo "Install and select a backend bundle before changing the policy to mode: enforce."
+    echo "The signed full init profile explicitly owns isolation and every other"
+    echo "required node policy; init never invents an absent policy generation."
 }
 
 post_upgrade() {

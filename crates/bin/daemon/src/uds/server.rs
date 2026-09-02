@@ -1854,10 +1854,7 @@ mod tests {
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
 
         let identity = NodeIdentity::create(&key_path).unwrap();
@@ -1976,13 +1973,11 @@ mod tests {
                 bundles: vec![],
                 routes: vec![],
                 commands: vec![],
-                hosted_node_policies: vec![],
-                command_registration_policy: Default::default(),
-                external_content_import_policy: None,
-                persistent_session_policy: None,
             }),
-            node_history_policy: Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            node_policy: Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                )]),
             ),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),

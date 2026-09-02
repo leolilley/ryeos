@@ -396,7 +396,7 @@ pub async fn spawn_detached_child(
                 &child_plan_context,
                 &child_provenance,
             )?,
-            node_history_policy: &state.node_history_policy,
+            node_history_policy: state.node_history_policy()?,
             item_ref: child_item_ref,
             launch_mode: "detached",
             parameters: child_parameters.clone(),

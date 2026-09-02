@@ -190,6 +190,16 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             });
         }
     };
+    let node_policy = crate::node_descriptors::load_verified_policy_snapshot(&app_root)
+        .map_err(|error| CliError::Local {
+            detail: format!("load verified node policy: {error:#}"),
+        })?;
+    let command_registration = node_policy
+        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .map_err(|error| CliError::Local {
+            detail: format!("load command-registration policy: {error:#}"),
+        })?;
+    let command_registration_policy = command_registration.runtime_policy();
 
     // `--project` and `--no-project` are global selectors when written before
     // the command, while descriptor binding also accepts them after the
@@ -201,7 +211,14 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // be represented as an `/execute` JSON result. The verified command is
     // still only routing: the handler's signed daemon requests carry the
     // operator authority and are independently authorized server-side.
-    if let Some(result) = try_dispatch_client_handler(&dispatch_rest, &app_root, snapshot).await? {
+    if let Some(result) = try_dispatch_client_handler(
+        &dispatch_rest,
+        &app_root,
+        snapshot,
+        &command_registration_policy,
+    )
+    .await?
+    {
         let mut presenter = Presenter::for_console(console);
         print_result(result, &mut presenter, &cli.rest, 0)?;
         return Ok(());
@@ -237,8 +254,12 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     //    service-schema `project` field, while global `-p/--project` before
     //    the command remains supported by clap above.
 
-    let mut resolved =
-        resolve_command_for_daemon(&dispatch_rest, snapshot, cli.project.as_deref())?;
+    let mut resolved = resolve_command_for_daemon(
+        &dispatch_rest,
+        snapshot,
+        &command_registration_policy,
+        cli.project.as_deref(),
+    )?;
     let mut presenter = Presenter::for_console(console);
     let item_ref_for_contract = resolved.item_ref.clone();
     normalize_resolved_parameters(
@@ -410,10 +431,11 @@ async fn try_dispatch_client_handler(
     rest: &[String],
     app_root: &Path,
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
 ) -> Result<Option<Value>, CliError> {
     let registry = CommandRegistry::from_records(
         &snapshot.commands,
-        &snapshot.command_registration_policy.policy,
+        command_registration_policy,
     )
     .map_err(|error| CliError::Local {
         detail: format!("load verified node commands: {error:#}"),
@@ -796,12 +818,13 @@ struct ResolvedControlFlags {
 fn resolve_command_for_daemon(
     rest: &[String],
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
     default_project: Option<&Path>,
 ) -> Result<CliResolvedExecute, CliError> {
     resolve_command_for_daemon_with_commands(
         rest,
         &snapshot.commands,
-        &snapshot.command_registration_policy.policy,
+        command_registration_policy,
         default_project,
     )
 }
@@ -2372,15 +2395,10 @@ mod tests {
             bundles: vec![ryeos_app::node_config::BundleRecord {
                 name: "core".into(),
                 path: core,
-                command_registration_caps: Vec::new(),
                 source_file: root.path().join("core-registration.yaml"),
             }],
             routes: Vec::new(),
             commands: Vec::new(),
-            hosted_node_policies: Vec::new(),
-            command_registration_policy: Default::default(),
-            external_content_import_policy: None,
-            persistent_session_policy: None,
         };
         let mut command = direct_execute_command();
         command.source_file = expected;

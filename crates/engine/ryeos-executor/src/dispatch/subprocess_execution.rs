@@ -354,7 +354,7 @@ async fn dispatch_managed_subprocess(
         &runtime_ref,
         ctx,
         request,
-        &state.node_history_policy,
+        state.node_history_policy()?,
     )?;
 
     if request.validate_only {
@@ -1217,7 +1217,7 @@ async fn dispatch_tool_subprocess(
             &ctx.plan_ctx,
             &request.provenance,
         )?;
-    let node_history_policy = std::sync::Arc::clone(&state.node_history_policy);
+    let node_history_policy = std::sync::Arc::new(state.node_history_policy()?.clone());
     let resolution_ref_bindings = request.ref_bindings.clone();
     let resolution_launch_mode = request.launch_mode.to_owned();
     let resolution_parameters = request.params.clone();

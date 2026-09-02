@@ -1975,7 +1975,9 @@ pub(crate) async fn dispatch_method(
             &ctx.plan_ctx,
             project_binding,
             std::sync::Arc::new(history_attestation),
-            &state.node_history_policy,
+            state
+                .node_history_policy()
+                .map_err(DispatchError::Internal)?,
             thread_profile_str.to_string(),
             request.ref_bindings.clone(),
             request.usage_subject.clone(),
@@ -5015,7 +5017,9 @@ fn finish_root_dispatch_preflight(
         &ctx.plan_ctx,
         project_binding.clone(),
         root_attestation,
-        &state.node_history_policy,
+        state
+            .node_history_policy()
+            .map_err(DispatchError::Internal)?,
         thread_profile,
         ref_bindings.clone(),
         usage_subject.cloned(),

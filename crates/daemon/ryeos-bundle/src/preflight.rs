@@ -784,9 +784,6 @@ struct PreflightNodeBundleRecord {
     kind: Option<String>,
     #[allow(dead_code)]
     path: PathBuf,
-    #[allow(dead_code)]
-    #[serde(default)]
-    command_registration_caps: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1137,67 +1134,6 @@ enum PreflightCommandAvailability {
     Both,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodePolicyRecord {
-    #[allow(dead_code)]
-    version: String,
-    schema_version: String,
-    #[allow(dead_code)]
-    description: String,
-    transport: PreflightHostedNodeTransportPolicy,
-    admission: PreflightHostedNodeAdmissionPolicy,
-    descriptor: PreflightHostedNodeDescriptorPolicy,
-    authorization: PreflightHostedNodeAuthorizationPolicy,
-    operations: PreflightHostedNodeOperationsPolicy,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeTransportPolicy {
-    public_https_required: bool,
-    #[allow(dead_code)]
-    loopback_http_allowed: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeAdmissionPolicy {
-    mode: String,
-    token_ttl_secs: u64,
-    reject_wildcard_scopes: bool,
-    token_delivery: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeDescriptorPolicy {
-    require_live_identity_match: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    advertised_capabilities: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeAuthorizationPolicy {
-    authority: String,
-    central_bearer_tokens_allowed: bool,
-    implicit_cross_node_authority_allowed: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeOperationsPolicy {
-    #[allow(dead_code)]
-    audit_admission_events: bool,
-    #[allow(dead_code)]
-    audit_grant_changes: bool,
-    #[allow(dead_code)]
-    prefer_isolated_node_per_principal: bool,
-    shared_daemon_multitenancy_enabled: bool,
-}
-
 fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<String> {
     let node_dir = ai_dir.join("node");
     let mut failures = Vec::new();
@@ -1263,7 +1199,16 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
             continue;
         }
 
-        if !matches!(section, "bundles" | "hosted" | "routes" | "commands") {
+        if matches!(section, "hosted" | "policies") {
+            failures.push(format!(
+                "{}: hosted and policy-set configuration is node-owned; bundles may not contribute '.ai/node/{}'",
+                rel.display(),
+                section
+            ));
+            continue;
+        }
+
+        if !matches!(section, "bundles" | "routes" | "commands") {
             continue;
         }
 
@@ -1362,7 +1307,6 @@ fn validate_node_config_item(
 
     match expected_section {
         "bundles" => validate_node_bundle_record(file_path, &body),
-        "hosted" => validate_hosted_node_policy(file_path, &body),
         "routes" => validate_node_route_record(&body),
         "commands" => validate_node_command_record(file_path, section_root, &body),
         _ => Ok(()),
@@ -1500,48 +1444,6 @@ fn validate_node_command_record(
             &format!("{} aliases[{idx}]", command_name),
             &alias.tokens,
         )?;
-    }
-    Ok(())
-}
-
-fn validate_hosted_node_policy(file_path: &Path, body: &serde_json::Value) -> Result<()> {
-    let record: PreflightHostedNodePolicyRecord = serde_json::from_value(body.clone())
-        .context("failed to parse hosted node-config policy")?;
-    if file_path.file_stem().and_then(|stem| stem.to_str()) != Some("policy") {
-        bail!("hosted-node policy filename must be 'policy'");
-    }
-    if record.schema_version != "1.0.0" {
-        bail!("hosted-node policy schema_version must be '1.0.0'");
-    }
-    if !record.transport.public_https_required {
-        bail!("hosted-node policy must require public HTTPS");
-    }
-    if record.admission.mode != "one_time_token" {
-        bail!("hosted-node admission.mode must be 'one_time_token'");
-    }
-    if record.admission.token_ttl_secs == 0 {
-        bail!("hosted-node admission.token_ttl_secs must be greater than zero");
-    }
-    if !record.admission.reject_wildcard_scopes {
-        bail!("hosted-node policy must reject wildcard admission scopes");
-    }
-    if record.admission.token_delivery != "out_of_band" {
-        bail!("hosted-node admission.token_delivery must be 'out_of_band'");
-    }
-    if !record.descriptor.require_live_identity_match {
-        bail!("hosted-node policy must require live descriptor identity matching");
-    }
-    if record.authorization.authority != "target_node_authorized_keys" {
-        bail!("hosted-node authorization.authority must be 'target_node_authorized_keys'");
-    }
-    if record.authorization.central_bearer_tokens_allowed {
-        bail!("hosted-node policy must not allow central bearer tokens");
-    }
-    if record.authorization.implicit_cross_node_authority_allowed {
-        bail!("hosted-node policy must not allow implicit cross-node authority");
-    }
-    if record.operations.shared_daemon_multitenancy_enabled {
-        bail!("hosted-node policy must not enable shared daemon multitenancy");
     }
     Ok(())
 }
@@ -2372,6 +2274,28 @@ system_source_caps:
             failures.iter().any(|failure| failure
                 .contains("command registration policy is node-owned seed/system config")),
             "expected command_registration rejection, got: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn node_config_preflight_rejects_bundle_authored_hosted_policy_authority() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.sign_and_write(
+            "node/policies/hosted.yaml",
+            r#"schema: 1
+admission_enabled: true
+admission_token_ttl_secs: 600
+allow_loopback_http: true
+"#,
+        );
+        let failures = collect_node_config_failures(&layout.ai_dir, &layout.trust_store());
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure
+                    .contains("hosted and policy-set configuration is node-owned")),
+            "expected bundle policy-authority rejection, got: {failures:?}"
         );
     }
 

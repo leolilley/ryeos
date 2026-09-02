@@ -156,17 +156,42 @@ owner = "$OWNER"
 EOF
 }
 
-assert_no_legacy_seed_paths() {
-  local stale
-  for stale in \
-    "$SOURCE_ROOT_AI/node/command_registration" \
-    "$SOURCE_ROOT_AI/node/bundle_registration_grants"
-  do
-    if [[ -e "$stale" ]]; then
-      ryeos_term_fail "stale legacy source-root seed path exists: $stale"
+assert_node_init_profile_inventory() {
+  local directory="$INIT_SEED/profiles"
+  local expected actual unsupported hardlinked profile
+
+  if ! ryeos_validate_node_init_root "$INIT_SEED"; then
+    ryeos_term_fail "source-root node init namespace is not closed"
+    exit 2
+  fi
+  if [[ ! -d "$directory" || -L "$directory" ]]; then
+    ryeos_term_fail "node init-profile directory is missing or unsafe: $directory"
+    exit 2
+  fi
+  unsupported="$(find "$directory" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+  if [[ -n "$unsupported" ]]; then
+    ryeos_term_fail "node init-profile inventory contains a link, directory, or special entry: $unsupported"
+    exit 2
+  fi
+  hardlinked="$(find "$directory" -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)"
+  if [[ -n "$hardlinked" ]]; then
+    ryeos_term_fail "node init-profile inventory contains a multiply-linked file: $hardlinked"
+    exit 2
+  fi
+  expected="$(ryeos_node_init_profile_file_names | sort)"
+  actual="$(find "$directory" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+  if [[ "$actual" != "$expected" ]]; then
+    ryeos_term_fail "node init-profile inventory does not match the authored contract"
+    printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+    exit 2
+  fi
+  while IFS= read -r profile; do
+    if ! ryeos_validate_node_init_profile \
+      "$profile" "$directory/$profile.yaml"; then
+      ryeos_term_fail "node init-profile contract is invalid: $profile"
       exit 2
     fi
-  done
+  done < <(ryeos_node_init_profile_names)
 }
 
 # ── Setup ────────────────────────────────────────────────────────────
@@ -208,6 +233,7 @@ SOURCE_ROOT_AI="$ROOT/bundles/.ai"
 INIT_SEED="$SOURCE_ROOT_AI/node/init"
 PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
 PUBLISHER_FP="$(publisher_fingerprint)"
+assert_node_init_profile_inventory
 
 # Bin-managed bundles for this set come from the shared definition (central-auth
 # is excluded — its Python implementation is tool support rather than a
@@ -501,9 +527,9 @@ done < <(staged_payload_records_for_set)
 # ── Publish ──────────────────────────────────────────────────────────
 
 ryeos_term_update "signing source-root seed data" "publisher $OWNER"
-assert_no_legacy_seed_paths
-sign_seed_yaml "$INIT_SEED/command-registration/default.yaml"
-sign_seed_yaml "$INIT_SEED/bundle-registration-grants/default.yaml"
+while IFS= read -r profile; do
+  sign_seed_yaml "$INIT_SEED/profiles/$profile.yaml"
+done < <(ryeos_node_init_profile_names)
 write_seed_trust_doc
 
 # Bundle publishing is an offline authoring operation. Use the maintainer

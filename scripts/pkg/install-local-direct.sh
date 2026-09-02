@@ -51,7 +51,10 @@ Options:
                         isolation backend), standard
                         (core+central-auth+standard), hosted-node
                         (core+central-auth+hosted-node), or hosted-workflow
-                        (core+central-auth+standard+hosted-node+codex)
+                        (core+central-auth+standard+hosted-node+codex). Every
+                        set selects its exact same-named publisher-authored
+                        node init profile for first policy publication; an
+                        existing signed generation is preserved.
                         (default: full)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
@@ -124,6 +127,23 @@ ryeos_user() {
 
 ryeos_status_quick() {
     RYEOS_TTY=never ryeos_user 10 node status 2>/dev/null || true
+}
+
+# Build only the init-profile portion of init. The distribution mapping is
+# first-publication authority; any existing occupant is preserved so RyeOS can
+# validate it as one complete signed generation. In particular, an empty file,
+# link, or partial directory never triggers a profile fallback.
+build_install_init_profile_args() {
+    local policy_generation_path="$1"
+    local mapped_profile="$2"
+
+    [[ -n "$mapped_profile" ]] || return 1
+    INSTALL_INIT_PROFILE_ARGS=()
+    INSTALL_PUBLISH_INITIAL_POLICY=0
+    if [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
+        INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile")
+        INSTALL_PUBLISH_INITIAL_POLICY=1
+    fi
 }
 
 # Refuse a non-official key in a source publisher document before stopping the
@@ -465,6 +485,10 @@ done < <(ryeos_bundle_set_names "$bundle_set") || true
 if [[ ${#bundle_names[@]} -eq 0 ]]; then
     die "--bundle-set must be 'full', 'full-sandbox', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
 fi
+if ! node_init_profile="$(ryeos_bundle_set_node_init_profile "$bundle_set")"; then
+    die "could not resolve node init profile for bundle set: $bundle_set"
+fi
+[[ -n "$node_init_profile" ]] || die "bundle set has no explicit node init profile: $bundle_set"
 bundle_names_csv=$(IFS=,; printf '%s\n' "${bundle_names[*]}")
 
 # Every selected source bundle must already carry its exact closed manifest and
@@ -566,6 +590,37 @@ fi
 require_closed_source_bundle_payloads "$repo_root" "${closed_payload_bundle_names[@]}" \
     || die "selected source bundle set is incomplete"
 
+# Validate the complete shared source-root seed closure before stopping a live
+# daemon or replacing installed files. Every distribution carries these seeds
+# and selects exactly the same-named seed through the mapping above.
+for name in "${bundle_names[@]}"; do
+    [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
+done
+[[ -d "$repo_root/bundles/.ai" && ! -L "$repo_root/bundles/.ai" ]] || \
+    die "missing or unsafe source-root seed data: bundles/.ai"
+[[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" && ! -L "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
+    die "missing or unsafe source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
+ryeos_validate_node_init_root "$repo_root/bundles/.ai/node/init" || \
+    die "source-root node init namespace is not closed"
+node_init_profile_dir="$repo_root/bundles/.ai/node/init/profiles"
+[[ -d "$node_init_profile_dir" && ! -L "$node_init_profile_dir" ]] || \
+    die "missing or unsafe source-root node init-profile directory: $node_init_profile_dir"
+unsupported_node_init_profile="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+[[ -z "$unsupported_node_init_profile" ]] || \
+    die "source-root node init-profile inventory contains an unsafe entry: $unsupported_node_init_profile"
+hardlinked_node_init_profile="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)"
+[[ -z "$hardlinked_node_init_profile" ]] || \
+    die "source-root node init-profile inventory contains a multiply-linked file: $hardlinked_node_init_profile"
+expected_node_init_profiles="$(ryeos_node_init_profile_file_names | sort)"
+actual_node_init_profiles="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+[[ "$actual_node_init_profiles" == "$expected_node_init_profiles" ]] || \
+    die "source-root node init-profile inventory is incomplete or unsupported"
+while IFS= read -r node_init_profile_name; do
+    ryeos_validate_node_init_profile \
+        "$node_init_profile_name" "$node_init_profile_dir/$node_init_profile_name.yaml" || \
+        die "source-root node init-profile contract is invalid: $node_init_profile_name"
+done < <(ryeos_node_init_profile_names)
+
 daemon_was_running=0
 if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
     if stop_daemon_for_install; then
@@ -608,17 +663,6 @@ done
 if [[ $(id -u) -ne 0 ]]; then
     sudo -v || die "sudo authorization is required for /usr installs"
 fi
-
-for name in "${bundle_names[@]}"; do
-    [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
-done
-[[ -d "$repo_root/bundles/.ai" ]] || die "missing source-root seed data: bundles/.ai"
-[[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
-    die "missing source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
-[[ -f "$repo_root/bundles/.ai/node/init/command-registration/default.yaml" ]] || \
-    die "missing source-root command-registration seed: bundles/.ai/node/init/command-registration/default.yaml"
-[[ -f "$repo_root/bundles/.ai/node/init/bundle-registration-grants/default.yaml" ]] || \
-    die "missing source-root bundle-registration-grants seed: bundles/.ai/node/init/bundle-registration-grants/default.yaml"
 
 ryeos_term_begin INSTALL "installing binaries"
 for b in "${required_bins[@]}"; do
@@ -712,6 +756,12 @@ if [[ $run_init -eq 1 ]]; then
     ryeos_term_update "initializing node state" "user $invoking_user"
     ryeos_term_suspend
     state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
+    policy_generation_path="$state_root/.ai/node/policies"
+    build_install_init_profile_args "$policy_generation_path" "$node_init_profile" || \
+        die "could not resolve init-profile arguments"
+    if [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 0 ]]; then
+        ryeos_term_note "preserving existing signed node policy generation"
+    fi
     for path in "$state_root/.ai/bundles"/*; do
         [[ -d "$path/.ai" ]] || continue
         name="$(basename "$path")"
@@ -755,6 +805,7 @@ if [[ $run_init -eq 1 ]]; then
     if [[ -n "$init_app_root" ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
+    init_args+=("${INSTALL_INIT_PROFILE_ARGS[@]}")
     init_status=0
     "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}" || init_status=$?
     if (( init_status != 0 )); then
@@ -764,11 +815,37 @@ if [[ $run_init -eq 1 ]]; then
 
     ryeos_term_end success INSTALL "node state initialized"
     ryeos_term_begin VERIFY "initialized bundle state"
-    state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     for name in "${bundle_names[@]}"; do
         test -d "$state_root/.ai/bundles/$name/.ai" || \
             die "initialized $name bundle missing from $state_root"
     done
+    if [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 1 ]]; then
+        selected_node_init_profile="$share_dir/.ai/node/init/profiles/$node_init_profile.yaml"
+        expected_node_policies="$(
+            ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+                | sed 's/$/.yaml/' \
+                | sort
+        )"
+        node_policy_dir="$state_root/.ai/node/policies"
+        [[ -n "$expected_node_policies" && -d "$node_policy_dir" && ! -L "$node_policy_dir" ]] || \
+            die "selected node init profile was not materialized under $node_policy_dir"
+        unsafe_node_policy="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+        [[ -z "$unsafe_node_policy" ]] || \
+            die "materialized node-policy generation contains an unsafe entry: $unsafe_node_policy"
+        actual_node_policies="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+        [[ "$actual_node_policies" == "$expected_node_policies" ]] || \
+            die "materialized node-policy generation does not match $node_init_profile"
+    else
+        node_policy_dir="$policy_generation_path"
+        [[ -d "$node_policy_dir" && ! -L "$node_policy_dir" ]] || \
+            die "existing node-policy generation is not a safe directory: $node_policy_dir"
+        unsafe_node_policy="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+        [[ -z "$unsafe_node_policy" ]] || \
+            die "existing node-policy generation contains an unsafe entry: $unsafe_node_policy"
+        actual_node_policies="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+        [[ -n "$actual_node_policies" ]] || \
+            die "existing node-policy generation is empty: $node_policy_dir"
+    fi
     if [[ "$bundle_set" == "hosted-node" ]]; then
         for name in standard ryeos-ui web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \

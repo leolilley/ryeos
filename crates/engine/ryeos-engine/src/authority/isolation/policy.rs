@@ -2,7 +2,8 @@ use ryeos_isolation_protocol::IsolationBackendSelection;
 use serde::{Deserialize, Serialize};
 
 pub const ISOLATION_POLICY_VERSION: u32 = 1;
-pub const ISOLATION_POLICY_RELATIVE_PATH: &str = "node/isolation.yaml";
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_ISOLATION_POLICY_RELATIVE_PATH: &str = "test-fixtures/isolation-policy.yaml";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +18,7 @@ pub struct IsolationPolicy {
 }
 
 impl IsolationPolicy {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn default_disabled() -> Self {
         Self {
             version: ISOLATION_POLICY_VERSION,

@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 #[cfg(unix)]
 use std::ffi::CString;
@@ -134,6 +134,197 @@ pub struct ExclusiveFileLock {
 /// [`ExclusiveFileLock`] remain serialized against every shared holder.
 pub struct SharedFileLock {
     _guard: FileLockGuard,
+}
+
+/// Non-blocking exclusive lease on the exact regular file named by `target`.
+///
+/// This differs from [`ExclusiveFileLock`], whose hidden sibling anchor
+/// serializes mutations *of* a target. An `ExactExclusiveFileLock` locks the
+/// target inode itself, retains its descriptor and parent authority, and can
+/// later prove that an expected pathname still selects that exact lock. It is
+/// used for long-lived operational exclusion files such as a node's
+/// `operator.lock`.
+pub struct ExactExclusiveFileLock {
+    file: fs::File,
+    parent: fs::File,
+    target_name: CString,
+}
+
+impl ExactExclusiveFileLock {
+    /// Open or create `target`, acquire `LOCK_EX | LOCK_NB`, and publish the
+    /// current PID as diagnostic content only after the lease is held.
+    pub fn acquire(target: &Path) -> Result<Self> {
+        Self::acquire_inner(target, true)
+    }
+
+    /// Acquire an already-existing target without creating or modifying it.
+    pub fn acquire_existing_read_only(target: &Path) -> Result<Self> {
+        Self::acquire_inner(target, false)
+    }
+
+    fn acquire_inner(target: &Path, create_missing: bool) -> Result<Self> {
+        #[cfg(not(unix))]
+        {
+            let _ = (target, create_missing);
+            anyhow::bail!("exact operational file locking is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::io::{Seek as _, Write as _};
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+            let parent = open_directory_no_follow(parent_path, create_missing)?;
+            let target_name = target
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("operational lock target has no file name"))?;
+            validate_lock_target_name(target_name)?;
+            let target_name = CString::new(target_name.as_bytes())?;
+            let access = if create_missing {
+                libc::O_RDWR
+            } else {
+                libc::O_RDONLY
+            };
+            let mut created = false;
+            let mut descriptor = -1;
+            if create_missing {
+                descriptor = unsafe {
+                    libc::openat(
+                        parent.as_raw_fd(),
+                        target_name.as_ptr(),
+                        access | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                        0o600,
+                    )
+                };
+                if descriptor >= 0 {
+                    created = true;
+                } else {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(error).with_context(|| {
+                            format!("create exact operational lock {}", target.display())
+                        });
+                    }
+                }
+            }
+            if descriptor < 0 {
+                descriptor = unsafe {
+                    libc::openat(
+                        parent.as_raw_fd(),
+                        target_name.as_ptr(),
+                        access | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                        0,
+                    )
+                };
+            }
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("open exact operational lock {}", target.display()));
+            }
+            let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+            if !file.metadata()?.file_type().is_file() {
+                anyhow::bail!(
+                    "exact operational lock is not a regular file: {}",
+                    target.display()
+                );
+            }
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(libc::EWOULDBLOCK)
+                {
+                    let holder = linux_flock_holder_pid(&file)
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    anyhow::bail!(
+                        "state lock held by another process (pid: {holder}); stop the daemon or other standalone service before proceeding"
+                    );
+                }
+                return Err(error).with_context(|| {
+                    format!("acquire exact operational lock {}", target.display())
+                });
+            }
+            if create_missing {
+                file.set_len(0)?;
+                file.rewind()?;
+                writeln!(&mut file, "{}", std::process::id())?;
+                file.sync_all()?;
+                if created {
+                    parent.sync_all()?;
+                }
+            }
+            Ok(Self {
+                file,
+                parent,
+                target_name,
+            })
+        }
+    }
+
+    /// Prove `target` still resolves to the exact parent/name/inode held by
+    /// this lease. No path component is followed.
+    pub fn ensure_path_binding(&self, target: &Path) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = target;
+            anyhow::bail!("exact operational lock binding is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            use std::os::unix::ffi::OsStrExt as _;
+            use std::os::unix::fs::MetadataExt as _;
+
+            let expected_name = target
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("operational lock target has no file name"))?;
+            if expected_name.as_bytes() != self.target_name.as_bytes() {
+                anyhow::bail!("operational lock protects a different child name");
+            }
+            let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+            let expected_parent = open_directory_no_follow(parent_path, false)?;
+            let held_parent = self.parent.metadata()?;
+            let observed_parent = expected_parent.metadata()?;
+            if held_parent.dev() != observed_parent.dev()
+                || held_parent.ino() != observed_parent.ino()
+            {
+                anyhow::bail!("operational lock protects a different parent directory");
+            }
+            let descriptor = unsafe {
+                libc::openat(
+                    self.parent.as_raw_fd(),
+                    self.target_name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    0,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("reopen exact operational lock binding");
+            }
+            let observed = unsafe { fs::File::from_raw_fd(descriptor) };
+            let held = self.file.metadata()?;
+            let observed = observed.metadata()?;
+            if !observed.file_type().is_file()
+                || held.dev() != observed.dev()
+                || held.ino() != observed.ino()
+            {
+                anyhow::bail!("operational lock pathname changed while the lease was held");
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn validate_lock_target_name(name: &OsStr) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.contains(&b'/') || bytes == b"." || bytes == b".." {
+        anyhow::bail!("operational lock target must be one safe child name");
+    }
+    Ok(())
 }
 
 impl ExclusiveFileLock {

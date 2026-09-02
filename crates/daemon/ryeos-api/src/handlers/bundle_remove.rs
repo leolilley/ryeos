@@ -173,15 +173,6 @@ fn admit_prospective_remove(
         );
     }
 
-    let prospective_roots: Vec<PathBuf> = plan
-        .bundles
-        .values()
-        .filter(|bundle| bundle.action != BundleAction::Remove)
-        .map(|bundle| bundle.source.root_path().clone())
-        .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(app_root, &prospective_roots, node_trust_store)
-        .context("prospective removal would fail node engine boot")?;
-
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root,
         trust_store: node_trust_store,
@@ -214,15 +205,42 @@ fn admit_prospective_remove(
             Ok(record)
         })
         .collect::<Result<Vec<_>>>()?;
+    let config_table = ryeos_app::node_config::NodeConfigTable::new();
+    let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
+    let policy_snapshot = ryeos_app::node_policy::load_snapshot(
+        app_root,
+        node_trust_store,
+        &policy_table,
+    )
+    .context("load exact node policy generation for prospective removal")?;
+    let command_registration = policy_snapshot.require::<
+        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+    >()?;
     let snapshot = loader
-        .load_full_prospective(
-            &ryeos_app::node_config::SectionTable::new(),
+        .load_full(
+            &config_table,
             &prospective_records,
+            command_registration,
+            &policy_table,
         )
         .context("prospective removal would fail full node-config boot")?;
     prospective_validator
         .validate(&snapshot)
         .context("prospective removal would fail composed node-config admission")?;
+    let prospective_roots: Vec<PathBuf> = plan
+        .bundles
+        .values()
+        .filter(|bundle| bundle.action != BundleAction::Remove)
+        .map(|bundle| bundle.source.root_path().clone())
+        .collect();
+    ryeos_app::engine_init::admit_node_bundle_roots(
+        app_root,
+        &prospective_roots,
+        node_trust_store,
+        policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+        policy_snapshot.generation_digest(),
+    )
+    .context("prospective removal would fail node engine boot")?;
     Ok(())
 }
 

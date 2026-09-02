@@ -826,8 +826,8 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
 fn local_detail(tokens: &str, description: &str) -> String {
     let (usage, options) = match tokens {
         "init" => (
-            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--source <DIR>] [--trust-file <FILE>]...",
-            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)",
+            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME>]",
+            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes",
         ),
         "setup" => (
             "ryeos setup [--app-root <DIR>]",

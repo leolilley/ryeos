@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2801,20 +2800,10 @@ impl ThreadLifecycleService {
         kind_profiles: Arc<KindProfileRegistry>,
         _events: Arc<EventStoreService>,
         event_hub: Arc<ThreadEventHub>,
+        current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        let hostname = env::var("HOSTNAME")
-            .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "HOSTNAME env var not set and system hostname unavailable. \
-                 Set HOSTNAME to this node's identity (e.g. hostname or unique site ID). \
-                 This is used to construct the site_id for thread isolation."
-                )
-            })?;
-        let current_site_id = format!("site:{hostname}");
-        crate::identity::validate_canonical_site_id(&current_site_id).with_context(|| {
-            format!("HOSTNAME `{hostname}` cannot form this node's canonical site identity")
-        })?;
+        crate::identity::validate_canonical_site_id(current_site_id)
+            .context("node identity produced a non-canonical site id")?;
 
         Ok(Self::new_with_site_id(
             state_store,
@@ -2822,7 +2811,7 @@ impl ThreadLifecycleService {
             kind_profiles,
             _events,
             event_hub,
-            current_site_id,
+            current_site_id.to_owned(),
         ))
     }
 

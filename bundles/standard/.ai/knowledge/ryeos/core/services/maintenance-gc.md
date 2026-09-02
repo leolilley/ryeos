@@ -150,7 +150,7 @@ struct RetentionPolicy {
 
 `compact: true` requires the complete nested `policy` object. Both fields are
 mandatory; RyeOS supplies no default or partial-policy fallback. The signed
-scheduled-maintenance declaration authors both values explicitly.
+node maintenance policy authors both values explicitly.
 
 HEAD is always kept regardless of policy. Then iterate newest-first:
 count per category, keep up to the policy limit for each. Everything

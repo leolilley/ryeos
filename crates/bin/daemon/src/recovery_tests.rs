@@ -26,10 +26,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         app_root: tmpdir.path().to_path_buf(),
         node_signing_key_path: key_path.clone(),
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-        require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
-        tool_env_passthrough: Vec::new(),
-        accounting_issue_acceptance_window_ms: 60_000,
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
@@ -85,10 +82,6 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         bundles: vec![],
         routes: vec![],
         commands: vec![],
-        hosted_node_policies: vec![],
-        command_registration_policy: Default::default(),
-        external_content_import_policy: None,
-        persistent_session_policy: None,
     };
 
     let state = AppState {
@@ -120,8 +113,10 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         services: Arc::new(ryeos_api::registry::build_service_registry()),
         service_descriptors: ryeos_api::handlers::ALL,
         node_config: Arc::new(node_config),
-        node_history_policy: Arc::new(
-            ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+        node_policy: Arc::new(
+            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            )]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: Arc::new(

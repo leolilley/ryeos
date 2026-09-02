@@ -452,25 +452,6 @@ requires:
         fixture,
     )?;
 
-    let policy_body = serde_yaml::to_string(
-        &ryeos_app::node_config::sections::persistent_sessions::PersistentSessionPolicyRecord {
-            schema: 1,
-            limits: ryeos_app::persistent_session::PersistentSessionPoolLimits::default(),
-        },
-    )?;
-    let policy_path = state_path.join(".ai/node/persistent_sessions/policy.yaml");
-    std::fs::create_dir_all(policy_path.parent().context("policy path has no parent")?)?;
-    std::fs::write(
-        policy_path,
-        lillux::signature::sign_content_at(
-            &policy_body,
-            &fixture.node,
-            "#",
-            None,
-            common::fast_fixture::FAST_FIXTURE_TIME,
-        ),
-    )?;
-
     let store = open_daemon_state(state_path)?;
     ryeos_app::private_artifact_home::create(
         &state_path.join(ryeos_engine::AI_DIR).join("state"),

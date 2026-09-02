@@ -426,23 +426,8 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             }
 
             // ── Two-phase node-config bootstrap ──
-            let (engine, node_config_snapshot, isolation) =
+            let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
                 bootstrap::load_node_config_two_phase(&config)?;
-            let node_history_policy = {
-                let roots = engine.resolution_roots(Some(config.app_root.clone()));
-                let parsers = engine.effective_parser_dispatcher(
-                    Some(&config.app_root),
-                    &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
-                )?;
-                let context = ryeos_engine::config_loading::ConfigLoadContext {
-                    roots: &roots,
-                    parsers: &parsers,
-                    kinds: &engine.kinds,
-                    trust_store: &engine.node_trust_store,
-                    project_authority: None,
-                };
-                Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
-            };
 
             // Build the service registry early — self-check needs it.
             let services = Arc::new(build_service_registry());
@@ -589,17 +574,18 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             // Execution admission limits must be armed before projection recovery
             // or any later runtime recovery action is classified or enqueued.
-            let execution_limits = load_node_execution_limits(&engine)?;
+            let execution_limits = node_policy_snapshot.require::<
+                ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+            >()?;
             ryeos_executor::execution::launch::arm_global_live_fanout_limit(
-                execution_limits.max_live_fanout,
+                Some(execution_limits.max_live_fanout),
             );
-            let private_copy_limit = execution_limits
-                .max_private_materialization_copy_bytes
-                .expect("verified node execution limits include private copy bytes");
+            let private_copy_limit = execution_limits.max_private_materialization_copy_bytes;
             ryeos_executor::execution::arm_private_materialization_copy_limit(private_copy_limit)?;
-            if let Some(n) = execution_limits.max_live_fanout {
-                tracing::info!(max_live_fanout = n, "node execution limits armed");
-            }
+            tracing::info!(
+                max_live_fanout = execution_limits.max_live_fanout,
+                "node execution limits armed"
+            );
             tracing::info!(
                 max_private_materialization_copy_bytes = private_copy_limit,
                 "node private materialization limit armed"
@@ -690,6 +676,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
+                &identity.site_id(),
             )?);
             threads.set_scheduler_db(
                 scheduler_db.clone(),
@@ -725,7 +712,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             let command_registry = Arc::new(
                 ryeos_runtime::CommandRegistry::from_records(
                     &node_config_snapshot.commands,
-                    &node_config_snapshot.command_registration_policy.policy,
+                    &node_policy_snapshot
+                        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+                        .runtime_policy(),
                 )
                 .context("failed to build command registry from node-config records")?,
             );
@@ -773,13 +762,25 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     &identity,
                     &build,
                 )?;
-            let persistent_sessions = match node_config_snapshot.persistent_session_policy.as_ref()
-            {
-                Some(policy) => ryeos_app::persistent_session::PersistentSessionPool::with_limits(
-                    policy.limits.clone(),
-                )?,
-                None => ryeos_app::persistent_session::PersistentSessionPool::disabled(),
+            let persistent_session_policy = node_policy_snapshot.require::<
+                ryeos_app::node_policy::sections::persistent_sessions::PersistentSessionPolicy,
+            >()?;
+            let persistent_sessions = if persistent_session_policy.enabled {
+                ryeos_app::persistent_session::PersistentSessionPool::with_limits(
+                    persistent_session_policy
+                        .limits
+                        .clone()
+                        .context("enabled persistent-session policy has no limits")?,
+                )?
+            } else {
+                ryeos_app::persistent_session::PersistentSessionPool::disabled()
             };
+            let ignore_matcher = Arc::new(
+                node_policy_snapshot
+                    .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+                    .matcher
+                    .clone(),
+            );
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
@@ -820,17 +821,14 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 services,
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
-                node_history_policy,
+                node_policy: node_policy_snapshot,
                 vault,
                 command_registry,
                 authorizer,
                 scheduler_db,
                 scheduler_runtime_gate,
                 scheduler_reload_tx: None,
-                ignore_matcher: Arc::new(
-                    ryeos_app::ignore::load_from_app_root(&config.app_root)
-                        .context("load ingest ignore config — did `ryeos init` run?")?,
-                ),
+                ignore_matcher,
                 vault_fingerprint: {
                     let vault_pk_path = config
                         .app_root
@@ -1039,7 +1037,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 "reconciling scheduler state",
             )?;
             maintenance_schedule::ensure_maintenance_schedule(&app_state)
-                .context("reconcile bundle-authored maintenance schedules")?;
+                .context("materialize node-policy maintenance schedules")?;
             let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
                 app_state.clone(),
             )));
@@ -1366,151 +1364,6 @@ async fn settle_uds_listener(task: &mut tokio::task::JoinHandle<Result<()>>) -> 
             Ok(())
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct NodeExecutionLimits {
-    max_live_fanout: Option<u32>,
-    max_private_materialization_copy_bytes: Option<u64>,
-}
-
-/// Read node execution limits from the layered signed execution config,
-/// bundle defaults first and the node's own `.ai` tree last (last layer
-/// wins, matching execution-policy layering). A present malformed or
-/// unverifiable layer refuses startup; load shedding must not fail open.
-fn load_node_execution_limits(
-    engine: &ryeos_engine::engine::Engine,
-) -> Result<NodeExecutionLimits> {
-    let ordinary_roots = engine.resolution_roots(None);
-    let roots = engine.launch_config_roots(&ordinary_roots);
-    let parsers = match engine.effective_parser_dispatcher(
-        None,
-        &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
-    ) {
-        Ok(p) => p,
-        Err(err) => {
-            return Err(err).context("node execution limits: parser dispatcher unavailable");
-        }
-    };
-    let ctx = ryeos_engine::config_loading::ConfigLoadContext {
-        roots: &roots,
-        parsers: &parsers,
-        kinds: &engine.kinds,
-        trust_store: &engine.node_trust_store,
-        project_authority: None,
-    };
-    let mut limits = NodeExecutionLimits::default();
-    // Resolution roots are ordered highest precedence first. Apply them in
-    // reverse so trusted bundle defaults land first and the exact node config
-    // layer, inserted ahead of bundle roots, wins last.
-    for root in roots.ordered.iter().rev() {
-        let candidate = root
-            .ai_root
-            .join("config")
-            .join("execution")
-            .join("execution.yaml");
-        if !candidate.exists() {
-            continue;
-        }
-        let value =
-            ryeos_engine::config_loading::load_and_verify_trusted_config_file(&candidate, &ctx)
-                .with_context(|| {
-                    format!(
-                        "node execution limits: config layer failed verification at {}",
-                        candidate.display()
-                    )
-                })?;
-        limits = apply_node_execution_limits_layer(limits, &value, &candidate)?;
-    }
-    if limits.max_live_fanout.is_none() {
-        anyhow::bail!(
-            "node execution limits: signed execution configuration must declare node.max_live_fanout"
-        );
-    }
-    if limits.max_private_materialization_copy_bytes.is_none() {
-        anyhow::bail!(
-            "node execution limits: signed execution configuration must declare node.max_private_materialization_copy_bytes"
-        );
-    }
-    Ok(NodeExecutionLimits {
-        max_live_fanout: limits.max_live_fanout,
-        max_private_materialization_copy_bytes: limits.max_private_materialization_copy_bytes,
-    })
-}
-
-fn apply_node_execution_limits_layer(
-    current: NodeExecutionLimits,
-    value: &serde_json::Value,
-    source: &std::path::Path,
-) -> Result<NodeExecutionLimits> {
-    let layer = decode_node_execution_limits(value, source)?;
-    Ok(NodeExecutionLimits {
-        max_live_fanout: layer.max_live_fanout.or(current.max_live_fanout),
-        max_private_materialization_copy_bytes: layer
-            .max_private_materialization_copy_bytes
-            .or(current.max_private_materialization_copy_bytes),
-    })
-}
-
-fn decode_node_execution_limits(
-    value: &serde_json::Value,
-    source: &std::path::Path,
-) -> Result<NodeExecutionLimits> {
-    let Some(node) = value.get("node") else {
-        return Ok(NodeExecutionLimits::default());
-    };
-    let node = node.as_object().ok_or_else(|| {
-        anyhow::anyhow!(
-            "node execution limits: node at {} must be an object",
-            source.display()
-        )
-    })?;
-    let max_live_fanout = node
-        .get("max_live_fanout")
-        .map(|raw| {
-            let parsed = raw.as_u64().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "node execution limits: node.max_live_fanout at {} must be a positive integer",
-                    source.display()
-                )
-            })?;
-            let parsed = u32::try_from(parsed).with_context(|| {
-                format!(
-                    "node execution limits: node.max_live_fanout at {} exceeds u32",
-                    source.display()
-                )
-            })?;
-            if parsed == 0 {
-                anyhow::bail!(
-                    "node execution limits: node.max_live_fanout at {} must be greater than zero",
-                    source.display()
-                );
-            }
-            Ok(parsed)
-        })
-        .transpose()?;
-    let max_private_materialization_copy_bytes = node
-        .get("max_private_materialization_copy_bytes")
-        .map(|raw| {
-            let parsed = raw.as_u64().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "node execution limits: node.max_private_materialization_copy_bytes at {} must be a positive integer",
-                    source.display()
-                )
-            })?;
-            if parsed == 0 {
-                anyhow::bail!(
-                    "node execution limits: node.max_private_materialization_copy_bytes at {} must be greater than zero",
-                    source.display()
-                );
-            }
-            Ok(parsed)
-        })
-        .transpose()?;
-    Ok(NodeExecutionLimits {
-        max_live_fanout,
-        max_private_materialization_copy_bytes,
-    })
 }
 
 /// Cross the durable ownership boundary for every active-thread resume intent.
@@ -2981,23 +2834,8 @@ async fn run_service_standalone(
 
     // Two-phase node-config bootstrap without daemon callback-socket authority:
     // standalone mode does not bind the configured UDS listener.
-    let (engine, node_config_snapshot, isolation) =
+    let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
         bootstrap::load_node_config_two_phase_standalone(config)?;
-    let node_history_policy = {
-        let roots = engine.resolution_roots(Some(config.app_root.clone()));
-        let parsers = engine.effective_parser_dispatcher(
-            Some(&config.app_root),
-            &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
-        )?;
-        let context = ryeos_engine::config_loading::ConfigLoadContext {
-            roots: &roots,
-            parsers: &parsers,
-            kinds: &engine.kinds,
-            trust_store: &engine.node_trust_store,
-            project_authority: None,
-        };
-        Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
-    };
 
     let params: serde_json::Value = match params_json {
         Some(json_str) => {
@@ -3095,6 +2933,7 @@ async fn run_service_standalone(
         kind_profiles.clone(),
         events.clone(),
         event_streams.clone(),
+        &identity.site_id(),
     )?);
     let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
     threads.set_live_input_queue(live_input.clone());
@@ -3107,7 +2946,9 @@ async fn run_service_standalone(
     let standalone_command_registry = Arc::new(
         ryeos_runtime::CommandRegistry::from_records(
             &node_config_snapshot.commands,
-            &node_config_snapshot.command_registration_policy.policy,
+            &node_policy_snapshot
+                .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+                .runtime_policy(),
         )
         .context("failed to build command registry from node-config records")?,
     );
@@ -3174,7 +3015,7 @@ async fn run_service_standalone(
         services,
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
-        node_history_policy,
+        node_policy: node_policy_snapshot.clone(),
         vault: Arc::new(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
                 .context("load sealed-envelope vault — did `ryeos init` run?")?,
@@ -3185,8 +3026,10 @@ async fn run_service_standalone(
         scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
-            ryeos_app::ignore::load_from_app_root(&config.app_root)
-                .context("load ingest ignore config for standalone service")?,
+            node_policy_snapshot
+                .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+                .matcher
+                .clone(),
         ),
         vault_fingerprint: None,
         // Standalone service invocations perform no paid launches; hard
@@ -3278,74 +3121,5 @@ mod shutdown_mapping_tests {
             resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 0 })),
             ShutdownAction::Graceful(Duration::from_secs(0))
         );
-    }
-}
-
-#[cfg(test)]
-mod execution_limit_tests {
-    use super::{
-        NodeExecutionLimits, apply_node_execution_limits_layer, decode_node_execution_limits,
-    };
-    use serde_json::json;
-    use std::path::Path;
-
-    #[test]
-    fn fanout_limit_accepts_positive_u32_and_rejects_invalid_values() {
-        let source = Path::new("execution.yaml");
-        assert_eq!(
-            decode_node_execution_limits(&json!({"node":{"max_live_fanout":8}}), source)
-                .unwrap()
-                .max_live_fanout,
-            Some(8)
-        );
-        for invalid in [
-            json!({"node":{"max_live_fanout":0}}),
-            json!({"node":{"max_live_fanout":"8"}}),
-            json!({"node":{"max_live_fanout":u64::from(u32::MAX)+1}}),
-            json!({"node":8}),
-            json!({"node":[]}),
-        ] {
-            assert!(decode_node_execution_limits(&invalid, source).is_err());
-        }
-    }
-
-    #[test]
-    fn private_copy_limit_accepts_positive_u64_and_rejects_invalid_values() {
-        let source = Path::new("execution.yaml");
-        assert_eq!(
-            decode_node_execution_limits(
-                &json!({"node":{"max_private_materialization_copy_bytes":17179869184_u64}}),
-                source,
-            )
-            .unwrap()
-            .max_private_materialization_copy_bytes,
-            Some(17_179_869_184)
-        );
-        for invalid in [
-            json!({"node":{"max_private_materialization_copy_bytes":0}}),
-            json!({"node":{"max_private_materialization_copy_bytes":"1"}}),
-        ] {
-            assert!(decode_node_execution_limits(&invalid, source).is_err());
-        }
-    }
-
-    #[test]
-    fn later_node_layer_replaces_the_bundle_default() {
-        let bundle = Path::new("bundle/execution.yaml");
-        let node = Path::new("node/execution.yaml");
-        let limits = apply_node_execution_limits_layer(
-            NodeExecutionLimits::default(),
-            &json!({"node":{"max_live_fanout":8,"max_private_materialization_copy_bytes":1024}}),
-            bundle,
-        )
-        .unwrap();
-        let limits = apply_node_execution_limits_layer(
-            limits,
-            &json!({"node":{"max_live_fanout":3,"max_private_materialization_copy_bytes":2048}}),
-            node,
-        )
-        .unwrap();
-        assert_eq!(limits.max_live_fanout, Some(3));
-        assert_eq!(limits.max_private_materialization_copy_bytes, Some(2048));
     }
 }

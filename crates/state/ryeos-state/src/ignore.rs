@@ -4,8 +4,8 @@
 //! - `ryeosd` (ingest_walk, walk_and_diff, push-head validation)
 //! - `ryeos-cli` (remote push manifest building)
 //!
-//! Patterns are loaded from `.ai/node/ingest/ignore.yaml`. If the file is
-//! missing the daemon is misconfigured — no silent default fallback.
+//! Patterns are compiled from the mandatory `ingest_ignore` member of the
+//! atomic node policy generation. Missing policy is a startup error.
 
 use std::path::Path;
 use std::sync::OnceLock;

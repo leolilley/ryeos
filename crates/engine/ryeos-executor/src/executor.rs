@@ -847,7 +847,7 @@ pub async fn execute_service_verified(
                     &ctx.plan_ctx,
                     project_binding,
                     verified_attestation,
-                    &state.node_history_policy,
+                    state.node_history_policy()?,
                     thread_profile,
                     std::collections::BTreeMap::new(),
                     recording.usage_subject.cloned(),

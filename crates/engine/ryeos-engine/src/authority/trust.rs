@@ -854,12 +854,47 @@ pub fn pin_key(
     signing_key: Option<&lillux::crypto::SigningKey>,
 ) -> Result<String, EngineError> {
     let fingerprint = compute_fingerprint(verifying_key);
-    let key_file = target_dir.join(format!("{fingerprint}.toml"));
+    let key_name = format!("{fingerprint}.toml");
+    let key_file = target_dir.join(&key_name);
+    let directory = lillux::PinnedDirectory::open_or_create(target_dir).map_err(|error| {
+        EngineError::Internal(format!(
+            "cannot establish trust dir {}: {error}",
+            target_dir.display()
+        ))
+    })?;
+    let _lock = directory.lock_exclusive().map_err(|error| {
+        EngineError::Internal(format!(
+            "cannot lock trust dir {}: {error}",
+            target_dir.display()
+        ))
+    })?;
 
     // Idempotent — already pinned. Strictly validate the existing doc
     // rather than blindly accepting its presence.
-    if key_file.exists() {
-        validate_existing_pin(&key_file, verifying_key, &fingerprint)?;
+    if let Some(existing) = directory
+        .open_pinned_regular(std::ffi::OsStr::new(&key_name), false)
+        .map_err(|error| {
+            EngineError::Internal(format!(
+                "cannot inspect trust key {}: {error}",
+                key_file.display()
+            ))
+        })?
+    {
+        let observation = existing.observation().map_err(|error| {
+            EngineError::Internal(format!(
+                "cannot observe trust key {}: {error}",
+                key_file.display()
+            ))
+        })?;
+        let bytes = existing
+            .read_stable_bounded(&observation, MAX_TRUST_DOCUMENT_BYTES)
+            .map_err(|error| {
+                EngineError::Internal(format!(
+                    "existing trust doc {} cannot be read for idempotency check: {error} — remove it manually if intentional",
+                    key_file.display()
+                ))
+            })?;
+        validate_existing_pin(&bytes, &key_file, verifying_key, &fingerprint)?;
         tracing::debug!(fingerprint = %fingerprint, "key already pinned and validated, skipping");
         return Ok(fingerprint);
     }
@@ -878,24 +913,19 @@ pub fn pin_key(
         None => body,
     };
 
-    // Atomic write via temp file
-    std::fs::create_dir_all(target_dir).map_err(|e| {
-        EngineError::Internal(format!(
-            "cannot create trust dir {}: {e}",
-            target_dir.display()
-        ))
-    })?;
-    let tmp = key_file.with_extension("tmp");
-    std::fs::write(&tmp, &content).map_err(|e| {
-        EngineError::Internal(format!("cannot write trust key {}: {e}", tmp.display()))
-    })?;
-    std::fs::rename(&tmp, &key_file).map_err(|e| {
-        EngineError::Internal(format!(
-            "cannot rename {} → {}: {e}",
-            tmp.display(),
-            key_file.display()
-        ))
-    })?;
+    directory
+        .atomic_write_pinned_if_same(
+            std::ffi::OsStr::new(&key_name),
+            None,
+            content.as_bytes(),
+            0o600,
+        )
+        .map_err(|e| {
+            EngineError::Internal(format!(
+                "cannot publish trust key {}: {e}",
+                key_file.display(),
+            ))
+        })?;
 
     tracing::info!(fingerprint = %fingerprint, owner = %owner, "pinned trusted key");
     Ok(fingerprint)
@@ -916,13 +946,14 @@ fn sign_toml_doc(body: &str, signing_key: &lillux::crypto::SigningKey) -> String
 ///
 /// Returns `Ok(())` only when everything matches.
 fn validate_existing_pin(
+    bytes: &[u8],
     key_file: &Path,
     verifying_key: &VerifyingKey,
     expected_fingerprint: &str,
 ) -> Result<(), EngineError> {
-    let content = std::fs::read_to_string(key_file).map_err(|e| {
+    let content = std::str::from_utf8(bytes).map_err(|e| {
         EngineError::Internal(format!(
-            "existing trust doc {} cannot be read for idempotency check: {e} \
+            "existing trust doc {} is not UTF-8: {e} \
              — remove it manually if intentional",
             key_file.display()
         ))

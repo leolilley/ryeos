@@ -91,6 +91,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             "origin_site_id must use the canonical `site:<name>` form".to_string(),
         ));
     }
+    let maximum_token_ttl_secs = hosted_admission_token_ttl_secs(&state)?;
     let token_hash = token_hash(&req.token);
     let token_path = admission_token_path(&state.config.app_root, &token_hash);
     let token = read_token_file(&token_path)?;
@@ -113,7 +114,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             "admission token expired".to_string(),
         ));
     }
-    enforce_hosted_policy_token_ttl(&state, &token, now)?;
+    enforce_hosted_policy_token_ttl(maximum_token_ttl_secs, &token, now)?;
     if now.abs_diff(req.signed_at) > CLAIM_MAX_AGE_SECS {
         return Err(HandlerError::Forbidden(
             "admission claim signature timestamp expired".to_string(),
@@ -227,14 +228,27 @@ fn consume_token_file(path: &Path) -> HandlerResult<()> {
     })
 }
 
+fn hosted_admission_token_ttl_secs(state: &AppState) -> HandlerResult<u64> {
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::hosted::HostedNodePolicy>()
+        .map_err(|error| HandlerError::Internal(format!("load hosted-node policy: {error:#}")))?;
+    match (policy.admission_enabled, policy.admission_token_ttl_secs) {
+        (true, Some(ttl_secs)) => Ok(ttl_secs),
+        (false, None) => Err(HandlerError::Forbidden(
+            "hosted-node admission is disabled by node policy".to_string(),
+        )),
+        _ => Err(HandlerError::Internal(
+            "hosted-node policy admission state is incoherent".to_string(),
+        )),
+    }
+}
+
 fn enforce_hosted_policy_token_ttl(
-    state: &AppState,
+    maximum_token_ttl_secs: u64,
     token: &AdmissionTokenFile,
     now: u64,
 ) -> HandlerResult<()> {
-    let Some(policy) = state.node_config.hosted_node_policies.first() else {
-        return Ok(());
-    };
     let issued_at_unix = token.issued_at_unix.ok_or_else(|| {
         HandlerError::Forbidden("hosted-node admission token is missing issued_at_unix".to_string())
     })?;
@@ -251,10 +265,10 @@ fn enforce_hosted_policy_token_ttl(
             "hosted-node admission token issued_at_unix is in the future".to_string(),
         ));
     }
-    if ttl_secs > policy.admission.token_ttl_secs {
+    if ttl_secs > maximum_token_ttl_secs {
         return Err(HandlerError::Forbidden(format!(
             "admission token TTL {}s exceeds hosted-node policy maximum {}s",
-            ttl_secs, policy.admission.token_ttl_secs
+            ttl_secs, maximum_token_ttl_secs
         )));
     }
     let expected_expires_at_unix = issued_at_unix.checked_add(ttl_secs).ok_or_else(|| {

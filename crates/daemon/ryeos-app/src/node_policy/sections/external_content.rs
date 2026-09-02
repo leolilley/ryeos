@@ -5,12 +5,15 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
+use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection, TypedNodePolicy};
+
+pub const SECTION_NAME: &str = "external_content";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,13 +21,7 @@ pub struct ExternalContentImportPolicyRecord {
     pub schema: u32,
     pub roots: BTreeMap<String, ExternalContentImportRoot>,
     pub limits: ExternalContentImportLimits,
-    /// Optional node-owned permission and ceilings for activation from signed
-    /// trusted-bundle declarations. Absence disables managed acquisition while
-    /// preserving the independent local named-root import primitive.
-    #[serde(default)]
-    pub managed_activation: Option<ManagedExternalContentActivationPolicy>,
-    #[serde(skip)]
-    pub source_file: PathBuf,
+    pub managed_activation: ManagedExternalContentPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,11 +47,7 @@ pub struct ExternalContentImportLimits {
 #[serde(deny_unknown_fields)]
 pub struct ManagedExternalContentActivationPolicy {
     pub allow_online: bool,
-    #[serde(default)]
     pub allowed_https_hosts: Vec<String>,
-    /// Redirects are denied when older or deliberately strict node policy
-    /// omits this field. Adding the field cannot widen existing authority.
-    #[serde(default)]
     pub max_redirects: usize,
     pub max_archives: usize,
     pub max_compressed_bytes: u64,
@@ -71,29 +64,53 @@ pub struct ManagedExternalContentActivationPolicy {
     pub max_attempts: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedExternalContentPolicy {
+    pub enabled: bool,
+    pub limits: Option<ManagedExternalContentActivationPolicy>,
+}
+
+impl ManagedExternalContentPolicy {
+    pub fn require_enabled(&self) -> anyhow::Result<&ManagedExternalContentActivationPolicy> {
+        if !self.enabled {
+            bail!("managed external-content activation is disabled by node policy");
+        }
+        self.limits
+            .as_ref()
+            .context("enabled managed external-content activation has no limits")
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        match (self.enabled, self.limits.as_ref()) {
+            (true, Some(limits)) => limits.validate(),
+            (false, None) => Ok(()),
+            (true, None) => bail!("enabled managed activation requires exact node limits"),
+            (false, Some(_)) => bail!("disabled managed activation must not retain latent limits"),
+        }
+    }
+}
+
 pub struct ExternalContentImportPolicySection;
 
-impl NodeConfigSection for ExternalContentImportPolicySection {
-    fn source_policy(&self) -> SectionSourcePolicy {
-        SectionSourcePolicy::SystemAndState
+impl TypedNodePolicy for ExternalContentImportPolicyRecord {
+    const SECTION_NAME: &'static str = SECTION_NAME;
+}
+
+impl NodePolicySection for ExternalContentImportPolicySection {
+    fn name(&self) -> &'static str {
+        SECTION_NAME
     }
 
-    fn operator_policy_item_id(&self) -> Option<&'static str> {
-        Some("policy")
-    }
-
-    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
-        if ctx.id != "policy" {
-            bail!(
-                "external-content import policy filename must be `policy`, got `{}`",
-                ctx.id
-            );
-        }
-        let mut record: ExternalContentImportPolicyRecord =
+    fn parse(
+        &self,
+        _context: &NodePolicyContext,
+        body: &Value,
+    ) -> anyhow::Result<Arc<dyn ErasedNodePolicy>> {
+        let record: ExternalContentImportPolicyRecord =
             serde_json::from_value(body.clone()).context("parse external-content import policy")?;
-        record.source_file = ctx.source_file.clone();
         record.validate()?;
-        Ok(Box::new(record))
+        Ok(Arc::new(record))
     }
 }
 
@@ -119,9 +136,7 @@ impl ExternalContentImportPolicyRecord {
             }
         }
         self.limits.validate()?;
-        if let Some(managed) = self.managed_activation.as_ref() {
-            managed.validate()?;
-        }
+        self.managed_activation.validate()?;
         Ok(())
     }
 }
@@ -221,12 +236,6 @@ impl ManagedExternalContentActivationPolicy {
     }
 }
 
-impl SectionRecord for ExternalContentImportPolicyRecord {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
 pub(crate) fn validate_root_name(value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 128
@@ -242,13 +251,10 @@ pub(crate) fn validate_root_name(value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn policy_rejects_relative_roots_and_unbounded_limits() {
-        assert_eq!(
-            ExternalContentImportPolicySection.operator_policy_item_id(),
-            Some("policy")
-        );
         let policy = ExternalContentImportPolicyRecord {
             schema: 1,
             roots: BTreeMap::from([(
@@ -267,8 +273,10 @@ mod tests {
                 store_budget_bytes: 2048,
                 minimum_free_bytes: 1024,
             },
-            managed_activation: None,
-            source_file: PathBuf::new(),
+            managed_activation: ManagedExternalContentPolicy {
+                enabled: false,
+                limits: None,
+            },
         };
         assert!(policy.validate().is_err());
     }
@@ -288,7 +296,7 @@ mod tests {
                 "store_budget_bytes": 2048,
                 "minimum_free_bytes": 1024
             },
-            "managed_activation": null
+            "managed_activation": {"enabled": false, "limits": null}
         });
         assert!(serde_json::from_value::<ExternalContentImportPolicyRecord>(value).is_err());
     }

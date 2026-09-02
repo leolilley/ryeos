@@ -454,11 +454,11 @@ impl PinnedProjectTrustContent {
         let mut current = BTreeMap::new();
         let mut total_bytes = 0_u64;
         for file in files {
-            let relative = prefix.join(&file.name);
-            if !ryeos_engine::trust::is_project_trust_document(Path::new(&file.name)) {
+            let relative = prefix.join(file.name());
+            if !ryeos_engine::trust::is_project_trust_document(Path::new(file.name())) {
                 continue;
             }
-            let observation = lillux::observe_open_regular_file(&file.file)?;
+            let observation = file.observation()?;
             if observation.size() > ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES {
                 bail!("project trust document exceeds its byte bound");
             }
@@ -468,9 +468,7 @@ impl PinnedProjectTrustContent {
             if total_bytes > ryeos_engine::trust::MAX_TRUST_DIRECTORY_BYTES {
                 bail!("project trust documents exceed their aggregate byte bound");
             }
-            let mut descriptor = file.file.try_clone()?;
-            let (digest, _) =
-                lillux::digest_open_regular_file_stable_exact(&mut descriptor, observation.size())?;
+            let digest = file.digest_stable_exact(&observation)?;
             current.insert(relative, digest);
         }
         directory.ensure_path_binding()?;
@@ -514,12 +512,11 @@ impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjec
         let mut entries = Vec::with_capacity(files.len());
         let mut total_bytes = 0_u64;
         for file in files {
-            let relative_path = PathBuf::from(&file.name);
+            let relative_path = PathBuf::from(file.name());
             if !ryeos_engine::trust::is_project_trust_document(&relative_path) {
                 continue;
             }
-            let observation =
-                lillux::observe_open_regular_file(&file.file).map_err(Self::engine_error)?;
+            let observation = file.observation().map_err(Self::engine_error)?;
             if observation.size() > ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES {
                 return Err(Self::engine_error(
                     "project trust document exceeds its byte bound",
@@ -533,10 +530,9 @@ impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjec
                     "project trust documents exceed their aggregate byte bound",
                 ));
             }
-            let mut descriptor = file.file.try_clone().map_err(Self::engine_error)?;
-            let (content_hash, _) =
-                lillux::digest_open_regular_file_stable_exact(&mut descriptor, observation.size())
-                    .map_err(Self::engine_error)?;
+            let content_hash = file
+                .digest_stable_exact(&observation)
+                .map_err(Self::engine_error)?;
             observed.insert(prefix.join(&relative_path), content_hash.clone());
             entries.push(ryeos_engine::project_content::ProjectContentEntry {
                 relative_path,

@@ -7,6 +7,33 @@ pub use ed25519_dalek::pkcs8::{
 };
 pub use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
+/// Generate an Ed25519 signing key from the platform CSPRNG. Entropy source
+/// selection stays inside Lillux rather than leaking OS mechanics to callers.
+pub fn generate_signing_key() -> SigningKey {
+    SigningKey::generate(&mut rand::rngs::OsRng)
+}
+
+/// Generate and create one private signing-key file without following links
+/// or replacing an incumbent pathname.
+pub fn create_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("signing key path has no parent: {}", path.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("signing key path has no filename: {}", path.display()))?;
+    let parent = crate::PinnedDirectory::open_or_create(parent_path)
+        .with_context(|| format!("pin signing key parent {}", parent_path.display()))?;
+    let signing_key = generate_signing_key();
+    let pem = signing_key
+        .to_pkcs8_pem(Default::default())
+        .context("failed to serialize signing key")?;
+    parent
+        .atomic_write_if_same(name, None, pem.as_bytes(), 0o600)
+        .with_context(|| format!("create signing key {}", path.display()))?;
+    Ok(signing_key)
+}
+
 /// Load a signing key from a PEM file.
 pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
     let bytes = crate::read_regular_file_bounded_no_follow(path, 64 * 1024)
@@ -17,13 +44,15 @@ pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
         .with_context(|| format!("failed to decode signing key: {}", path.display()))
 }
 
-/// Load a signing key from one already-opened regular-file authority.
-/// The descriptor is observed and read exactly once so callers that pin the
-/// containing directory never fall back to pathname authority.
-pub fn load_signing_key_from_open_file(mut file: std::fs::File) -> anyhow::Result<SigningKey> {
-    let observation =
-        crate::observe_open_regular_file(&file).context("observe signing-key descriptor")?;
-    let bytes = crate::read_open_regular_file_stable_bounded(&mut file, &observation, 64 * 1024)
+/// Load a signing key from one exact pinned regular-file authority.
+pub fn load_signing_key_from_pinned_file(
+    file: &crate::PinnedRegularFile,
+) -> anyhow::Result<SigningKey> {
+    let observation = file
+        .observation()
+        .context("observe signing-key descriptor")?;
+    let bytes = file
+        .read_stable_bounded(&observation, 64 * 1024)
         .context("read stable signing-key descriptor")?;
     let pem = std::str::from_utf8(&bytes).context("signing key is not UTF-8")?;
     SigningKey::from_pkcs8_pem(pem).context("failed to decode signing key")

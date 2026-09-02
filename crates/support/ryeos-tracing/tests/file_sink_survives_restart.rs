@@ -21,6 +21,7 @@ fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::Pa
         app_root: state_dir.clone(),
         source_dir: root.join("bundles"),
         trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
+        node_profile: None,
         skip_preflight: true,
     })
     .expect("ryeos init state for tracing test");

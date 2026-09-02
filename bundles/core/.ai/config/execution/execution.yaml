@@ -26,28 +26,6 @@ defaults:
 #       timeout: 600
 #       cancellation_grace_secs: 30
 
-# Generic root-history default. The node's own signed config layer may replace
-# this complete block. No retention age exists in Rust; omitting all signed
-# history blocks resolves Durable as well. An optional `minimum_terminal_for`
-# bounds both the finite node default and trusted item-authored overrides; a
-# node default below that minimum is invalid at boot.
-history:
-  default_retention: durable
-  item_authored_retention: allow
-
-# Other node-scoped valves — read by the daemon at boot from bundle layers plus
-# the node's own tree (<app_root>/.ai/config/execution/execution.yaml),
-# which is the operator's overlay. Per-launch policy reads use the project
-# as overlay and never read this section, so a project cannot set
-# node-wide limits.
-node:
-  # Ceiling on launched-and-live launch-window members across ALL fanouts on
-  # this node (a member is a child chain; see the graph foreach
-  # `max_concurrency` launch window). The node may replace this signed default,
-  # but project and item layers cannot widen it.
-  max_live_fanout: 8
-
-  # Aggregate byte ceiling for ordinary copies while constructing one private
-  # admitted-input root when the filesystem cannot reflink immutable source
-  # and external-realization files. Reflinked bytes do not consume it.
-  max_private_materialization_copy_bytes: 17179869184
+# Node-wide admission, retention, and host-environment authority lives only in
+# the complete current-node-signed `.ai/node/policies/` generation. This
+# bundle file contains workload execution defaults and cannot widen node policy.

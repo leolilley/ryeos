@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T00:33:45Z:9bd1a28a06c6844beb84fc5bf8c58cd1103710e3d06e144a98714251f639e351:GtZer7gx0QXCb+qGPzJeBey543UaaxhzpKB16Ppvbta9Xg4Ch+sl1aA0FBTnoG0vViYSEDG3pvlrzaV+0K/ICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T08:05:37Z:9d99fa4883bc40857c22eb55d853c80056ac8ce73e8cc20ee159a456c18b2e10:rim07jhPoYoALofSw6a5H8ziEgaWVRsMLIaYi3PtOUA3dt8C2EFRxVoObVR/S+xwAdgk4uL6VLzOXEqPvZ5cAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.7.3"
+version: "3.7.5"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -75,9 +75,11 @@ choose its authenticated origin.
 
 ### On the remote node
 
-1. **Bootstrap**: run `ryeos init` so the remote has node identity,
-   vault key material, local operator authorization, and installed
-   bundles.
+1. **Bootstrap**: run `ryeos init --node-profile <distribution-profile>` so
+   the remote has node identity, vault key material, local operator
+   authorization, the exact distribution bundles, and a complete signed node
+   policy generation. Packaged full nodes use `full`; images use the profile
+   mapped by their bundle-set packaging.
 
 2. **Authorize the caller node key**: either mint a one-time admission
    token on the target node, or directly authorize the caller node key.

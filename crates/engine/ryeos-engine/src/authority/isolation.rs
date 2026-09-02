@@ -1,9 +1,8 @@
 //! Node-owned subprocess isolation policy and its immutable runtime form.
 //!
-//! The policy has one fixed source: `<app-root>/.ai/node/isolation.yaml`.
-//! [`IsolationRuntime::load`] reads, strictly parses, and resolves that policy
-//! once. Launch paths then share the resolved runtime and call [`IsolationRuntime::apply`]
-//! without reopening node configuration at the process boundary.
+//! Production composition receives the already compiled policy from RyeOS's
+//! atomic node-policy snapshot. Launch paths share the resolved runtime and
+//! never reopen a raw policy pathname at the process boundary.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -41,10 +40,12 @@ pub use authority::{
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
 pub use policy::{
-    ISOLATION_POLICY_RELATIVE_PATH, ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
+    ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
     IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationMode, IsolationNetworkMode,
     IsolationNetworkPolicy, IsolationPolicy,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
 use provenance::redacted_plan_digest;
 pub use provenance::{
     AppliedIsolationLaunch, AppliedIsolationLaunchAwaitingAttachment, IsolationLaunchProvenance,
@@ -703,7 +704,7 @@ fn remove_flat_artifact_generation(
     root: &lillux::PinnedDirectory,
 ) -> anyhow::Result<()> {
     for entry in root.regular_files()? {
-        root.remove_if_same(&entry.name, &entry.file)?;
+        root.remove_pinned_regular_if_same(&entry)?;
     }
     if !stores_root.remove_empty_child_if_same(generation, root)? {
         anyhow::bail!(
@@ -756,6 +757,7 @@ struct WritableMount {
     source_handle: Arc<std::fs::File>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct LoadedIsolationPolicy {
     policy: IsolationPolicy,
     source: PathBuf,
@@ -1230,6 +1232,7 @@ impl IsolationRuntime {
     /// are errors in both modes. Enforced mode validates and captures the
     /// configured backend before this value is returned. Disabled mode never
     /// resolves, validates, or probes the configured backend.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load(app_root: &Path) -> Result<Self, EngineError> {
         Self::load_with_backend(app_root, None)
     }
@@ -1237,6 +1240,7 @@ impl IsolationRuntime {
     /// Securely read and fully validate the fixed node policy without
     /// resolving or executing its selected backend. Prospective composition
     /// uses this before selecting any privileged bundle artifact.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load_policy(app_root: &Path) -> Result<IsolationPolicy, EngineError> {
         let loaded = load_policy_source(app_root)?;
         Self::validate_policy(&loaded.policy)?;
@@ -1260,6 +1264,7 @@ impl IsolationRuntime {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load_with_backend(
         app_root: &Path,
         backend: Option<Arc<ResolvedIsolationBackend>>,
@@ -1269,6 +1274,7 @@ impl IsolationRuntime {
 
     /// Load the daemon snapshot and retain the exact configured callback
     /// socket inode for every launch that is allowed callback IPC.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load_for_daemon(
         app_root: &Path,
         daemon_socket: &Path,
@@ -1322,6 +1328,105 @@ impl IsolationRuntime {
         Self::load_inner(app_root, Some(socket), backend)
     }
 
+    /// Resolve an already-compiled node-signed isolation policy. The caller
+    /// supplies the policy-generation source coordinate and digest; this
+    /// function retains the exact app-root authority but never reopens a
+    /// parallel raw policy pathname.
+    pub fn resolve_compiled_policy(
+        app_root: &Path,
+        policy: IsolationPolicy,
+        source: PathBuf,
+        digest: String,
+        backend: Option<Arc<ResolvedIsolationBackend>>,
+    ) -> Result<Self, EngineError> {
+        Self::resolve_compiled_policy_inner(app_root, policy, source, digest, None, backend)
+    }
+
+    /// Daemon form of [`Self::resolve_compiled_policy`] retaining the exact
+    /// callback socket authority in the same runtime snapshot.
+    pub fn resolve_compiled_policy_for_daemon(
+        app_root: &Path,
+        daemon_socket: &Path,
+        policy: IsolationPolicy,
+        source: PathBuf,
+        digest: String,
+        backend: Option<Arc<ResolvedIsolationBackend>>,
+    ) -> Result<Self, EngineError> {
+        validate_namespace_destination("daemon socket", daemon_socket)?;
+        let socket_parent = daemon_socket.parent().ok_or_else(|| {
+            refused(format!(
+                "daemon socket path has no parent: {}",
+                daemon_socket.display()
+            ))
+        })?;
+        let canonical_parent = canonicalize_launch_path("daemon socket parent", socket_parent)?;
+        let socket_name = daemon_socket.file_name().ok_or_else(|| {
+            refused(format!(
+                "daemon socket path has no file name: {}",
+                daemon_socket.display()
+            ))
+        })?;
+        let parent = lillux::PinnedDirectory::open(&canonical_parent)
+            .map_err(|error| refused(format!("daemon socket parent cannot be pinned: {error}")))?
+            .ok_or_else(|| refused("daemon socket parent disappeared".to_string()))?;
+        let entry = parent
+            .open_mount_entry(socket_name)
+            .map_err(|error| refused(format!("daemon socket cannot be pinned: {error}")))?
+            .ok_or_else(|| {
+                refused("daemon socket disappeared before isolation load".to_string())
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt as _;
+            if !entry
+                .metadata()
+                .map_err(|error| refused(format!("daemon socket cannot be inspected: {error}")))?
+                .file_type()
+                .is_socket()
+            {
+                return Err(refused(format!(
+                    "daemon socket {} is not a Unix socket",
+                    daemon_socket.display()
+                )));
+            }
+        }
+        let socket = PinnedDaemonSocket {
+            source: canonical_parent.join(socket_name),
+            destination: daemon_socket.to_path_buf(),
+            parent: Arc::new(parent),
+            name: socket_name.to_os_string(),
+            entry: Arc::new(entry),
+        };
+        Self::resolve_compiled_policy_inner(app_root, policy, source, digest, Some(socket), backend)
+    }
+
+    fn resolve_compiled_policy_inner(
+        app_root: &Path,
+        policy: IsolationPolicy,
+        source: PathBuf,
+        digest: String,
+        daemon_socket: Option<PinnedDaemonSocket>,
+        backend: Option<Arc<ResolvedIsolationBackend>>,
+    ) -> Result<Self, EngineError> {
+        Self::validate_policy(&policy)?;
+        validate_namespace_destination("app root", app_root)?;
+        let runtime_app_root = canonicalize_context_mount("app root", app_root)?;
+        let app_root_authority = lillux::PinnedDirectory::open(&runtime_app_root)
+            .map_err(|error| refused(format!("app root cannot be pinned: {error}")))?
+            .ok_or_else(|| refused("app root disappeared while loading isolation policy".into()))?;
+        Self::resolve(IsolationRuntimeResolution {
+            policy,
+            source: Some(source),
+            digest: Some(digest),
+            app_root: Some(runtime_app_root),
+            app_root_authority: Some(Arc::new(app_root_authority)),
+            app_root_destination: Some(app_root.to_path_buf()),
+            daemon_socket,
+            backend,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn load_inner(
         app_root: &Path,
         daemon_socket: Option<PinnedDaemonSocket>,
@@ -3972,8 +4077,8 @@ impl IsolationRuntime {
     }
 }
 
-/// Disabled runtime used by in-memory fixtures that have no node filesystem.
-/// Production composition must call [`IsolationRuntime::load`].
+/// Disabled runtime used only by in-memory fixtures with no node policy.
+#[cfg(any(test, feature = "test-support"))]
 impl Default for IsolationRuntime {
     fn default() -> Self {
         Self::resolve(IsolationRuntimeResolution {
@@ -5195,6 +5300,7 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn load_policy_source(app_root: &Path) -> Result<LoadedIsolationPolicy, EngineError> {
     validate_namespace_destination("app root", app_root)?;
     // Bind the policy bytes and all later authority checks to one canonical
@@ -5208,14 +5314,14 @@ fn load_policy_source(app_root: &Path) -> Result<LoadedIsolationPolicy, EngineEr
         })?;
     let policy_parent = open_relative_directory(
         &app_root_authority,
-        &[crate::AI_DIR, "node"],
+        &[crate::AI_DIR, "test-fixtures"],
         "isolation policy parent",
     )?;
     let source = runtime_app_root
         .join(crate::AI_DIR)
-        .join(ISOLATION_POLICY_RELATIVE_PATH);
+        .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
     let mut file = policy_parent
-        .open_regular("isolation.yaml".as_ref(), false)
+        .open_regular("isolation-policy.yaml".as_ref(), false)
         .map_err(|error| refused(format!("node isolation policy cannot be opened: {error}")))?
         .ok_or_else(|| {
             refused(format!(
@@ -5316,7 +5422,7 @@ mod tests {
     fn write_policy(app_root: &Path, policy: &IsolationPolicy) {
         let policy_path = app_root
             .join(crate::AI_DIR)
-            .join(ISOLATION_POLICY_RELATIVE_PATH);
+            .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         std::fs::write(policy_path, serde_yaml::to_string(policy).unwrap()).unwrap();
     }
@@ -6771,7 +6877,7 @@ mod tests {
         let policy_path = app_root
             .path()
             .join(crate::AI_DIR)
-            .join(ISOLATION_POLICY_RELATIVE_PATH);
+            .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
 
         let mut unsupported = IsolationPolicy::default_disabled();
@@ -6814,7 +6920,7 @@ mod tests {
         let policy_path = app_root
             .path()
             .join(crate::AI_DIR)
-            .join(ISOLATION_POLICY_RELATIVE_PATH);
+            .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         let real_policy = policy_path.with_file_name("isolation-source.yaml");
         std::fs::write(

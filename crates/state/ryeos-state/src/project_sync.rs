@@ -849,13 +849,13 @@ mod tests {
 
     #[test]
     fn rendered_policy_is_valid_yaml_with_all_buckets() {
-        let yaml = render_effective_sync_policy_yaml(".ai/node/ingest/ignore.yaml");
+        let yaml = render_effective_sync_policy_yaml(".ai/node/policies/ingest_ignore.yaml");
         let v: serde_yaml::Value =
             serde_yaml::from_str(&yaml).expect("generated policy is valid YAML");
         assert_eq!(v["version"].as_u64(), Some(1));
         assert_eq!(
             v["ignore_source"].as_str(),
-            Some(".ai/node/ingest/ignore.yaml")
+            Some(".ai/node/policies/ingest_ignore.yaml")
         );
         let secrets = v["never_deploy_secrets"].as_sequence().unwrap();
         assert!(secrets.iter().any(|x| x.as_str() == Some(".env")));

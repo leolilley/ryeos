@@ -1,123 +1,76 @@
-//! Bundle-authored maintenance schedule application.
+//! Node-policy maintenance schedule materialization.
 //!
 //! The system has no daemon-internal GC trigger. Rather than inventing one, GC
-//! becomes a normal scheduled thread: the standard bundle authors a maintenance
-//! schedule *declaration* (cadence, item ref, params, granted capabilities), and
-//! this module reconciles it into a signed node schedule spec at daemon init —
+//! becomes a normal scheduled thread. The node's complete signed policy
+//! generation owns cadence, item ref, parameters, and granted capabilities;
+//! this module reconciles that typed policy into a signed node schedule spec —
 //! the same shape `scheduler.register` / project sync produce, so the scheduler
 //! reconcile that runs immediately afterwards projects and fires it like any
 //! other schedule.
 //!
-//! Why a declaration + init-time reconcile instead of shipping the final spec:
+//! Why policy + init-time reconcile instead of storing only the final spec:
 //! the node spec must carry `execution.requester_fingerprint` (the acting
 //! principal at dispatch) and a node signature. Those are per-install, so they
-//! can't be baked into a portable bundle artifact — the daemon fills its own
-//! identity here.
+//! cannot be supplied by an init profile — the daemon fills its own identity.
 //!
 //! Ownership & operator control: generated specs carry a specific `managed_by`
-//! marker. On every boot, declarations refresh every declaration-owned field
-//! and remove marked specs no longer declared. An existing marked spec's
+//! marker. On every boot, policy refreshes every policy-owned field and removes
+//! marked specs no longer authorized. An existing marked spec's
 //! `enabled` value is the one operator override: `scheduler pause` / `resume`
 //! survives restarts. Unmarked schedule specs are never adopted or removed.
 //! Cadence, timezone, misfire/overlap behavior, lateness, initial enablement,
-//! parameters, and capabilities are all required signed declaration fields;
+//! parameters, and capabilities are all required signed policy fields;
 //! this adapter supplies no behavioral defaults.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use serde_json::Value;
 
 use ryeos_app::identity::NodeIdentity;
-use ryeos_app::node_config::writer;
+use ryeos_app::node_document;
+use ryeos_app::node_policy::sections::maintenance::{
+    NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy,
+};
 use ryeos_app::state::AppState;
-
-/// Relative location (under `.ai/node/`) of the bundle-authored declaration.
-const DECLARATION_REL: &str = "maintenance/schedules.yaml";
 
 /// Exact ownership discriminator written into generated schedule specs.
 /// Both fields must match before reconciliation may mutate or remove a spec.
-const MANAGED_BY_TYPE: &str = "node_maintenance_declaration";
-const MANAGED_BY_SOURCE: &str = DECLARATION_REL;
+const MANAGED_BY_TYPE: &str = "node_maintenance_policy";
+const MANAGED_BY_SOURCE: &str = ryeos_scheduler::types::NODE_MAINTENANCE_POLICY_SOURCE;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MaintenanceDeclarationFile {
-    /// Format guard — only `1` is understood.
-    spec_version: u32,
-    schedules: Vec<MaintenanceScheduleDeclaration>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MaintenanceScheduleDeclaration {
-    schedule_id: String,
-    item_ref: String,
-    ref_bindings: BTreeMap<String, String>,
-    schedule_type: String,
-    expression: String,
-    timezone: String,
-    misfire_policy: String,
-    overlap_policy: String,
-    lateness_grace_secs: i64,
-    enabled: bool,
-    params: Value,
-    /// Capabilities the schedule dispatches with — least privilege. The node
-    /// signs the resulting spec, so these are trusted at fire time.
-    capabilities: Vec<String>,
-}
-
-/// Reconcile the bundle-authored maintenance schedule into a signed node spec.
-///
-/// Absence is an explicit empty declaration set: previously generated specs
-/// are removed, while all operator/project-owned specs remain untouched.
+/// Materialize the mandatory node maintenance policy as signed schedule specs.
 pub fn ensure_maintenance_schedule(state: &AppState) -> Result<()> {
     let node_dir = state
         .config
         .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node");
-    apply_maintenance_schedules(&node_dir, &state.identity, &state.engine.trust_store)
+    let policy = state
+        .node_policy
+        .require::<NodeMaintenancePolicy>()
+        .context("node has no compiled maintenance policy")?;
+    apply_maintenance_schedules(
+        &node_dir,
+        &state.identity,
+        &state.engine.trust_store,
+        policy,
+    )
 }
 
 fn apply_maintenance_schedules(
     node_dir: &Path,
     identity: &NodeIdentity,
     trust_store: &ryeos_engine::trust::TrustStore,
+    policy: &NodeMaintenancePolicy,
 ) -> Result<()> {
-    let file = load_declaration(node_dir, trust_store)?;
-    let declarations = match file {
-        Some(file) => {
-            if file.spec_version != 1 {
-                bail!(
-                    "maintenance declaration has unsupported spec_version {} (only 1)",
-                    file.spec_version
-                );
-            }
-            file.schedules
-        }
-        None => Vec::new(),
-    };
-
-    let mut declared_ids = HashSet::with_capacity(declarations.len());
-    for declaration in &declarations {
-        validate_declaration(declaration).with_context(|| {
-            format!(
-                "validate maintenance schedule declaration '{}'",
-                declaration.schedule_id
-            )
-        })?;
-        if !declared_ids.insert(declaration.schedule_id.clone()) {
-            bail!(
-                "maintenance declaration contains duplicate schedule_id '{}'",
-                declaration.schedule_id
-            );
-        }
-    }
+    let declarations = &policy.schedules;
+    let declared_ids = declarations
+        .iter()
+        .map(|schedule| schedule.schedule_id.clone())
+        .collect::<HashSet<_>>();
 
     let node_directory = lillux::PinnedDirectory::open_or_create(node_dir)
         .context("establish no-follow node configuration root")?;
@@ -129,13 +82,13 @@ fn apply_maintenance_schedules(
     let existing_files = scan_schedule_files(&schedules_directory)?;
     let managed_specs = load_managed_specs(&schedules_directory, &existing_files, trust_store)?;
 
-    for decl in &declarations {
+    for decl in declarations {
         let target = schedules_dir.join(format!("{}.yaml", decl.schedule_id));
         let same_id_files = existing_files
             .get(&decl.schedule_id)
             .map_or(&[][..], Vec::as_slice);
         let (initial_enabled, initial_registered_at) = match same_id_files {
-            [] => (decl.enabled, lillux::time::timestamp_millis()),
+            [] => (decl.initial_enabled, lillux::time::timestamp_millis()),
             [existing] if existing == &target => {
                 let managed = managed_specs.get(&decl.schedule_id).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -199,7 +152,7 @@ fn apply_maintenance_schedules(
         {
             tracing::debug!(
                 schedule_id = %decl.schedule_id,
-                "bundle-authored maintenance schedule already matches declaration"
+                "node-policy maintenance schedule already matches policy"
             );
             continue;
         }
@@ -216,7 +169,7 @@ fn apply_maintenance_schedules(
             item_ref = %decl.item_ref,
             expression = %decl.expression,
             enabled,
-            "reconciled bundle-authored maintenance schedule"
+            "reconciled node-policy maintenance schedule"
         );
     }
 
@@ -256,45 +209,6 @@ fn apply_maintenance_schedules(
     }
 
     Ok(())
-}
-
-/// Load the maintenance declaration at `.ai/node/maintenance/schedules.yaml`.
-///
-/// `None` when absent — and absent means NOTHING is scheduled. The
-/// declaration is the only source of maintenance cadence: no declaration,
-/// no scheduled GC. Deliberate; a node whose bundle doesn't declare
-/// maintenance must never grow a background job it can't see in data.
-fn load_declaration(
-    node_dir: &Path,
-    trust_store: &ryeos_engine::trust::TrustStore,
-) -> Result<Option<MaintenanceDeclarationFile>> {
-    let declaration_path = node_dir.join(DECLARATION_REL);
-    match fs::symlink_metadata(&declaration_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!(
-                path = %declaration_path.display(),
-                "no maintenance declaration; declared schedule set is empty"
-            );
-            return Ok(None);
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspect maintenance declaration {}",
-                    declaration_path.display()
-                )
-            });
-        }
-    }
-    let body =
-        ryeos_app::node_config::loader::load_verified_node_yaml(&declaration_path, trust_store)?;
-    serde_json::from_value(body).map(Some).with_context(|| {
-        format!(
-            "parse maintenance declaration {}",
-            declaration_path.display()
-        )
-    })
 }
 
 #[derive(Debug)]
@@ -435,60 +349,8 @@ fn is_managed_maintenance_spec(body: &Value) -> bool {
         })
 }
 
-fn validate_declaration(decl: &MaintenanceScheduleDeclaration) -> Result<()> {
-    ryeos_scheduler::crontab::validate_schedule_id(&decl.schedule_id)?;
-    ryeos_engine::canonical_ref::CanonicalRef::parse(&decl.item_ref)
-        .with_context(|| format!("invalid item_ref '{}'", decl.item_ref))?;
-    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&decl.ref_bindings)
-        .with_context(|| {
-            format!(
-                "maintenance schedule '{}' has invalid ref_bindings",
-                decl.schedule_id
-            )
-        })?;
-    ryeos_scheduler::crontab::validate_expression(&decl.schedule_type, &decl.expression)?;
-    ryeos_scheduler::crontab::validate_timezone(&decl.timezone)?;
-    ryeos_scheduler::overlap::parse_overlap_policy(&decl.overlap_policy).with_context(|| {
-        format!(
-            "maintenance schedule '{}' has invalid overlap_policy",
-            decl.schedule_id
-        )
-    })?;
-    ryeos_scheduler::misfire::parse_misfire_policy(&decl.misfire_policy).with_context(|| {
-        format!(
-            "maintenance schedule '{}' has invalid misfire_policy",
-            decl.schedule_id
-        )
-    })?;
-
-    if decl.capabilities.is_empty()
-        || decl
-            .capabilities
-            .iter()
-            .any(|capability| capability.trim().is_empty())
-    {
-        bail!(
-            "maintenance schedule '{}' must declare non-empty capabilities",
-            decl.schedule_id
-        );
-    }
-    if !decl.params.is_object() {
-        bail!(
-            "maintenance schedule '{}' params must be a mapping",
-            decl.schedule_id
-        );
-    }
-    if decl.lateness_grace_secs <= 0 {
-        bail!(
-            "maintenance schedule '{}' lateness_grace_secs must be positive",
-            decl.schedule_id
-        );
-    }
-    Ok(())
-}
-
 fn maintenance_spec_body(
-    decl: &MaintenanceScheduleDeclaration,
+    decl: &NodeMaintenanceSchedulePolicy,
     enabled: bool,
     registered_at: i64,
     identity: &NodeIdentity,
@@ -522,12 +384,12 @@ fn maintenance_spec_body(
 
 fn write_maintenance_spec(
     schedules_dir: &lillux::PinnedDirectory,
-    decl: &MaintenanceScheduleDeclaration,
+    decl: &NodeMaintenanceSchedulePolicy,
     body: &Value,
     identity: &NodeIdentity,
     expected: Option<&std::fs::File>,
 ) -> Result<()> {
-    let bytes = writer::render_signed_node_item("schedules", &decl.schedule_id, body, identity)?;
+    let bytes = node_document::render_signed_item("schedules", &decl.schedule_id, body, identity)?;
     let name = format!("{}.yaml", decl.schedule_id);
     schedules_dir.atomic_write_if_same(std::ffi::OsStr::new(&name), expected, &bytes, 0o600)
 }
@@ -559,11 +421,8 @@ mod tests {
         }])
     }
 
-    fn write_declaration(node_dir: &Path, body: &str, identity: &NodeIdentity) {
-        let dir = node_dir.join("maintenance");
-        std::fs::create_dir_all(&dir).unwrap();
-        let signed = lillux::signature::sign_content(body, identity.signing_key(), "#", None);
-        std::fs::write(dir.join("schedules.yaml"), signed).unwrap();
+    fn policy(body: &str) -> NodeMaintenancePolicy {
+        serde_yaml::from_str(body).unwrap()
     }
 
     fn read_schedule_body(path: &Path) -> Value {
@@ -573,7 +432,7 @@ mod tests {
     }
 
     fn write_operator_schedule(node_dir: &Path, identity: &NodeIdentity, schedule_id: &str) {
-        writer::write_signed_node_item(
+        node_document::write_signed_item(
             node_dir,
             "schedules",
             schedule_id,
@@ -603,7 +462,7 @@ mod tests {
         .unwrap();
     }
 
-    const DECL: &str = r#"spec_version: 1
+    const POLICY: &str = r#"schema: 1
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
@@ -614,7 +473,7 @@ schedules:
     overlap_policy: skip
     misfire_policy: skip
     lateness_grace_secs: 60
-    enabled: true
+    initial_enabled: true
     params:
       deep: true
       schedule_fire_max_age_days: 30
@@ -626,15 +485,15 @@ schedules:
 "#;
 
     #[test]
-    fn applies_declaration_into_signed_node_spec() {
+    fn materializes_policy_into_signed_node_spec() {
         let tmp = tempfile::tempdir().unwrap();
         let node_dir = tmp.path().join(".ai").join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
         let id = identity();
-        write_declaration(&node_dir, DECL, &id);
         let trust = trust_store(&id);
+        let policy = policy(POLICY);
 
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
+        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
 
         let spec_path = node_dir.join("schedules").join("maintenance-gc.yaml");
         let content = std::fs::read_to_string(&spec_path).unwrap();
@@ -664,11 +523,11 @@ schedules:
         assert_eq!(parsed["managed_by"]["source"], MANAGED_BY_SOURCE);
         assert!(parsed["registered_at"].is_i64());
 
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
+        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
         assert_eq!(
             std::fs::read_to_string(&spec_path).unwrap(),
             content,
-            "an unchanged declaration must not churn the signed spec hash"
+            "an unchanged policy must not churn the signed spec hash"
         );
     }
 
@@ -678,9 +537,9 @@ schedules:
         let node_dir = tmp.path().join(".ai").join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
         let id = identity();
-        write_declaration(&node_dir, DECL, &id);
         let trust = trust_store(&id);
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
+        let initial_policy = policy(POLICY);
+        apply_maintenance_schedules(&node_dir, &id, &trust, &initial_policy).unwrap();
 
         let existing = node_dir.join("schedules/maintenance-gc.yaml");
         let mut paused = read_schedule_body(&existing);
@@ -688,12 +547,11 @@ schedules:
         paused["expression"] = Value::String("0 0 3 * * *".into());
         paused["params"]["deep"] = Value::Bool(false);
         let anchor = paused["registered_at"].as_i64().unwrap();
-        writer::write_signed_node_item(&node_dir, "schedules", "maintenance-gc", &paused, &id)
+        node_document::write_signed_item(&node_dir, "schedules", "maintenance-gc", &paused, &id)
             .unwrap();
 
-        write_declaration(&node_dir, &DECL.replace("0 0 4 * * *", "0 0 5 * * *"), &id);
-
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
+        let updated = policy(&POLICY.replace("0 0 4 * * *", "0 0 5 * * *"));
+        apply_maintenance_schedules(&node_dir, &id, &trust, &updated).unwrap();
 
         let refreshed = read_schedule_body(&existing);
         assert_eq!(refreshed["enabled"], false, "operator pause must survive");
@@ -709,13 +567,13 @@ schedules:
         let node_dir = tmp.path().join(".ai").join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
         let id = identity();
-        write_declaration(&node_dir, DECL, &id);
         write_operator_schedule(&node_dir, &id, "maintenance-gc");
         let trust = trust_store(&id);
+        let policy = policy(POLICY);
         let existing = node_dir.join("schedules/maintenance-gc.yaml");
         let before = std::fs::read(&existing).unwrap();
 
-        let error = apply_maintenance_schedules(&node_dir, &id, &trust).unwrap_err();
+        let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
 
         assert!(format!("{error:#}").contains("refusing to adopt"));
         assert_eq!(
@@ -726,22 +584,25 @@ schedules:
     }
 
     #[test]
-    fn absent_declaration_removes_managed_specs_only() {
+    fn empty_policy_removes_managed_specs_only() {
         let tmp = tempfile::tempdir().unwrap();
         let node_dir = tmp.path().join(".ai").join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
         let id = identity();
-        write_declaration(&node_dir, DECL, &id);
         let trust = trust_store(&id);
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
+        let policy = policy(POLICY);
+        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
         write_operator_schedule(&node_dir, &id, "operator-job");
 
-        std::fs::remove_file(node_dir.join(DECLARATION_REL)).unwrap();
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
+        let empty = NodeMaintenancePolicy {
+            schema: 1,
+            schedules: Vec::new(),
+        };
+        apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
 
         assert!(
             !node_dir.join("schedules/maintenance-gc.yaml").exists(),
-            "absence is an empty declaration set"
+            "empty policy must remove no-longer-authorized managed specs"
         );
         assert!(
             node_dir.join("schedules/operator-job.yaml").exists(),
@@ -749,101 +610,4 @@ schedules:
         );
     }
 
-    #[test]
-    fn empty_declaration_removes_specs_no_longer_declared() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node");
-        std::fs::create_dir_all(&node_dir).unwrap();
-        let id = identity();
-        write_declaration(&node_dir, DECL, &id);
-        let trust = trust_store(&id);
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
-
-        write_declaration(&node_dir, "spec_version: 1\nschedules: []\n", &id);
-        apply_maintenance_schedules(&node_dir, &id, &trust).unwrap();
-
-        assert!(!node_dir.join("schedules/maintenance-gc.yaml").exists());
-    }
-
-    #[test]
-    fn rejects_duplicate_ids_before_writing_any_specs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node");
-        std::fs::create_dir_all(&node_dir).unwrap();
-        let id = identity();
-        let duplicated = DECL.replace(
-            "schedules:\n",
-            "schedules:\n  - schedule_id: maintenance-gc\n    item_ref: \"service:maintenance/gc\"\n    ref_bindings: {}\n    schedule_type: cron\n    expression: \"0 0 3 * * *\"\n    timezone: UTC\n    misfire_policy: skip\n    overlap_policy: skip\n    lateness_grace_secs: 60\n    enabled: true\n    params: {}\n    capabilities:\n      - \"ryeos.execute.service.maintenance/gc\"\n",
-        );
-        write_declaration(&node_dir, &duplicated, &id);
-        let trust = trust_store(&id);
-
-        let error = apply_maintenance_schedules(&node_dir, &id, &trust).unwrap_err();
-
-        assert!(format!("{error:#}").contains("duplicate schedule_id"));
-        assert!(!node_dir.join("schedules/maintenance-gc.yaml").exists());
-    }
-
-    #[test]
-    fn rejects_tampered_signed_declaration() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node");
-        std::fs::create_dir_all(&node_dir).unwrap();
-        let id = identity();
-        write_declaration(&node_dir, DECL, &id);
-        let declaration_path = node_dir.join(DECLARATION_REL);
-        let tampered = std::fs::read_to_string(&declaration_path)
-            .unwrap()
-            .replace("0 0 4 * * *", "0 0 5 * * *");
-        std::fs::write(&declaration_path, tampered).unwrap();
-        let trust = trust_store(&id);
-
-        assert!(apply_maintenance_schedules(&node_dir, &id, &trust).is_err());
-        assert!(!node_dir.join("schedules/maintenance-gc.yaml").exists());
-    }
-
-    #[test]
-    fn rejects_incomplete_schedule_policy_instead_of_defaulting_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node");
-        std::fs::create_dir_all(&node_dir).unwrap();
-        let id = identity();
-        let incomplete = DECL.replace("    lateness_grace_secs: 60\n", "");
-        write_declaration(&node_dir, &incomplete, &id);
-        let trust = trust_store(&id);
-
-        let error = apply_maintenance_schedules(&node_dir, &id, &trust).unwrap_err();
-
-        assert!(format!("{error:#}").contains("lateness_grace_secs"));
-        assert!(!node_dir.join("schedules/maintenance-gc.yaml").exists());
-    }
-
-    #[test]
-    fn rejects_empty_capabilities() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node");
-        std::fs::create_dir_all(&node_dir).unwrap();
-        let id = identity();
-        write_declaration(
-            &node_dir,
-            r#"spec_version: 1
-schedules:
-  - schedule_id: maintenance-gc
-    item_ref: "service:maintenance/gc"
-    ref_bindings: {}
-    schedule_type: cron
-    expression: "0 0 4 * * *"
-    timezone: UTC
-    misfire_policy: skip
-    overlap_policy: skip
-    lateness_grace_secs: 60
-    enabled: true
-    params: {}
-    capabilities: []
-"#,
-            &id,
-        );
-        let trust = trust_store(&id);
-        assert!(apply_maintenance_schedules(&node_dir, &id, &trust).is_err());
-    }
 }

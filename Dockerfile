@@ -80,6 +80,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=full
 EXPOSE 8000
 
 # Re-declared here: build-stage ARGs do not carry across FROM boundaries.

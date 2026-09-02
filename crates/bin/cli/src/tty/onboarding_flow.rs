@@ -224,6 +224,7 @@ async fn run_core_initialization(
         app_root: options.app_root.clone(),
         source_dir: options.source_dir.clone(),
         trust_files: options.trust_files.clone(),
+        node_profile: options.node_profile.clone(),
         skip_preflight: options.skip_preflight,
     };
     let ceremony = InitOperatorCeremony {

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::managed_external_content_operation::AcquisitionMode;
-use crate::node_config::sections::external_content::{
+use crate::node_policy::sections::external_content::{
     ExternalContentImportLimits, ManagedExternalContentActivationPolicy,
 };
 
@@ -666,15 +666,12 @@ pub fn resolve_activation(
     activation_ref: &str,
     acquisition_mode: AcquisitionMode,
 ) -> anyhow::Result<ResolvedManagedExternalContentActivation> {
-    let import_policy = state
-        .node_config
-        .external_content_import_policy
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+    let import_policy = state.node_policy.require::<
+        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+    >()?;
     let policy = import_policy
         .managed_activation
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+        .require_enabled()?;
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(activation_ref)
         .map_err(|error| anyhow::anyhow!("invalid activation ref: {error}"))?;
     if canonical.to_string() != activation_ref || canonical.kind != "config" {

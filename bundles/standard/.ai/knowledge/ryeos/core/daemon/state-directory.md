@@ -28,8 +28,8 @@ System-space artifacts installed or registered by `ryeos init`:
 - `<system>/.ai/node/bundles/<name>.yaml` — signed registrations.
 - `<system>/.ai/node/identity/private_key.pem` — node key.
 - `<system>/.ai/node/vault/private_key.pem` — vault X25519 key.
-- `<system>/.ai/node/ingest/ignore.yaml` — ingest-ignore config.
-- `<system>/.ai/node/isolation.yaml` — create-once strict subprocess policy.
+- `<system>/.ai/node/policies/` — one complete node-signed semantic policy
+  generation, seeded from the selected init profile on first publication.
 
 Daemon-local artifacts `ryeosd` may repair after init verification:
 
@@ -45,12 +45,12 @@ The daemon must not write user trust docs or regenerate the node key.
 
 - `.ai/bundles/` — installed bundles.
 - `.ai/node/config.yaml` — daemon config.
-- `.ai/node/isolation.yaml` — immutable-at-runtime isolation policy source.
+- `.ai/node/policies/` — atomic node-owned policy generation, including
+  isolation, execution, ingest, retention, maintenance, and hosted authority.
 - `.ai/node/identity/` — node key and public identity.
 - `.ai/node/auth/authorized_keys/` — node-signed authorized callers.
 - `.ai/node/vault/` — vault key material.
 - `.ai/node/bundles/` — signed bundle registrations.
-- `.ai/node/ingest/ignore.yaml` — ingest-ignore rules.
 - `.ai/state/runtime.sqlite3` — exact-current execution/session state and the
   live credential-profile lease projection.
 - `.ai/state/operational.sqlite3` — retained source-of-truth operational state,

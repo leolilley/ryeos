@@ -251,22 +251,10 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     )
     .context("node policy apply requires the daemon to be stopped")?;
 
-    let table = ryeos_app::node_config::SectionTable::new();
-    let section = table
+    let table = ryeos_app::node_policy::NodePolicyTable::new();
+    table
         .get(&args.section)
         .with_context(|| format!("unknown node-config section `{}`", args.section))?;
-    let item_id = section.operator_policy_item_id().with_context(|| {
-        format!(
-            "node-config section `{}` does not expose an operator-authored policy item",
-            args.section
-        )
-    })?;
-    if section.source_policy() != ryeos_app::node_config::SectionSourcePolicy::SystemAndState {
-        anyhow::bail!(
-            "operator-authored policy section `{}` is not system/state-only",
-            args.section
-        );
-    }
 
     let raw = lillux::read_regular_file_to_string_no_follow(&args.source)
         .with_context(|| format!("read policy source {}", args.source.display()))?;
@@ -283,32 +271,30 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
 
     let identity = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for policy apply")?;
-    let context = ryeos_app::node_config::NodeItemContext {
-        section: args.section.clone(),
-        id: item_id.to_owned(),
-        stem: item_id.to_owned(),
-        rel_path: PathBuf::from(format!("{item_id}.yaml")),
-        source_file: args.source.clone(),
-        signer_fingerprint: identity.fingerprint().to_owned(),
-    };
-    section
-        .parse(&context, &body)
-        .with_context(|| format!("validate `{}` node policy", args.section))?;
-    let node_root = config.app_root.join(ryeos_engine::AI_DIR).join("node");
-    let installed = ryeos_app::node_config::writer::write_signed_node_item(
-        &node_root,
-        &args.section,
-        item_id,
-        &body,
+    let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
+        .context("load trust store for current node policies")?;
+    let current = ryeos_app::node_policy::generation::load_policy_generation(
+        &config.app_root,
+        &trust_store,
+        &table,
+    )?;
+    let mut policies = current.policies().clone();
+    policies.insert(args.section.clone(), body);
+    let update = current.prepare_replacement(&table, policies, &args.source)?;
+    let policy_dir = ryeos_app::node_policy::generation::publish_policy_update(
+        &config.app_root,
+        &update,
         &identity,
+        &trust_store,
+        &_state_lock,
     )
-    .context("atomically publish signed node policy")?;
+    .context("atomically publish signed node policy generation")?;
+    let installed = policy_dir.join(format!("{}.yaml", args.section));
 
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "installed",
             "section": args.section,
-            "item_id": item_id,
             "path": installed,
             "signer_fingerprint": identity.fingerprint(),
         }))?;
@@ -855,6 +841,11 @@ struct InitArgs {
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
     trust_files: Vec<PathBuf>,
 
+    /// Explicit publisher-signed node init profile from the source-root init
+    /// namespace (for example `hosted-workflow`). Required on fresh nodes.
+    #[arg(long)]
+    node_profile: Option<String>,
+
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
@@ -876,6 +867,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         app_root,
         source_dir: args.source,
         trust_files: args.trust_files,
+        node_profile: args.node_profile,
         skip_preflight: false,
     };
 
@@ -1242,7 +1234,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         let policy_path = config
             .app_root
             .join(ryeos_engine::AI_DIR)
-            .join("node/isolation.yaml");
+            .join("node/policies/isolation.yaml");
         match inspect_isolation_policy(&config.app_root) {
             Ok(inspection) => checks.push(check(
                 "isolation",
@@ -1255,7 +1247,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                 serde_json::json!({
                     "policy": policy_path,
                     "error": format!("{error:#}"),
-                    "fix": "repair `.ai/node/isolation.yaml` (or set its mode to `disabled`); then run `ryeos node doctor` again",
+                    "fix": "publish a complete valid `.ai/node/policies/` generation; then run `ryeos node doctor` again",
                 }),
             )),
         }
@@ -1994,7 +1986,6 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_core_tools::actions::doctor::NA;
 
     fn execution_history_reset_args(dry_run: bool, confirm: bool) -> ExecutionHistoryResetArgs {
         ExecutionHistoryResetArgs {
@@ -2032,33 +2023,6 @@ mod tests {
         assert!(preview.validate().is_ok());
     }
 
-    fn isolation_policy(mode: &str, open_files: Option<u64>) -> String {
-        let open_files = open_files
-            .map(|limit| format!("  open_files: {limit}\n"))
-            .unwrap_or_else(|| "  open_files: null\n".to_string());
-        let backend = if mode == "enforce" {
-            "backend:\n  bundle: example-isolation-backend\n  implementation: example"
-        } else {
-            "backend: null"
-        };
-        format!(
-            "version: 1\nmode: {mode}\n{backend}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
-        )
-    }
-
-    fn supported_open_file_limit() -> u64 {
-        [128, 64, 32, 16, 8, 4, 2, 1, 0]
-            .into_iter()
-            .find(|max_open_files| {
-                lillux::validate_subprocess_limits(Some(&lillux::SubprocessLimits {
-                    max_open_files: Some(*max_open_files),
-                    ..lillux::SubprocessLimits::default()
-                }))
-                .is_ok()
-            })
-            .expect("the current process should accept at least RLIMIT_NOFILE=0")
-    }
-
     #[test]
     fn revision_skew_compares_running_and_installed_daemon() {
         assert!(!is_revision_skew(
@@ -2086,62 +2050,4 @@ mod tests {
         assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
     }
 
-    #[test]
-    fn isolation_doctor_requires_a_registered_signed_backend() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".ai/node/identity")).unwrap();
-        std::fs::write(
-            temp.path().join(".ai/node/identity/public-identity.json"),
-            "{}",
-        )
-        .unwrap();
-        let policy = temp.path().join(".ai/node/isolation.yaml");
-        let max_open_files = supported_open_file_limit();
-        std::fs::write(&policy, isolation_policy("enforce", Some(max_open_files))).unwrap();
-
-        let error = inspect_isolation_policy(temp.path())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("isolation bundle"));
-    }
-
-    #[test]
-    fn isolation_doctor_reports_disabled_without_inspecting_backend() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
-        let policy = temp.path().join(".ai/node/isolation.yaml");
-        std::fs::write(&policy, isolation_policy("disabled", Some(1024))).unwrap();
-
-        let inspection = inspect_isolation_policy(temp.path()).unwrap();
-        assert_eq!(inspection.status, NA);
-        assert_eq!(inspection.detail["mode"], "disabled");
-        assert_eq!(inspection.detail["backend_status"], "disabled");
-        assert_eq!(
-            inspection.detail["limit_enforcement"]["open_files"]["status"],
-            "inactive"
-        );
-    }
-
-    #[test]
-    fn isolation_doctor_rejects_unknown_fields_and_missing_selected_bundle() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
-        let policy = temp.path().join(".ai/node/isolation.yaml");
-        std::fs::write(
-            &policy,
-            format!("{}unexpected: true\n", isolation_policy("disabled", None)),
-        )
-        .unwrap();
-
-        let error = format!("{:#}", inspect_isolation_policy(temp.path()).unwrap_err());
-        assert!(error.contains("unknown field"), "{error}");
-
-        std::fs::write(&policy, isolation_policy("enforce", None)).unwrap();
-        assert!(
-            inspect_isolation_policy(temp.path())
-                .unwrap_err()
-                .to_string()
-                .contains("isolation bundle")
-        );
-    }
 }

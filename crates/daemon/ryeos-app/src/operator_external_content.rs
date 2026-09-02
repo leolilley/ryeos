@@ -242,11 +242,9 @@ pub async fn import(
     {
         bail!("expected_file_sha256 is not a canonical sha256 digest");
     }
-    let policy = state
-        .node_config
-        .external_content_import_policy
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("node has no external-content import policy"))?;
+    let policy = state.node_policy.require::<
+        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+    >()?;
     let root_policy = policy
         .roots
         .get(&request.root)
@@ -380,15 +378,12 @@ pub fn import_managed_activation_component(
     let maximum_entries = component.capture_bounds.maximum_entries;
     let expected_file_sha256 = component.expected_file_sha256.clone();
     validate_relative_path(staged_name)?;
-    let import_policy = state
-        .node_config
-        .external_content_import_policy
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+    let import_policy = state.node_policy.require::<
+        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+    >()?;
     let policy = import_policy
         .managed_activation
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+        .require_enabled()?;
     activation.document.validate_portable()?;
     let request = ImportRequest {
         root: "managed-activation-staging".to_owned(),
@@ -411,7 +406,7 @@ pub fn import_managed_activation_component(
     {
         bail!("managed external-content component exceeds current node import policy");
     }
-    let limits = crate::node_config::sections::external_content::ExternalContentImportLimits {
+    let limits = crate::node_policy::sections::external_content::ExternalContentImportLimits {
         max_depth: maximum_depth,
         max_entries: maximum_entries,
         max_file_bytes: maximum_file_bytes,
@@ -1158,7 +1153,7 @@ struct ResolvedConsumer {
 #[allow(clippy::too_many_arguments)]
 fn capture_content_import(
     request: &ImportRequest,
-    limits: &crate::node_config::sections::external_content::ExternalContentImportLimits,
+    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
     root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -1239,7 +1234,7 @@ fn capture_content_import(
 #[allow(clippy::too_many_arguments)]
 fn capture_large_import(
     request: &ImportRequest,
-    limits: &crate::node_config::sections::external_content::ExternalContentImportLimits,
+    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
     root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -1508,7 +1503,7 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
 
 fn import_request_digest(
     request: &ImportRequest,
-    limits: &crate::node_config::sections::external_content::ExternalContentImportLimits,
+    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
     root_device: u64,
     root_inode: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -1554,7 +1549,7 @@ mod tests {
             maximum_bytes: 4096,
             expected_file_sha256: None,
         };
-        let limits = crate::node_config::sections::external_content::ExternalContentImportLimits {
+        let limits = crate::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 32,
             max_file_bytes: 4096,

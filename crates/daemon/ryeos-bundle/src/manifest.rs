@@ -764,10 +764,13 @@ mod tests {
             mf.uses_kinds.is_empty(),
             "hosted-node runtime bundle must stay core-only; docs belong outside .ai/"
         );
-        assert!(root.join(".ai/node/hosted/policy.yaml").is_file());
         assert!(
             !root.join(".ai/config").exists(),
-            "hosted-node runtime policy belongs under .ai/node/hosted, not .ai/config"
+            "hosted-node bundle must not contribute system configuration"
+        );
+        assert!(
+            !root.join(".ai/node/hosted").exists() && !root.join(".ai/node/policies").exists(),
+            "hosted policy is node-owned policy-set state, not bundle content"
         );
         assert!(
             !root.join(".ai/knowledge").exists(),

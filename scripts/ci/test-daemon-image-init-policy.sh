@@ -144,6 +144,66 @@ assert_runtime_bundle_inventory Dockerfile.hosted-node hosted-node
 assert_runtime_bundle_inventory Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.central-host central-host
 
+assert_runtime_init_profile() {
+    local image="$1" bundle_set="$2" instructions final_stage expected_selector actual_selector
+    instructions="$(dockerfile_instructions "$root/$image")"
+    final_stage="$(awk '
+        tolower($1) == "from" { stage = "" }
+        { stage = stage $0 ORS }
+        END { printf "%s", stage }
+    ' <<<"$instructions")"
+    expected_selector="$(ryeos_bundle_set_node_init_profile "$bundle_set")"
+    actual_selector="$(sed -nE 's/^ENV RYEOS_INIT_NODE_PROFILE=([^[:space:]]+)$/\1/p' <<<"$final_stage")"
+    if [[ "$actual_selector" != "$expected_selector" ]]; then
+        echo "$image init profile does not match $bundle_set bundle-set profile" >&2
+        echo "expected: ${expected_selector:-<none>}" >&2
+        echo "actual: ${actual_selector:-<none>}" >&2
+        exit 1
+    fi
+}
+
+assert_runtime_init_profile Dockerfile full
+assert_runtime_init_profile Dockerfile.dev full
+assert_runtime_init_profile Dockerfile.standard standard
+assert_runtime_init_profile Dockerfile.hosted-node hosted-node
+assert_runtime_init_profile Dockerfile.hosted-workflow hosted-workflow
+assert_runtime_init_profile Dockerfile.central-host central-host
+
+# The shared entrypoint consumes only a generic selector and must not infer
+# provider/workload policy from the bundles present in an image.
+! grep -Fq 'hosted-workflow' "$root/deploy/entrypoint.sh"
+! grep -Fiq 'codex' "$root/deploy/entrypoint.sh"
+(
+    # shellcheck source=deploy/entrypoint.sh
+    source "$root/deploy/entrypoint.sh"
+    policy_test_root="$(mktemp -d)"
+    trap 'rm -rf "$policy_test_root"' EXIT
+
+    # Image metadata is mandatory even when a persisted generation exists.
+    unset RYEOS_INIT_NODE_PROFILE
+    mkdir -p "$policy_test_root/.ai/node/policies"
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null 2>&1; then
+        echo "entrypoint accepted an absent node init profile" >&2
+        exit 1
+    fi
+
+    # A fresh root receives the exact mapped first-publication seed.
+    RYEOS_INIT_NODE_PROFILE=hosted-workflow
+    rm -rf "$policy_test_root/.ai"
+    build_ryeos_init_args /opt/ryeos "$policy_test_root"
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --node-profile hosted-workflow" ]]
+
+    # A present generation is preserved. Even a malformed occupant takes this
+    # path so real RyeOS rejects it instead of silently falling back to seed.
+    mkdir -p "$policy_test_root/.ai/node/policies"
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos" ]]
+    rm -rf "$policy_test_root/.ai/node/policies"
+    : > "$policy_test_root/.ai/node/policies"
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos" ]]
+)
+
 # central-auth owns Python-authored support and every runtime set that includes
 # it must mechanically prove the interpreter is present in the final image.
 for image in "${daemon_images[@]}"; do
@@ -160,7 +220,7 @@ for image in "${daemon_images[@]}"; do
 done
 
 release_bundle_instructions="$(dockerfile_instructions "$root/Dockerfile.release-bundles")"
-if grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)|^entrypoint ' <<<"$release_bundle_instructions"; then
+if grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)|^entrypoint |^env RYEOS_INIT_NODE_PROFILE=' <<<"$release_bundle_instructions"; then
     echo "Dockerfile.release-bundles is an artifact export and must not gain runtime init policy" >&2
     exit 1
 fi

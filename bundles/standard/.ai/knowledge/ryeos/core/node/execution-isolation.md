@@ -11,10 +11,11 @@ description: >
 # Execution Isolation
 
 RyeOS can launch executable tools and runtimes through a node-owned isolation
-policy and a selected signed backend bundle. The only policy source is
-`<app-root>/.ai/node/isolation.yaml`. `ryeos init` creates it once; later edits
-belong to the node owner. Items, bundles, requests, and environment variables
-cannot activate the isolation or weaken its controls.
+policy and a selected signed backend bundle. Isolation is one mandatory member
+of the complete node-signed generation under `<app-root>/.ai/node/policies/`.
+The selected init profile makes the first explicit choice; later changes replace
+the whole policy generation atomically. Items, bundles, requests, and environment
+variables cannot activate isolation or weaken its controls.
 
 The engine resolves typed isolation requirements against signed backend
 declarations and live inspected capabilities. It emits a strict backend-neutral
@@ -63,40 +64,42 @@ The policy has two modes:
 - `mode: enforce` applies the complete policy and refuses the launch if any
   requested control cannot be enforced.
 
-## Default policy
+## Explicit disabled policy member
 
 ```yaml
-version: 1
-mode: disabled
-backend: null
-filesystem:
-  readable:
-    - "{node_public_identity}"
-    - "{daemon_socket}"
-    - "{bundle_roots}"
-    - "{node_trusted_keys}"
-    - "{verified_code}"
-  writable:
-    - "{project}"
-    - "{checkpoint_dir}"
-network:
-  mode: host
-environment:
-  allow:
-    - "*"
-limits:
-  open_files: 1024
-  stdout_bytes: 8388608
-  stderr_bytes: 8388608
-  verified_artifact_file_bytes: 67108864
-  verified_artifact_total_bytes: 268435456
-  verified_artifact_files: 4096
+schema: 1
+policy:
+  version: 1
+  mode: disabled
+  backend: null
+  filesystem:
+    readable:
+      - "{node_public_identity}"
+      - "{daemon_socket}"
+      - "{bundle_roots}"
+      - "{node_trusted_keys}"
+      - "{verified_code}"
+    writable:
+      - "{project}"
+      - "{checkpoint_dir}"
+  network:
+    mode: host
+  environment:
+    allow:
+      - "*"
+  limits:
+    open_files: 1024
+    stdout_bytes: 8388608
+    stderr_bytes: 8388608
+    verified_artifact_file_bytes: 67108864
+    verified_artifact_total_bytes: 268435456
+    verified_artifact_files: 4096
 ```
 
-The default is deliberately inert. To opt in, install a signed backend bundle,
-select its bundle and implementation in the policy, change the node-owned mode
-to `enforce`, run
-`ryeos node doctor`, and restart the node.
+This is an explicit policy choice, not a Rust fallback. To opt in, install a
+signed backend bundle, select its bundle and implementation in the replacement
+policy generation, change the mode to `enforce`, run `ryeos node doctor`, and
+restart the node.
 
 `--pin-project` remains the explicit complete-project snapshot/COW workflow. It
 does not control ordinary admitted source or external-content delivery, and is

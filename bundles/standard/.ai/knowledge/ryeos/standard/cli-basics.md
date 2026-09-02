@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-24T15:37:12Z:5681107e9cdac9131deedcfac42238231abf8812bcbd2ff97ee9137b62cf029f:uGMlDHAX7gSkAfQQysmntFYhxPUQZ607fPrJOqzz2VpLwEu3OqsGnBg9i34SUAxoYfDOB6RDuAoL5VI2xqosBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T08:05:37Z:d0c41559dd002cf9a0791e9510925a1f74e5834a7175e94dcbd5bfc08b8dfc00:uRLO4Z+u0xTbtrznTeFlJQr0knNmPM9mpOH4+oIS05GjoNXh6x9HpGzu1vuoDMPCIJY8EwjnwRnjw4AboStoBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
-version: "1.3.0"
+version: "1.4.1"
 description: >
   LLM-facing quickstart for using the ryeos CLI from initialization through
   local execution, project execution, thread inspection, and remote execution.
@@ -35,7 +35,7 @@ Run init once per machine or whenever installed bundles need refreshing.
 Packaged install:
 
 ```bash
-ryeos init
+ryeos init --node-profile full
 ```
 
 Development checkout:
@@ -43,6 +43,7 @@ Development checkout:
 ```bash
 ryeos init \
   --source /path/to/ryeos/bundles \
+  --node-profile full \
   --trust-file /path/to/ryeos/bundles/core/PUBLISHER_TRUST.toml \
   --trust-file /path/to/ryeos/bundles/standard/PUBLISHER_TRUST.toml
 ```
@@ -50,7 +51,7 @@ ryeos init \
 Custom app root:
 
 ```bash
-ryeos init --app-root /tmp/ryeos-state --source /path/to/bundles
+ryeos init --app-root /tmp/ryeos-state --source /path/to/bundles --node-profile full
 ```
 
 The init result reports the app-root path, operator key fingerprint,

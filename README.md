@@ -163,20 +163,21 @@ AUR packages (`ryeos`, `ryeos-mcp`) are coming soon. Once published:
 
 ```bash
 yay -S ryeos ryeos-mcp
-ryeos init
+ryeos init --node-profile full
 ryeos start
 ryeos node status
 ```
 
-On a capable terminal, `ryeos init` opens the first-contact ceremony. It
+On a capable terminal, `ryeos init --node-profile full` opens the
+first-contact ceremony. It
 discovers packaged bundles under `/usr/share/ryeos`, installs them into the
 system space, creates operator and node keys, initializes trust and vault
 material, and optionally connects a verified model provider. Use
 `ryeos setup` to reopen provider/model setup later. Automation must use
-`ryeos init --non-interactive` or `ryeos init --json`. The isolation policy defaults
-to `mode: disabled` with no backend selected. Isolation backends are ordinary,
-separately installed bundles; RyeOS distributions do not include one by
-default. `ryeos start`
+`ryeos init --non-interactive --node-profile full` or
+`ryeos init --json --node-profile full`. Every fresh init requires an exact
+publisher-signed init profile; absence is never replaced with runtime defaults.
+Isolation backends are ordinary, separately installed bundles. `ryeos start`
 launches `ryeosd`. See the
 [execution isolation contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
 enabling or tightening the node-owned policy.
@@ -184,7 +185,7 @@ enabling or tightening the node-owned policy.
 The user lifecycle surface is intentionally small:
 
 ```bash
-ryeos init          # interactive first-contact initialization
+ryeos init --node-profile full  # interactive first-contact initialization
 ryeos setup         # reopen optional provider/model setup
 ryeos start         # bring the local node online
 ryeos stop          # stop it
@@ -201,14 +202,15 @@ docker pull ghcr.io/leolilley/ryeos-standard:latest
 ```
 
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
-entrypoint runs `ryeos init --non-interactive` on every boot (idempotent) before starting
+entrypoint runs `ryeos init --non-interactive --node-profile standard` for
+first policy publication. On later boots it omits the init profile and asks
+RyeOS to validate and preserve the existing complete signed generation before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
 so keys, trust, and runtime state survive redeploys. Release containers rely
 only on the official publisher key compiled into `ryeos`; the entrypoint does
-not infer trust from files baked into the image. The initialized isolation policy
-defaults to disabled with no backend selected, so the normal container profile
-needs no extra namespace capabilities. Release images do not include an
-isolation backend. Keep `/data` on a named volume:
+not infer trust from files baked into the image. The signed standard init profile
+explicitly owns isolation and every other required node policy. Keep `/data` on
+a named volume:
 
 ```bash
 docker volume create ryeos-data
@@ -279,7 +281,7 @@ can start the node for optional provider setup; `ryeos start` remains
 idempotent if setup was skipped or initialization was non-interactive:
 
 ```bash
-ryeos init
+ryeos init --node-profile full
 ryeos start
 ryeos node status
 ```
@@ -373,7 +375,7 @@ The repository currently includes bundles such as:
 | `web`          | Web-oriented tools and runtimes.                                                         |
 | `browser`      | Browser automation tools.                                                                |
 | `ryeos-ui`       | UI/operator-facing bundle assets.                                                        |
-| `hosted-node`  | Policy for exposing a node as a hosted remote target.                                    |
+| `hosted-node`  | Admission services and schemas for a hosted remote target.                               |
 | `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                            |
 
 ## State model

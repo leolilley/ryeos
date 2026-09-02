@@ -14,14 +14,20 @@ The `ryeos` package has two immutable inputs:
 
 The AUR build copies the second artifact verbatim into `/usr/share/ryeos`. It
 does not regenerate CAS data, re-sign bundle content, or import packaged trust
-documents as authority. `ryeos init` verifies the installed artifact against
-the official publisher key compiled into the release binary.
+documents as authority. `ryeos init --node-profile full` verifies the installed
+artifact and its complete full-distribution init profile against the official
+publisher key compiled into the release binary. Fresh init refuses an absent
+profile.
 
-Initialization writes the strict isolation policy with `mode: disabled` and no
-backend selected. The package does not ship an isolation backend. Operators may
-install a separately authored backend bundle, select it in
-`<app-root>/.ai/node/isolation.yaml`, and change the mode to `enforce`; execution
-fails closed when the selected signed backend is missing or unusable. Validate the edit with
+The profile is first-publication authority. Reinstall and restart preserve an
+existing complete node-signed policy generation and validate it through RyeOS;
+a partial or malformed present generation fails rather than falling back to the
+packaged profile.
+
+The complete signed init profile owns the initial isolation policy. Operators
+may replace the stopped node's complete policy generation under the normal
+node-signing and compare-and-swap contract; execution fails closed when a
+selected signed backend is missing or unusable. Validate the change with
 `ryeos node doctor` and restart the node to load it. The
 [isolation contract](../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) documents the strict
 schema and operating contract.

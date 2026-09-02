@@ -51,7 +51,7 @@ pub use lock::GcLock;
 /// The individual `purge_cache` / `truncate_trace` / `prune_runtime_history`
 /// flags remain available for targeted reclamation.
 ///
-/// The signed scheduled-maintenance declaration runs the deep profile and
+/// The signed node maintenance policy runs the deep profile and
 /// authors every operational cleanup window explicitly, so an
 /// unattended install reclaims fully on cadence while interactive `ryeos gc`
 /// stays conservative. Destructive-ish steps (trace truncation, fire pruning)

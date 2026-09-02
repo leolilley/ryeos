@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:300251619ba335c25878744bc1d43dbe79934b15c7fbc3435e3d11ad99efde4e:0LGwSzZqGf16eBlMQGAzVQktYy4BgJW8pT/iN48ocKb4Zpxi3McTW3LZv+CVAomSwd0xci/RkoKOD9KMaZfNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T08:20:18Z:69fb29944f596e19b870ec1b5594583b94c23f79f4f056e78d8a4abafbd9428f:ZuOR8Q3ExDwSVgd7sqw5VusMg/aRaNO8On8bGKrKvxEoBWUL5k5/2Z1brsN8+MGfvopmK+9pPexWJgT/Yd1QCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
-version: "2.1.0"
+version: "2.2.1"
 description: >
   The two-tier space resolution system — project and system (bundle)
   spaces, how bundles are installed, and how items are found.
@@ -53,7 +53,8 @@ overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 │   ├── identity/private_key.pem     ← daemon's Ed25519 signing key
 │   ├── vault/{private_key,public_key}.pem  ← X25519 sealed secrets
 │   ├── config.yaml                  ← daemon config
-│   ├── isolation.yaml                 ← create-once node execution policy
+│   ├── policies/<section>.yaml      ← complete node-signed policy generation
+│   ├── sync/policy.yaml             ← read-only derived sync view
 │   ├── bundles/
 │   │   ├── core.yaml                ← signed registration records
 │   │   └── standard.yaml
@@ -78,10 +79,12 @@ ryeos fetch tool:ryeos/core/sign --to project
 The copied item lives in project space and shadows the system
 version (first match wins).
 
-`isolation.yaml` is operator-owned mutable node policy rather than installed
-bundle content. It defaults to disabled, is loaded as an immutable snapshot at
-daemon startup, and is documented in [Execution
-Sandbox](node/execution-isolation.md).
+`.ai/node/policies/isolation.yaml` is one member of the complete node-signed
+policy generation rather than installed bundle content. The selected init
+profile explicitly publishes disabled isolation on a fresh distribution; no
+runtime default creates it. A stopped-node policy transaction may replace the
+section, and daemon startup loads the complete generation as one immutable
+snapshot. See [Execution Sandbox](node/execution-isolation.md).
 
 ## Installing Bundles
 
@@ -96,18 +99,26 @@ Bundles are installed by `ryeos init` (not the daemon). The CLI:
 
 ```bash
 # Packaged install (default source):
-ryeos init
+ryeos init --node-profile full
 
 # Development:
-ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile full \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 
-# Docker:
-ryeos init --source /opt/ryeos
+# Distribution image entrypoint:
+ryeos init --source /opt/ryeos \
+  --node-profile "$RYEOS_INIT_NODE_PROFILE"
 ```
+
+Fresh initialization has no absent-policy fallback. The selected signed init
+profile names the exact source bundle inventory and all required node-policy
+sections; a mismatch fails before installation.
 
 Init is **idempotent** — running it again preserves keys, atomically
 replaces bundles (stage → swap with one-generation backup), and
-re-validates registrations.
+re-validates registrations. It also preserves an existing complete signed
+policy generation; the distribution profile is first-publication authority, not
+an overwrite path.
 
 ## Resolution Order
 

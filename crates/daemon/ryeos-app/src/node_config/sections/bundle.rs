@@ -11,8 +11,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::node_config::{
-    BundleRecord, NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy,
+    BundleRecord, NodeConfigRecord, NodeConfigSection, NodeItemContext, SectionCardinality,
+    NodeConfigSourceScope, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
 };
+
+pub const SECTION_NAME: &str = "bundles";
 
 /// Section handler for `bundles` node-config items.
 pub struct BundleSection;
@@ -22,17 +25,28 @@ pub struct BundleSection;
 struct RawBundleRecord {
     kind: String,
     path: std::path::PathBuf,
-    #[serde(default)]
-    command_registration_caps: Vec<String>,
 }
 
 impl NodeConfigSection for BundleSection {
-    fn source_policy(&self) -> SectionSourcePolicy {
-        // Bundles cannot self-register — only the app root.
-        SectionSourcePolicy::SystemAndState
+    fn name(&self) -> &'static str {
+        SECTION_NAME
     }
 
-    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
+    fn source_scope(&self) -> NodeConfigSourceScope {
+        // Bundles cannot self-register — only the app root.
+        NodeConfigSourceScope::AppRootOnly
+    }
+
+    fn load_spec(&self) -> SectionLoadSpec {
+        SectionLoadSpec {
+            phase: SectionLoadPhase::BundleBootstrap,
+            traversal: SectionTraversal::Flat,
+            signer: SectionSignerPolicy::Trusted,
+            cardinality: SectionCardinality::AtLeastOne,
+        }
+    }
+
+    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<NodeConfigRecord> {
         let raw: RawBundleRecord =
             serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
         if raw.kind != "node" {
@@ -54,9 +68,8 @@ impl NodeConfigSection for BundleSection {
         let record = BundleRecord {
             name: ctx.id.clone(),
             path: raw.path,
-            command_registration_caps: raw.command_registration_caps,
             source_file: std::path::PathBuf::new(),
         };
-        Ok(Box::new(record))
+        Ok(NodeConfigRecord::Bundle(record))
     }
 }

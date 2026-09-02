@@ -648,19 +648,35 @@ pub enum PinnedDirectoryEntry {
     Regular(File),
 }
 
-/// One regular entry opened from a [`PinnedDirectory`].
+/// Exact authority for one regular child opened from a [`PinnedDirectory`].
+///
+/// The descriptor, its direct-child coordinate, and its diagnostic pathname
+/// form one inseparable authority object. The pathname is never sufficient
+/// authority to reopen or mutate the entry, and the child name must not be
+/// paired with an independently obtained descriptor. Callers therefore use
+/// the typed read, observation, conversion, and directory-mutation methods
+/// below instead of extracting and recombining the underlying fields.
 #[derive(Debug)]
 pub struct PinnedRegularFile {
-    pub path: PathBuf,
-    pub name: OsString,
-    pub file: File,
+    path: PathBuf,
+    name: OsString,
+    file: File,
 }
 
 impl PinnedRegularFile {
+    /// Return the pathname recorded when this authority was opened.
+    ///
+    /// This is diagnostic context only. It does not prove that the namespace
+    /// still selects this inode and must never be used to reopen the file.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Return the direct-child coordinate retained with this authority.
+    ///
+    /// The name is useful for diagnostics and policy matching. Namespace
+    /// mutations should accept the complete [`PinnedRegularFile`] so this
+    /// coordinate cannot accidentally be paired with another descriptor.
     pub fn name(&self) -> &OsStr {
         &self.name
     }
@@ -671,13 +687,104 @@ impl PinnedRegularFile {
             .with_context(|| format!("read pinned regular file {}", self.path.display()))
     }
 
+    /// Observe the exact descriptor for a later stable conditional read.
+    pub fn observation(&self) -> Result<OpenRegularFileObservation> {
+        observe_open_regular_file(&self.file)
+    }
+
+    /// Read this exact descriptor and prove it still matches a prior
+    /// observation. The cloned raw descriptor remains internal to Lillux.
+    pub fn read_stable_bounded(
+        &self,
+        observation: &OpenRegularFileObservation,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        let mut file = self.file.try_clone()?;
+        read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
+    }
+
+    /// Digest this exact descriptor at the size committed by `observation`
+    /// and prove that its identity and metadata remained stable throughout.
+    /// The descriptor clone used by the digest implementation does not escape
+    /// this typed authority boundary.
+    pub fn digest_stable_exact(&self, observation: &OpenRegularFileObservation) -> Result<String> {
+        let mut file = self.file.try_clone()?;
+        let (digest, after) = digest_open_regular_file_stable_exact(&mut file, observation.size())?;
+        if !same_regular_file_observation(&observation.metadata, &after) {
+            anyhow::bail!(
+                "pinned regular file changed while it was being digested: {}",
+                self.path.display()
+            );
+        }
+        Ok(digest)
+    }
+
     /// Return the ordinary permission bits of this exact pinned inode.
     pub fn permission_mode(&self) -> Result<u32> {
         observe_open_regular_file(&self.file)?.permission_mode()
     }
 
-    /// Duplicate this exact open regular-file descriptor for a typed consumer
-    /// that retains descriptor authority across a later operation.
+    /// Return the byte length observed from this exact descriptor.
+    pub fn size(&self) -> Result<u64> {
+        let metadata = self
+            .file
+            .metadata()
+            .with_context(|| format!("inspect pinned regular file {}", self.path.display()))?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!("pinned descriptor is not a regular file");
+        }
+        Ok(metadata.len())
+    }
+
+    /// Acquire an exclusive advisory lock on this exact open inode.
+    ///
+    /// The lock is attached to the retained descriptor, never to a pathname
+    /// reopened by the caller. Dropping this authority (and all descriptor
+    /// clones made from it) releases the process's ownership as defined by the
+    /// platform lock contract.
+    pub fn lock_exclusive(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("regular-file advisory locking is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("lock pinned regular file {}", self.path.display()));
+            }
+            Ok(())
+        }
+    }
+
+    /// Attempt to acquire an exclusive advisory lock on this exact inode.
+    /// Returns `false` only when another owner currently holds the lock.
+    pub fn try_lock_exclusive(&self) -> Result<bool> {
+        #[cfg(not(unix))]
+        anyhow::bail!("regular-file advisory locking is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(false)
+            } else {
+                Err(error).with_context(|| {
+                    format!("try-lock pinned regular file {}", self.path.display())
+                })
+            }
+        }
+    }
+
+    /// Duplicate this exact open descriptor for a boundary whose own type
+    /// retains descriptor authority (for example CAS ingestion or isolation).
+    ///
+    /// This is not a general namespace escape hatch: callers must not combine
+    /// the returned descriptor with [`Self::name`] or [`Self::path`] to perform
+    /// pathname operations. Such operations belong on `PinnedDirectory` and
+    /// take the complete `PinnedRegularFile` authority instead.
     pub fn try_clone_descriptor(&self) -> Result<File> {
         self.file
             .try_clone()
@@ -718,6 +825,21 @@ impl PinnedRegularFile {
         self,
     ) -> Result<crate::exec::InheritedDescriptorAuthority> {
         crate::exec::inherited_descriptor_path(self.file).map_err(anyhow::Error::msg)
+    }
+}
+
+/// Sequential reads remain bound to the exact inode retained by this typed
+/// authority. Implementing `Read` and `Seek` avoids forcing archive and parser
+/// consumers to extract a raw descriptor merely to consume bytes.
+impl std::io::Read for PinnedRegularFile {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+
+impl std::io::Seek for PinnedRegularFile {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
     }
 }
 
@@ -3513,6 +3635,37 @@ impl PinnedDirectory {
         }
     }
 
+    /// Typed counterpart to [`Self::replace_bytes_if_matches_atomic`] that
+    /// keeps ordinary OS file descriptors inside Lillux.
+    pub fn replace_pinned_bytes_if_matches_atomic<V>(
+        &self,
+        name: &OsStr,
+        expected: Option<&PinnedRegularFile>,
+        validate_expected: V,
+        bytes: &[u8],
+        mode: u32,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&PinnedRegularFile) -> Result<()>,
+    {
+        let diagnostic_path = self.path.join(name);
+        let diagnostic_name = name.to_os_string();
+        self.replace_bytes_if_matches_atomic(
+            name,
+            expected.map(|file| &file.file),
+            move |file| {
+                let pinned = PinnedRegularFile {
+                    path: diagnostic_path,
+                    name: diagnostic_name,
+                    file: file.try_clone()?,
+                };
+                validate_expected(&pinned)
+            },
+            bytes,
+            mode,
+        )
+    }
+
     /// Recover an interrupted conditional byte replacement for one exact child
     /// name without beginning another mutation. Higher-level durable jobs call
     /// this before strict namespace classification so the Lillux-owned recovery
@@ -3881,6 +4034,15 @@ impl PinnedDirectory {
     pub fn remove_if_same(&self, name: &OsStr, expected: &File) -> Result<()> {
         self.remove_if_same_atomic(name, expected)
             .map_err(Into::into)
+    }
+
+    /// Remove the child represented by one complete pinned-file authority.
+    ///
+    /// Keeping the coordinate and expected inode inside the same typed object
+    /// prevents higher layers from accidentally authorizing removal with a
+    /// name obtained from one lookup and a descriptor obtained from another.
+    pub fn remove_pinned_regular_if_same(&self, expected: &PinnedRegularFile) -> Result<()> {
+        self.remove_if_same(expected.name(), &expected.file)
     }
 
     /// Commit-aware form of [`Self::remove_if_same`].
@@ -4520,6 +4682,65 @@ pub fn collect_regular_files_no_follow(
         };
         let mut files = Vec::new();
         collect_from_open_directory(root, &directory, recursive, &mut files)?;
+        Ok(Some(files))
+    }
+}
+
+/// Deterministically collect exact regular-file authorities beneath `root`.
+///
+/// Unlike [`collect_regular_files_no_follow`], the returned values retain the
+/// descriptors opened by the no-follow traversal, so callers cannot
+/// accidentally re-open a replaced pathname. The traversal is bounded before
+/// descriptors are retained. `recursive=false` rejects child directories;
+/// symlinks and special entries always fail closed. A missing root yields
+/// `None`.
+pub fn collect_pinned_regular_files_no_follow_bounded(
+    root: &Path,
+    recursive: bool,
+    budget: DirectoryTraversalBudget,
+) -> Result<Option<Vec<PinnedRegularFile>>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (root, recursive, budget);
+        anyhow::bail!(
+            "secure descriptor-retaining directory walking is unavailable on this platform"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let Some(directory) = open_directory_no_follow(root)? else {
+            return Ok(None);
+        };
+        let mut files = Vec::new();
+        let mut state = DirectoryTraversalState {
+            remaining_entries: budget.max_entries,
+            max_depth: budget.max_depth,
+        };
+        visit_from_open_directory(
+            root,
+            Path::new(""),
+            &directory,
+            Some(&mut state),
+            0,
+            &mut |relative, is_directory| {
+                if is_directory && !recursive {
+                    anyhow::bail!(
+                        "secure flat directory contains unsupported child directory: {}",
+                        root.join(relative).display()
+                    );
+                }
+                Ok(false)
+            },
+            &mut |relative, file| {
+                let path = root.join(relative);
+                let name = relative
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("regular file has no relative filename"))?
+                    .to_os_string();
+                files.push(PinnedRegularFile { path, name, file });
+                Ok(())
+            },
+        )?;
         Ok(Some(files))
     }
 }
@@ -5383,6 +5604,25 @@ mod tests {
             std::fs::read(root.path().join("value")).unwrap(),
             b"local edit"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn typed_pinned_regular_remove_refuses_a_rebound_name() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("value");
+        std::fs::write(&path, b"observed").unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let expected = directory
+            .open_pinned_regular(OsStr::new("value"), false)
+            .unwrap()
+            .unwrap();
+
+        std::fs::rename(&path, root.path().join("displaced")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+
+        assert!(directory.remove_pinned_regular_if_same(&expected).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
     }
 
     #[cfg(unix)]

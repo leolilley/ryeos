@@ -232,7 +232,21 @@ pub fn offline_status(
         .to_str()
         .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
     let project_hash = ryeos_state::refs::deployed_project_key(canonical);
-    let ignore_matcher = crate::ignore::load_from_app_root(&config.app_root)?;
+    let node_trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config(),
+    )
+    .context("load node trust for exact ingest-ignore policy")?;
+    let node_policy = crate::node_policy::load_snapshot(
+        &config.app_root,
+        &node_trust_store,
+        &crate::node_policy::NodePolicyTable::new(),
+    )
+    .context("compile exact node policy generation for snapshot status")?;
+    let ignore_matcher = node_policy
+        .require::<crate::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+        .matcher
+        .clone();
     let ctx = SnapshotContext {
         state: SnapshotState::Offline(&state_db),
         ignore_matcher: &ignore_matcher,

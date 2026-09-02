@@ -7,7 +7,7 @@ use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
-use crate::actions::hosted_policy::load_hosted_policy;
+use crate::actions::hosted_policy::{LoadedHostedNodePolicy, load_hosted_policy};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +22,8 @@ pub struct ExportRemoteDescriptorParams {
     /// Informational capability labels advertised by this node/provider.
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Optional admission mode label. Defaults to `token`.
+    /// Optional assertion of the code-owned admission mode. The node policy
+    /// controls whether admission is advertised.
     #[serde(default)]
     pub admission_mode: Option<String>,
     /// Optional provider/operator label.
@@ -126,9 +127,7 @@ pub fn run_export_remote_descriptor(
     }
 
     let hosted_policy = load_hosted_policy(&app_root)?;
-    if let Some(policy) = &hosted_policy {
-        enforce_hosted_transport_policy(&url, policy)?;
-    }
+    enforce_hosted_transport_policy(&url, &hosted_policy)?;
 
     let requested_admission_mode = params
         .admission_mode
@@ -143,47 +142,26 @@ pub fn run_export_remote_descriptor(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
-    if let Some(policy) = &hosted_policy {
-        if capabilities.is_empty() {
-            capabilities = policy.descriptor.advertised_capabilities.clone();
-        } else {
-            for capability in &capabilities {
-                if !policy
-                    .descriptor
-                    .advertised_capabilities
-                    .contains(capability)
-                {
-                    bail!(
-                        "capability '{}' is not advertised by hosted-node policy from {}",
-                        capability,
-                        policy.source_file.display()
-                    );
-                }
-            }
-        }
-    }
     capabilities.sort();
     capabilities.dedup();
 
-    let admission = if let Some(policy) = &hosted_policy {
-        if let Some(mode) = &requested_admission_mode
-            && mode != &policy.admission.mode
-        {
+    let admission = match (
+        hosted_policy.admission_enabled,
+        requested_admission_mode.as_deref(),
+    ) {
+        (true, None | Some("one_time_token")) => Some(AdmissionDescriptor {
+            mode: "one_time_token".to_string(),
+        }),
+        (true, Some(_)) => {
             bail!(
-                "admission_mode '{}' conflicts with hosted-node policy mode '{}' from {}",
-                mode,
-                policy.admission.mode,
-                policy.source_file.display()
-            );
+                "hosted-node policy from {} supports only one_time_token admission",
+                hosted_policy.source_file.display()
+            )
         }
-        policy.admission.mode.clone()
-    } else {
-        requested_admission_mode.unwrap_or_else(|| "one_time_token".to_string())
-    };
-    let admission = if admission.is_empty() {
-        None
-    } else {
-        Some(AdmissionDescriptor { mode: admission })
+        (false, None) => None,
+        (false, Some(_)) => {
+            bail!("admission_mode cannot be advertised while hosted-node admission is disabled")
+        }
     };
     let provider = params.provider_name.and_then(|name| {
         let name = name.trim().to_string();
@@ -245,17 +223,16 @@ fn resolve_app_root(opt: Option<String>) -> Result<PathBuf> {
 
 fn enforce_hosted_transport_policy(
     url: &str,
-    policy: &ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord,
+    policy: &LoadedHostedNodePolicy,
 ) -> Result<()> {
-    if !policy.transport.public_https_required || url.starts_with("https://") {
+    if url.starts_with("https://") {
         return Ok(());
     }
-    if policy.transport.loopback_http_allowed && is_loopback_http_url(url) {
+    if policy.allow_loopback_http && is_loopback_http_url(url) {
         return Ok(());
     }
     bail!(
-        "hosted-node policy requires public HTTPS descriptor URLs; got '{}' from {}",
-        url,
+        "hosted-node policy requires HTTPS descriptor URLs except for explicitly allowed loopback HTTP; policy source {}",
         policy.source_file.display()
     )
 }
@@ -308,7 +285,7 @@ mod tests {
     use rand::rngs::OsRng;
     struct HostedPolicyFixture {
         _user: std::path::PathBuf,
-        key: lillux::crypto::SigningKey,
+        _bootstrap_key: lillux::crypto::SigningKey,
     }
 
     impl HostedPolicyFixture {
@@ -323,41 +300,43 @@ mod tests {
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
             write_node_bootstrap(root, &trust_dir, &key);
-            Self { _user: user, key }
+            Self {
+                _user: user,
+                _bootstrap_key: key,
+            }
         }
     }
 
-    fn write_hosted_policy(app_root: &std::path::Path, key: &lillux::crypto::SigningKey) {
-        let path = app_root.join(".ai/node/hosted/policy.yaml");
+    fn write_hosted_policy_with_choices(
+        app_root: &std::path::Path,
+        admission_enabled: bool,
+        allow_loopback_http: bool,
+    ) {
+        let identity = ryeos_app::identity::NodeIdentity::load(
+            &app_root.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let path = app_root.join(".ai/node/policies/hosted.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let body = r#"
-version: "0.1.0"
-schema_version: "1.0.0"
-description: "test hosted policy"
-transport:
-  public_https_required: true
-  loopback_http_allowed: true
-admission:
-  mode: "one_time_token"
-  token_ttl_secs: 600
-  reject_wildcard_scopes: true
-  token_delivery: "out_of_band"
-descriptor:
-  require_live_identity_match: true
-  advertised_capabilities:
-    - remote-execute
-    - bundle-install
-authorization:
-  authority: "target_node_authorized_keys"
-  central_bearer_tokens_allowed: false
-  implicit_cross_node_authority_allowed: false
-operations:
-  audit_admission_events: true
-  audit_grant_changes: true
-  prefer_isolated_node_per_principal: true
-  shared_daemon_multitenancy_enabled: false
-"#;
-        std::fs::write(path, lillux::signature::sign_content(body, key, "#", None)).unwrap();
+        let ttl = admission_enabled
+            .then_some("admission_token_ttl_secs: 600\n")
+            .unwrap_or_default();
+        let body = format!(
+            r#"
+schema: 1
+admission_enabled: {admission_enabled}
+{ttl}allow_loopback_http: {allow_loopback_http}
+"#
+        );
+        std::fs::write(
+            path,
+            lillux::signature::sign_content(&body, identity.signing_key(), "#", None),
+        )
+        .unwrap();
+    }
+
+    fn write_hosted_policy(app_root: &std::path::Path) {
+        write_hosted_policy_with_choices(app_root, true, true);
     }
 
     fn write_node_bootstrap(
@@ -406,18 +385,22 @@ system_source_caps:
             lillux::signature::sign_content(policy, node_identity.signing_key(), "#", None),
         )
         .unwrap();
+        crate::actions::hosted_policy::write_required_non_hosted_test_policies(
+            app_root,
+            node_identity.signing_key(),
+        );
     }
 
     #[test]
-    fn remote_descriptor_inherits_hosted_policy_defaults() {
+    fn remote_descriptor_advertises_enabled_admission_without_inventing_capabilities() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
         let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -430,10 +413,7 @@ system_source_caps:
         })
         .unwrap();
 
-        assert_eq!(
-            result.descriptor.capabilities,
-            vec!["bundle-install".to_string(), "remote-execute".to_string()]
-        );
+        assert!(result.descriptor.capabilities.is_empty());
         assert_eq!(result.descriptor.admission.unwrap().mode, "one_time_token");
     }
 
@@ -445,8 +425,8 @@ system_source_caps:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -460,7 +440,7 @@ system_source_caps:
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("requires public HTTPS"),
+            err.to_string().contains("requires HTTPS descriptor URLs"),
             "got: {err:#}"
         );
     }
@@ -473,8 +453,8 @@ system_source_caps:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -498,8 +478,8 @@ system_source_caps:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -523,8 +503,8 @@ system_source_caps:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -538,7 +518,7 @@ system_source_caps:
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("requires public HTTPS"),
+            err.to_string().contains("requires HTTPS descriptor URLs"),
             "got: {err:#}"
         );
     }
@@ -551,8 +531,8 @@ system_source_caps:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -566,24 +546,23 @@ system_source_caps:
         .unwrap_err();
 
         assert!(
-            err.to_string()
-                .contains("conflicts with hosted-node policy"),
+            err.to_string().contains("supports only one_time_token"),
             "got: {err:#}"
         );
     }
 
     #[test]
-    fn remote_descriptor_rejects_capability_outside_hosted_policy() {
+    fn remote_descriptor_keeps_capabilities_as_explicit_informational_labels() {
         let tmp = tempfile::tempdir().unwrap();
         let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
         let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
-        let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
+        let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
@@ -592,13 +571,9 @@ system_source_caps:
             provider_name: None,
             output: None,
         })
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            err.to_string()
-                .contains("is not advertised by hosted-node policy"),
-            "got: {err:#}"
-        );
+        assert_eq!(result.descriptor.capabilities, vec!["provider-dashboard"]);
     }
 
     #[test]
@@ -609,8 +584,8 @@ system_source_caps:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), &fixture.key);
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             app_root: Some(tmp.path().to_string_lossy().to_string()),
@@ -625,5 +600,58 @@ system_source_caps:
 
         assert_eq!(result.descriptor.capabilities, vec!["remote-execute"]);
         assert_eq!(result.descriptor.admission.unwrap().mode, "one_time_token");
+    }
+
+    #[test]
+    fn remote_descriptor_omits_admission_when_explicitly_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
+        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        identity
+            .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
+            .unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy_with_choices(tmp.path(), false, true);
+
+        let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            name: "hosted-disabled".into(),
+            url: "https://node.example.com".into(),
+            capabilities: vec![],
+            admission_mode: None,
+            provider_name: None,
+            output: None,
+        })
+        .unwrap();
+
+        assert!(result.descriptor.admission.is_none());
+    }
+
+    #[test]
+    fn remote_descriptor_rejects_loopback_http_when_operator_disallows_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity_path = tmp.path().join(".ai/node/identity/private_key.pem");
+        let identity = ryeos_app::identity::NodeIdentity::create(&identity_path).unwrap();
+        identity
+            .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
+            .unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy_with_choices(tmp.path(), true, false);
+
+        let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            name: "hosted-local".into(),
+            url: "http://127.0.0.1:8000".into(),
+            capabilities: vec![],
+            admission_mode: None,
+            provider_name: None,
+            output: None,
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("requires HTTPS descriptor URLs"),
+            "got: {err:#}"
+        );
     }
 }

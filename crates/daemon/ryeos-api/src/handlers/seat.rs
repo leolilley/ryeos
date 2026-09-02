@@ -90,7 +90,9 @@ pub async fn handle_open(
     let origin_site_id = ctx.execution_origin(&site_id);
     let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
         &state.engine,
-        &state.node_history_policy,
+        state
+            .node_history_policy()
+            .map_err(|error| HandlerError::Internal(error.to_string()))?,
         &surface_ref,
         &project_path,
         &caller,

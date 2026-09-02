@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:32Z:4f1586c4d0e69da43222e3c5d2e941c2292aac39d4f3f89e2bb81fea1ad5f614:h7mN3qAHaemRype2KhHiqxEcnRNGv/lNCG16MBWOTFizbn13ta/F906Cb4NQh7sRqRwLK/xTxExNYAsrK1DzBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T08:05:36Z:a290c24e05da24dbeec988a078265a16650ce15842d6098c1ac2c5e760e01816:ylPBQ8ZLm+8DxSGEPkyOaIngKfqW+sQtjc0CTlUe3OhSy1X6ULkrAs6JN2jBuaWCeP9gcQXmoa/KSbZP/xTTAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
-version: "1.3.0"
+version: "1.4.1"
 description: >
   Operator initialization contract implemented by ryeos-node: keys,
   trust, bundle discovery, bundle planning, install, and post-init checks.
@@ -17,12 +17,17 @@ registrations. The daemon must not substitute for it.
 ## Inputs
 
 ```bash
-ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...]
+ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...] [--node-profile <name>]
 ```
 
 Defaults are `/usr/share/ryeos` for source and the XDG data dir
 (`~/.local/share/ryeos`) for the app root, overridable via `--app-root`
-or `RYEOS_APP_ROOT`. Packaged installs initialize with plain `ryeos init`.
+or `RYEOS_APP_ROOT`. Every fresh initialization requires
+`--node-profile <name>` to select a complete publisher-signed init profile from
+`<source>/.ai/node/init/profiles/<name>.yaml`. Packaged full installs use
+`--node-profile full`; each lean distribution uses its exact same-named
+profile. Selection is never inferred from the bundles present in the source,
+and absence fails rather than manufacturing an implicit default.
 
 ## Init sequence
 
@@ -35,23 +40,33 @@ or `RYEOS_APP_ROOT`. Packaged installs initialize with plain `ryeos init`.
 7. Pin any additional `--trust-file` publisher docs.
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
-10. Compose and admit the exact prospective source generation. An existing
+10. If a node init profile was selected, verify its publisher signature, require
+    its sorted `exact_bundles` inventory to equal the discovered bundle
+    inventory, validate every typed policy section, and refuse a conflict with
+    an existing nonempty policy generation.
+11. Compose and admit the exact prospective source generation. An existing
     enforced policy must resolve and inspect its selected backend here even
     when ordinary test preflight is skipped.
-11. Preflight-verify source bundles unless explicitly skipped by tests.
-12. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
+12. Preflight-verify source bundles unless explicitly skipped by tests.
+13. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
     write signed registrations under `<system>/.ai/node/bundles/`.
     Before selected-backend activation, resolve and inspect its exact completed
     staging tree.
-13. Create/load the vault X25519 keypair.
-14. Write create-once node policy files if missing, including the disabled strict
-    subprocess isolation policy and ingest-ignore config.
-15. Reload trust and verify official publisher, user key, and node key
+14. Create/load the vault X25519 keypair.
+15. When no generation exists, require the selected node init profile and
+    atomically publish all of its policies beneath
+    `<system>/.ai/node/policies/`, signed by the node key. With an existing
+    generation, an omitted selection preserves it and an explicit selection
+    must be identical. Init authors no implicit isolation, ingest-ignore, or
+    other policy fallback. Materialize only the read-only sync view derived
+    from the admitted generation.
+16. Reload trust and verify official publisher, user key, and node key
     are trusted.
 
 The init report includes the app root, operator/node key fingerprints,
 official publisher fingerprint, vault public-key fingerprint, and
-installed bundle names.
+installed bundle names. It also names the explicitly selected node init profile,
+when present.
 
 ## Official publisher trust
 
@@ -98,6 +113,8 @@ one-generation backup.
 `ryeos init` does not start the daemon and does not depend on it. Runtime
 startup may repair daemon-local public identity, daemon config, vault
 public key output, and local authorized-key entry, but only after
-init-state verification succeeds. Init also never overwrites an existing
-operator-edited `.ai/node/isolation.yaml`. See
-[Execution Isolation](execution-isolation.md) for the complete accepted policy.
+init-state verification succeeds. Init never authors an implicit policy
+fallback or overwrites a different existing node-signed generation. Stopped
+node policy changes use the typed `ryeos node policy-apply` boundary. See
+[Execution Isolation](execution-isolation.md) for the isolation section's
+complete accepted body.

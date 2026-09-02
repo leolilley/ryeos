@@ -1,54 +1,74 @@
 //! Hosted-node policy helpers for local operator tools.
 //!
 //! These helpers intentionally do not introduce a provider service or central
-//! authority. They read the local node's installed hosted policy, if present,
-//! so operator-side tools can align descriptor/admission behavior with the
-//! node-level policy loaded by the daemon.
+//! authority. They read the required node-owned hosted policy generation so
+//! operator-side tools use the same admission choices as the daemon.
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
-use ryeos_app::node_config::SectionTable;
-use ryeos_app::node_config::loader::BootstrapLoader;
-use ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord;
+use anyhow::{Context, Result};
+use ryeos_app::node_policy::NodePolicyTable;
+use ryeos_app::node_policy::sections::hosted::HostedNodePolicy;
 
-/// Load the single installed hosted-node policy for `app_root`.
-///
-/// Returns `Ok(None)` when no hosted policy is installed. Returns an error if
-/// more than one policy is present because precedence/override semantics have
-/// not been designed yet.
-pub fn load_hosted_policy(app_root: &Path) -> Result<Option<HostedNodePolicyRecord>> {
+#[derive(Debug, Clone)]
+pub struct LoadedHostedNodePolicy {
+    pub policy: HostedNodePolicy,
+    pub source_file: std::path::PathBuf,
+}
+
+impl std::ops::Deref for LoadedHostedNodePolicy {
+    type Target = HostedNodePolicy;
+
+    fn deref(&self) -> &Self::Target {
+        &self.policy
+    }
+}
+
+/// Load the required hosted-node policy for `app_root`.
+pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
     let trust_store = ryeos_engine::trust::TrustStore::load(
         None,
         &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
     )
     .context("hosted policy: load trust store")?;
-    let loader = BootstrapLoader {
+    let snapshot = ryeos_app::node_policy::load_snapshot(
         app_root,
-        trust_store: &trust_store,
-    };
-    let bundles = loader
-        .load_bundle_section()
-        .context("hosted policy: load verified node bundle registrations")?;
-    let snapshot = loader
-        .load_full(&SectionTable::new(), &bundles)
-        .context("hosted policy: load verified node config")?;
-    let mut records = snapshot.hosted_node_policies;
+        &trust_store,
+        &NodePolicyTable::new(),
+    )
+    .context("hosted policy: load verified node policy generation")?;
+    Ok(LoadedHostedNodePolicy {
+        policy: snapshot.require::<HostedNodePolicy>()?.clone(),
+        source_file: snapshot.source_file::<HostedNodePolicy>()?.to_path_buf(),
+    })
+}
 
-    match records.len() {
-        0 => Ok(None),
-        1 => Ok(records.pop()),
-        _ => {
-            let sources = records
-                .iter()
-                .map(|record| record.source_file.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            bail!(
-                "multiple hosted-node policies installed; refusing ambiguous hosted policy set: {}",
-                sources
-            )
+#[cfg(test)]
+pub(crate) fn write_required_non_hosted_test_policies(
+    app_root: &Path,
+    key: &lillux::crypto::SigningKey,
+) {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|candidate| candidate.join("bundles/.ai/node/init/profiles").is_dir())
+        .expect("workspace with node init profiles");
+    let seed_path = workspace.join("bundles/.ai/node/init/profiles/hosted-workflow.yaml");
+    let signed = std::fs::read_to_string(&seed_path).expect("read hosted-workflow node profile");
+    let body = lillux::signature::strip_signature_lines(&signed);
+    let seed: ryeos_app::node_policy::generation::NodeInitProfile =
+        serde_yaml::from_str(&body).expect("parse hosted-workflow node profile");
+    let policy_dir = app_root.join(".ai/node/policies");
+    std::fs::create_dir_all(&policy_dir).expect("create test node-policy directory");
+    for (name, body) in seed.policies() {
+        if name == "hosted" {
+            continue;
         }
+        let body = serde_yaml::to_string(body).expect("serialize test node policy");
+        std::fs::write(
+            policy_dir.join(format!("{name}.yaml")),
+            lillux::signature::sign_content(&body, key, "#", None),
+        )
+        .expect("write test node policy");
     }
 }
 
@@ -58,31 +78,10 @@ mod tests {
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
     const POLICY: &str = r#"
-version: "0.1.0"
-schema_version: "1.0.0"
-description: "Default hosted-node operator policy for decentralized remote admission."
-transport:
-  public_https_required: true
-  loopback_http_allowed: true
-admission:
-  mode: "one_time_token"
-  token_ttl_secs: 600
-  reject_wildcard_scopes: true
-  token_delivery: "out_of_band"
-descriptor:
-  require_live_identity_match: true
-  advertised_capabilities:
-    - remote-execute
-    - bundle-install
-authorization:
-  authority: "target_node_authorized_keys"
-  central_bearer_tokens_allowed: false
-  implicit_cross_node_authority_allowed: false
-operations:
-  audit_admission_events: true
-  audit_grant_changes: true
-  prefer_isolated_node_per_principal: true
-  shared_daemon_multitenancy_enabled: false
+schema: 1
+admission_enabled: true
+admission_token_ttl_secs: 600
+allow_loopback_http: true
 "#;
 
     struct Fixture {
@@ -147,37 +146,30 @@ system_source_caps:
             lillux::signature::sign_content(policy, key, "#", None),
         )
         .unwrap();
+        write_required_non_hosted_test_policies(app_root, key);
     }
 
     #[test]
-    fn load_hosted_policy_reads_installed_bundle_policy() {
+    fn load_hosted_policy_reads_current_node_policy_generation() {
         let fixture = Fixture::new();
-        let path = fixture.system.join(".ai/node/hosted/policy.yaml");
+        let path = fixture.system.join(".ai/node/policies/hosted.yaml");
         fixture.write_policy(&path);
 
-        let policy = load_hosted_policy(&fixture.system)
-            .unwrap()
-            .expect("policy should load");
+        let policy = load_hosted_policy(&fixture.system).expect("policy should load");
 
-        assert_eq!(policy.admission.token_ttl_secs, 600);
-        assert_eq!(
-            policy.descriptor.advertised_capabilities,
-            vec!["remote-execute".to_string(), "bundle-install".to_string()]
-        );
+        assert_eq!(policy.admission_token_ttl_secs, Some(600));
+        assert!(policy.allow_loopback_http);
         assert_eq!(policy.source_file, path);
     }
 
     #[test]
-    fn load_hosted_policy_rejects_nested_policy_id() {
+    fn load_hosted_policy_rejects_missing_required_policy() {
         let fixture = Fixture::new();
-        fixture.write_policy(&fixture.system.join(".ai/node/hosted/policy.yaml"));
-        fixture.write_policy(&fixture.system.join(".ai/node/hosted/extra/policy.yaml"));
-
         let err = load_hosted_policy(&fixture.system).unwrap_err();
         let rendered = format!("{err:#}");
-
+        assert!(rendered.contains("hosted"), "got: {rendered}");
         assert!(
-            rendered.contains("hosted-node policy filename must be 'policy'"),
+            rendered.contains("ExactlyOne") || rendered.contains("required"),
             "got: {rendered}"
         );
     }

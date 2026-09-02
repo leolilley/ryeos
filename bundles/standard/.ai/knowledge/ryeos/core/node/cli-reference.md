@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-13T23:39:10Z:c5567d0b598598557e6cf4c14653852a4f85c6b1ffd0e4ec403719c4f95b392b:bwwPpwTfSujg19KTaE+2AUWbGvjYGl/hu3QzpqvuM34cikuIr8NHEC22M86k9NXExkM312veiWfod4K/W/RIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T08:05:36Z:c6514b63351ee30f43c672651385c68090f8003de7e4bdf9f6c259c2a99594bc:fqs6+YuC0HPIDViCjjCYQtlO2/mHdrYJlgKG7qcpZjCQSqPNKjbVg93Dt/qqAeLVUEqsxmcgl71kTn+/9N2IBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.4.0"
+version: "3.5.1"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -26,14 +26,21 @@ Daemon-backed dispatch is preflighted with local lifecycle status unless
 ### `ryeos init`
 
 ```bash
-ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...]
+ryeos init [--node-profile <name>] [--source <dir>] [--app-root <dir>] [--trust-file <file>...]
 ```
 
-Packaged installs use `/usr/share/ryeos` by default, so plain
-`ryeos init` is sufficient. Development usage:
+Packaged installs use `/usr/share/ryeos` by default. The full package selects
+its exact complete seed explicitly:
 
 ```bash
-ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --node-profile full
+```
+
+Fresh init refuses an absent selector; bundle presence never implies one.
+Development usage:
+
+```bash
+ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`

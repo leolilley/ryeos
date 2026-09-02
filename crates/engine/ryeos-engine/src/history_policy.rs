@@ -6,7 +6,7 @@
 //! contract. It never reads `metadata.extra` or switches on a kind or item ref.
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::{
     fs::File,
     io::Read,
@@ -17,12 +17,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
 use crate::config_loading::ConfigLoadContext;
 use crate::contracts::{ItemSpace, TrustClass, VerifiedItem};
 use crate::error::EngineError;
+#[cfg(test)]
 use crate::item_resolution::parse_signature_header;
 use crate::kind_registry::{KindRegistry, KindSchema};
 use crate::resolution::{ResolutionOutput, TrustClass as ResolutionTrustClass};
+#[cfg(test)]
 use crate::trust::{content_hash_after_signature, verify_item_signature_with_hash};
 
 /// Deserialize a nullable field while still requiring its key to be present.
@@ -36,7 +39,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-pub const NODE_HISTORY_POLICY_CONFIG: &str = "config/execution/execution.yaml";
+pub const NODE_HISTORY_POLICY_CONFIG: &str = ".ai/node/policies/thread_history.yaml";
 
 /// Concrete history behavior captured on a newly-created root chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +104,7 @@ pub struct ResolvedNodeThreadHistoryPolicy {
 }
 
 impl ResolvedNodeThreadHistoryPolicy {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn durable_without_config() -> Self {
         Self {
             item_authored_retention: ItemAuthoredRetentionMode::Allow,
@@ -229,6 +233,7 @@ pub struct ResolveLaunchPolicyInput<'a> {
 ///
 /// `ctx.roots` must be rooted at the node app tree, followed by bundle roots;
 /// an executed project's tree must not be allowed to change node GC policy.
+#[cfg(test)]
 pub fn load_node_thread_history_policy(
     ctx: &ConfigLoadContext<'_>,
 ) -> Result<ResolvedNodeThreadHistoryPolicy, EngineError> {
@@ -312,7 +317,7 @@ pub fn load_node_thread_history_policy(
     Ok(ResolvedNodeThreadHistoryPolicy::durable_without_config())
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn read_optional_regular_file_no_follow(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
     use std::path::Component;
 
@@ -394,7 +399,7 @@ fn read_optional_regular_file_no_follow(path: &std::path::Path) -> anyhow::Resul
     Ok(Some(bytes))
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn read_optional_regular_file_no_follow(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
     let _ = path;
     anyhow::bail!("secure no-follow node history policy loading is unavailable on this platform")
