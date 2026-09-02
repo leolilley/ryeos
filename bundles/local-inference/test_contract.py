@@ -523,13 +523,19 @@ class LocalInferenceContractTests(unittest.TestCase):
             '"authority_digest": record["coordinate"]["authority_digest"]',
             '"thread_id": expected_thread',
             'observation.get("produced_by_thread") != expected_thread',
-            'execution-thread-{profile.rsplit(\'-\', 1)[-1]}.txt',
-            'new_thread_id_for_item',
+            'execution-thread-{profile.rsplit(\'-\', 1)[-1]}.json',
+            'write_new_thread_proof_for_item',
             'threads-before-execution-4096.json',
             'threads-after-execution-4096.json',
             'threads-before-execution-2048.json',
             'threads-after-execution-2048.json',
             'if len(new) != 1 or len(matches) != 1:',
+            '"schema": "ryeos.local_inference_execution_thread_proof.v1"',
+            '"before_thread_ids": before',
+            '"after_thread_ids": sorted(',
+            '"new_threads": [',
+            '"selected_thread_id": thread_id',
+            '"execution_threads": {',
         ):
             self.assertIn(required_join, qualifier)
 
