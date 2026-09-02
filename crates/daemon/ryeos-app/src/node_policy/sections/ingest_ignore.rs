@@ -143,9 +143,11 @@ mod tests {
     fn section_is_registered_policy_authority() {
         let section = IngestIgnorePolicySection;
         assert_eq!(section.name(), SECTION_NAME);
-        assert!(section
-            .parse(&context(), &json!({"schema": 1, "additional_patterns": []}))
-            .is_ok());
+        assert!(
+            section
+                .parse(&context(), &json!({"schema": 1, "additional_patterns": []}))
+                .is_ok()
+        );
     }
 
     #[test]

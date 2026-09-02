@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{NodePolicyContext, NodePolicyTable};
-use crate::node_config::loader::load_verified_pinned_node_yaml_with_signer;
 use crate::identity::NodeIdentity;
 
 pub const POLICIES_DIRECTORY: &str = "policies";
@@ -250,8 +249,7 @@ pub fn load_optional_policy_generation(
     let Some(directory) = lillux::PinnedDirectory::open(&policy_directory(app_root))? else {
         return Ok(None);
     };
-    load_policy_generation_from_directory(app_root, &directory, trust_store, policy_table)
-        .map(Some)
+    load_policy_generation_from_directory(app_root, &directory, trust_store, policy_table).map(Some)
 }
 
 fn load_policy_generation_from_directory(
@@ -286,7 +284,7 @@ fn load_policy_generation_from_directory(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .with_context(|| format!("node policy disappeared: {}", path.display()))?;
-        let verified = load_verified_pinned_node_yaml_with_signer(&file, trust_store)?;
+        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
         if verified.signer_fingerprint != node_fingerprint {
             bail!(
                 "node policy {} is signed by {}, expected current node {}",
@@ -331,7 +329,7 @@ pub fn publish_policy_update(
     }
     let node_root_path = app_root.join(ryeos_engine::AI_DIR).join("node");
     let node_root = lillux::PinnedDirectory::open_or_create(&node_root_path)
-        .context("pin node-config root for policy publication")?;
+        .context("pin node root for policy publication")?;
     let target_name = OsStr::new(POLICIES_DIRECTORY);
     let current = node_root.open_child_directory(target_name)?;
     let current_digest = current
@@ -369,12 +367,7 @@ pub fn publish_policy_update(
         for (section_name, body) in &update.generation.policies {
             let filename = OsString::from(format!("{section_name}.yaml"));
             let bytes =
-                crate::node_document::render_signed_item(
-                    section_name,
-                    "policy",
-                    body,
-                    identity,
-                )?;
+                crate::node_document::render_signed_item(section_name, "policy", body, identity)?;
             staging.atomic_write_pinned_if_same(&filename, None, &bytes, 0o600)?;
         }
         staging.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(
@@ -460,4 +453,35 @@ pub fn publish_policy_update(
     }
     result?;
     Ok(policy_directory(app_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_authored_init_profile_compiles_as_one_complete_generation() {
+        let profile_directory =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles/.ai/node/init/profiles");
+        let mut profiles = std::fs::read_dir(&profile_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        profiles.sort();
+        assert!(!profiles.is_empty(), "init profile inventory is empty");
+
+        let table = NodePolicyTable::new();
+        for path in profiles {
+            assert_eq!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yaml")
+            );
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let body = lillux::signature::strip_signature_lines(&raw);
+            let profile: NodeInitProfile = serde_yaml::from_str(&body).unwrap();
+            profile
+                .validated_generation(&table, &path)
+                .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+        }
+    }
 }

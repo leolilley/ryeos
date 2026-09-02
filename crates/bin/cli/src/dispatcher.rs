@@ -190,9 +190,11 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             });
         }
     };
-    let node_policy = crate::node_descriptors::load_verified_policy_snapshot(&app_root)
-        .map_err(|error| CliError::Local {
-            detail: format!("load verified node policy: {error:#}"),
+    let node_policy =
+        crate::node_descriptors::load_verified_policy_snapshot(&app_root).map_err(|error| {
+            CliError::Local {
+                detail: format!("load verified node policy: {error:#}"),
+            }
         })?;
     let command_registration = node_policy
         .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
@@ -433,11 +435,8 @@ async fn try_dispatch_client_handler(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
 ) -> Result<Option<Value>, CliError> {
-    let registry = CommandRegistry::from_records(
-        &snapshot.commands,
-        command_registration_policy,
-    )
-    .map_err(|error| CliError::Local {
+    let registry = CommandRegistry::from_records(&snapshot.commands, command_registration_policy)
+        .map_err(|error| CliError::Local {
         detail: format!("load verified node commands: {error:#}"),
     })?;
     let Ok(matched) = registry.resolve(rest) else {

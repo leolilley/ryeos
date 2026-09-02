@@ -381,8 +381,8 @@ pub fn load_prospective_isolation(
         format!("sha256:{policy_generation_digest}"),
         backend,
     )
-        .map(Arc::new)
-        .map_err(anyhow::Error::from)
+    .map(Arc::new)
+    .map_err(anyhow::Error::from)
 }
 
 fn resolve_verified_isolation_backend(
@@ -1159,7 +1159,9 @@ mod isolation_generation_tests {
         assert!(error.to_string().contains("root identity changed"));
     }
 
-    fn policy(mode: ryeos_engine::isolation::IsolationMode) -> ryeos_engine::isolation::IsolationPolicy {
+    fn policy(
+        mode: ryeos_engine::isolation::IsolationMode,
+    ) -> ryeos_engine::isolation::IsolationPolicy {
         let mut policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
         policy.mode = mode;
         if mode == ryeos_engine::isolation::IsolationMode::Enforce {

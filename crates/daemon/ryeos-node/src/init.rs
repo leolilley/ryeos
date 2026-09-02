@@ -511,8 +511,8 @@ fn run_init_internal(
             &policy_table,
         )
         .context("prospective init source set has invalid node configuration")?;
-    let isolation_policy = prospective_policy
-        .require::<ryeos_engine::isolation::IsolationPolicy>()?;
+    let isolation_policy =
+        prospective_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?;
     let prospective_isolation = ryeos_app::engine_init::admit_node_bundle_roots(
         &opts.app_root,
         &prospective_roots,
@@ -970,7 +970,10 @@ fn validate_prospective_staging(
     policy_snapshot: &ryeos_app::node_policy::NodePolicySnapshot,
 ) -> Result<()> {
     let records = prospective_bundle_records(plan, Some((bundle_name, staging)));
-    let roots = records.iter().map(|record| record.path.clone()).collect::<Vec<_>>();
+    let roots = records
+        .iter()
+        .map(|record| record.path.clone())
+        .collect::<Vec<_>>();
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root,
         trust_store: node_trust_store,
@@ -980,9 +983,10 @@ fn validate_prospective_staging(
     >()?;
     loader
         .load_full(config_table, &records, command_registration, policy_table)
-        .with_context(|| format!("completed `{bundle_name}` staging tree has invalid node config"))?;
-    let isolation_policy = policy_snapshot
-        .require::<ryeos_engine::isolation::IsolationPolicy>()?;
+        .with_context(|| {
+            format!("completed `{bundle_name}` staging tree has invalid node config")
+        })?;
+    let isolation_policy = policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?;
     ryeos_app::engine_init::admit_node_bundle_roots(
         app_root,
         &roots,
@@ -1587,7 +1591,7 @@ mod tests {
             app_root: state.to_path_buf(),
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: None,
+            node_profile: Some("full".to_owned()),
             skip_preflight: true,
         }
     }
@@ -1656,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn run_init_installs_core_and_hosted_node_without_standard() {
+    fn run_init_installs_the_exact_hosted_node_profile_without_standard() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         fs::create_dir_all(&source).unwrap();
@@ -1667,6 +1671,11 @@ mod tests {
             &source.join("hosted-node"),
         )
         .expect("copy hosted-node bundle");
+        copy_dir_recursive(
+            &workspace_root().join("bundles/central-auth"),
+            &source.join("central-auth"),
+        )
+        .expect("copy central-auth bundle");
         copy_source_seed(&source);
 
         let state = tmp.path().join("state");
@@ -1674,14 +1683,18 @@ mod tests {
             app_root: state.to_path_buf(),
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: None,
+            node_profile: Some("hosted-node".to_owned()),
             skip_preflight: true,
         };
 
         let report = run_init(&opts).expect("init core + hosted-node");
         assert_eq!(
             report.bundles_installed,
-            vec!["core".to_string(), "hosted-node".to_string()]
+            vec![
+                "central-auth".to_string(),
+                "core".to_string(),
+                "hosted-node".to_string()
+            ]
         );
         assert!(state.join(".ai/bundles/core/.ai").is_dir());
         assert!(state.join(".ai/bundles/hosted-node/.ai").is_dir());
@@ -1840,7 +1853,7 @@ mod tests {
             app_root: state,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: None,
+            node_profile: Some("full".to_owned()),
             skip_preflight: true,
         };
 
@@ -1860,7 +1873,7 @@ mod tests {
             app_root: state,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
-            node_profile: None,
+            node_profile: Some("full".to_owned()),
             skip_preflight: true,
         };
 
@@ -2214,7 +2227,7 @@ typo_field: oops
     }
 
     #[test]
-    fn run_init_aborts_before_install_on_unsatisfied_deps() {
+    fn run_init_aborts_before_install_on_unadmitted_source_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
 
@@ -2239,16 +2252,16 @@ typo_field: oops
             app_root: state.clone(),
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: None,
+            node_profile: Some("full".to_owned()),
             skip_preflight: true,
         };
 
         let result = run_init(&opts);
-        assert!(result.is_err(), "init should fail with unsatisfied deps");
+        assert!(result.is_err(), "init should fail before source mutation");
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(
-            err_msg.contains("nonexistent-kind"),
-            "error should mention the missing kind: {err_msg}"
+            err_msg.contains("exact bundle inventory") || err_msg.contains("nonexistent-kind"),
+            "error should identify the unadmitted source generation: {err_msg}"
         );
 
         // Critical: no bundles should be installed (non-mutating failure)

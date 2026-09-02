@@ -1040,7 +1040,7 @@ impl SealedRootExecutionRequest {
             item_trust_class: TrustClass::Unsigned,
             kind_schema_content_hash: kind_schema_content_hash.clone(),
             source: PolicyProvenance::NodeDefault {
-                node_policy: NodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: NodeHistoryPolicyProvenance::test_policy(),
             },
         };
         let captured_history_policy = ryeos_state::objects::CapturedThreadHistoryPolicy {
@@ -1051,8 +1051,8 @@ impl SealedRootExecutionRequest {
             item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Unsigned,
             kind_schema_content_hash: kind_schema_content_hash.clone(),
             resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
-                node_policy:
-                    ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(
+                ),
             },
         };
         let resolved_result_policy = ryeos_engine::history_policy::ResolvedThreadResultPolicy {

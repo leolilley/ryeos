@@ -101,13 +101,11 @@ pub async fn try_offline_dispatch(
     }
 
     // 2. Resolve the command from the verified snapshot.
-    let registry = CommandRegistry::from_records(
-        &snapshot.commands,
-        &command_registration.runtime_policy(),
-    )
-    .map_err(|error| CliError::Local {
-        detail: format!("load verified node commands: {error:#}"),
-    })?;
+    let registry =
+        CommandRegistry::from_records(&snapshot.commands, &command_registration.runtime_policy())
+            .map_err(|error| CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        })?;
     let Ok(matched) = registry.resolve(argv) else {
         return Ok(None);
     };

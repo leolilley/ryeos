@@ -386,42 +386,44 @@ pub enum CapturedEffectiveTrustClass {
 pub enum CapturedItemSpace {
     Project,
     Bundle,
+    Node,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum CapturedNodeHistoryPolicyProvenance {
-    MissingConfig,
-    SignedConfig {
-        path: PathBuf,
-        space: CapturedItemSpace,
-        content_hash: String,
-        signer_fingerprint: String,
-    },
+#[serde(deny_unknown_fields)]
+pub struct CapturedNodeHistoryPolicyProvenance {
+    pub path: PathBuf,
+    pub space: CapturedItemSpace,
+    pub content_hash: String,
+    pub signer_fingerprint: String,
 }
 
 impl CapturedNodeHistoryPolicyProvenance {
     fn validate(&self) -> anyhow::Result<()> {
-        let Self::SignedConfig {
-            path,
-            content_hash,
-            signer_fingerprint,
-            ..
-        } = self
-        else {
-            return Ok(());
-        };
-        if path != Path::new("config/execution/execution.yaml") {
+        if self.path != Path::new(".ai/node/policies/thread_history.yaml") {
             anyhow::bail!(
-                "captured node history policy path must be exactly config/execution/execution.yaml"
+                "captured node history policy path must be exactly .ai/node/policies/thread_history.yaml"
             );
         }
-        validate_canonical_hash("captured node history policy content_hash", content_hash)?;
+        validate_canonical_hash(
+            "captured node history policy content_hash",
+            &self.content_hash,
+        )?;
         validate_canonical_hash(
             "captured node history policy signer_fingerprint",
-            signer_fingerprint,
+            &self.signer_fingerprint,
         )?;
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_policy() -> Self {
+        Self {
+            path: PathBuf::from(".ai/node/policies/thread_history.yaml"),
+            space: CapturedItemSpace::Node,
+            content_hash: "44".repeat(32),
+            signer_fingerprint: "55".repeat(32),
+        }
     }
 }
 
@@ -458,15 +460,6 @@ impl CapturedPolicyProvenance {
         match self {
             Self::NodeDefault { node_policy } => {
                 node_policy.validate()?;
-                if matches!(
-                    node_policy,
-                    CapturedNodeHistoryPolicyProvenance::MissingConfig
-                ) && retention != &ThreadHistoryRetention::Durable
-                {
-                    anyhow::bail!(
-                        "missing node history config can only supply the built-in durable default"
-                    );
-                }
                 Ok(())
             }
             Self::ItemAuthored {
@@ -508,14 +501,6 @@ impl CapturedPolicyProvenance {
                         "unclamped item-authored retention must equal requested_seconds"
                     ),
                     Some(clamp) => {
-                        if matches!(
-                            node_policy,
-                            CapturedNodeHistoryPolicyProvenance::MissingConfig
-                        ) {
-                            anyhow::bail!(
-                                "missing node history config cannot impose a minimum clamp"
-                            );
-                        }
                         if clamp.requested_seconds != *requested_seconds {
                             anyhow::bail!(
                                 "captured history clamp requested_seconds does not match provenance"
@@ -1289,18 +1274,13 @@ mod tests {
             item_trust_class: CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: "33".repeat(32),
             resolved_from: CapturedPolicyProvenance::NodeDefault {
-                node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
             },
         }
     }
 
     fn signed_node_policy() -> CapturedNodeHistoryPolicyProvenance {
-        CapturedNodeHistoryPolicyProvenance::SignedConfig {
-            path: PathBuf::from("config/execution/execution.yaml"),
-            space: CapturedItemSpace::Project,
-            content_hash: "44".repeat(32),
-            signer_fingerprint: "55".repeat(32),
-        }
+        CapturedNodeHistoryPolicyProvenance::test_policy()
     }
 
     fn child_snapshot() -> ThreadSnapshot {
@@ -1397,10 +1377,7 @@ mod tests {
     fn signed_node_policy_requires_the_exact_current_relative_path() {
         let mut policy = signed_node_policy();
         assert!(policy.validate().is_ok());
-        let CapturedNodeHistoryPolicyProvenance::SignedConfig { path, .. } = &mut policy else {
-            unreachable!()
-        };
-        *path = PathBuf::from("/app/.ai/config/execution/execution.yaml");
+        policy.path = PathBuf::from("/app/.ai/node/policies/thread_history.yaml");
         assert!(policy.validate().is_err());
     }
 
@@ -1443,10 +1420,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_node_config_cannot_claim_a_finite_node_default() {
+    fn signed_node_policy_can_authorize_a_finite_node_default() {
         let mut policy = durable_policy();
         policy.retention = ThreadHistoryRetention::TerminalFor { seconds: 60 };
-        assert!(policy.validate().is_err());
+        assert!(policy.validate().is_ok());
     }
 
     #[test]

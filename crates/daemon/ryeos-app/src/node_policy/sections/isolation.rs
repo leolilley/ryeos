@@ -1,6 +1,6 @@
 //! Node-owned subprocess isolation policy.
 //!
-//! The section adds only the node-config policy envelope. Isolation semantics
+//! The section adds only the node-policy envelope. Isolation semantics
 //! and their validation remain owned by `ryeos-engine`'s existing
 //! [`ryeos_engine::isolation::IsolationPolicy`] contract.
 
@@ -85,9 +85,7 @@ mod tests {
     #[test]
     fn parses_and_retains_the_engine_owned_policy_exactly() {
         let section = IsolationPolicySection;
-        let parsed = section
-            .parse(&context(), &disabled_policy_value())
-            .unwrap();
+        let parsed = section.parse(&context(), &disabled_policy_value()).unwrap();
         assert_eq!(
             parsed
                 .as_any()

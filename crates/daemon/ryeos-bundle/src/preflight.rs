@@ -1182,33 +1182,12 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
             continue;
         };
 
-        if matches!(section, "verbs" | "aliases") {
+        if !matches!(section, "routes" | "commands") {
             failures.push(format!(
-                "{}: legacy node config section '.ai/node/{}' is no longer supported; use '.ai/node/commands'",
+                "{}: bundles may contribute only '.ai/node/engine/kinds', '.ai/node/routes', or '.ai/node/commands'; namespace '.ai/node/{}' is node-owned or unsupported",
                 rel.display(),
                 section
             ));
-            continue;
-        }
-
-        if section == "command_registration" {
-            failures.push(format!(
-                "{}: command registration policy is node-owned seed/system config; normal bundles may not ship '.ai/node/command_registration'",
-                rel.display()
-            ));
-            continue;
-        }
-
-        if matches!(section, "hosted" | "policies") {
-            failures.push(format!(
-                "{}: hosted and policy-set configuration is node-owned; bundles may not contribute '.ai/node/{}'",
-                rel.display(),
-                section
-            ));
-            continue;
-        }
-
-        if !matches!(section, "bundles" | "routes" | "commands") {
             continue;
         }
 
@@ -2228,15 +2207,11 @@ dispatch:
     }
 
     #[test]
-    fn node_config_preflight_rejects_legacy_verb_section() {
+    fn node_config_preflight_rejects_unregistered_bundle_namespace() {
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
-            "node/verbs/demo.yaml",
-            r#"category: verbs
-section: verbs
-name: demo
-description: Legacy verb
-execute: tool:demo/run
+            "node/arbitrary/demo.yaml",
+            r#"value: unsupported
 "#,
         );
         let trust_store = layout.trust_store();
@@ -2246,39 +2221,13 @@ execute: tool:demo/run
         assert!(
             failures
                 .iter()
-                .any(|failure| failure.contains("legacy node config section")),
-            "expected legacy node/verbs rejection, got: {failures:?}"
+                .any(|failure| failure.contains("bundles may contribute only")),
+            "expected unsupported node namespace rejection, got: {failures:?}"
         );
     }
 
     #[test]
-    fn node_config_preflight_rejects_bundle_authored_command_registration_policy() {
-        let layout = BundleLayout::new("test-bundle");
-        layout.sign_and_write(
-            "node/command_registration/default.yaml",
-            r#"claim_rules:
-  - claim:
-      kind: command.root
-      value: execute
-    required_caps:
-      - ryeos.register.command.root.execute
-system_source_caps:
-  - ryeos.register.command.root.execute
-"#,
-        );
-        let trust_store = layout.trust_store();
-
-        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
-
-        assert!(
-            failures.iter().any(|failure| failure
-                .contains("command registration policy is node-owned seed/system config")),
-            "expected command_registration rejection, got: {failures:?}"
-        );
-    }
-
-    #[test]
-    fn node_config_preflight_rejects_bundle_authored_hosted_policy_authority() {
+    fn node_config_preflight_rejects_bundle_authored_policy_generation() {
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
             "node/policies/hosted.yaml",
@@ -2293,9 +2242,8 @@ allow_loopback_http: true
         assert!(
             failures
                 .iter()
-                .any(|failure| failure
-                    .contains("hosted and policy-set configuration is node-owned")),
-            "expected bundle policy-authority rejection, got: {failures:?}"
+                .any(|failure| failure.contains("bundles may contribute only")),
+            "expected bundle policy-generation rejection, got: {failures:?}"
         );
     }
 

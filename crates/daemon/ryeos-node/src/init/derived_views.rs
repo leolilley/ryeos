@@ -32,10 +32,9 @@ fn replace_if_unchanged(
                         "node derived view changed before publication"
                     );
                     anyhow::ensure!(
-                        current.read_stable_bounded(
-                            &current_observation,
-                            MAX_DERIVED_VIEW_BYTES,
-                        )? == incumbent_bytes,
+                        current
+                            .read_stable_bounded(&current_observation, MAX_DERIVED_VIEW_BYTES,)?
+                            == incumbent_bytes,
                         "node derived-view bytes changed before publication"
                     );
                     Ok(())

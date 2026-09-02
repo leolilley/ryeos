@@ -280,7 +280,7 @@ fn build_app_state(
         node_config: Arc::new(snapshot),
         node_policy: Arc::new(
             ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
             )]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),

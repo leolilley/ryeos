@@ -13,8 +13,7 @@
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
-//!   - `ryeos node policy-apply` — validate and node-sign an operator-authored policy
-//!   - `ryeos node isolation-apply` — validate and install the fixed isolation policy
+//!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -107,11 +106,6 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "isolation-apply"],
-        summary: "Validate and install the fixed isolation policy",
-        category: "maintenance",
-    },
-    LocalCommandDescriptor {
         tokens: &["help"],
         summary: "Open the compact TTY help screen",
         category: "meta",
@@ -194,10 +188,6 @@ pub async fn try_dispatch(
             run_node_policy_apply_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("isolation-apply")) => {
-            run_node_isolation_apply_command(&argv[2..], console).map_err(map_local_err)?;
-            Ok(true)
-        }
         ("start", _) => {
             run_start_command(&argv[1..], console)
                 .await
@@ -218,14 +208,14 @@ pub async fn try_dispatch(
 #[command(
     name = "ryeos node policy-apply",
     about = "Validate and atomically install an operator-authored node policy",
-    long_about = "Validate a stopped-node policy through its registered node-config section, then sign and publish it with the node identity. Only sections that explicitly advertise an operator policy item are accepted; bundle registrations, routes, commands, and runtime-owned items remain inaccessible.",
+    long_about = "Validate a stopped-node policy through its registered node-policy compiler, replace that member in the complete generation, then node-sign and atomically publish the full generation. Bundle registrations, routes, and commands are separate node configuration and remain inaccessible.",
     no_binary_name = true
 )]
 struct NodePolicyApplyArgs {
-    /// Registered node-config section (for example external_content).
+    /// Registered node-policy section (for example external_content).
     section: String,
 
-    /// Unsigned YAML policy source outside the live node-config namespace.
+    /// Unsigned YAML policy source outside the live node-policy namespace.
     source: PathBuf,
 
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
@@ -245,7 +235,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         app_root: args.app_root,
         ..Default::default()
     })
-    .context("load local node configuration for policy apply")?;
+    .context("load local node location for policy apply")?;
     let _state_lock = ryeos_app::state_lock::StateLock::acquire(
         &ryeos_app::state_lock::default_lock_path(&config.app_root),
     )
@@ -254,7 +244,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let table = ryeos_app::node_policy::NodePolicyTable::new();
     table
         .get(&args.section)
-        .with_context(|| format!("unknown node-config section `{}`", args.section))?;
+        .with_context(|| format!("unknown node-policy section `{}`", args.section))?;
 
     let raw = lillux::read_regular_file_to_string_no_follow(&args.source)
         .with_context(|| format!("read policy source {}", args.source.display()))?;
@@ -301,74 +291,6 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     } else {
         console.text(&format!(
             "Installed signed node policy: {}\n",
-            installed.display()
-        ))?;
-    }
-    Ok(())
-}
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "ryeos node isolation-apply",
-    about = "Validate and atomically install the fixed node isolation policy",
-    long_about = "Strictly parse and validate an operator-authored isolation policy, then atomically replace the fixed node-owned isolation.yaml while the daemon is stopped. Backend resolution and artifact inspection remain doctor/startup admission steps.",
-    no_binary_name = true
-)]
-struct NodeIsolationApplyArgs {
-    /// Unsigned YAML isolation policy source outside the live node namespace.
-    source: PathBuf,
-
-    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
-    #[arg(long)]
-    app_root: Option<PathBuf>,
-
-    /// Emit structured JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-fn run_node_isolation_apply_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
-    let Some(args) = parse_or_render_help::<NodeIsolationApplyArgs>(argv, console)? else {
-        return Ok(());
-    };
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: args.app_root,
-        ..Default::default()
-    })
-    .context("load local node configuration for isolation apply")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
-    )
-    .context("node isolation apply requires the daemon to be stopped")?;
-    let raw = lillux::read_regular_file_to_string_no_follow(&args.source)
-        .with_context(|| format!("read isolation source {}", args.source.display()))?;
-    let policy: ryeos_engine::isolation::IsolationPolicy = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse isolation source {}", args.source.display()))?;
-    ryeos_engine::isolation::IsolationRuntime::validate_policy(&policy)
-        .map_err(anyhow::Error::from)
-        .context("validate isolation policy")?;
-    let canonical =
-        serde_yaml::to_string(&policy).context("serialize validated isolation policy")?;
-
-    let node_root = config.app_root.join(ryeos_engine::AI_DIR).join("node");
-    let node_directory = lillux::PinnedDirectory::open_or_create(&node_root)
-        .context("pin node-config directory for isolation apply")?;
-    let filename = std::ffi::OsStr::new("isolation.yaml");
-    let expected = node_directory.open_regular(filename, false)?;
-    node_directory
-        .atomic_write_if_same(filename, expected.as_ref(), canonical.as_bytes(), 0o600)
-        .context("atomically publish isolation policy")?;
-    let installed = node_directory.path().join(filename);
-
-    if args.json {
-        crate::tty::write_json(&serde_json::json!({
-            "status": "installed",
-            "path": installed,
-            "mode": format!("{:?}", policy.mode).to_ascii_lowercase(),
-        }))?;
-    } else {
-        console.text(&format!(
-            "Installed node isolation policy: {}\n",
             installed.display()
         ))?;
     }
@@ -2049,5 +1971,4 @@ mod tests {
         assert_eq!(parse_installed_revision(b"two revisions\n"), None);
         assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
     }
-
 }

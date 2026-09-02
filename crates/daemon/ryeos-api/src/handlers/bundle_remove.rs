@@ -207,12 +207,9 @@ fn admit_prospective_remove(
         .collect::<Result<Vec<_>>>()?;
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
     let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
-    let policy_snapshot = ryeos_app::node_policy::load_snapshot(
-        app_root,
-        node_trust_store,
-        &policy_table,
-    )
-    .context("load exact node policy generation for prospective removal")?;
+    let policy_snapshot =
+        ryeos_app::node_policy::load_snapshot(app_root, node_trust_store, &policy_table)
+            .context("load exact node policy generation for prospective removal")?;
     let command_registration = policy_snapshot.require::<
         ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;

@@ -669,9 +669,7 @@ pub fn resolve_activation(
     let import_policy = state.node_policy.require::<
         crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
-    let policy = import_policy
-        .managed_activation
-        .require_enabled()?;
+    let policy = import_policy.managed_activation.require_enabled()?;
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(activation_ref)
         .map_err(|error| anyhow::anyhow!("invalid activation ref: {error}"))?;
     if canonical.to_string() != activation_ref || canonical.kind != "config" {

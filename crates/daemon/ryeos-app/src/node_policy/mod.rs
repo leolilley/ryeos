@@ -192,7 +192,10 @@ pub fn compile_generation(
             .parse(&context, body)
             .with_context(|| format!("compile `{name}` node policy"))?;
         if record.section_name() != name {
-            bail!("node-policy compiler `{name}` returned a value for `{}`", record.section_name());
+            bail!(
+                "node-policy compiler `{name}` returned a value for `{}`",
+                record.section_name()
+            );
         }
         if records.insert(name, record).is_some() {
             bail!("duplicate compiled node policy `{name}`");

@@ -2458,7 +2458,9 @@ mod tests {
             isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
             engine,
-            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+            resolution_cache: std::sync::Arc::new(
+                ryeos_app::resolution_cache::ResolutionCache::new(128),
+            ),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(Default::default()),
             identity: Arc::new(identity),
             threads,
@@ -2466,9 +2468,7 @@ mod tests {
             events,
             event_streams,
             commands,
-            callback_tokens: Arc::new(
-                ryeos_app::callback_token::CallbackCapabilityStore::new(),
-            ),
+            callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
             extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
             write_barrier: Arc::new(write_barrier),
@@ -2483,7 +2483,7 @@ mod tests {
             node_config: Arc::new(node_config),
             node_policy: Arc::new(
                 ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
@@ -2534,7 +2534,7 @@ mod tests {
                 kind_schema_content_hash: "c".repeat(64),
                 resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                     node_policy:
-                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
         }

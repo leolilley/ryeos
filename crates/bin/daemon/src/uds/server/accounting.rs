@@ -440,7 +440,8 @@ pub(super) fn handle_provider_attempt_mark_issued(
     // issue-to-provider-acceptance window beyond the durable Issued boundary.
     let accounting_policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::accounting::NodeAccountingPolicy>()?;
+        .require::<ryeos_app::node_policy::sections::accounting::NodeAccountingPolicy>(
+    )?;
     let acceptance_window_ms =
         i64::try_from(accounting_policy.issue_acceptance_window_ms).unwrap_or(i64::MAX);
     let sealed = sealed_financial_authority(state, &cap.thread_id)?;

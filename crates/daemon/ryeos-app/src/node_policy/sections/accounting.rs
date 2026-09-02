@@ -48,8 +48,8 @@ impl NodePolicySection for NodeAccountingPolicySection {
         _context: &NodePolicyContext,
         body: &Value,
     ) -> anyhow::Result<Arc<dyn ErasedNodePolicy>> {
-        let record: NodeAccountingPolicy = serde_json::from_value(body.clone())
-            .context("parse node accounting policy")?;
+        let record: NodeAccountingPolicy =
+            serde_json::from_value(body.clone()).context("parse node accounting policy")?;
         record.validate()?;
         Ok(Arc::new(record))
     }

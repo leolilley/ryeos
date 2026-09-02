@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::Context;
 use ryeos_app::node_config::loader::BootstrapLoader;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
-use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority;
+use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_runtime::{CommandDef, CommandDispatch};
 
 #[derive(Debug, Clone)]
@@ -54,9 +54,7 @@ pub fn load_verified_snapshot_with_trust(
         .context("load verified node config")
 }
 
-pub fn load_verified_policy_snapshot(
-    app_root: &Path,
-) -> anyhow::Result<NodePolicySnapshot> {
+pub fn load_verified_policy_snapshot(app_root: &Path) -> anyhow::Result<NodePolicySnapshot> {
     let trust_store = ryeos_engine::trust::TrustStore::load(
         None,
         &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),

@@ -24,7 +24,7 @@
 pub mod loader;
 pub mod sections;
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -125,29 +125,23 @@ pub struct NodeConfigSnapshot {
 
 impl NodeConfigSnapshot {}
 
-/// Closed typed contribution returned by registered node-config compilers.
+/// Erased typed contribution returned by one registered node-config compiler.
 ///
-/// The filesystem loader deliberately does not downcast or branch on section
-/// names. One typed snapshot builder owns projection into the public snapshot.
-#[derive(Debug, Clone)]
-pub enum NodeConfigRecord {
-    Bundle(BundleRecord),
-    Route(RawRouteSpec),
-    Command(CommandRecord),
-}
+/// Each section owns admission of its concrete record into the typed snapshot.
+/// The generic loader verifies the registered section identity and invokes
+/// this interface; it never enumerates record variants or branches on names.
+pub(crate) trait CompiledNodeConfigItem: std::fmt::Debug + Send + Sync {
+    fn section_name(&self) -> &'static str;
 
-impl NodeConfigRecord {
-    pub fn section_name(&self) -> &'static str {
-        match self {
-            Self::Bundle(_) => sections::bundle::SECTION_NAME,
-            Self::Route(_) => sections::route::SECTION_NAME,
-            Self::Command(_) => sections::command::SECTION_NAME,
-        }
-    }
+    fn admit(
+        self: Box<Self>,
+        target: &mut loader::NodeConfigSnapshotBuilder,
+        admission: &loader::NodeConfigAdmission,
+    ) -> anyhow::Result<()>;
 }
 
 /// Trait implemented by each node-config section handler.
-pub trait NodeConfigSection: Send + Sync {
+pub(crate) trait NodeConfigSection: Send + Sync {
     /// Canonical first path segment and registry key for this compiler.
     fn name(&self) -> &'static str;
 
@@ -162,13 +156,12 @@ pub trait NodeConfigSection: Send + Sync {
         &self,
         ctx: &NodeItemContext,
         body: &serde_json::Value,
-    ) -> anyhow::Result<NodeConfigRecord>;
+    ) -> anyhow::Result<Box<dyn CompiledNodeConfigItem>>;
 }
 
 /// Registry of all known sections, keyed by section name.
 pub struct NodeConfigTable {
     sections: Vec<Box<dyn NodeConfigSection>>,
-    indexes: BTreeMap<&'static str, usize>,
 }
 
 impl NodeConfigTable {
@@ -183,31 +176,18 @@ impl NodeConfigTable {
     }
 
     fn from_sections(sections: Vec<Box<dyn NodeConfigSection>>) -> anyhow::Result<Self> {
-        let mut indexes = BTreeMap::new();
-        for (index, section) in sections.iter().enumerate() {
+        let mut names = BTreeSet::new();
+        for section in &sections {
             let name = section.name();
             validate_section_name(name)?;
-            if indexes.insert(name, index).is_some() {
+            if !names.insert(name) {
                 anyhow::bail!("duplicate node-config section `{name}`");
             }
         }
-        Ok(Self { sections, indexes })
+        Ok(Self { sections })
     }
 
-    /// Get a section handler by name.
-    pub fn get(&self, name: &str) -> Option<&dyn NodeConfigSection> {
-        self.indexes
-            .get(name)
-            .and_then(|index| self.sections.get(*index))
-            .map(|section| section.as_ref())
-    }
-
-    /// Iterate over all registered section names.
-    pub fn section_names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.sections.iter().map(|section| section.name())
-    }
-
-    pub fn sections(&self) -> impl Iterator<Item = &dyn NodeConfigSection> + '_ {
+    pub(crate) fn sections(&self) -> impl Iterator<Item = &dyn NodeConfigSection> + '_ {
         self.sections.iter().map(|section| section.as_ref())
     }
 }

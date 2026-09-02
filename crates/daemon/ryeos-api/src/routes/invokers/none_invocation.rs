@@ -124,7 +124,9 @@ mod tests {
             isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
             engine,
-            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+            resolution_cache: std::sync::Arc::new(
+                ryeos_app::resolution_cache::ResolutionCache::new(128),
+            ),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -149,7 +151,7 @@ mod tests {
             node_config: Arc::new(snapshot.clone()),
             node_policy: Arc::new(
                 ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),

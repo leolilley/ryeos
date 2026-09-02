@@ -127,16 +127,15 @@ limits:
   max_total_backlog_bytes: 16777216
 ~~~
 
-Author both files outside the live node namespace, then atomically validate and
-apply them through their registered sections:
-
-~~~text
-ryeos node policy-apply external_content /path/to/external-content-policy.yaml
-ryeos node policy-apply persistent_sessions /path/to/persistent-session-policy.yaml
-~~~
-
-Do not hand-edit or separately sign files under .ai/node. Policy absence or
-invalid bounds are refusals.
+A fresh `full` or `full-sandbox` installation selects a publisher-signed init
+profile containing these values and publishes one complete node-signed
+generation under `.ai/node/policies/`. `external_content.yaml` and
+`persistent_sessions.yaml` are mandatory members. An operator changing either
+member later must stop the daemon and use
+`ryeos node policy-apply <section> <source.yaml>`; that command validates the
+replacement and atomically republishes the complete generation. Do not
+hand-edit generation files or manufacture prerequisite policy documents for
+an ordinary fresh install. Policy absence or invalid bounds are refusals.
 
 ## One-command activation
 

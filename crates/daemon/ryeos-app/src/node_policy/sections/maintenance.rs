@@ -70,10 +70,12 @@ impl NodeMaintenanceSchedulePolicy {
             .with_context(|| format!("schedule `{}` has invalid ref_bindings", self.schedule_id))?;
         ryeos_scheduler::crontab::validate_expression(&self.schedule_type, &self.expression)?;
         ryeos_scheduler::crontab::validate_timezone(&self.timezone)?;
-        ryeos_scheduler::overlap::parse_overlap_policy(&self.overlap_policy)
-            .with_context(|| format!("schedule `{}` has invalid overlap_policy", self.schedule_id))?;
-        ryeos_scheduler::misfire::parse_misfire_policy(&self.misfire_policy)
-            .with_context(|| format!("schedule `{}` has invalid misfire_policy", self.schedule_id))?;
+        ryeos_scheduler::overlap::parse_overlap_policy(&self.overlap_policy).with_context(
+            || format!("schedule `{}` has invalid overlap_policy", self.schedule_id),
+        )?;
+        ryeos_scheduler::misfire::parse_misfire_policy(&self.misfire_policy).with_context(
+            || format!("schedule `{}` has invalid misfire_policy", self.schedule_id),
+        )?;
         if self.lateness_grace_secs <= 0 {
             bail!(
                 "schedule `{}` lateness_grace_secs must be positive",

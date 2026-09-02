@@ -9470,8 +9470,8 @@ static GLOBAL_LIVE_FANOUT_LIMIT: std::sync::OnceLock<Option<u32>> = std::sync::O
 
 /// Arm the node-wide ceiling on launched-and-live window members across ALL
 /// fanouts — the cross-project load valve. The daemon arms it once at boot
-/// from the node-scoped execution config (`config/execution/execution.yaml`,
-/// `node.max_live_fanout`); unarmed or 0 means no ceiling.
+/// from the mandatory node-signed execution policy. The unarmed state exists
+/// only before boot publication; current policy rejects a zero ceiling.
 pub fn arm_global_live_fanout_limit(limit: Option<u32>) {
     let _ = GLOBAL_LIVE_FANOUT_LIMIT.set(limit.filter(|n| *n > 0));
 }

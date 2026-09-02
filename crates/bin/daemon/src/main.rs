@@ -577,9 +577,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             let execution_limits = node_policy_snapshot.require::<
                 ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
             >()?;
-            ryeos_executor::execution::launch::arm_global_live_fanout_limit(
-                Some(execution_limits.max_live_fanout),
-            );
+            ryeos_executor::execution::launch::arm_global_live_fanout_limit(Some(
+                execution_limits.max_live_fanout,
+            ));
             let private_copy_limit = execution_limits.max_private_materialization_copy_bytes;
             ryeos_executor::execution::arm_private_materialization_copy_limit(private_copy_limit)?;
             tracing::info!(
@@ -934,12 +934,10 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Reconcile active execution state while the stable listeners continue to
             // serve lifecycle status. Recovery work is collected before application
             // publication and dispatched only after callback state is available.
-            // Node-scoped execution limits ride the SAME signed, layered config
-            // family as every other execution limit: `config/execution/execution.yaml`,
-            // `node:` section. Bundle layers carry defaults; the node's own tree
-            // (`<app_root>/.ai/config/...`) is the top overlay — the operator's
-            // surface, which no project layer can touch (per-launch policy reads use
-            // the project as overlay instead and never read `node:`).
+            // Node-wide admission limits were compiled from the mandatory
+            // node-signed execution policy before startup recovery. Per-launch
+            // project execution configuration remains a separate item-resolution
+            // contract and cannot alter this node-wide ceiling.
             startup.phase(
                 ryeos_node::StartupPhase::ReconcilingThreads,
                 "reconciling active thread execution state",

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -52,7 +52,10 @@ impl NodePolicySection for CommandRegistrationPolicySection {
     ) -> Result<Arc<dyn ErasedNodePolicy>> {
         let raw: CommandRegistrationPolicyDocument = serde_json::from_value(body.clone())
             .context("failed to parse command registration policy record")?;
-        anyhow::ensure!(raw.schema == 1, "command registration policy schema is not current");
+        anyhow::ensure!(
+            raw.schema == 1,
+            "command registration policy schema is not current"
+        );
         let canonical_system_caps = raw
             .system_source_caps
             .iter()
@@ -66,7 +69,12 @@ impl NodePolicySection for CommandRegistrationPolicySection {
         );
         for (bundle, caps) in &raw.bundle_source_caps {
             crate::node_policy::generation::validate_policy_name("bundle policy", bundle)?;
-            let canonical = caps.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+            let canonical = caps
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
             anyhow::ensure!(
                 &canonical == caps,
                 "command registration caps for bundle `{bundle}` must be sorted and unique"

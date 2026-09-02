@@ -381,9 +381,7 @@ pub fn import_managed_activation_component(
     let import_policy = state.node_policy.require::<
         crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
-    let policy = import_policy
-        .managed_activation
-        .require_enabled()?;
+    let policy = import_policy.managed_activation.require_enabled()?;
     activation.document.validate_portable()?;
     let request = ImportRequest {
         root: "managed-activation-staging".to_owned(),

@@ -12,6 +12,58 @@ use crate::identity::NodeIdentity;
 pub const MAX_ITEM_BYTES: u64 = 1024 * 1024;
 pub const MAX_SIGNATURE_OVERHEAD_BYTES: u64 = 512;
 
+pub struct VerifiedNodeDocument {
+    pub body: serde_json::Value,
+    pub signer_fingerprint: String,
+}
+
+pub fn verify_pinned_signed_yaml(
+    file: &lillux::PinnedRegularFile,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<VerifiedNodeDocument> {
+    let content = file.read_bounded(MAX_ITEM_BYTES)?;
+    let content = std::str::from_utf8(&content)
+        .with_context(|| format!("node document at {} is not UTF-8", file.path().display()))?;
+    let envelope = ryeos_engine::contracts::SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
+        .with_context(|| {
+            format!(
+                "node document at {} has no valid signature line",
+                file.path().display()
+            )
+        })?;
+    let signer_fingerprint = header.signer_fingerprint.clone();
+    let (trust_class, _) =
+        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)?;
+    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
+        bail!(
+            "node document at {} is not trusted (trust_class: {:?})",
+            file.path().display(),
+            trust_class
+        );
+    }
+    let body: serde_json::Value = serde_yaml::from_str(
+        &lillux::signature::strip_signature_lines_with_envelope(content, "#", None),
+    )
+    .with_context(|| format!("parse YAML body of {}", file.path().display()))?;
+    for forbidden in ["category", "section"] {
+        if body.get(forbidden).is_some() {
+            bail!(
+                "node document at {} declares path-owned structural field `{forbidden}`",
+                file.path().display()
+            );
+        }
+    }
+    Ok(VerifiedNodeDocument {
+        body,
+        signer_fingerprint,
+    })
+}
+
 pub fn render_signed_item(
     section: &str,
     name: &str,

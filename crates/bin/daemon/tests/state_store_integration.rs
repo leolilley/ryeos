@@ -27,8 +27,8 @@ mod integration_tests {
             item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: hash,
             resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
-                node_policy:
-                    ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(
+                ),
             },
         }
     }

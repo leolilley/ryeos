@@ -39,13 +39,13 @@ pub use authority::{
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
-pub use policy::{
-    ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
-    IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationMode, IsolationNetworkMode,
-    IsolationNetworkPolicy, IsolationPolicy,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
+pub use policy::{
+    ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy, IsolationFilesystemPolicy,
+    IsolationLimitsPolicy, IsolationMode, IsolationNetworkMode, IsolationNetworkPolicy,
+    IsolationPolicy,
+};
 use provenance::redacted_plan_digest;
 pub use provenance::{
     AppliedIsolationLaunch, AppliedIsolationLaunchAwaitingAttachment, IsolationLaunchProvenance,

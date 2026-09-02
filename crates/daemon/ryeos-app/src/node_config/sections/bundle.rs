@@ -11,8 +11,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::node_config::{
-    BundleRecord, NodeConfigRecord, NodeConfigSection, NodeItemContext, SectionCardinality,
-    NodeConfigSourceScope, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
+    BundleRecord, CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope,
+    NodeItemContext, SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy,
+    SectionTraversal,
 };
 
 pub const SECTION_NAME: &str = "bundles";
@@ -25,6 +26,52 @@ pub struct BundleSection;
 struct RawBundleRecord {
     kind: String,
     path: std::path::PathBuf,
+}
+
+impl BundleSection {
+    pub(crate) fn parse_bundle(
+        &self,
+        ctx: &NodeItemContext,
+        body: &Value,
+    ) -> anyhow::Result<BundleRecord> {
+        let raw: RawBundleRecord =
+            serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
+        if raw.kind != "node" {
+            bail!(
+                "bundle '{}' declares kind {:?}, expected kind 'node'",
+                ctx.id,
+                raw.kind
+            );
+        }
+
+        if !raw.path.is_absolute() {
+            bail!(
+                "bundle '{}' path must be absolute, got: {}",
+                ctx.id,
+                raw.path.display()
+            );
+        }
+
+        Ok(BundleRecord {
+            name: ctx.id.clone(),
+            path: raw.path,
+            source_file: std::path::PathBuf::new(),
+        })
+    }
+}
+
+impl CompiledNodeConfigItem for BundleRecord {
+    fn section_name(&self) -> &'static str {
+        SECTION_NAME
+    }
+
+    fn admit(
+        self: Box<Self>,
+        _target: &mut crate::node_config::loader::NodeConfigSnapshotBuilder,
+        _admission: &crate::node_config::loader::NodeConfigAdmission,
+    ) -> anyhow::Result<()> {
+        bail!("bundle records may only enter through phase-one bootstrap")
+    }
 }
 
 impl NodeConfigSection for BundleSection {
@@ -46,30 +93,11 @@ impl NodeConfigSection for BundleSection {
         }
     }
 
-    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<NodeConfigRecord> {
-        let raw: RawBundleRecord =
-            serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
-        if raw.kind != "node" {
-            bail!(
-                "bundle '{}' declares kind {:?}, expected kind 'node'",
-                ctx.id,
-                raw.kind
-            );
-        }
-
-        if !raw.path.is_absolute() {
-            bail!(
-                "bundle '{}' path must be absolute, got: {}",
-                ctx.id,
-                raw.path.display()
-            );
-        }
-
-        let record = BundleRecord {
-            name: ctx.id.clone(),
-            path: raw.path,
-            source_file: std::path::PathBuf::new(),
-        };
-        Ok(NodeConfigRecord::Bundle(record))
+    fn parse(
+        &self,
+        ctx: &NodeItemContext,
+        body: &Value,
+    ) -> anyhow::Result<Box<dyn CompiledNodeConfigItem>> {
+        Ok(Box::new(self.parse_bundle(ctx, body)?))
     }
 }

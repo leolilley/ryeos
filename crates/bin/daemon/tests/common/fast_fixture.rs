@@ -665,10 +665,7 @@ pem = "ed25519:{key_b64}"
     Ok(())
 }
 
-fn materialize_seed_node_policy_generation(
-    state_path: &Path,
-    node: &SigningKey,
-) -> Result<()> {
+fn materialize_seed_node_policy_generation(state_path: &Path, node: &SigningKey) -> Result<()> {
     let source = super::workspace_root()
         .join("bundles")
         .join(AI_DIR)
@@ -679,30 +676,21 @@ fn materialize_seed_node_policy_generation(
     let raw = fs::read_to_string(&source)
         .with_context(|| format!("read node init profile {}", source.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let profile: ryeos_app::node_policy::generation::NodeInitProfile =
-        serde_yaml::from_str(&body)
-            .with_context(|| format!("parse node init profile {}", source.display()))?;
-    let target_dir = state_path
-        .join(AI_DIR)
-        .join("node")
-        .join("policies");
+    let profile: ryeos_app::node_policy::generation::NodeInitProfile = serde_yaml::from_str(&body)
+        .with_context(|| format!("parse node init profile {}", source.display()))?;
+    let target_dir = state_path.join(AI_DIR).join("node").join("policies");
     fs::create_dir_all(&target_dir).with_context(|| format!("create {}", target_dir.display()))?;
     for (name, policy) in profile.policies() {
         let body = serde_yaml::to_string(policy)
             .with_context(|| format!("serialize `{name}` test node policy"))?;
-        let signed =
-            lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
+        let signed = lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
         fs::write(target_dir.join(format!("{name}.yaml")), signed)
             .with_context(|| format!("write `{name}` test node policy"))?;
     }
     Ok(())
 }
 
-fn authorize_fixture_bundle(
-    state_path: &Path,
-    bundle_name: &str,
-    node: &SigningKey,
-) -> Result<()> {
+fn authorize_fixture_bundle(state_path: &Path, bundle_name: &str, node: &SigningKey) -> Result<()> {
     let path = state_path
         .join(AI_DIR)
         .join("node")
@@ -711,8 +699,8 @@ fn authorize_fixture_bundle(
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("read test command-registration policy {}", path.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let mut policy: serde_json::Value = serde_yaml::from_str(&body)
-        .context("parse test command-registration policy")?;
+    let mut policy: serde_json::Value =
+        serde_yaml::from_str(&body).context("parse test command-registration policy")?;
     let bundle_caps = policy
         .get_mut("bundle_source_caps")
         .and_then(serde_json::Value::as_object_mut)

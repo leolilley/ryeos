@@ -2702,41 +2702,25 @@ fn capture_item_space(space: ItemSpace) -> Result<ryeos_state::objects::Captured
     Ok(match space {
         ItemSpace::Project => ryeos_state::objects::CapturedItemSpace::Project,
         ItemSpace::Bundle => ryeos_state::objects::CapturedItemSpace::Bundle,
-        ItemSpace::Node => {
-            bail!("node-local config authority cannot be captured as general item provenance")
-        }
+        ItemSpace::Node => ryeos_state::objects::CapturedItemSpace::Node,
     })
 }
 
 fn capture_node_policy_provenance(
     provenance: &NodeHistoryPolicyProvenance,
 ) -> Result<ryeos_state::objects::CapturedNodeHistoryPolicyProvenance> {
-    match provenance {
-        NodeHistoryPolicyProvenance::MissingConfig => {
-            Ok(ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig)
-        }
-        NodeHistoryPolicyProvenance::SignedConfig {
-            path,
-            space,
-            content_hash,
-            signer_fingerprint,
-        } => {
-            if path != Path::new(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG) {
-                bail!(
-                    "node history provenance path must be exactly `{}`",
-                    ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG
-                );
-            }
-            Ok(
-                ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::SignedConfig {
-                    path: PathBuf::from(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG),
-                    space: capture_item_space(*space)?,
-                    content_hash: content_hash.clone(),
-                    signer_fingerprint: signer_fingerprint.clone(),
-                },
-            )
-        }
+    if provenance.path != Path::new(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG) {
+        bail!(
+            "node history provenance path must be exactly `{}`",
+            ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG
+        );
     }
+    Ok(ryeos_state::objects::CapturedNodeHistoryPolicyProvenance {
+        path: provenance.path.clone(),
+        space: capture_item_space(provenance.space)?,
+        content_hash: provenance.content_hash.clone(),
+        signer_fingerprint: provenance.signer_fingerprint.clone(),
+    })
 }
 
 fn capture_effective_trust_class(
@@ -7263,7 +7247,7 @@ mod tests {
                     requested_seconds: 30,
                     minimum_seconds: 60,
                 }),
-                node_policy: NodeHistoryPolicyProvenance::SignedConfig {
+                node_policy: NodeHistoryPolicyProvenance {
                     path: PathBuf::from(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG),
                     space: ItemSpace::Project,
                     content_hash: "44".repeat(32),

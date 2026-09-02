@@ -2,14 +2,30 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::node_config::{
-    NodeConfigRecord, NodeConfigSection, NodeItemContext, SectionCardinality, SectionLoadPhase,
-    NodeConfigSourceScope, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
+    CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope, NodeItemContext,
+    SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
 };
 use crate::route_raw::RawRouteSpec;
 
 pub const SECTION_NAME: &str = "routes";
 
 pub struct RouteSection;
+
+impl CompiledNodeConfigItem for RawRouteSpec {
+    fn section_name(&self) -> &'static str {
+        SECTION_NAME
+    }
+
+    fn admit(
+        mut self: Box<Self>,
+        target: &mut crate::node_config::loader::NodeConfigSnapshotBuilder,
+        admission: &crate::node_config::loader::NodeConfigAdmission,
+    ) -> anyhow::Result<()> {
+        self.source_file = admission.source_file.clone();
+        target.push_route(*self);
+        Ok(())
+    }
+}
 
 impl NodeConfigSection for RouteSection {
     fn name(&self) -> &'static str {
@@ -29,7 +45,11 @@ impl NodeConfigSection for RouteSection {
         }
     }
 
-    fn parse(&self, _ctx: &NodeItemContext, body: &Value) -> Result<NodeConfigRecord> {
+    fn parse(
+        &self,
+        _ctx: &NodeItemContext,
+        body: &Value,
+    ) -> Result<Box<dyn CompiledNodeConfigItem>> {
         let record: RawRouteSpec = serde_json::from_value::<RawRouteSpec>(body.clone())
             .context("failed to parse route record")?;
 
@@ -37,7 +57,7 @@ impl NodeConfigSection for RouteSection {
             anyhow::bail!("route '{}' has empty methods list", record.id);
         }
 
-        Ok(NodeConfigRecord::Route(record))
+        Ok(Box::new(record))
     }
 }
 

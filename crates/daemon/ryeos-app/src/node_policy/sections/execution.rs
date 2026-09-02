@@ -74,8 +74,8 @@ impl NodePolicySection for NodeExecutionPolicySection {
         _context: &NodePolicyContext,
         body: &Value,
     ) -> anyhow::Result<Arc<dyn ErasedNodePolicy>> {
-        let record: NodeExecutionAdmissionPolicy = serde_json::from_value(body.clone())
-            .context("parse node execution policy")?;
+        let record: NodeExecutionAdmissionPolicy =
+            serde_json::from_value(body.clone()).context("parse node execution policy")?;
         record.validate()?;
         Ok(Arc::new(record))
     }

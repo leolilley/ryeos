@@ -3988,7 +3988,7 @@ while True:
     }
 
     #[test]
-    fn absent_node_policy_disables_contact() {
+    fn explicitly_disabled_node_policy_refuses_contact() {
         let pool = PersistentSessionPool::disabled();
         let error = match pool.reserve_stream_capacity("attempt-disabled", "thread-disabled") {
             Ok(_) => panic!("disabled pool unexpectedly reserved stream capacity"),

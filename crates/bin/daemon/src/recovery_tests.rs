@@ -115,7 +115,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         node_config: Arc::new(node_config),
         node_policy: Arc::new(
             ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
             )]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
@@ -163,8 +163,8 @@ fn thread_record(
             item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: "c".repeat(64),
             resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
-                node_policy:
-                    ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(
+                ),
             },
         }),
     }

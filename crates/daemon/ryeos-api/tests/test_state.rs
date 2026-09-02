@@ -156,17 +156,13 @@ fn build_test_state_with_hosted_policy_choices(
     let (tmpdir, mut state) = build_test_state();
     state.node_policy = Arc::new(
         ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
-            Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
-            ),
-            Arc::new(
-                ryeos_app::node_policy::sections::hosted::HostedNodePolicy {
-                    schema: 1,
-                    admission_enabled,
-                    admission_token_ttl_secs: admission_enabled.then_some(token_ttl_secs),
-                    allow_loopback_http: true,
-                },
-            ),
+            Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
+            Arc::new(ryeos_app::node_policy::sections::hosted::HostedNodePolicy {
+                schema: 1,
+                admission_enabled,
+                admission_token_ttl_secs: admission_enabled.then_some(token_ttl_secs),
+                allow_loopback_http: true,
+            }),
         ]),
     );
     (tmpdir, state)
@@ -228,7 +224,7 @@ fn build_app_state(
         node_config: Arc::new(snapshot),
         node_policy: Arc::new(
             ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
             )]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),

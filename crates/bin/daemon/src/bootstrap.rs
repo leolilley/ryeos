@@ -730,17 +730,24 @@ fn load_node_config_two_phase_with_socket(
         })
         .context("Phase 1: resolve selected isolation backend")?;
     let isolation = match daemon_socket {
-        Some(daemon_socket) => ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
-            app_root,
-            daemon_socket,
-            node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?.clone(),
-            ryeos_app::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
-            format!("sha256:{}", node_policy.generation_digest()),
-            isolation_backend,
-        ),
+        Some(daemon_socket) => {
+            ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
+                app_root,
+                daemon_socket,
+                node_policy
+                    .require::<ryeos_engine::isolation::IsolationPolicy>()?
+                    .clone(),
+                ryeos_app::node_policy::generation::policy_directory(app_root)
+                    .join("isolation.yaml"),
+                format!("sha256:{}", node_policy.generation_digest()),
+                isolation_backend,
+            )
+        }
         None => ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
             app_root,
-            node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?.clone(),
+            node_policy
+                .require::<ryeos_engine::isolation::IsolationPolicy>()?
+                .clone(),
             ryeos_app::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
             format!("sha256:{}", node_policy.generation_digest()),
             isolation_backend,
@@ -767,9 +774,9 @@ fn load_node_config_two_phase_with_socket(
         &generation,
         isolation,
         &bootstrap_trust_store,
-        node_policy.require::<
-            ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
-        >()?,
+        node_policy
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            )?,
     )?;
     let engine = Arc::new(engine);
 

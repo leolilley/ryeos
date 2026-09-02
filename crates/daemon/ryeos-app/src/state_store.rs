@@ -17607,7 +17607,7 @@ mod tests {
                 kind_schema_content_hash: hash,
                 resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                     node_policy:
-                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }
         });

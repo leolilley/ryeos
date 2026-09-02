@@ -76,19 +76,16 @@ knowledge bundle.
      max_total_backlog_bytes: 67108864
    ```
 
-   With the daemon stopped, validate and atomically apply them through the
-   registered node-config sections:
-
-   ```text
-   ryeos node policy-apply external_content /path/to/external-content-policy.yaml
-   ryeos node policy-apply persistent_sessions /path/to/persistent-session-policy.yaml
-   ```
-
-   The resulting node-signed files are
-   `<system>/.ai/node/external_content/policy.yaml` and
-   `<system>/.ai/node/persistent_sessions/policy.yaml`. Absence of either is a
-   refusal; bundles never enable acquisition, storage, or worker capacity
-   themselves.
+   A fresh `hosted-workflow`, `full`, or `full-sandbox` installation selects a
+   publisher-signed init profile containing these values and publishes one
+   complete node-signed generation under `<system>/.ai/node/policies/`.
+   `external_content.yaml` and `persistent_sessions.yaml` are mandatory
+   members; bundles never enable acquisition, storage, or worker capacity
+   themselves. An operator changing either member later must stop the daemon
+   and use `ryeos node policy-apply <section> <source.yaml>`, which validates
+   the replacement and atomically republishes the complete generation. Do not
+   hand-edit generation files or manufacture prerequisite policy documents for
+   an ordinary fresh install.
 3. Start the node while the configured operator still has its ordinary local
    grant, then activate the signed recipe:
 

@@ -472,10 +472,11 @@ mod tests {
                 ),
             ]),
             limits: import_limits(),
-            managed_activation: crate::node_policy::sections::external_content::ManagedExternalContentPolicy {
-                enabled: true,
-                limits: Some(managed_policy()),
-            },
+            managed_activation:
+                crate::node_policy::sections::external_content::ManagedExternalContentPolicy {
+                    enabled: true,
+                    limits: Some(managed_policy()),
+                },
         };
         let baseline = offline_archive_root_authority_digest(&policy, "archives").unwrap();
 

@@ -114,8 +114,7 @@ pub struct MintAdmissionTokenParams {
     pub ttl_secs: u64,
 }
 
-#[derive(serde::Serialize)]
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct MintAdmissionTokenResult {
     /// One-time bearer token. Show once to the local node being admitted.
     pub token: String,

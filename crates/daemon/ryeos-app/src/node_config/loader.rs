@@ -30,9 +30,8 @@ use ryeos_engine::trust::TrustStore;
 use super::sections::bundle::BundleSection;
 use super::sections::command::CommandRecord;
 use super::{
-    BundleRecord, NodeConfigRecord, NodeConfigSection, NodeConfigSnapshot, NodeItemContext,
-    NodeConfigSourceScope, NodeConfigTable, SectionCardinality, SectionLoadPhase,
-    SectionSignerPolicy, SectionTraversal,
+    BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeConfigSourceScope, NodeConfigTable,
+    NodeItemContext, SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
 use crate::node_policy::sections::command_registration::CommandRegistrationAuthority;
 use crate::route_raw::RawRouteSpec;
@@ -96,7 +95,12 @@ impl NodeConfigSource {
     }
 }
 
-struct NodeConfigSnapshotBuilder {
+pub(crate) struct NodeConfigAdmission {
+    pub(crate) source_file: PathBuf,
+    pub(crate) command_provenance: ryeos_runtime::CommandProvenance,
+}
+
+pub(crate) struct NodeConfigSnapshotBuilder {
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
@@ -118,7 +122,7 @@ impl NodeConfigSnapshotBuilder {
 
     fn admit(
         &mut self,
-        record: NodeConfigRecord,
+        record: Box<dyn super::CompiledNodeConfigItem>,
         context: &NodeItemContext,
         source: &NodeConfigSource,
     ) -> Result<()> {
@@ -129,21 +133,19 @@ impl NodeConfigSnapshotBuilder {
                 record.section_name()
             );
         }
-        match record {
-            NodeConfigRecord::Bundle(_) => {
-                bail!("bundle records may only enter through phase-one bootstrap")
-            }
-            NodeConfigRecord::Route(mut record) => {
-                record.source_file = context.source_file.clone();
-                self.routes.push(record);
-            }
-            NodeConfigRecord::Command(mut record) => {
-                record.source_file = context.source_file.clone();
-                record.provenance = source.command_provenance()?;
-                self.commands.push(record);
-            }
-        }
-        Ok(())
+        let admission = NodeConfigAdmission {
+            source_file: context.source_file.clone(),
+            command_provenance: source.command_provenance()?,
+        };
+        record.admit(self, &admission)
+    }
+
+    pub(crate) fn push_route(&mut self, record: RawRouteSpec) {
+        self.routes.push(record);
+    }
+
+    pub(crate) fn push_command(&mut self, record: CommandRecord) {
+        self.commands.push(record);
     }
 
     fn finish(self) -> Result<NodeConfigSnapshot> {
@@ -171,90 +173,8 @@ fn node_config_envelope() -> SignatureEnvelope {
     }
 }
 
-/// Load one standalone node YAML item through the same strict trust boundary
-/// used by registered node-config sections. This is for typed control-plane
-/// declarations that have not yet become a full [`NodeConfigSection`]: regular
-/// YAML files only, symlinks rejected, trusted signature required, and
-/// path-owned structural fields rejected.
-pub struct VerifiedNodeYaml {
-    pub body: Value,
-    pub signer_fingerprint: String,
-}
-
 const MAX_NODE_CONFIG_ENTRIES_PER_ROOT: usize = 512;
 const MAX_NODE_CONFIG_DEPTH: usize = 32;
-
-pub fn load_verified_node_yaml_with_signer(
-    file: &Path,
-    trust_store: &TrustStore,
-) -> Result<VerifiedNodeYaml> {
-    let ext = file.extension().and_then(|extension| extension.to_str());
-    if !matches!(ext, Some("yaml" | "yml")) {
-        bail!(
-            "node config item at {} is not a .yaml or .yml file",
-            file.display()
-        );
-    }
-    let pinned = lillux::open_pinned_regular_file_no_follow(file)
-        .with_context(|| format!("failed to securely open {}", file.display()))?;
-    load_verified_pinned_node_yaml_with_signer(&pinned, trust_store)
-}
-
-/// Verify a node YAML item from an already-open exact regular-file authority.
-/// The diagnostic path is never reopened.
-pub fn load_verified_pinned_node_yaml_with_signer(
-    file: &lillux::PinnedRegularFile,
-    trust_store: &TrustStore,
-) -> Result<VerifiedNodeYaml> {
-    let content = file.read_bounded(crate::node_document::MAX_ITEM_BYTES)?;
-    let content = std::str::from_utf8(&content)
-        .with_context(|| format!("node config item at {} is not UTF-8", file.path().display()))?;
-    verify_node_yaml_content(content, file.path(), trust_store)
-}
-
-fn verify_node_yaml_content(
-    content: &str,
-    file: &Path,
-    trust_store: &TrustStore,
-) -> Result<VerifiedNodeYaml> {
-    let envelope = node_config_envelope();
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-        .with_context(|| {
-            format!(
-                "node config item at {} has no valid signature line",
-                file.display()
-            )
-        })?;
-    let signer_fingerprint = header.signer_fingerprint.clone();
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
-    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-        bail!(
-            "node config item at {} is not trusted (trust_class: {:?}); only trusted items are allowed in node config",
-            file.display(),
-            trust_class
-        );
-    }
-    let body: Value = serde_yaml::from_str(&strip_signature(&content))
-        .with_context(|| format!("failed to parse YAML body of {}", file.display()))?;
-    for forbidden in ["category", "section"] {
-        if body.get(forbidden).is_some() {
-            bail!(
-                "node config item at {} declares path-owned structural field '{}'",
-                file.display(),
-                forbidden
-            );
-        }
-    }
-    Ok(VerifiedNodeYaml {
-        body,
-        signer_fingerprint,
-    })
-}
-
-pub fn load_verified_node_yaml(file: &Path, trust_store: &TrustStore) -> Result<Value> {
-    Ok(load_verified_node_yaml_with_signer(file, trust_store)?.body)
-}
 
 /// Recursively collect all `.yaml`/`.yml` regular files under a directory.
 ///
@@ -430,14 +350,11 @@ impl<'a> BootstrapLoader<'a> {
         for path in scan_yaml_files(&node_dir, false)? {
             let verified = verify_and_parse(&path, &node_dir, section.name(), self.trust_store)?;
 
-            let record = section
-                .parse(&verified.ctx, &verified.body)
+            let mut record = section
+                .parse_bundle(&verified.ctx, &verified.body)
                 .with_context(|| {
                     format!("failed to parse bundle record {}", verified.path.display())
                 })?;
-            let NodeConfigRecord::Bundle(mut record) = record else {
-                bail!("bundle section returned the wrong typed record")
-            };
             record.source_file = verified.path.clone();
 
             // Validate path: canonicalize, must exist as directory
@@ -526,15 +443,16 @@ impl<'a> BootstrapLoader<'a> {
                                 )
                             })?;
                     verify_section_signer(section, &verified, &node_fingerprint)?;
-                    let record = section
-                        .parse(&verified.ctx, &verified.body)
-                        .with_context(|| {
-                            format!(
-                                "failed to parse node config item {} in section '{}'",
-                                verified.path.display(),
-                                section_name
-                            )
-                        })?;
+                    let record =
+                        section
+                            .parse(&verified.ctx, &verified.body)
+                            .with_context(|| {
+                                format!(
+                                    "failed to parse node config item {} in section '{}'",
+                                    verified.path.display(),
+                                    section_name
+                                )
+                            })?;
                     builder.admit(record, &verified.ctx, &scan_root.source)?;
                     count = count.saturating_add(1);
                 }
@@ -561,10 +479,7 @@ pub(crate) fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
     Ok(identity.fingerprint().to_string())
 }
 
-fn system_scan_root(
-    app_root: &Path,
-    policy: &CommandRegistrationAuthority,
-) -> NodeConfigScanRoot {
+fn system_scan_root(app_root: &Path, policy: &CommandRegistrationAuthority) -> NodeConfigScanRoot {
     NodeConfigScanRoot {
         path: app_root.to_path_buf(),
         source: NodeConfigSource::Node {
@@ -1020,7 +935,8 @@ mod tests {
         let relative: Vec<String> = files
             .iter()
             .map(|f| {
-                f.path().strip_prefix(&routes_dir)
+                f.path()
+                    .strip_prefix(&routes_dir)
                     .unwrap()
                     .to_string_lossy()
                     .to_string()
@@ -1203,8 +1119,7 @@ mod tests {
                 vec!["ryeos.register.command.root.standard".into()],
             ),
         ]);
-        policy.system_source_caps =
-            vec!["ryeos.register.command.root.execute".into()];
+        policy.system_source_caps = vec!["ryeos.register.command.root.execute".into()];
         let core = BundleRecord {
             name: "core".into(),
             path: std::path::PathBuf::from("/system/.ai/bundles/core"),

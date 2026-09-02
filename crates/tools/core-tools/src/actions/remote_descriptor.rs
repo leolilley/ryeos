@@ -221,10 +221,7 @@ fn resolve_app_root(opt: Option<String>) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("could not determine app rootectory"))
 }
 
-fn enforce_hosted_transport_policy(
-    url: &str,
-    policy: &LoadedHostedNodePolicy,
-) -> Result<()> {
+fn enforce_hosted_transport_policy(url: &str, policy: &LoadedHostedNodePolicy) -> Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }

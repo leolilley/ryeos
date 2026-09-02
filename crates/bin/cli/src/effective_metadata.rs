@@ -28,9 +28,10 @@ pub fn build_effective_item_engine(
         .context("load node isolation policy")?;
     let policy = crate::node_descriptors::load_verified_policy_snapshot(app_root)
         .context("load exact node execution policy")?;
-    let execution_policy = policy.require::<
-        ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
-    >()?;
+    let execution_policy =
+        policy
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            )?;
 
     ryeos_app::engine_init::build_registered_engine_for_roots(
         &config,

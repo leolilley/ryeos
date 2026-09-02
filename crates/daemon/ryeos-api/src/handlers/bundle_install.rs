@@ -342,14 +342,12 @@ pub(crate) fn admit_completed_staging(
         .map(|(name, bundle)| {
             if name == bundle_name {
                 if replace {
-                    current_records
-                        .remove(name)
-                        .with_context(|| {
-                            format!(
-                                "replacement bundle '{}' has no verified current registration",
-                                name
-                            )
-                        })?;
+                    current_records.remove(name).with_context(|| {
+                        format!(
+                            "replacement bundle '{}' has no verified current registration",
+                            name
+                        )
+                    })?;
                 }
                 Ok(ryeos_app::node_config::BundleRecord {
                     name: name.clone(),
@@ -371,12 +369,9 @@ pub(crate) fn admit_completed_staging(
         .collect::<Result<Vec<_>>>()?;
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
     let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
-    let policy_snapshot = ryeos_app::node_policy::load_snapshot(
-        app_root,
-        node_trust_store,
-        &policy_table,
-    )
-    .context("load exact node policy generation for prospective admission")?;
+    let policy_snapshot =
+        ryeos_app::node_policy::load_snapshot(app_root, node_trust_store, &policy_table)
+            .context("load exact node policy generation for prospective admission")?;
     let command_registration = policy_snapshot.require::<
         ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
