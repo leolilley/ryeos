@@ -208,7 +208,7 @@ CORRESPONDING_SOURCE_GROUPS = [
         "packages": ["xz-libs-5.8.3-r0"],
         "upstream": (
             "xz-5.8.3.tar.gz",
-            "8ec1767fa517642ecb4cf08b891ce667ba6f143551e382b07c7ef437bda335e2",
+            "3d3a1b973af218114f4f889bbaa2f4c037deaae0c8e815eec381c3d546b974a0",
             "https://github.com/tukaani-project/xz/releases/download/"
             "v5.8.3/xz-5.8.3.tar.gz",
         ),

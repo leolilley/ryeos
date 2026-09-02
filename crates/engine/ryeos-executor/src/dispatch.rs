@@ -4558,7 +4558,7 @@ pub async fn admit_launch_contract(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<(), DispatchError> {
-    prepare_admitted_launch_contract(
+    let prepared = prepare_admitted_launch_contract(
         applicability,
         root_admission,
         ref_bindings,
@@ -4567,15 +4567,26 @@ pub async fn admit_launch_contract(
         ctx,
         state,
     )
-    .await
-    .map(|_| ())
+    .await?;
+    if let Some(prepared) = prepared.as_ref() {
+        require_prepared_launch_secret_availability(
+            root_admission,
+            prepared,
+            provenance.project_authority(),
+            ctx,
+            state,
+        )?;
+    }
+    Ok(())
 }
 
 /// Prepare the exact launch contract admitted by the threadless execution
 /// boundary and return its path-free dependency authority to read-side
-/// callers. Execution and static validation share this one cache and secret
-/// admission path; callers must not persist or serialize the opaque prepared
-/// runtime payload itself.
+/// callers. This compiles symbolic secret requirements but deliberately does
+/// not open any credential source. [`admit_launch_contract`] performs the
+/// authority-bound availability check for real admission; static validation
+/// must remain credential-read-free. Callers must not persist or serialize
+/// the opaque prepared runtime payload itself.
 #[allow(clippy::too_many_arguments)]
 pub async fn prepare_admitted_launch_contract(
     applicability: &LaunchContractApplicability,
@@ -4711,6 +4722,16 @@ pub async fn prepare_admitted_launch_contract(
         },
     )
     .await?;
+    Ok(Some(prepared))
+}
+
+fn require_prepared_launch_secret_availability(
+    root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+    prepared: &crate::execution::launch_preparation::PreparedRuntimeLaunch,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<(), DispatchError> {
     let mut names = root_admission
         .verified_subject()
         .resolved
@@ -4725,15 +4746,13 @@ pub async fn prepare_admitted_launch_contract(
     );
     names.sort();
     names.dedup();
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(provenance.original_project_path()));
-    ryeos_app::vault::read_required_secrets(
+    ryeos_app::vault::read_required_secrets_with_authority(
         state.vault.as_ref(),
         &ctx.principal_fingerprint,
         &names,
-        &dotenv_dirs,
+        project_authority,
     )
-    .map(|_| Some(prepared))
+    .map(|_| ())
     .map_err(|error| match error {
         ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
             let name = names

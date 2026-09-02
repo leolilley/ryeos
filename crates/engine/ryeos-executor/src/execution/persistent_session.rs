@@ -44,7 +44,6 @@ pub(crate) struct PersistentSessionEligibilityPreview {
 pub(crate) struct ExecutionDependencyValidationPreview {
     pub(crate) canonical_ref: String,
     pub(crate) resolution: ryeos_engine::resolution::AsLaunchedResolutionDigest,
-    pub(crate) effective_definition_digest: String,
     pub(crate) source: Option<ryeos_app::source_closure_admission::SourceClosureValidationPreview>,
     pub(crate) external_content:
         Option<ryeos_app::external_content_admission::ExternalContentValidationPreview>,
@@ -58,6 +57,8 @@ pub(crate) struct ContentDependencyValidationPreview {
     pub(crate) canonical_ref: String,
     pub(crate) resolution: ryeos_engine::resolution::AsLaunchedResolutionDigest,
     pub(crate) targets: Vec<String>,
+    pub(crate) executable_search: Vec<ryeos_handler_protocol::ExecutableSearchPathEntryWire>,
+    pub(crate) external_content_policy: ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
     pub(crate) external_content:
         ryeos_app::external_content_admission::ExternalContentValidationPreview,
     pub(crate) admission_ready: bool,
@@ -340,6 +341,11 @@ pub(crate) fn preview_prepared_dependencies(
     let roots = engine.resolution_roots(None);
     let mut execution_dependencies = BTreeMap::new();
     let mut content_dependencies = BTreeMap::new();
+    let mut entries_by_target: BTreeMap<
+        String,
+        Vec<ryeos_engine::external_realization::RealizedExternalContent>,
+    > = BTreeMap::new();
+    let mut search_by_target: TargetExecutableSearch = BTreeMap::new();
     let mut admission_ready = true;
 
     for (name, dependency) in &prepared.execution_dependencies {
@@ -368,21 +374,13 @@ pub(crate) fn preview_prepared_dependencies(
         let session = if let Some((declaration, protocol)) = session_contract(engine, dependency)? {
             let lifecycle = lifecycle_contract(&declaration)?;
             let wire = wire_contract(&protocol)?;
-            Some(
-                match state
-                    .persistent_sessions
-                    .validate_contract_eligibility(&lifecycle, &wire)
-                {
-                    Ok(()) => PersistentSessionEligibilityPreview {
-                        ready_for_admission: true,
-                        status: "ready".to_owned(),
-                    },
-                    Err(error) => PersistentSessionEligibilityPreview {
-                        ready_for_admission: false,
-                        status: error.to_string(),
-                    },
-                },
-            )
+            let eligibility = state
+                .persistent_sessions
+                .validate_contract_eligibility(&lifecycle, &wire)?;
+            Some(PersistentSessionEligibilityPreview {
+                ready_for_admission: eligibility.ready_for_admission(),
+                status: eligibility.code().to_owned(),
+            })
         } else {
             None
         };
@@ -401,12 +399,6 @@ pub(crate) fn preview_prepared_dependencies(
             ExecutionDependencyValidationPreview {
                 canonical_ref: dependency.canonical_ref.clone(),
                 resolution: dependency.resolution.as_launched_digest(),
-                effective_definition_digest: dependency
-                    .resolution
-                    .effective_definition_digest()
-                    .map_err(|error| anyhow!(error))?
-                    .as_str()
-                    .to_owned(),
                 source,
                 external_content,
                 session,
@@ -420,13 +412,30 @@ pub(crate) fn preview_prepared_dependencies(
             .validate()
             .with_context(|| format!("validate prepared content dependency `{name}`"))?;
         let resolution = dependency.resolution.restore();
-        let external_content =
-            ryeos_app::external_content_admission::preview_portable_content_dependency(
+        let preview = ryeos_app::external_content_admission::preview_portable_content_dependency_with_realizations(
                 state,
                 &resolution,
                 &dependency.external_content_policy,
             )?;
-        let ready = external_content.ready_for_admission;
+        let ready = preview.validation.ready_for_admission;
+        if let Some(realized) = preview.realizations.as_ref() {
+            validate_dependency_search(state, name, dependency, realized)?;
+            for target in &dependency.targets {
+                entries_by_target
+                    .entry(target.clone())
+                    .or_default()
+                    .extend(realized.iter().cloned());
+                search_by_target.entry(target.clone()).or_default().extend(
+                    dependency
+                        .executable_search
+                        .iter()
+                        .map(|entry| ExecutableSearchPathEntry {
+                            realization_id: entry.realization_id.clone(),
+                            relative_directory: entry.relative_directory.clone(),
+                        }),
+                );
+            }
+        }
         admission_ready &= ready;
         content_dependencies.insert(
             name.clone(),
@@ -435,11 +444,14 @@ pub(crate) fn preview_prepared_dependencies(
                 canonical_ref: dependency.canonical_ref.clone(),
                 resolution: resolution.as_launched_digest(),
                 targets: dependency.targets.clone(),
-                external_content,
+                executable_search: dependency.executable_search.clone(),
+                external_content_policy: dependency.external_content_policy.clone(),
+                external_content: preview.validation,
                 admission_ready: ready,
             },
         );
     }
+    validate_content_target_aggregation(entries_by_target, search_by_target)?;
 
     Ok(PreparedDependencyValidationPreview {
         binding_records: prepared.binding_records.clone(),
@@ -513,6 +525,18 @@ fn admit_or_verify_content_dependencies(
             );
         }
     }
+    let (content_by_target, search_by_target) =
+        validate_content_target_aggregation(entries_by_target, search_by_target)?;
+    Ok((content_by_target, search_by_target, publications))
+}
+
+fn validate_content_target_aggregation(
+    entries_by_target: BTreeMap<
+        String,
+        Vec<ryeos_engine::external_realization::RealizedExternalContent>,
+    >,
+    search_by_target: TargetExecutableSearch,
+) -> Result<(TargetContentSets, TargetExecutableSearch)> {
     let content_by_target = entries_by_target
         .into_iter()
         .map(|(target, entries)| {
@@ -536,7 +560,7 @@ fn admit_or_verify_content_dependencies(
             bail!("combined executable search contains duplicate entries");
         }
     }
-    Ok((content_by_target, search_by_target, publications))
+    Ok((content_by_target, search_by_target))
 }
 
 fn realization_set(
@@ -1779,6 +1803,55 @@ mod tests {
             "bin",
             [("sbin/tool", File)]
         ));
+    }
+
+    fn test_realization(
+        id: &str,
+        mount: &str,
+        hash_seed: char,
+    ) -> ryeos_engine::external_realization::RealizedExternalContent {
+        ryeos_engine::external_realization::RealizedExternalContent {
+            id: id.to_owned(),
+            kind: ryeos_state::objects::ExternalContentKind::Tree,
+            mode: ryeos_state::objects::ExternalContentMode::Pinned,
+            manifest_hash: std::iter::repeat_n(hash_seed, 64).collect(),
+            entry_count: 1,
+            total_bytes: 1,
+            mount: mount.to_owned(),
+        }
+    }
+
+    #[test]
+    fn content_target_projection_reuses_live_collision_and_search_bounds() {
+        let valid = BTreeMap::from([(
+            "runtime".to_owned(),
+            vec![test_realization("toolchain", "opt/toolchain", 'a')],
+        )]);
+        let search = BTreeMap::from([(
+            "runtime".to_owned(),
+            vec![ExecutableSearchPathEntry {
+                realization_id: "toolchain".to_owned(),
+                relative_directory: "bin".to_owned(),
+            }],
+        )]);
+        validate_content_target_aggregation(valid.clone(), search.clone()).unwrap();
+
+        let duplicate_realization = BTreeMap::from([(
+            "runtime".to_owned(),
+            vec![
+                test_realization("toolchain", "opt/toolchain", 'a'),
+                test_realization("toolchain", "opt/other", 'b'),
+            ],
+        )]);
+        assert!(
+            validate_content_target_aggregation(duplicate_realization, search.clone()).is_err()
+        );
+
+        let duplicate_search = BTreeMap::from([(
+            "runtime".to_owned(),
+            vec![search["runtime"][0].clone(), search["runtime"][0].clone()],
+        )]);
+        assert!(validate_content_target_aggregation(valid, duplicate_search).is_err());
     }
 
     fn resource_override_declaration() -> PersistentSessionDecl {

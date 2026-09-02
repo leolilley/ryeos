@@ -45,6 +45,14 @@ pub struct ExternalContentValidationPreview {
     pub ready_for_admission: bool,
 }
 
+/// Read-side result for a locator-free preparer-selected content dependency.
+/// Realizations are present only when every exact retained manifest and
+/// binding is currently ready; they are never serialized by public callers.
+pub struct PortableContentDependencyPreview {
+    pub validation: ExternalContentValidationPreview,
+    pub realizations: Option<RealizedExternalContentSet>,
+}
+
 /// Observe the exact manifests a structurally valid declaration would pin.
 /// This is validation-only: no object, blob, binding, or launch authority is
 /// published. Strict admission continues to reject pending or mismatched pins.
@@ -73,7 +81,7 @@ pub fn preview_external_content_pins(
     let mut sink = DigestOnlyExternalContentSink;
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
-    for declaration in declarations {
+    for declaration in &declarations {
         let (observed_digest, binding_digest, status, ready) = match declaration.locator.as_ref() {
             Some(locator) => {
                 let base_path = resolve_named_root(engine, roots, &locator.root)?;
@@ -109,17 +117,18 @@ pub fn preview_external_content_pins(
                 let ready = status != "mismatched";
                 (Some(observed), None, status, ready)
             }
-            None => preview_retained_external_content(state, contract, &resolution, &declaration)?,
+            None => preview_retained_external_content(state, contract, resolution, declaration)?,
         };
         ready_for_admission &= ready;
         previews.push(ExternalContentPinPreview {
-            id: declaration.id,
-            expected_digest: declaration.digest,
+            id: declaration.id.clone(),
+            expected_digest: declaration.digest.clone(),
             observed_digest,
             binding_digest,
             status: status.to_owned(),
         });
     }
+    validate_retained_declaration_totals(state, contract, &declarations)?;
     Ok(Some(ExternalContentValidationPreview {
         declarations: previews,
         ready_for_admission,
@@ -135,6 +144,17 @@ pub fn preview_portable_content_dependency(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     policy: &ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
 ) -> anyhow::Result<ExternalContentValidationPreview> {
+    Ok(
+        preview_portable_content_dependency_with_realizations(state, resolution, policy)?
+            .validation,
+    )
+}
+
+pub fn preview_portable_content_dependency_with_realizations(
+    state: &AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    policy: &ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
+) -> anyhow::Result<PortableContentDependencyPreview> {
     let contract = policy.declaration_contract();
     let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
     let declarations = ryeos_engine::external_content::declarations_from_composed(
@@ -148,7 +168,7 @@ pub fn preview_portable_content_dependency(
     }
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
-    for declaration in declarations {
+    for declaration in &declarations {
         if declaration.locator.is_some() {
             anyhow::bail!(
                 "portable content dependency `{}` contains an ambient locator",
@@ -156,20 +176,139 @@ pub fn preview_portable_content_dependency(
             );
         }
         let (observed_digest, binding_digest, status, ready) =
-            preview_retained_external_content(state, Some(&contract), resolution, &declaration)?;
+            preview_retained_external_content(state, Some(&contract), resolution, declaration)?;
         ready_for_admission &= ready;
         previews.push(ExternalContentPinPreview {
-            id: declaration.id,
-            expected_digest: declaration.digest,
+            id: declaration.id.clone(),
+            expected_digest: declaration.digest.clone(),
             observed_digest,
             binding_digest,
             status: status.to_owned(),
         });
     }
-    Ok(ExternalContentValidationPreview {
-        declarations: previews,
-        ready_for_admission,
+    validate_retained_declaration_totals(state, Some(&contract), &declarations)?;
+    let realizations = if ready_for_admission {
+        Some(retained_realization_set(state, &declarations)?)
+    } else {
+        None
+    };
+    Ok(PortableContentDependencyPreview {
+        validation: ExternalContentValidationPreview {
+            declarations: previews,
+            ready_for_admission,
+        },
+        realizations,
     })
+}
+
+fn validate_retained_declaration_totals(
+    state: &AppState,
+    contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
+    declarations: &[ExternalContentDeclaration],
+) -> anyhow::Result<()> {
+    let authority = pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let mut ordinary_total = 0u64;
+    let mut large_total = 0u64;
+    for declaration in declarations {
+        let Some(digest) = declaration
+            .locator
+            .is_none()
+            .then_some(declaration.digest.as_deref())
+            .flatten()
+        else {
+            continue;
+        };
+        let Some(value) = cas.get_object(digest)? else {
+            continue;
+        };
+        match value.get("kind").and_then(Value::as_str) {
+            Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+                let manifest =
+                    ryeos_state::objects::ExternalContentManifestObject::from_value(&value)?;
+                ordinary_total = ordinary_total
+                    .checked_add(manifest.total_bytes)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("external-content realization byte total overflow")
+                    })?;
+                if ordinary_total > ryeos_state::objects::MAX_EXTERNAL_CONTENT_TOTAL_BYTES {
+                    anyhow::bail!(
+                        "retained content realizations exceed the content-tier launch bound"
+                    );
+                }
+            }
+            Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+                let manifest =
+                    ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
+                large_total = large_total
+                    .checked_add(manifest.total_bytes)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("large-content realization byte total overflow")
+                    })?;
+                let ceiling = contract
+                    .and_then(|contract| contract.large_content.as_ref())
+                    .and_then(|grant| grant.max_total_bytes)
+                    .unwrap_or(ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES);
+                if large_total > ceiling {
+                    anyhow::bail!(
+                        "large-content realizations exceed the signed {ceiling}-byte grant"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn retained_realization_set(
+    state: &AppState,
+    declarations: &[ExternalContentDeclaration],
+) -> anyhow::Result<RealizedExternalContentSet> {
+    let authority = pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let mut realized = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+        let digest = declaration.digest.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "locator-free external content `{}` has no retained digest",
+                declaration.id
+            )
+        })?;
+        let value = cas.get_object(digest)?.ok_or_else(|| {
+            anyhow::anyhow!("retained external-content manifest disappeared during validation")
+        })?;
+        let (entry_count, total_bytes) = match value.get("kind").and_then(Value::as_str) {
+            Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+                let manifest =
+                    ryeos_state::objects::ExternalContentManifestObject::from_value(&value)?;
+                (manifest.entry_count, manifest.total_bytes)
+            }
+            Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+                let manifest =
+                    ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
+                (manifest.entry_count, manifest.total_bytes)
+            }
+            Some(other) => {
+                anyhow::bail!("retained external-content manifest has unsupported kind `{other}`")
+            }
+            None => anyhow::bail!("retained external-content manifest is untyped"),
+        };
+        realized.push(RealizedExternalContent {
+            id: declaration.id.clone(),
+            kind: declaration.kind,
+            mode: declaration.mode,
+            manifest_hash: digest.to_owned(),
+            entry_count,
+            total_bytes,
+            mount: declaration.mount.clone(),
+        });
+    }
+    RealizedExternalContentSet::new(realized)
 }
 
 fn preview_retained_external_content(

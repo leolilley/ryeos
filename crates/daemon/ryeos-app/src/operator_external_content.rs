@@ -1070,6 +1070,27 @@ pub fn active_binding_from_store(
                 .map(str::to_owned)
         })
         .ok_or_else(|| anyhow::anyhow!("external-content binding manifest is absent or untyped"))?;
+    if !binding_authorizes_consumer(
+        &binding,
+        &binding_id,
+        manifest_hash,
+        consumer_ref,
+        publisher_fingerprint,
+        &manifest_kind,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some((head.target_hash, binding)))
+}
+
+fn binding_authorizes_consumer(
+    binding: &ryeos_state::objects::ExternalContentBinding,
+    binding_id: &str,
+    manifest_hash: &str,
+    consumer_ref: &str,
+    publisher_fingerprint: &str,
+    manifest_kind: &str,
+) -> anyhow::Result<bool> {
     if binding.binding_id != binding_id
         || binding.manifest_hash != manifest_hash
         || binding.consumer_ref != consumer_ref
@@ -1079,10 +1100,8 @@ pub fn active_binding_from_store(
         bail!("external-content binding does not authorize this consumer");
     }
     match binding.state {
-        ryeos_state::objects::ExternalContentBindingState::Active => {
-            Ok(Some((head.target_hash, binding)))
-        }
-        ryeos_state::objects::ExternalContentBindingState::Released => Ok(None),
+        ryeos_state::objects::ExternalContentBindingState::Active => Ok(true),
+        ryeos_state::objects::ExternalContentBindingState::Released => Ok(false),
     }
 }
 
@@ -1560,6 +1579,71 @@ mod tests {
                 require_import_store_capacity("fixture store", capacity, 100, 1_000, 10).is_err()
             );
         }
+    }
+
+    #[test]
+    fn retained_binding_projection_is_exact_and_release_is_not_ready() {
+        let manifest_hash = "a".repeat(64);
+        let publisher = "b".repeat(64);
+        let consumer = "worker:tests/profile";
+        let active = ryeos_state::objects::ExternalContentBinding::active(
+            manifest_hash.clone(),
+            ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            consumer.to_owned(),
+            publisher.clone(),
+            "c".repeat(64),
+        )
+        .unwrap();
+        assert!(
+            binding_authorizes_consumer(
+                &active,
+                &active.binding_id,
+                &manifest_hash,
+                consumer,
+                &publisher,
+                ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            )
+            .unwrap()
+        );
+
+        let released =
+            ryeos_state::objects::ExternalContentBinding::released_from(&active, "d".repeat(64))
+                .unwrap();
+        assert!(
+            !binding_authorizes_consumer(
+                &released,
+                &released.binding_id,
+                &manifest_hash,
+                consumer,
+                &publisher,
+                ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            )
+            .unwrap()
+        );
+
+        assert!(
+            binding_authorizes_consumer(
+                &active,
+                &active.binding_id,
+                &manifest_hash,
+                "worker:tests/other",
+                &publisher,
+                ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            )
+            .is_err()
+        );
+        let wrong_publisher = "e".repeat(64);
+        assert!(
+            binding_authorizes_consumer(
+                &active,
+                &active.binding_id,
+                &manifest_hash,
+                consumer,
+                &wrong_publisher,
+                ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            )
+            .is_err()
+        );
     }
 }
 

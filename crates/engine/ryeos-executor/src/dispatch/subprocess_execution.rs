@@ -392,7 +392,28 @@ async fn dispatch_managed_subprocess(
         )
         .map_err(DispatchError::Internal)?;
         let dependencies_ready = dependencies.admission_ready;
-        let admission_ready = root_ready && dependencies_ready;
+        let mut credential_names = root_admission
+            .verified_subject()
+            .resolved
+            .metadata
+            .required_secrets
+            .clone();
+        credential_names.extend(
+            launch_contract
+                .required_secrets
+                .iter()
+                .map(|requirement| requirement.name.clone()),
+        );
+        credential_names.sort();
+        credential_names.dedup();
+        let credentials_ready = credential_names.is_empty();
+        let credential_readiness = if credentials_ready {
+            "required_none"
+        } else {
+            "not_checked"
+        };
+        let runtime_preparation_ready = dependencies_ready && credentials_ready;
+        let admission_ready = root_ready && runtime_preparation_ready;
         return Ok(json!({
             "validated": true,
             "admission_ready": admission_ready,
@@ -405,7 +426,11 @@ async fn dispatch_managed_subprocess(
                 "binding_records": dependencies.binding_records,
                 "execution_dependencies": dependencies.execution_dependencies,
                 "content_dependencies": dependencies.content_dependencies,
-                "admission_ready": dependencies_ready,
+                "credential_readiness": {
+                    "status": credential_readiness,
+                    "required_count": credential_names.len(),
+                },
+                "admission_ready": runtime_preparation_ready,
             },
         }));
     }

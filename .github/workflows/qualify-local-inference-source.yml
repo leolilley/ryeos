@@ -158,7 +158,8 @@ jobs:
             --archive-root "$RUNNER_TEMP/local-inference-offline-archives" \
             --minimum-free-bytes 2147483648 \
             --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml \
-            --qualification-parent "$RUNNER_TEMP"
+            --qualification-parent "$RUNNER_TEMP" \
+            --evidence-output "$RUNNER_TEMP/local-inference-offline-qualification.json"
 
       - name: Release offline archive staging before online qualification
         run: |
@@ -174,4 +175,16 @@ jobs:
             --online \
             --minimum-free-bytes 2147483648 \
             --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml \
-            --qualification-parent "$RUNNER_TEMP"
+            --qualification-parent "$RUNNER_TEMP" \
+            --evidence-output "$RUNNER_TEMP/local-inference-online-qualification.json"
+
+      - name: Retain exact local-inference qualification evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: local-inference-qualification-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/local-inference-offline-qualification.json
+            ${{ runner.temp }}/local-inference-online-qualification.json
+          if-no-files-found: error
+          retention-days: 30

@@ -12,7 +12,7 @@ set -euo pipefail
 export LC_ALL=C
 
 usage() {
-    echo "usage: $0 --release-contract PATH --bundle-source DIR --ryeos-bin PATH (--online | --archive-root DIR) [--minimum-free-bytes BYTES] [--trust-file PATH] [--qualification-parent DIR] [--keep]" >&2
+    echo "usage: $0 --release-contract PATH --bundle-source DIR --ryeos-bin PATH (--online | --archive-root DIR) [--minimum-free-bytes BYTES] [--trust-file PATH] [--qualification-parent DIR] [--evidence-output PATH] [--keep]" >&2
     exit 2
 }
 
@@ -25,6 +25,7 @@ online=0
 archive_root=""
 minimum_free_bytes="2147483648"
 keep=0
+evidence_output=""
 while (($#)); do
     case "$1" in
         --release-contract) release_contract="${2:-}"; shift 2 ;;
@@ -35,6 +36,7 @@ while (($#)); do
         --online) online=1; shift ;;
         --archive-root) archive_root="${2:-}"; shift 2 ;;
         --minimum-free-bytes) minimum_free_bytes="${2:-}"; shift 2 ;;
+        --evidence-output) evidence_output="${2:-}"; shift 2 ;;
         --keep) keep=1; shift ;;
         *) usage ;;
     esac
@@ -58,6 +60,11 @@ release_contract="$(realpath "$release_contract")"
 bundle_source="$(realpath "$bundle_source")"
 ryeos_bin="$(realpath "$ryeos_bin")"
 qualification_parent="$(realpath "$qualification_parent")"
+if [[ -n "$evidence_output" ]]; then
+    evidence_parent="$(dirname "$evidence_output")"
+    [[ -d "$evidence_parent" ]] || usage
+    evidence_output="$(cd "$evidence_parent" && pwd)/$(basename "$evidence_output")"
+fi
 if [[ -n "$archive_root" ]]; then
     archive_root="$(realpath "$archive_root")"
 fi
@@ -825,6 +832,17 @@ records = rows(
     "SELECT cache_key, answer_digest, record_hash, produced_at, last_replayed_at "
     "FROM replay_records WHERE namespace='provider.call' ORDER BY cache_key",
 )
+
+def cas_object(digest):
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise SystemExit(f"invalid retained object digest: {digest!r}")
+    path = (
+        node / ".ai/state/objects/objects" / digest[:2] / digest[2:4]
+        / f"{digest}.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+provider_calls = [cas_object(record["record_hash"]) for record in records]
 observation_rows = rows(
     projection_path,
     "SELECT e.event_hash, e.chain_root_id, e.thread_id, e.thread_seq, "
@@ -860,6 +878,9 @@ for attempt in attempts:
             )
     if attempt["settled_at_ms"] is None:
         raise SystemExit("provider attempt is terminal without settled_at_ms")
+for field in ("launch_generation", "config_hash", "authority_digest"):
+    if len({attempt[field] for attempt in attempts}) != expected_count:
+        raise SystemExit(f"exact provider attempts share {field}")
 publication = [
     item for item in operations
     if item["operation_kind"] == "provider_call_publication"
@@ -873,6 +894,48 @@ if len(records) != expected_count:
     raise SystemExit(
         f"expected {expected_count} provider replay records, observed {len(records)}"
     )
+expected_workers = {
+    "worker:local-inference/qwen3-0.6b-cpu-4096",
+    "worker:local-inference/qwen3-0.6b-cpu-2048",
+}
+workers = {
+    record["coordinate"]["transport"].get("worker_ref")
+    for record in provider_calls
+}
+if workers != expected_workers:
+    raise SystemExit(f"provider coordinates name the wrong exact workers: {workers!r}")
+for record in provider_calls:
+    if record.get("cache_key") not in {item["cache_key"] for item in records}:
+        raise SystemExit("provider-call object is absent from the replay index")
+    transport = record["coordinate"]["transport"]
+    for field in (
+        "effective_definition_digest",
+        "capsule_hash",
+        "execution_realization_hash",
+    ):
+        value = transport.get(field)
+        if not isinstance(value, str) or len(value) != 64:
+            raise SystemExit(f"provider coordinate has no exact {field}")
+for field in (
+    "effective_definition_digest",
+    "capsule_hash",
+    "execution_realization_hash",
+):
+    if len({record["coordinate"]["transport"][field] for record in provider_calls}) != expected_count:
+        raise SystemExit(f"exact worker profiles share {field}")
+for field in ("provider_config_hash", "provider_config_value_digest"):
+    if len({record["coordinate"][field] for record in provider_calls}) != expected_count:
+        raise SystemExit(f"exact worker profiles share provider coordinate field {field}")
+if len(
+    {record["coordinate"]["outer_effective_definition_digest"] for record in provider_calls}
+) != expected_count:
+    raise SystemExit("exact worker profiles share outer effective program identity")
+observation_coordinates = {
+    observation["payload"]["effect_coordinate_digest"]
+    for observation in observations
+}
+if observation_coordinates != {record["cache_key"] for record in provider_calls}:
+    raise SystemExit("durable provider observations contradict exact call coordinates")
 records_by_hash = {record["record_hash"]: record for record in records}
 for operation in publication:
     proof = json.loads(operation["response_json"])
@@ -888,6 +951,10 @@ evidence = {
     "attempts": attempts,
     "operations": operations,
     "provider_records": records,
+    "provider_call_objects": sorted(
+        provider_calls,
+        key=lambda record: record["coordinate"]["transport"]["worker_ref"],
+    ),
     "provider_observations": observations,
 }
 Path(sys.argv[2]).write_text(
@@ -944,6 +1011,7 @@ after = thread_ids(root / "threads-after-validation.json")
 if before != after:
     raise SystemExit(f"static validation changed thread inventory: {before} -> {after}")
 
+resolution_identities = []
 for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
     value = json.loads((root / f"validation-before-{profile}.json").read_text())
     def find(item):
@@ -972,8 +1040,16 @@ for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
     pins = dependency["external_content"]["declarations"]
     if {item["id"] for item in pins} != {"runtime", "tinygrad", "toolchain", "model"}:
         raise SystemExit(f"validation omitted exact pins for {profile}")
+    credentials = result["runtime_preparation"].get("credential_readiness")
+    if credentials != {"status": "required_none", "required_count": 0}:
+        raise SystemExit(f"credential-free profile projected credential access: {credentials!r}")
+    resolution_identities.append(
+        json.dumps(dependency["resolution"], sort_keys=True, separators=(",", ":"))
+    )
     if result["admission_ready"] or dependency["admission_ready"]:
         raise SystemExit(f"unactivated profile {profile} was reported ready")
+if len(set(resolution_identities)) != 2:
+    raise SystemExit("the two exact worker profiles share a dependency resolution identity")
 PY
 
 activation_args=(
@@ -1075,22 +1151,49 @@ assert_json_path "$qualification_root/activation-2048-idempotent.json" state com
 
 # Both exact consumer bindings now exist. Re-run threadless validation and
 # prove readiness without creating an execution thread or resident worker.
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-ready-validation.json"
 for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
     directive="directive:local-inference/examples/${profile//[-.]/_}_smoke"
     HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
         "$directive" --ref-binding "model=$directive" --no-project --input '{}' \
         > "$qualification_root/validation-after-$profile.json"
 done
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-ready-validation.json"
 [[ -z "$(worker_pids)" ]] || {
     echo "ready static validation launched a local-inference worker" >&2
     exit 1
 }
 python3 - "$qualification_root" <<'PY'
+import hashlib
 import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
+
+def thread_ids(path):
+    value = json.loads(path.read_text())
+    found = set()
+    def walk(item):
+        if isinstance(item, dict):
+            if isinstance(item.get("thread_id"), str):
+                found.add(item["thread_id"])
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+    walk(value)
+    return found
+
+if thread_ids(root / "threads-before-ready-validation.json") != thread_ids(
+    root / "threads-after-ready-validation.json"
+):
+    raise SystemExit("ready static validation changed thread inventory")
+
+resolution_identities = []
 for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
     value = json.loads((root / f"validation-after-{profile}.json").read_text())
     def find(item):
@@ -1116,6 +1219,27 @@ for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
     pins = dependency["external_content"]["declarations"]
     if any(item["status"] != "ready" or item["binding_digest"] is None for item in pins):
         raise SystemExit(f"activated dependency {profile} lacks exact binding readiness")
+    credentials = result["runtime_preparation"].get("credential_readiness")
+    if credentials != {"status": "required_none", "required_count": 0}:
+        raise SystemExit(f"credential-free profile projected credential access: {credentials!r}")
+    resolution_identities.append(
+        json.dumps(dependency["resolution"], sort_keys=True, separators=(",", ":"))
+    )
+    if profile == "qwen3-0.6b-cpu-4096":
+        model_pin = next(item for item in pins if item["id"] == "model")
+        seed = {
+            "manifest_hash": model_pin["expected_digest"],
+            "consumer_ref": dependency["canonical_ref"],
+            "publisher_fingerprint": dependency["resolution"]["root"]
+            ["signer_fingerprint"],
+        }
+        canonical = json.dumps(seed, sort_keys=True, separators=(",", ":"))
+        (root / "release-binding-id-4096.txt").write_text(
+            hashlib.sha256(canonical.encode()).hexdigest() + "\n",
+            encoding="utf-8",
+        )
+if len(set(resolution_identities)) != 2:
+    raise SystemExit("activated exact profiles share a dependency resolution identity")
 PY
 
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
@@ -1185,6 +1309,75 @@ start_node
     echo "daemon restart contacted local inference before a request" >&2
     exit 1
 }
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-refusal-validation.json"
+for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
+    directive="directive:local-inference/examples/${profile//[-.]/_}_smoke"
+    HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
+        "$directive" --ref-binding "model=$directive" --no-project --input '{}' \
+        > "$qualification_root/validation-refused-$profile.json"
+done
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-refusal-validation.json"
+[[ -z "$(worker_pids)" ]] || {
+    echo "refusal validation contacted a local-inference worker" >&2
+    exit 1
+}
+python3 - "$qualification_root" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+def thread_ids(path):
+    value = json.loads(path.read_text())
+    found = set()
+    def walk(item):
+        if isinstance(item, dict):
+            if isinstance(item.get("thread_id"), str):
+                found.add(item["thread_id"])
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+    walk(value)
+    return found
+
+if thread_ids(root / "threads-before-refusal-validation.json") != thread_ids(
+    root / "threads-after-refusal-validation.json"
+):
+    raise SystemExit("refusal validation changed thread inventory")
+
+for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"):
+    value = json.loads((root / f"validation-refused-{profile}.json").read_text())
+    def find(item):
+        if isinstance(item, dict):
+            if "runtime_preparation" in item and "admission_ready" in item:
+                return item
+            for child in item.values():
+                found = find(child)
+                if found is not None:
+                    return found
+        elif isinstance(item, list):
+            for child in item:
+                found = find(child)
+                if found is not None:
+                    return found
+        return None
+    result = find(value)
+    dependency = next(iter(result["runtime_preparation"]["execution_dependencies"].values()))
+    session = dependency["session"]
+    if result["admission_ready"] or dependency["admission_ready"]:
+        raise SystemExit(f"refusal policy admitted profile {profile}")
+    if (
+        session["ready_for_admission"]
+        or session["status"] != "resource_request_exceeds_policy"
+        or "reason" in session
+    ):
+        raise SystemExit(f"refusal policy was not projected for {profile}: {session!r}")
+PY
 python3 - "$qualification_root/bank-before-replay.json" <<'PY'
 import datetime
 import json
@@ -1554,12 +1747,155 @@ evidence = {
 connection.close()
 PY
 
+# A successful static projection is observation, never a lease. Release one
+# exact current binding after validation, then prove both a fresh validation
+# and a real launch re-check live binding authority without worker contact.
+stop_node
+start_node
+[[ -z "$(worker_pids)" ]] || {
+    echo "binding-release phase started with a resident local-inference worker" >&2
+    exit 1
+}
+binding_id="$(tr -d '\n' < "$qualification_root/release-binding-id-4096.txt")"
+thread_service service:external-content/release \
+    "{\"binding_id\":\"$binding_id\"}" \
+    "$qualification_root/released-binding-4096.json"
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-released-validation.json"
+for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
+    directive="directive:local-inference/examples/${profile//[-.]/_}_smoke"
+    HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
+        "$directive" --ref-binding "model=$directive" --no-project --input '{}' \
+        > "$qualification_root/validation-released-$profile.json"
+done
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-released-validation.json"
+[[ -z "$(worker_pids)" ]] || {
+    echo "released-binding validation contacted a local-inference worker" >&2
+    exit 1
+}
 python3 - "$qualification_root" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
+
+def find(item):
+    if isinstance(item, dict):
+        if "runtime_preparation" in item and "admission_ready" in item:
+            return item
+        for child in item.values():
+            found = find(child)
+            if found is not None:
+                return found
+    elif isinstance(item, list):
+        for child in item:
+            found = find(child)
+            if found is not None:
+                return found
+    return None
+
+def thread_ids(path):
+    value = json.loads(path.read_text())
+    found = set()
+    def walk(item):
+        if isinstance(item, dict):
+            if isinstance(item.get("thread_id"), str):
+                found.add(item["thread_id"])
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+    walk(value)
+    return found
+
+if thread_ids(root / "threads-before-released-validation.json") != thread_ids(
+    root / "threads-after-released-validation.json"
+):
+    raise SystemExit("released-binding validation changed thread inventory")
+
+released = find(json.loads((root / "validation-released-qwen3-0.6b-cpu-4096.json").read_text()))
+retained = find(json.loads((root / "validation-released-qwen3-0.6b-cpu-2048.json").read_text()))
+released_dependency = next(iter(
+    released["runtime_preparation"]["execution_dependencies"].values()
+))
+retained_dependency = next(iter(
+    retained["runtime_preparation"]["execution_dependencies"].values()
+))
+if released["admission_ready"] or released_dependency["admission_ready"]:
+    raise SystemExit("released exact binding remained ready")
+model = next(
+    item for item in released_dependency["external_content"]["declarations"]
+    if item["id"] == "model"
+)
+if model["status"] != "missing_binding" or model["binding_digest"] is not None:
+    raise SystemExit(f"released exact binding projected incorrectly: {model!r}")
+if not retained["admission_ready"] or not retained_dependency["admission_ready"]:
+    raise SystemExit("consumer-specific release affected the other exact profile")
+PY
+if HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --no-project --no-stream --input '{}' \
+    > "$qualification_root/released-binding-launch-refusal.txt" 2>&1; then
+    echo "execution reused validation after its exact binding was released" >&2
+    exit 1
+fi
+[[ -z "$(worker_pids)" ]] || {
+    echo "released-binding launch refusal contacted a local-inference worker" >&2
+    exit 1
+}
+
+python3 - "$qualification_root" "$evidence_output" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+evidence_output = Path(sys.argv[2]) if sys.argv[2] else None
+
+def validation_result(phase, profile):
+    value = json.loads((root / f"validation-{phase}-{profile}.json").read_text())
+    def find(item):
+        if isinstance(item, dict):
+            if "runtime_preparation" in item and "admission_ready" in item:
+                return item
+            for child in item.values():
+                found = find(child)
+                if found is not None:
+                    return found
+        elif isinstance(item, list):
+            for child in item:
+                found = find(child)
+                if found is not None:
+                    return found
+        return None
+    result = find(value)
+    if result is None:
+        raise SystemExit(f"validation evidence omitted {phase}/{profile}")
+    return result
+
+profiles = ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048")
+resolution_identities = {}
+for profile in profiles:
+    identities = []
+    for phase in ("before", "after", "refused", "released"):
+        dependency = next(iter(
+            validation_result(phase, profile)["runtime_preparation"]
+            ["execution_dependencies"].values()
+        ))
+        identities.append(json.dumps(
+            dependency["resolution"], sort_keys=True, separators=(",", ":")
+        ))
+    if len(set(identities)) != 1:
+        raise SystemExit(f"dependency resolution identity moved across phases for {profile}")
+    resolution_identities[profile] = identities[0]
+if len(set(resolution_identities.values())) != len(profiles):
+    raise SystemExit("the two exact profiles share a dependency resolution identity")
+
 summary = {
     "schema": "ryeos.local_inference_node_qualification.v1",
     "external_content_policy": json.loads(
@@ -1574,6 +1910,27 @@ summary = {
             "first": json.loads((root / "activation-2048-first.json").read_text()),
             "idempotent": json.loads((root / "activation-2048-idempotent.json").read_text()),
         },
+    },
+    "validation": {
+        phase: {
+            profile: json.loads(
+                (root / f"validation-{phase}-{profile}.json").read_text()
+            )
+            for profile in ("qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048")
+        }
+        for phase in ("before", "after", "refused", "released")
+    },
+    "validation_thread_inventory": {
+        phase: {
+            side: json.loads((root / f"threads-{side}-{phase}-validation.json").read_text())
+            for side in ("before", "after")
+        }
+        for phase in ("ready", "refusal", "released")
+    } | {
+        "unactivated": {
+            side: json.loads((root / f"threads-{side}-validation.json").read_text())
+            for side in ("before", "after")
+        }
     },
     "managed_cache": json.loads((root / "managed-cache-first.json").read_text()),
     "worker_pids": {
@@ -1597,10 +1954,21 @@ summary = {
     "worker_pids_after_replay": [],
     "live_tool_loop": json.loads((root / "live-tool-executed.json").read_text()),
     "graph_follow": json.loads((root / "live-tool-and-graph-evidence.json").read_text()),
+    "released_binding": json.loads(
+        (root / "released-binding-4096.json").read_text()
+    ),
+    "released_binding_launch_refusal": (
+        root / "released-binding-launch-refusal.txt"
+    ).read_text(),
 }
 (root / "qualification.json").write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
-print(json.dumps({"status": "passed", "evidence": str(root / "qualification.json")}))
+if evidence_output is not None:
+    temporary = evidence_output.with_name(evidence_output.name + ".tmp")
+    temporary.write_bytes((root / "qualification.json").read_bytes())
+    os.replace(temporary, evidence_output)
+reported_evidence = evidence_output or (root / "qualification.json")
+print(json.dumps({"status": "passed", "evidence": str(reported_evidence)}))
 PY

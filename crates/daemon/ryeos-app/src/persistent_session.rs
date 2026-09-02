@@ -158,6 +158,36 @@ pub enum PersistentSessionFrameKind {
     ObservationAck,
 }
 
+/// Path-free result of read-only admission-policy projection. Raw cleanup or
+/// process diagnostics remain operator-only and must never cross validation
+/// or remote-execution response boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentSessionContractEligibility {
+    Ready,
+    Disabled,
+    Shutdown,
+    ResourceRequestExceedsPolicy,
+    WireFrameExceedsPolicy,
+    CleanupUnproved,
+}
+
+impl PersistentSessionContractEligibility {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Disabled => "disabled",
+            Self::Shutdown => "shutdown",
+            Self::ResourceRequestExceedsPolicy => "resource_request_exceeds_policy",
+            Self::WireFrameExceedsPolicy => "wire_frame_exceeds_policy",
+            Self::CleanupUnproved => "cleanup_unproved",
+        }
+    }
+
+    pub fn ready_for_admission(self) -> bool {
+        self == Self::Ready
+    }
+}
+
 pub struct StartedPersistentSession {
     pub running: ryeos_engine::dispatch::RunningExecution,
     pub socket: UnixStream,
@@ -884,30 +914,37 @@ impl PersistentSessionPool {
         &self,
         lifecycle: &PersistentSessionLifecycleContract,
         wire: &PersistentSessionWireContract,
-    ) -> Result<()> {
-        if !self.inner.enabled {
-            bail!("persistent sessions are disabled by node policy");
-        }
-        self.ensure_admission_open()?;
+    ) -> Result<PersistentSessionContractEligibility> {
         lifecycle.validate()?;
         wire.validate()?;
+        if !self.inner.enabled {
+            return Ok(PersistentSessionContractEligibility::Disabled);
+        }
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            return Ok(PersistentSessionContractEligibility::Shutdown);
+        }
         if lifecycle.real_uid_process_limit > self.inner.limits.max_real_uid_process_limit
             || lifecycle.max_address_space_bytes > self.inner.limits.max_total_address_space_bytes
             || lifecycle.max_cpu_seconds > self.inner.limits.max_total_cpu_seconds
         {
-            bail!("persistent-session resource request exceeds node policy");
+            return Ok(PersistentSessionContractEligibility::ResourceRequestExceedsPolicy);
+        }
+        if usize::try_from(wire.max_frame_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(4))
+            .is_none_or(|bytes| bytes > self.streams.limits.max_total_backlog_bytes)
+        {
+            return Ok(PersistentSessionContractEligibility::WireFrameExceedsPolicy);
         }
         let state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reason) = state.cleanup_unproved.as_deref() {
-            bail!(
-                "persistent-session ownership is quarantined after unproved process cleanup: {reason}"
-            );
+        if state.cleanup_unproved.is_some() {
+            return Ok(PersistentSessionContractEligibility::CleanupUnproved);
         }
-        Ok(())
+        Ok(PersistentSessionContractEligibility::Ready)
     }
 
     /// Reserve node-wide capacity for one session-owned process. This shares
@@ -4034,23 +4071,36 @@ while True:
     #[test]
     fn read_only_contract_eligibility_observes_policy_without_reserving() {
         let pool = PersistentSessionPool::with_limits(narrow_stream_limits()).unwrap();
-        pool.validate_contract_eligibility(&test_lifecycle(), &test_wire())
-            .unwrap();
+        let mut admissible_wire = test_wire();
+        admissible_wire.max_frame_bytes = 1024;
+        assert_eq!(
+            pool.validate_contract_eligibility(&test_lifecycle(), &admissible_wire)
+                .unwrap(),
+            PersistentSessionContractEligibility::Ready
+        );
         assert!(pool.inner.state.lock().unwrap().groups.is_empty());
+        assert_eq!(
+            pool.validate_contract_eligibility(&test_lifecycle(), &test_wire())
+                .unwrap(),
+            PersistentSessionContractEligibility::WireFrameExceedsPolicy
+        );
 
         let mut excessive = test_lifecycle();
         excessive.real_uid_process_limit = 2;
-        let error = pool
-            .validate_contract_eligibility(&excessive, &test_wire())
-            .unwrap_err();
-        assert!(error.to_string().contains("exceeds node policy"));
+        assert_eq!(
+            pool.validate_contract_eligibility(&excessive, &admissible_wire)
+                .unwrap(),
+            PersistentSessionContractEligibility::ResourceRequestExceedsPolicy
+        );
         assert!(pool.inner.state.lock().unwrap().groups.is_empty());
 
         let disabled = PersistentSessionPool::disabled();
-        let error = disabled
-            .validate_contract_eligibility(&test_lifecycle(), &test_wire())
-            .unwrap_err();
-        assert!(error.to_string().contains("disabled by node policy"));
+        assert_eq!(
+            disabled
+                .validate_contract_eligibility(&test_lifecycle(), &admissible_wire)
+                .unwrap(),
+            PersistentSessionContractEligibility::Disabled
+        );
     }
 
     #[test]

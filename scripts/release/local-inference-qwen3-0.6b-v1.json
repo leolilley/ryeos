@@ -33,7 +33,7 @@
       "upstream": {
         "archive": "xz-5.8.3.tar.gz",
         "origin_url": "https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.gz",
-        "sha256": "8ec1767fa517642ecb4cf08b891ce667ba6f143551e382b07c7ef437bda335e2",
+        "sha256": "3d3a1b973af218114f4f889bbaa2f4c037deaae0c8e815eec381c3d546b974a0",
         "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/xz-5.8.3.tar.gz"
       }
     }

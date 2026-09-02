@@ -400,6 +400,14 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("--online", source_qualifier)
         self.assertIn("--archive-root", source_qualifier)
         self.assertEqual(source_qualifier.count("--minimum-free-bytes 2147483648"), 2)
+        self.assertEqual(source_qualifier.count("--evidence-output"), 2)
+        self.assertIn(
+            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+            source_qualifier,
+        )
+        self.assertIn("if-no-files-found: error", source_qualifier)
+        self.assertIn("local-inference-offline-qualification.json", source_qualifier)
+        self.assertIn("local-inference-online-qualification.json", source_qualifier)
         self.assertIn("--archive-root", qualifier)
         self.assertIn("minimum_free_bytes = int(sys.argv[5])", qualifier)
         self.assertIn('source "$repository_root/scripts/pkg/bundle-sets.sh"', qualifier)
@@ -431,8 +439,28 @@ class LocalInferenceContractTests(unittest.TestCase):
             )
             self.assertIn(f"validation-before-$profile.json", qualifier)
             self.assertIn(f"validation-after-$profile.json", qualifier)
+            self.assertIn(f"validation-refused-$profile.json", qualifier)
+            self.assertIn(f"validation-released-$profile.json", qualifier)
         self.assertIn("runtime_preparation", qualifier)
         self.assertIn("static validation changed thread inventory", qualifier)
+        self.assertIn("ready static validation changed thread inventory", qualifier)
+        self.assertIn("refusal validation changed thread inventory", qualifier)
+        self.assertIn("released-binding validation changed thread inventory", qualifier)
+        self.assertIn("released exact binding remained ready", qualifier)
+        self.assertIn("consumer-specific release affected the other exact profile", qualifier)
+        self.assertIn("execution reused validation after its exact binding was released", qualifier)
+        self.assertIn('"validation": {', qualifier)
+        self.assertIn('"validation_thread_inventory": {', qualifier)
+        self.assertIn("dependency resolution identity moved across phases", qualifier)
+        self.assertIn("provider_call_objects", qualifier)
+        for field in (
+            "effective_definition_digest",
+            "capsule_hash",
+            "execution_realization_hash",
+            "provider_config_hash",
+            "provider_config_value_digest",
+        ):
+            self.assertIn(field, qualifier)
         self.assertIn('snapshot_provider_bank "$qualification_root/bank-before-replay.json" 2', qualifier)
         self.assertIn("directive:qualification/live_tool_loop", qualifier)
         self.assertIn("graph:qualification/live_tool_follow", qualifier)
