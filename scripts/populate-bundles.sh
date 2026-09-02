@@ -241,6 +241,7 @@ staged_foundational_release_bins_for_set() {
 # Newest mtime (integer epoch) across the foundational library crate sources.
 foundational_newest_mtime() {
   find \
+    "$ROOT/crates/engine/ryeos-engine/src" \
     "$ROOT/crates/engine/ryeos-runtime/src" \
     "$ROOT/crates/state/ryeos-state/src" \
     "$ROOT/crates/daemon/ryeos-app/src" \

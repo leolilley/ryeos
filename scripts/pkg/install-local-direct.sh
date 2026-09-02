@@ -174,6 +174,7 @@ bundle_payload_binary_path() {
 
 foundational_newest_mtime() {
     find \
+        "$repo_root/crates/engine/ryeos-engine/src" \
         "$repo_root/crates/engine/ryeos-runtime/src" \
         "$repo_root/crates/state/ryeos-state/src" \
         "$repo_root/crates/daemon/ryeos-app/src" \
@@ -199,7 +200,15 @@ validate_incremental_bundle_payload_sources() {
             }; then
                 die "refusing non-static admitted persistent-session payload: $source"
             fi
-            if [[ "$bin" != "ryeos-session-exec" && -n "$newest" ]]; then
+            # These payloads are standalone executables: Cargo proves they do
+            # not link the foundational RyeOS crates. Keep this set aligned
+            # with staged_foundational_release_bins_for_set in
+            # populate-bundles.sh so authoring and incremental install apply
+            # the same generation fence.
+            if [[ "$bin" != "ryeos-session-exec" \
+                && "$bin" != "ryeos-web-tools" \
+                && "$bin" != "ryeos-browser-tools" \
+                && -n "$newest" ]]; then
                 source_mtime="$(stat -c %Y "$source" 2>/dev/null || echo 0)"
                 if (( source_mtime < newest )); then
                     stale+=("$bin")
