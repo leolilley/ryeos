@@ -18,8 +18,9 @@ pub struct IsolationPolicy {
 }
 
 impl IsolationPolicy {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn default_disabled() -> Self {
+    /// Explicit policy-free authoring/test boundary. Running nodes compile
+    /// their mandatory signed isolation policy instead of using this value.
+    pub fn disabled_for_authoring() -> Self {
         Self {
             version: ISOLATION_POLICY_VERSION,
             mode: IsolationMode::Disabled,

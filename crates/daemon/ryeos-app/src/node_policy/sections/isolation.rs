@@ -70,7 +70,7 @@ mod tests {
     fn disabled_policy_value() -> Value {
         serde_json::to_value(IsolationPolicyDocument {
             schema: POLICY_SCHEMA,
-            policy: ryeos_engine::isolation::IsolationPolicy::default_disabled(),
+            policy: ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring(),
         })
         .unwrap()
     }
@@ -91,7 +91,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<ryeos_engine::isolation::IsolationPolicy>()
                 .unwrap(),
-            &ryeos_engine::isolation::IsolationPolicy::default_disabled()
+            &ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring()
         );
     }
 

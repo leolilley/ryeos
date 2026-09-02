@@ -1340,7 +1340,9 @@ mod tests {
         let state = ryeos_app::state::AppState {
             config: std::sync::Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
-            isolation: std::sync::Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            isolation: std::sync::Arc::new(
+                ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             state_store,
             engine,
             resolution_cache: std::sync::Arc::new(

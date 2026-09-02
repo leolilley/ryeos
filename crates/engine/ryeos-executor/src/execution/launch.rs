@@ -10875,7 +10875,7 @@ mod tests {
         let bare = "admitted-recovery-executor";
         let content_hash = write_admitted_executor_blob(tmp.path(), b"previous signed executor");
         let manifest_hash = "b".repeat(64);
-        let isolation = ryeos_engine::isolation::IsolationRuntime::default();
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
 
         let materialized = materialize_admitted_native_executor(
             &format!("native:{bare}"),
@@ -10909,7 +10909,7 @@ mod tests {
             vec![b'x'; admitted_bytes.len()],
         )
         .unwrap();
-        let isolation = ryeos_engine::isolation::IsolationRuntime::default();
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
 
         let error = materialize_admitted_native_executor(
             &format!("native:{bare}"),

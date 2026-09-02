@@ -1788,7 +1788,7 @@ mod tests {
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
             vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()
         .project;

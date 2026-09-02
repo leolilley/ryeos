@@ -1134,7 +1134,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let authority = resolve_offline_project_isolation_authority(
             project.path(),
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
 

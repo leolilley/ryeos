@@ -40,7 +40,10 @@ impl HandlerLaunchRuntime {
     }
 
     pub(crate) fn disabled() -> Self {
-        Self::new(Arc::new(IsolationRuntime::default()), Vec::new())
+        Self::new(
+            Arc::new(IsolationRuntime::disabled_for_authoring()),
+            Vec::new(),
+        )
     }
 }
 

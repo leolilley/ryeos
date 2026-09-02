@@ -333,7 +333,7 @@ mod tests {
         envs: Vec<(String, String)>,
         project: &std::path::Path,
     ) -> Value {
-        let isolation = IsolationRuntime::default();
+        let isolation = IsolationRuntime::disabled_for_authoring();
         run_probe(
             interpreter,
             args,

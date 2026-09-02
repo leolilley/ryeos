@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T00:15:48Z:d9c4715efca4b404d1bacd5340b737aacddf49adc304c753d7b25dba8a6c0e83:DT399IuVKJ73WPT4v0UOFu66sRua3Hr7651Gm1PBMe6CrLhS1LLzHzu7FxNJTYVsjQg0go3qxv50lomtObq9Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T10:47:33Z:c0e4e54ca0bbe1f2b99fca16e5702a3e76435b993189a1b8e55e2149873fc80e:QNYQVZEzIjvtfJfGhHzSRTJ9ayJYaVM8XWrG55Y5F8g6r9mZk8ALmTnpE+ZoLW1kygq5ePSQORIDXOJwbmb5Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]

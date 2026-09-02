@@ -194,7 +194,7 @@ fn build_app_state(
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),
-        isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+        isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         state_store,
         engine,
         resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(

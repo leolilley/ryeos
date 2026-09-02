@@ -367,21 +367,6 @@ admission_enabled: {admission_enabled}
         ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", &app_trust_dir, None)
             .unwrap();
 
-        let policy_dir = app_root.join(".ai/node/command_registration");
-        std::fs::create_dir_all(&policy_dir).unwrap();
-        let policy = r#"claim_rules:
-  - claim:
-      kind: command.root
-      value: execute
-    required_caps: []
-system_source_caps:
-  - ryeos.register.command.root.execute
-"#;
-        std::fs::write(
-            policy_dir.join("default.yaml"),
-            lillux::signature::sign_content(policy, node_identity.signing_key(), "#", None),
-        )
-        .unwrap();
         crate::actions::hosted_policy::write_required_non_hosted_test_policies(
             app_root,
             node_identity.signing_key(),

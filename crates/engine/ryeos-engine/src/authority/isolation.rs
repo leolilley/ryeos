@@ -5,6 +5,7 @@
 //! never reopen a raw policy pathname at the process boundary.
 
 use std::collections::BTreeMap;
+#[cfg(any(test, feature = "test-support"))]
 use std::io::Read as _;
 #[cfg(not(unix))]
 use std::io::Seek as _;
@@ -1546,13 +1547,6 @@ impl IsolationRuntime {
                     })
             })
             .transpose()
-    }
-
-    /// Load and resolve a policy for an inspection-only caller such as doctor.
-    /// This shares the production parser and validator rather than maintaining
-    /// a second diagnostic interpretation of the policy.
-    pub fn inspect(app_root: &Path) -> Result<IsolationInspection, EngineError> {
-        Self::load(app_root).map(|runtime| runtime.inspection)
     }
 
     pub fn is_enforced(&self) -> bool {
@@ -4077,12 +4071,14 @@ impl IsolationRuntime {
     }
 }
 
-/// Disabled runtime used only by in-memory fixtures with no node policy.
-#[cfg(any(test, feature = "test-support"))]
-impl Default for IsolationRuntime {
-    fn default() -> Self {
+impl IsolationRuntime {
+    /// Construct the explicit policy-free disabled boundary used while
+    /// authoring an engine generation or by an in-memory fixture. A running
+    /// node must replace this value with its compiled node-policy generation
+    /// before admitting execution; this is not a missing-policy fallback.
+    pub fn disabled_for_authoring() -> Self {
         Self::resolve(IsolationRuntimeResolution {
-            policy: IsolationPolicy::default_disabled(),
+            policy: IsolationPolicy::disabled_for_authoring(),
             source: None,
             digest: None,
             app_root: None,
@@ -5439,7 +5435,7 @@ mod tests {
         let store = Arc::new(
             VerifiedArtifactStore::create(
                 &pinned_root,
-                &IsolationPolicy::default_disabled().limits,
+                &IsolationPolicy::disabled_for_authoring().limits,
             )
             .unwrap(),
         );
@@ -5482,7 +5478,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         runtime.state = IsolationRuntimeState::Enforced;
 
@@ -5516,7 +5512,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         runtime.state = IsolationRuntimeState::Enforced;
 
@@ -5554,7 +5550,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         runtime.state = IsolationRuntimeState::Enforced;
         let project = tempfile::tempdir().unwrap();
@@ -5574,7 +5570,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         runtime.state = IsolationRuntimeState::Enforced;
         let parent = tempfile::tempdir().unwrap();
@@ -5603,7 +5599,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         runtime.state = IsolationRuntimeState::Enforced;
 
@@ -5638,7 +5634,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let source_dir = tempfile::tempdir().unwrap();
         let source_path = source_dir.path().join("cas-blob");
@@ -5689,7 +5685,7 @@ mod tests {
         use std::os::unix::fs::{FileExt as _, MetadataExt as _, PermissionsExt as _};
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let cache = tempfile::tempdir().unwrap();
         let command_path = cache.path().join("ordinary-executor-cache-entry");
@@ -5795,7 +5791,7 @@ mod tests {
         use std::io::Write as _;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let captured = runtime
             .capture_verified_command(Path::new("/bin/true"), None, None)
@@ -5851,7 +5847,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".ai")).unwrap();
@@ -5920,7 +5916,7 @@ mod tests {
         use std::io::{Read as _, Seek as _};
 
         let app_root = tempfile::tempdir().unwrap();
-        let mut policy = IsolationPolicy::default_disabled();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
         policy.mode = IsolationMode::Enforce;
         policy.backend = Some(resolved_backend().selection.clone());
         policy.filesystem.readable = vec!["{verified_code}".to_string()];
@@ -6031,7 +6027,7 @@ mod tests {
         use std::io::{Read as _, Seek as _};
 
         let app_root = tempfile::tempdir().unwrap();
-        let mut policy = IsolationPolicy::default_disabled();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
         policy.mode = IsolationMode::Enforce;
         policy.backend = Some(resolved_backend().selection.clone());
         policy.filesystem.readable = vec![
@@ -6139,7 +6135,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".ai")).unwrap();
@@ -6196,7 +6192,7 @@ mod tests {
     #[test]
     fn projectless_restartable_command_can_capture_the_system_runtime_surface() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         runtime.state = IsolationRuntimeState::Enforced;
 
@@ -6228,7 +6224,7 @@ mod tests {
     #[test]
     fn disabled_runtime_retains_policy_identity_without_capturing_a_backend() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
 
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         assert_eq!(runtime.mode(), IsolationMode::Disabled);
@@ -6261,7 +6257,7 @@ mod tests {
     #[test]
     fn disabled_runtime_refuses_descriptor_mounts_instead_of_discarding_them() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let source_path = app_root.path().join("sealed");
         std::fs::create_dir(&source_path).unwrap();
@@ -6317,7 +6313,7 @@ mod tests {
     #[test]
     fn captured_execution_refuses_ambient_node_filesystem_policy() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
         // The ceiling is checked before backend compilation. Make the fixture
         // exercise the enforced contract without pretending a backend exists.
@@ -6370,7 +6366,7 @@ mod tests {
     #[test]
     fn target_channel_refuses_competing_stdin_in_every_isolation_mode() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let (worker, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
         let channel = IsolationTargetChannelAuthority::new(worker, "RYEOS_SESSION_FD").unwrap();
@@ -6418,7 +6414,7 @@ mod tests {
     #[test]
     fn disabled_runtime_owns_complete_private_project_workspaces() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let workspaces = runtime.runtime_workspaces.as_ref().unwrap();
         let workspace = workspaces
@@ -6514,7 +6510,7 @@ mod tests {
     #[test]
     fn disabled_attachment_compilation_preserves_the_distinct_request_type() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let live_access = IsolationLiveAccessAuthority::UnconfinedHost {
             authorized_write_namespaces: vec!["project".to_string()],
@@ -6602,7 +6598,7 @@ mod tests {
     #[test]
     fn disabled_runtime_accepts_only_explicit_unconfined_live_authority() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let request = || lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
@@ -6677,7 +6673,7 @@ mod tests {
     #[test]
     fn disabled_runtime_still_rejects_runtime_workspace_authority() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let error = runtime
             .apply_with_provenance(
@@ -6858,7 +6854,7 @@ mod tests {
     #[test]
     fn enforced_runtime_requires_the_exact_selected_signed_backend() {
         let app_root = tempfile::tempdir().unwrap();
-        let mut policy = IsolationPolicy::default_disabled();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
         policy.mode = IsolationMode::Enforce;
         policy.backend = Some(resolved_backend().selection);
         write_policy(app_root.path(), &policy);
@@ -6880,7 +6876,7 @@ mod tests {
             .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
 
-        let mut unsupported = IsolationPolicy::default_disabled();
+        let mut unsupported = IsolationPolicy::disabled_for_authoring();
         unsupported.version = ISOLATION_POLICY_VERSION + 1;
         write_policy(app_root.path(), &unsupported);
         assert!(
@@ -6890,7 +6886,8 @@ mod tests {
                 .contains("expected 1")
         );
 
-        let mut unknown = serde_yaml::to_string(&IsolationPolicy::default_disabled()).unwrap();
+        let mut unknown =
+            serde_yaml::to_string(&IsolationPolicy::disabled_for_authoring()).unwrap();
         unknown.push_str("unknown_policy_field: true\n");
         std::fs::write(&policy_path, unknown).unwrap();
         assert!(
@@ -6900,7 +6897,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let mut zero_output = IsolationPolicy::default_disabled();
+        let mut zero_output = IsolationPolicy::disabled_for_authoring();
         zero_output.limits.stdout_bytes = 0;
         write_policy(app_root.path(), &zero_output);
         assert!(
@@ -6925,7 +6922,7 @@ mod tests {
         let real_policy = policy_path.with_file_name("isolation-source.yaml");
         std::fs::write(
             &real_policy,
-            serde_yaml::to_string(&IsolationPolicy::default_disabled()).unwrap(),
+            serde_yaml::to_string(&IsolationPolicy::disabled_for_authoring()).unwrap(),
         )
         .unwrap();
         symlink(real_policy, policy_path).unwrap();

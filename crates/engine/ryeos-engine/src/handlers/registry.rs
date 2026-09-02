@@ -216,7 +216,7 @@ impl HandlerRegistry {
         Self::load_base(
             roots,
             trust_store,
-            Arc::new(crate::isolation::IsolationRuntime::default()),
+            Arc::new(crate::isolation::IsolationRuntime::disabled_for_authoring()),
         )
     }
 

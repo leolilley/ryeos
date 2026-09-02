@@ -240,7 +240,7 @@ pub fn install_signed_bundle_binary(
 /// Pre-populate `state_path` with everything
 /// `bootstrap::init` would produce, using deterministic keys.
 ///
-/// After this returns the daemon can boot WITHOUT ``:
+/// After this returns the daemon can boot without running node initialization:
 /// node identity, vault keypair, layout dirs, user signing key, and
 /// self-signed trust docs are all in place.
 ///
@@ -248,8 +248,7 @@ pub fn install_signed_bundle_binary(
 ///
 /// ```text
 /// <state>/.ai/node/identity/private_key.pem            (deterministic node Ed25519)
-/// <state>/.ai/node/policies/isolation.yaml               (node isolation policy)
-/// <state>/.ai/node/command_registration/default.yaml   (deterministic node-signed seed)
+/// <state>/.ai/node/policies/*.yaml                    (complete node-signed generation)
 /// <state>/.ai/node/vault/private_key.pem               (deterministic vault X25519)
 /// <state>/.ai/node/vault/public_key.pem
 /// <state>/.ai/node/auth/authorized_keys/               (empty dir)
@@ -290,10 +289,6 @@ pub fn populate_initialized_state_with_node_key(
             .join("node")
             .join("auth")
             .join("authorized_keys"),
-        state_path
-            .join(AI_DIR)
-            .join("node")
-            .join("command_registration"),
         state_path.join(AI_DIR).join("node").join("vault"),
         state_path.join(AI_DIR).join("node").join("identity"),
         state_path.join(AI_DIR).join("state").join("objects"),

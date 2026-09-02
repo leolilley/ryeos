@@ -1162,7 +1162,7 @@ mod isolation_generation_tests {
     fn policy(
         mode: ryeos_engine::isolation::IsolationMode,
     ) -> ryeos_engine::isolation::IsolationPolicy {
-        let mut policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
         policy.mode = mode;
         if mode == ryeos_engine::isolation::IsolationMode::Enforce {
             policy.backend = Some(ryeos_isolation_protocol::IsolationBackendSelection {

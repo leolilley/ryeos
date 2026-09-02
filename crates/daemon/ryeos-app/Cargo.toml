@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-test-support = []
+test-support = ["ryeos-engine/test-support", "ryeos-state/test-support"]
 latency-profiling = []
 # Allows an exact runtime-owned phase to be selected by the daemon's
 # process-kill qualification harness. Production daemon builds never enable

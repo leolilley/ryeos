@@ -7,8 +7,8 @@ policy is required node-owned complete-generation state; the publisher-signed
 `hosted-workflow` init profile supplies its initial body and initialization
 re-signs the selected generation with the current node identity.
 
-The bundle intentionally does not ship `.ai/node/hosted` or
-`.ai/node/policies` content. Bundles cannot widen node-owned policy authority.
+The bundle intentionally does not ship a `.ai/node/policies` generation.
+Bundles cannot widen node-owned policy authority.
 
 These notes live outside `.ai/` so the bundle does not acquire a runtime
 dependency on the `knowledge` kind from `standard`.

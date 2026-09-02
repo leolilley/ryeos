@@ -2314,7 +2314,7 @@ mod tests {
             Some(project.path()),
             None,
             None,
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
         )
         .unwrap();
@@ -2358,7 +2358,7 @@ mod tests {
             Some(project.path()),
             Some(&snapshot_hash),
             Some(&destination),
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
         )
         .unwrap();
@@ -2379,7 +2379,7 @@ mod tests {
                 Some(project.path()),
                 Some(&snapshot_hash),
                 None,
-                &ryeos_engine::isolation::IsolationRuntime::default(),
+                &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
             )
             .is_err()
@@ -2394,7 +2394,7 @@ mod tests {
                 Some(project.path()),
                 Some(&snapshot_hash),
                 Some(&mismatch),
-                &ryeos_engine::isolation::IsolationRuntime::default(),
+                &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
             )
             .is_err()

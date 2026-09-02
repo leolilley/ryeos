@@ -32,9 +32,11 @@
 //! standard/.ai/...  ← copied from source/standard/
 //! ```
 //!
-//! The entire source bundle directory is copied as-is. Source bundles
-//! are expected to contain only bundle content (handlers, parsers, kinds,
-//! tools, config, knowledge, binaries). Runtime-only state directories
+//! Each bundle selected by the signed initialization profile is copied as-is.
+//! A source root may publish several bundle-set profiles; unselected sibling
+//! bundles are inert. Source bundles are expected to contain only bundle
+//! content (handlers, parsers, kinds, tools, config, knowledge, binaries).
+//! Runtime-only state directories
 //! (`state/objects/`, `state/refs/`, `node/identity/`, `node/vault/`,
 //! `node/bundles/`) are never present in source bundles and are not
 //! created by init — they belong to the app-root runtime layout.
@@ -385,7 +387,7 @@ fn run_init_internal(
 
     // ── 6. Discover bundles in source_dir ──
     progress(InitPhase::DiscoveringBundles, None, None, None)?;
-    let discovered = discover_bundles(&opts.source_dir)?;
+    let mut discovered = discover_bundles(&opts.source_dir)?;
     if discovered.is_empty() {
         bail!(
             "no bundles found in {} — expected immediate child directories \
@@ -410,18 +412,25 @@ fn run_init_internal(
         .map(|name| load_init_node_profile(&opts.source_dir, name, &seed_trust_store))
         .transpose()?;
     if let Some(profile) = selected_node_profile.as_ref() {
-        let discovered_names = discovered
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        if discovered_names != profile.exact_bundles() {
-            bail!(
-                "selected node profile requires exact bundle inventory {:?}, found {:?} in {}",
-                profile.exact_bundles(),
-                discovered_names,
-                opts.source_dir.display()
+        let mut available = discovered.into_iter().collect::<BTreeMap<_, _>>();
+        let mut selected = Vec::with_capacity(profile.exact_bundles().len());
+        for name in profile.exact_bundles() {
+            let source = available.remove(name).with_context(|| {
+                format!(
+                    "selected node profile requires bundle `{name}`, but it is absent from {}",
+                    opts.source_dir.display()
+                )
+            })?;
+            selected.push((name.clone(), source));
+        }
+        if !available.is_empty() {
+            tracing::debug!(
+                profile = opts.node_profile.as_deref().unwrap_or("<existing>"),
+                ignored = ?available.keys().collect::<Vec<_>>(),
+                "ignoring source bundles outside the exact selected initialization profile"
             );
         }
+        discovered = selected;
     }
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
     let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
@@ -1691,8 +1700,8 @@ mod tests {
         assert_eq!(
             report.bundles_installed,
             vec![
-                "central-auth".to_string(),
                 "core".to_string(),
+                "central-auth".to_string(),
                 "hosted-node".to_string()
             ]
         );
@@ -2260,7 +2269,7 @@ typo_field: oops
         assert!(result.is_err(), "init should fail before source mutation");
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(
-            err_msg.contains("exact bundle inventory") || err_msg.contains("nonexistent-kind"),
+            err_msg.contains("requires bundle") || err_msg.contains("nonexistent-kind"),
             "error should identify the unadmitted source generation: {err_msg}"
         );
 

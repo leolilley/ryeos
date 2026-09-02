@@ -1030,7 +1030,9 @@ impl Engine {
             bundle_roots,
             registered_bundle_roots: Vec::new(),
             node_config_root: None,
-            isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
+            isolation_generation: std::sync::Arc::new(
+                crate::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             request_trust_base: None,
             request_trust_overlay_identity: None,
             parser_overlay_cache: std::sync::Arc::new(
@@ -3897,11 +3899,8 @@ formats:
     #[test]
     fn checked_generation_batches_multiple_resolutions_under_one_guard() {
         let lifeline = std::sync::Arc::new(CountingGenerationLifeline::default());
-        let isolation = crate::isolation::IsolationRuntime::default().retain_registered_generation(
-            lifeline.clone(),
-            TrustStore::empty(),
-            vec![],
-        );
+        let isolation = crate::isolation::IsolationRuntime::disabled_for_authoring()
+            .retain_registered_generation(lifeline.clone(), TrustStore::empty(), vec![]);
         let engine = test_engine().with_isolation_generation(std::sync::Arc::new(isolation));
         let ctx = test_plan_context();
         let item_ref = CanonicalRef::parse("tool:missing").unwrap();
@@ -3925,16 +3924,18 @@ formats:
             name: "same-name".to_string(),
             canonical_root: PathBuf::from("/same/canonical/root"),
         }];
-        let first = crate::isolation::IsolationRuntime::default().retain_registered_generation(
-            std::sync::Arc::new(CountingGenerationLifeline::default()),
-            TrustStore::empty(),
-            roots.clone(),
-        );
-        let second = crate::isolation::IsolationRuntime::default().retain_registered_generation(
-            std::sync::Arc::new(CountingGenerationLifeline::default()),
-            TrustStore::empty(),
-            roots.clone(),
-        );
+        let first = crate::isolation::IsolationRuntime::disabled_for_authoring()
+            .retain_registered_generation(
+                std::sync::Arc::new(CountingGenerationLifeline::default()),
+                TrustStore::empty(),
+                roots.clone(),
+            );
+        let second = crate::isolation::IsolationRuntime::disabled_for_authoring()
+            .retain_registered_generation(
+                std::sync::Arc::new(CountingGenerationLifeline::default()),
+                TrustStore::empty(),
+                roots.clone(),
+            );
         let first = test_engine()
             .with_registered_bundle_roots(roots.clone())
             .with_isolation_generation(std::sync::Arc::new(first));

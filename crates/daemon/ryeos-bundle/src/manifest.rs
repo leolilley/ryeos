@@ -769,8 +769,8 @@ mod tests {
             "hosted-node bundle must not contribute system configuration"
         );
         assert!(
-            !root.join(".ai/node/hosted").exists() && !root.join(".ai/node/policies").exists(),
-            "hosted policy is node-owned policy-set state, not bundle content"
+            !root.join(".ai/node/policies").exists(),
+            "node policy generations are node-owned state, not bundle content"
         );
         assert!(
             !root.join(".ai/knowledge").exists(),

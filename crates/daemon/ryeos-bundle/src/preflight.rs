@@ -1935,7 +1935,7 @@ description: "fixed parser handler for preflight tests"
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("a signed manifest-only bundle needs no synthetic kind dependency");
 
@@ -1955,7 +1955,7 @@ description: "fixed parser handler for preflight tests"
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect_err("an undeclared item namespace must not be silently ignored");
 
@@ -2333,7 +2333,7 @@ optional: {}
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -2366,7 +2366,7 @@ optional: {}
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("non-identity composer should skip pre-composition contract validation");
 
@@ -2394,7 +2394,7 @@ strict_fields: warn
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("warnings should not fail preflight");
 

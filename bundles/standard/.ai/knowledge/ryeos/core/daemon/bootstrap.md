@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:28Z:4fb735c65ffd4fa4fa9ccddb8d6ae8d02c23bc3ca6d5a95bd74455f485a83865:u4oaAh/JGV4KU+L14yg4H1J02PPMXuqWgIAXV3f0y9nlJYKfO+2yTX8I4Va73lf+iCY9JL2SrcFhNyKLLWjoBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T10:47:09Z:7b329cd88fb608e33d4bddc991e14cbd9e637bce57199dc6c970f18cff51b211:sIx/I6064MYh+PW6gP4HbMEyHfIIS7O4SSADEneNyUdnKdQUMz01O+l/Y0SEhfzKyON19irlgsD7xCa8ztnEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]

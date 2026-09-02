@@ -128,21 +128,6 @@ allow_loopback_http: true
         )
         .unwrap();
 
-        let policy_dir = app_root.join(".ai/node/command_registration");
-        std::fs::create_dir_all(&policy_dir).unwrap();
-        let policy = r#"claim_rules:
-  - claim:
-      kind: command.root
-      value: execute
-    required_caps: []
-system_source_caps:
-  - ryeos.register.command.root.execute
-"#;
-        std::fs::write(
-            policy_dir.join("default.yaml"),
-            lillux::signature::sign_content(policy, key, "#", None),
-        )
-        .unwrap();
         write_required_non_hosted_test_policies(app_root, key);
     }
 
@@ -164,9 +149,8 @@ system_source_caps:
         let fixture = Fixture::new();
         let err = load_hosted_policy(&fixture.system).unwrap_err();
         let rendered = format!("{err:#}");
-        assert!(rendered.contains("hosted"), "got: {rendered}");
         assert!(
-            rendered.contains("ExactlyOne") || rendered.contains("required"),
+            rendered.contains("requires exactly one `hosted` policy"),
             "got: {rendered}"
         );
     }

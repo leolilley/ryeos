@@ -827,7 +827,7 @@ mod policy_tests {
             let error = resolve_standard_local_live_authority(
                 project.path(),
                 vec![insufficient.to_string()],
-                &ryeos_engine::isolation::IsolationRuntime::default(),
+                &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             )
             .unwrap_err();
             assert!(error.to_string().contains(LIVE_PROJECT_WRITE_CAPABILITY));
@@ -836,7 +836,7 @@ mod policy_tests {
         let authority = resolve_standard_local_live_authority(
             project.path(),
             vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
         assert!(matches!(
@@ -853,7 +853,7 @@ mod policy_tests {
         resolve_standard_local_live_authority(
             project.path(),
             vec!["*".to_string()],
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .expect("node-local wildcard authority remains valid");
         assert_eq!(
@@ -874,7 +874,7 @@ mod policy_tests {
         let project = tempfile::tempdir().unwrap();
         let authority = resolve_offline_local_live_project_authority(
             project.path(),
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
 
