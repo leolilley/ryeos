@@ -453,6 +453,20 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn('"validation_thread_inventory": {', qualifier)
         self.assertIn("dependency resolution identity moved across phases", qualifier)
         self.assertIn("provider_call_objects", qualifier)
+        self.assertIn("provider_call_index_pairs", qualifier)
+        self.assertIn("verify_indexed_provider_call_pair", qualifier)
+        self.assertIn(
+            'provider_call.get("cache_key") != replay_record["cache_key"]',
+            qualifier,
+        )
+        self.assertIn(
+            'provider_call.get("answer_digest") != replay_record["answer_digest"]',
+            qualifier,
+        )
+        self.assertIn(
+            "replay-index oracle accepted swapped row/CAS authority",
+            qualifier,
+        )
         for field in (
             "effective_definition_digest",
             "capsule_hash",

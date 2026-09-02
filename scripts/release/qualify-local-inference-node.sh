@@ -957,7 +957,48 @@ def cas_object(digest):
     )
     return json.loads(path.read_text(encoding="utf-8"))
 
-provider_calls = [cas_object(record["record_hash"]) for record in records]
+provider_call_pairs = [
+    {"replay_record": record, "provider_call": cas_object(record["record_hash"])}
+    for record in records
+]
+
+def verify_indexed_provider_call_pair(pair):
+    replay_record = pair["replay_record"]
+    provider_call = pair["provider_call"]
+    if provider_call.get("cache_key") != replay_record["cache_key"]:
+        raise ValueError("replay-index row record_hash names another cache key")
+    if provider_call.get("answer_digest") != replay_record["answer_digest"]:
+        raise ValueError("replay-index row record_hash names another answer digest")
+
+for pair in provider_call_pairs:
+    try:
+        verify_indexed_provider_call_pair(pair)
+    except ValueError as error:
+        raise SystemExit(f"replay-index row/CAS association is invalid: {error}") from error
+provider_calls = [pair["provider_call"] for pair in provider_call_pairs]
+
+# The retained evidence is useful only if the oracle rejects a legal-shape
+# cross-profile substitution instead of normalizing objects by their internal
+# cache keys. Exercise that negative at the row-to-CAS authority seam itself.
+if len(provider_call_pairs) >= 2:
+    swapped_pairs = [
+        {
+            "replay_record": pair["replay_record"],
+            "provider_call": pair["provider_call"],
+        }
+        for pair in provider_call_pairs
+    ]
+    swapped_pairs[0]["provider_call"] = provider_call_pairs[1]["provider_call"]
+    swapped_pairs[1]["provider_call"] = provider_call_pairs[0]["provider_call"]
+    swapped_rejected = False
+    for pair in swapped_pairs:
+        try:
+            verify_indexed_provider_call_pair(pair)
+        except ValueError:
+            swapped_rejected = True
+            break
+    if not swapped_rejected:
+        raise SystemExit("replay-index oracle accepted swapped row/CAS authority")
 observation_rows = rows(
     projection_path,
     "SELECT e.event_hash, e.chain_root_id, e.thread_id, e.thread_seq, "
@@ -981,6 +1022,10 @@ if validation_mode == "state-only":
         "provider_call_objects": sorted(
             provider_calls,
             key=lambda record: (record["cache_key"], record["kind"]),
+        ),
+        "provider_call_index_pairs": sorted(
+            provider_call_pairs,
+            key=lambda pair: pair["replay_record"]["cache_key"],
         ),
         "provider_observations": observations,
     }
@@ -1131,6 +1176,10 @@ evidence = {
     "provider_call_objects": sorted(
         provider_calls,
         key=lambda record: record["coordinate"]["transport"]["worker_ref"],
+    ),
+    "provider_call_index_pairs": sorted(
+        provider_call_pairs,
+        key=lambda pair: pair["replay_record"]["cache_key"],
     ),
     "provider_observations": observations,
 }
