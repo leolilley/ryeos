@@ -2997,15 +2997,14 @@ mod tests {
             Some(project.path()),
         )
         .unwrap();
-        let contract = InvocationInputContract::from_lightweight_schema_value(&serde_json::json!({
-            "remote": "string?",
-            "item_ref": "string",
-            "ref_bindings": "object",
-            "project": "string?",
-            "parameters": "object?",
-        }))
-        .unwrap()
-        .unwrap();
+        let service: Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/services/remote/execute.yaml"
+        )))
+        .expect("signed remote-execute service descriptor");
+        let contract = InvocationInputContract::from_lightweight_schema_value(&service["schema"])
+            .unwrap()
+            .unwrap();
         let parameters = ryeos_runtime::arg_binder::normalize_params_with_contract(
             resolved.parameters,
             Some(&contract),
@@ -3021,6 +3020,11 @@ mod tests {
             serde_json::json!({"model": "worker:models/qualified"})
         );
         assert_eq!(parameters["parameters"], serde_json::json!({"probe": true}));
+        assert_eq!(parameters["execution_policy"]["schema_version"], 2);
+        assert_eq!(
+            parameters["execution_policy"]["project"]["source"]["scope"],
+            "full_project"
+        );
         assert_eq!(
             parameters["project"],
             project

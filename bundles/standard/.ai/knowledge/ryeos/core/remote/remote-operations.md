@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T22:15:11Z:a679fb5022f0569059816cbba18445bfb6aa4d2da4d3d22d037db582b7088bcd:kRVQ2YB1IL/sNztW7aP0kx3LrfuXEBk8rSwQvEN8RV6gtzUEUMy0m/PKUxTLNc6ZVTaL+oq9zRf9cdQCPQ13DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T00:33:45Z:9bd1a28a06c6844beb84fc5bf8c58cd1103710e3d06e144a98714251f639e351:GtZer7gx0QXCb+qGPzJeBey543UaaxhzpKB16Ppvbta9Xg4Ch+sl1aA0FBTnoG0vViYSEDG3pvlrzaV+0K/ICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -108,7 +108,10 @@ choose its authenticated origin.
      --remote production \
      --token "<one-time-token>" \
      --label "dev-machine" \
-     --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
+     --scopes ryeos.execute.service.objects/has \
+     --scopes ryeos.execute.service.objects/put \
+     --scopes ryeos.execute.service.objects/get \
+     --scopes ryeos.execute.service.system/push-head
    ```
 
    Direct local authorization remains available when the operator has the
@@ -259,7 +262,10 @@ ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
+  --scopes ryeos.execute.service.objects/has \
+  --scopes ryeos.execute.service.objects/put \
+  --scopes ryeos.execute.service.objects/get \
+  --scopes ryeos.execute.service.system/push-head
 
 ryeos remote doctor --remote prod
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T22:15:11Z:9beb0240b005f66accaf15c7056218d2977b370e59dbecdaea3a34272b5066b6:ryiWdiwYyOSzt2TT7qwqOEQgOZ+7nGYKSbUrQSH3YP3i8BG4aIj79IcUnJr1VoSNodvQzK52U7hUH1SeON4YDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T00:33:45Z:325c4f45e1b9d3517f2f2bca9263b32eac17c404e716eb5ab4a2965669034633:xieqeda1MgAHyfiKYqsKbivpBMzeB73tvxblUNLdLwzq00vgZ9LACiWMxFVNMuc4weZjq7nqw5JghHEoSbkJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -169,8 +169,15 @@ ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
+  --scopes ryeos.execute.service.objects/has \
+  --scopes ryeos.execute.service.objects/put \
+  --scopes ryeos.execute.service.objects/get \
+  --scopes ryeos.execute.service.system/push-head
 ```
+
+`remote admit` binds `scopes` as a typed array, so pass one repeatable
+`--scopes` flag per exact scope. The target-side `admission-token` authoring
+tool instead accepts its documented comma-separated scope string.
 
 Before sending the token, the command fetches the live remote identity and
 requires the principal, signing key, key fingerprint, canonical site ID, and

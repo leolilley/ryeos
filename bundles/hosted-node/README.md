@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-09-02T00:33:45Z:abc18b51cfeed89b525242138f0f74b66b6eb734e3fb3b41a52fbc7120f2b48c:qxyP2TYpyj9FPUSAL6Jcka65hadX+FYsbH21Zh2UnWtzeES5Ueb7//wim4iM6u3psbgeRz+4B/fEcWa7aIcdCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Hosted-Node Bundle
 
 The `hosted-node` bundle packages core-only operator policy for a RyeOS
@@ -95,7 +96,10 @@ ryeos remote admit \
   --remote hosted-prod \
   --token "<one-time-token>" \
   --label "caller-node" \
-  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
+  --scopes ryeos.execute.service.objects/has \
+  --scopes ryeos.execute.service.objects/put \
+  --scopes ryeos.execute.service.objects/get \
+  --scopes ryeos.execute.service.system/push-head
 
 ryeos remote doctor --remote hosted-prod
 ```
