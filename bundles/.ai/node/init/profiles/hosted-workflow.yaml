@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-02T10:46:49Z:1544192d88d775dd87caf2602f2035a4eef272283d6739a588d7357242068b11:SRLBVmCvsh5BcBJNaBPa0W57M/UNJHYewY84ZeemMibdqQlmk4kVb6GPvd/f6/DzxC0LdapQw4upxnNxWu2kDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-02T12:38:43Z:b484b497b5b9bb06277ecf5463ee81ab6f522144d142b4ca27a79d1f766fd76f:m2DUgYfiH9oKyz9hY+KZlnPJqtD+ISP8nG/g9MYHsBeow418HZNX7M20up3l7cAt+mPXf7gPDHTKYg6pSxrjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -204,7 +204,7 @@ policies:
       max_total_processes: 4
       max_total_address_space_bytes: 68719476736
       max_total_cpu_seconds: 14400
-      max_real_uid_process_limit: 64
+      max_real_uid_process_limit: 4096
       max_open_streams: 32
       max_active_streams: 4
       max_active_streams_per_subject: 1

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-02T10:46:49Z:acfc0babdc583b2b67662dd3282438a0b3cb19af2c6bfab2e60b22ae1c144428:NwqJIwEUsUVRIKHA0PgTp07se4WORh2j7cjcQ7YPTsZjXyt5wuBcVpVbgwTufaFE1yeZy6Fem5Iu4GZ5w2G+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-02T12:38:43Z:3acf0d62a617c4dacb7beab17a77d852fdf9f6b0411c86d9b11308312b42c69b:H+LqP3bgPlcUU6BBL/l/NsjuPlx/01JgkGXudO568IjU7ZoDOQP9QT981ww6ICet8ZDPdDqjCo+ipI2M3orMBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -181,28 +181,30 @@ policies:
     schema: 1
     roots: {}
     limits:
-      max_depth: 8
-      max_entries: 64
-      max_file_bytes: 268435456
-      max_total_bytes: 536870912
-      store_budget_bytes: 1073741824
-      minimum_free_bytes: 1073741824
+      max_depth: 11
+      max_entries: 4480
+      max_file_bytes: 1503300328
+      max_total_bytes: 1514745854
+      store_budget_bytes: 4294967296
+      minimum_free_bytes: 2147483648
     managed_activation:
       enabled: true
       limits:
         allow_online: true
         allowed_https_hosts:
+          - github.com
+          - release-assets.githubusercontent.com
           - releases.openai.com
-        max_redirects: 0
-        max_archives: 1
-        max_compressed_bytes: 134217728
-        max_expanded_bytes: 335544320
-        max_members: 64
-        max_member_bytes: 268435456
+        max_redirects: 2
+        max_archives: 4
+        max_compressed_bytes: 1329438282
+        max_expanded_bytes: 1893273600
+        max_members: 4836
+        max_member_bytes: 1503300328
         max_concurrent_activations: 1
-        cache_budget_bytes: 536870912
-        store_budget_bytes: 1073741824
-        minimum_free_bytes: 1073741824
+        cache_budget_bytes: 2147483648
+        store_budget_bytes: 4294967296
+        minimum_free_bytes: 2147483648
         max_attempts: 3
   persistent_sessions:
     schema: 1
@@ -212,7 +214,7 @@ policies:
       max_total_processes: 4
       max_total_address_space_bytes: 68719476736
       max_total_cpu_seconds: 14400
-      max_real_uid_process_limit: 64
+      max_real_uid_process_limit: 4096
       max_open_streams: 32
       max_active_streams: 4
       max_active_streams_per_subject: 1

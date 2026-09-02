@@ -96,15 +96,6 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
     .unwrap();
     let body = lillux::signature::strip_signature_lines(&worker_item);
     let worker: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
-    let worker_lifecycle =
-        serde_yaml::from_str::<serde_yaml::Value>(&lillux::signature::strip_signature_lines(
-            &std::fs::read_to_string(
-                repository
-                    .join("bundles/core/.ai/node/engine/kinds/worker/worker.kind-schema.yaml"),
-            )
-            .unwrap(),
-        ))
-        .unwrap();
     let declared = worker["external_content"]
         .as_sequence()
         .unwrap()
@@ -130,47 +121,48 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         fixture["consumer_ref"].as_str(),
         Some("worker:local-inference/local-tinygrad")
     );
-    let pool = &fixture["persistent_session_policy"];
-    let lifecycle = &worker_lifecycle["execution"]["persistent_session"];
-    assert!(
-        pool["max_total_processes"].as_u64().unwrap()
-            >= lifecycle["max_processes"].as_u64().unwrap()
-    );
-    assert!(
-        pool["max_total_address_space_bytes"].as_u64().unwrap()
-            >= lifecycle["max_address_space_bytes"].as_u64().unwrap()
-    );
-    assert!(
-        pool["max_total_cpu_seconds"].as_u64().unwrap()
-            >= lifecycle["max_cpu_seconds"].as_u64().unwrap()
-    );
-    let expected_imports = BTreeMap::from([
-        ("runtime", ("runtime", "content", 104_857_600_u64)),
-        ("tinygrad", ("tinygrad", "content", 33_554_432_u64)),
-        ("toolchain", ("toolchain", "large_content", 335_544_320_u64)),
-        ("model", ("model", "large_content", 1_677_721_600_u64)),
-    ]);
+    assert!(fixture.get("persistent_session_policy").is_none());
+    let release: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repository.join("scripts/release/local-inference-qwen3-0.6b-v1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let releases = release["realizations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["component"].as_str().unwrap(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let sources = fixture["sources"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["id"].as_str().unwrap(), entry))
+        .collect::<BTreeMap<_, _>>();
     let captured = fixture["components"]
         .as_sequence()
         .unwrap()
         .iter()
         .map(|entry| {
-            assert_eq!(entry["shape"].as_str(), Some("tree"));
             let id = entry["id"].as_str().unwrap();
-            let (path, storage, maximum_bytes) = expected_imports[id];
-            assert_eq!(entry["path"].as_str(), Some(path));
-            assert_eq!(entry["storage"].as_str(), Some(storage));
-            let expected_schema = match storage {
-                "content" => ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
-                "large_content" => ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
-                _ => unreachable!("fixture storage was validated above"),
-            };
-            assert_eq!(entry["manifest_schema"].as_str(), Some(expected_schema));
-            assert_eq!(entry["maximum_bytes"].as_u64(), Some(maximum_bytes));
-            (
-                id.to_owned(),
-                entry["expected_manifest_hash"].as_str().unwrap().to_owned(),
-            )
+            let release = releases[id];
+            let source_id = format!("{id}_archive");
+            let source = sources[source_id.as_str()];
+            let shape = &entry["shape"];
+            assert_eq!(shape["kind"].as_str(), Some("whole_archive_tree"));
+            assert_eq!(shape["source"].as_str(), Some(source_id.as_str()));
+            assert_eq!(shape["prefix"].as_str(), release["prefix"].as_str());
+            assert_eq!(
+                shape["bounds"],
+                serde_yaml::to_value(&release["bounds"]).unwrap()
+            );
+            assert_eq!(entry["storage"].as_str(), release["storage"].as_str());
+            assert_eq!(source["url"].as_str(), release["url"].as_str());
+            assert_eq!(source["sha256"].as_str(), release["sha256"].as_str());
+            assert_eq!(declared[id], release["manifest_hash"].as_str().unwrap());
+            (id.to_owned(), declared[id].to_owned())
         })
         .collect::<BTreeMap<_, _>>();
     assert_eq!(captured, declared);

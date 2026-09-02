@@ -31,10 +31,10 @@ daemon-owned private workspace and runs the persistent worker under disabled
 OS isolation. An installed isolation backend is optional hardening; RyeOS
 records whether confinement and isolated networking were actually enforced.
 
-Installing the bundle does not acquire model/runtime content or grant node
-capacity. Follow `knowledge:local-inference/activation` to apply explicit
-managed-acquisition and persistent-session policy, then activate the complete
-fixture with one generic operation:
+Installing bundle bytes does not acquire model/runtime content. A fresh
+`full` or `full-sandbox` initialization explicitly publishes the bounded
+publisher-authored acquisition and persistent-session baseline needed by this
+fixture, so it can be activated with one generic operation:
 
 ```text
 ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation online
@@ -50,6 +50,12 @@ reproduces the worker's existing manifest pins, publishes ordinary consumer
 bindings, and records target-local settlement. The online path needs no
 installed assembler, public realization directory, named-root policy,
 node-side build, or manual import/bind loop.
+
+Reinstalling an existing node preserves its current node-owned policy
+generation. Operators use stopped-node `ryeos node policy-apply` only when
+deliberately changing that policy, adding an offline archive root, or repairing
+an older/missing policy generation; an ordinary fresh full initialization does
+not require hand-authored prerequisite policy files.
 
 For a network-independent node, the same operation accepts an explicitly
 selected node-policy archive root:

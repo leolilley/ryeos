@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:5a3b4005d3f6512bd9f3b160556e227035b7e087c95f02f21b847df16f554d29:TMDe6nHc5/v48Gkw2UEP6w3zY76BQwgAy0GrG+7PWOzfh4aNIx8njm06lqaBf9vl5140d093BKU7vPtmeZrBCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:50:48Z:2e935eee0aa21ab304bc5129e06111c9efe4f77f44dac11d2a496a119f87b34d:P4l73cZCUGdoSJRZP3isA6DUK9dbNnXS589lTfx83Tos7x0yd/UR1REdJt6f1WIKQYVnSdJJ7AYCDDD12ZaxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -47,28 +47,32 @@ knowledge bundle.
      store_budget_bytes: 1073741824
      minimum_free_bytes: 1073741824
    managed_activation:
-     allow_online: true
-     allowed_https_hosts: [releases.openai.com]
-     max_redirects: 0
-     max_archives: 1
-     max_compressed_bytes: 134217728
-     max_expanded_bytes: 335544320
-     max_members: 64
-     max_member_bytes: 268435456
-     max_concurrent_activations: 1
-     cache_budget_bytes: 536870912
-     store_budget_bytes: 1073741824
-     minimum_free_bytes: 1073741824
-     max_attempts: 3
+     enabled: true
+     limits:
+       allow_online: true
+       allowed_https_hosts: [releases.openai.com]
+       max_redirects: 0
+       max_archives: 1
+       max_compressed_bytes: 134217728
+       max_expanded_bytes: 335544320
+       max_members: 64
+       max_member_bytes: 268435456
+       max_concurrent_activations: 1
+       cache_budget_bytes: 536870912
+       store_budget_bytes: 1073741824
+       minimum_free_bytes: 1073741824
+       max_attempts: 3
    ```
 
    ```yaml
    schema: 1
+   enabled: true
    limits:
      max_pool_groups: 4
      max_total_processes: 4
      max_total_address_space_bytes: 68719476736
      max_total_cpu_seconds: 14400
+     max_real_uid_process_limit: 4096
      max_open_streams: 32
      max_active_streams: 4
      max_active_streams_per_subject: 1

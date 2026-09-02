@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T10:47:33Z:c0e4e54ca0bbe1f2b99fca16e5702a3e76435b993189a1b8e55e2149873fc80e:QNYQVZEzIjvtfJfGhHzSRTJ9ayJYaVM8XWrG55Y5F8g6r9mZk8ALmTnpE+ZoLW1kygq5ePSQORIDXOJwbmb5Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:56:53Z:5ace257bec64f8c2e4d4bbc6d30a82f1e56ec88a01fac174fbe0f91b92656b41:2m0uRRdAvcupCRU3e8L4gPhu1cmKzB+QUKiywFuBxQJRsZVkyYWMOVZf+FMBlGAinGu5MEk0LmhMFLheDyXRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
@@ -23,8 +23,10 @@ The ordinary full source installation includes the local-inference bundle:
 sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ~~~
 
-Installation does not acquire model/runtime bytes and does not silently grant
-node acquisition or persistent-process capacity. Bubblewrap is optional node
+Installation does not acquire model/runtime bytes. A fresh explicit `full` or
+`full-sandbox` initialization publishes a bounded publisher-authored
+acquisition and persistent-process baseline; reinstalling an existing node
+preserves that node's current policy generation. Bubblewrap is optional node
 hardening and is not an activation prerequisite.
 
 The shipped worker:local-inference/local-tinygrad and
@@ -65,11 +67,13 @@ provider contract.
 
 ## Node policy
 
-Apply node policy while the daemon is stopped. Online or cache-only managed
-activation needs no named filesystem root. The following is the recommended
-normal-node online shape for this fixture; operators may choose a different
-residual free-space reserve deliberately, but must not reduce the signed
-acquisition or import bounds:
+Apply a node-policy replacement only while the daemon is stopped. Online or
+cache-only managed activation needs no named filesystem root. The following is
+the current `full`/`full-sandbox` installed-bundle union with a recommended
+higher residual reserve. When applying this change, start from the node's
+current complete `external_content` member and change only the two
+`minimum_free_bytes` values; do not remove capacity or hosts required by other
+installed workloads. The current complete shape is:
 
 ~~~yaml
 schema: 1
@@ -82,21 +86,24 @@ limits:
   store_budget_bytes: 4294967296
   minimum_free_bytes: 8589934592
 managed_activation:
-  allow_online: true
-  allowed_https_hosts:
-    - github.com
-    - release-assets.githubusercontent.com
-  max_redirects: 2
-  max_archives: 4
-  max_compressed_bytes: 1329438282
-  max_expanded_bytes: 1893273600
-  max_members: 4836
-  max_member_bytes: 1503300328
-  max_concurrent_activations: 1
-  cache_budget_bytes: 2147483648
-  store_budget_bytes: 4294967296
-  minimum_free_bytes: 8589934592
-  max_attempts: 3
+  enabled: true
+  limits:
+    allow_online: true
+    allowed_https_hosts:
+      - github.com
+      - release-assets.githubusercontent.com
+      - releases.openai.com
+    max_redirects: 2
+    max_archives: 4
+    max_compressed_bytes: 1329438282
+    max_expanded_bytes: 1893273600
+    max_members: 4836
+    max_member_bytes: 1503300328
+    max_concurrent_activations: 1
+    cache_budget_bytes: 2147483648
+    store_budget_bytes: 4294967296
+    minimum_free_bytes: 8589934592
+    max_attempts: 3
 ~~~
 
 The two HTTPS hosts are separately node-admitted because an immutable GitHub
@@ -104,22 +111,28 @@ release URL redirects to GitHub's release-asset host. RyeOS follows at most the
 node-owned redirect ceiling, rechecks canonical HTTPS and the host allowlist on
 every hop, and still requires the exact signed archive digest.
 
-The 8 GiB residual free-space floor above is the normal node recommendation,
-not workload identity. The disposable release qualifier accepts an explicit
-`--minimum-free-bytes` node-policy value and records it in its evidence; its
-storage-constrained hosted runner uses 2 GiB only after deleting every build
-target. This changes local admission testimony, never archive, manifest,
-program, or replay identity.
+The 8 GiB residual free-space floor above is an operator recommendation, not
+workload identity. The publisher-authored `full` and `full-sandbox` baseline
+uses a reviewed 2 GiB floor so fresh source qualification can run on the
+storage-constrained hosted runner after deleting build targets. A higher local
+override changes admission testimony, never archive, manifest, program, or
+replay identity.
 
 The persistent worker also requires a separate node-owned session policy:
 
+`max_real_uid_process_limit` is the process's real-UID-wide `RLIMIT_NPROC`
+ceiling, not a per-worker descendant count. RyeOS separately bounds pool groups
+and total resident worker processes.
+
 ~~~yaml
 schema: 1
+enabled: true
 limits:
   max_pool_groups: 4
   max_total_processes: 1
   max_total_address_space_bytes: 17179869184
   max_total_cpu_seconds: 3600
+  max_real_uid_process_limit: 4096
   max_open_streams: 8
   max_active_streams: 1
   max_active_streams_per_subject: 1
@@ -128,8 +141,9 @@ limits:
 ~~~
 
 A fresh `full` or `full-sandbox` installation selects a publisher-signed init
-profile containing these values and publishes one complete node-signed
-generation under `.ai/node/policies/`. `external_content.yaml` and
+profile whose capacities cover the exact acquisition and worker requirements
+above, with the reviewed 2 GiB residual free-space baseline, and publishes one
+complete node-signed generation under `.ai/node/policies/`. `external_content.yaml` and
 `persistent_sessions.yaml` are mandatory members. An operator changing either
 member later must stop the daemon and use
 `ryeos node policy-apply <section> <source.yaml>`; that command validates the

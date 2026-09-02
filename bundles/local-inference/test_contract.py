@@ -43,6 +43,10 @@ RELEASE_VERIFIER_PATH = (
 ACTIVATION_KNOWLEDGE_PATH = (
     BUNDLE / ".ai/knowledge/local-inference/activation.md"
 )
+FULL_PROFILE_PATH = REPOSITORY / "bundles/.ai/node/init/profiles/full.yaml"
+FULL_SANDBOX_PROFILE_PATH = (
+    REPOSITORY / "bundles/.ai/node/init/profiles/full-sandbox.yaml"
+)
 
 
 def worker_source_manifest_digest() -> str:
@@ -211,7 +215,8 @@ class LocalInferenceContractTests(unittest.TestCase):
             policy["limits"]["max_total_bytes"],
             max(item["maximum_total_bytes"] for item in bounds),
         )
-        managed = policy["managed_activation"]
+        self.assertTrue(policy["managed_activation"]["enabled"])
+        managed = policy["managed_activation"]["limits"]
         self.assertEqual(managed["max_archives"], len(realizations))
         self.assertEqual(
             managed["max_compressed_bytes"],
@@ -230,6 +235,71 @@ class LocalInferenceContractTests(unittest.TestCase):
             max(item["maximum_file_bytes"] for item in bounds),
         )
         self.assertEqual(managed["max_concurrent_activations"], 1)
+
+    def test_full_init_profiles_admit_the_exact_release(self) -> None:
+        realizations = self.release["realizations"]
+        bounds = [item["bounds"] for item in realizations]
+        for path in (FULL_PROFILE_PATH, FULL_SANDBOX_PROFILE_PATH):
+            profile = yaml.safe_load(path.read_text(encoding="utf-8"))
+            external = profile["policies"]["external_content"]
+            self.assertEqual(
+                external["limits"]["max_depth"],
+                max(item["maximum_depth"] for item in bounds),
+                path,
+            )
+            self.assertEqual(
+                external["limits"]["max_entries"],
+                max(item["maximum_entries"] for item in bounds),
+                path,
+            )
+            self.assertEqual(
+                external["limits"]["max_file_bytes"],
+                max(item["maximum_file_bytes"] for item in bounds),
+                path,
+            )
+            self.assertEqual(
+                external["limits"]["max_total_bytes"],
+                max(item["maximum_total_bytes"] for item in bounds),
+                path,
+            )
+            self.assertEqual(
+                external["limits"]["store_budget_bytes"], 4 * 1024**3, path
+            )
+            self.assertTrue(external["managed_activation"]["enabled"], path)
+            managed = external["managed_activation"]["limits"]
+            self.assertEqual(
+                set(managed["allowed_https_hosts"]),
+                {
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "releases.openai.com",
+                },
+                path,
+            )
+            self.assertEqual(managed["max_archives"], len(realizations), path)
+            self.assertEqual(
+                managed["max_compressed_bytes"],
+                sum(item["maximum_compressed_bytes"] for item in realizations),
+                path,
+            )
+            self.assertEqual(
+                managed["max_expanded_bytes"],
+                sum(item["maximum_expanded_bytes"] for item in realizations),
+                path,
+            )
+            self.assertEqual(
+                managed["max_members"],
+                sum(item["maximum_entries"] for item in realizations),
+                path,
+            )
+            self.assertEqual(
+                managed["max_member_bytes"],
+                max(item["maximum_file_bytes"] for item in bounds),
+                path,
+            )
+            sessions = profile["policies"]["persistent_sessions"]
+            self.assertTrue(sessions["enabled"], path)
+            self.assertEqual(sessions["limits"]["max_real_uid_process_limit"], 4096, path)
 
     def test_worker_source_digest_covers_the_complete_source_closure(self) -> None:
         source = WORKER_PATH.read_text(encoding="utf-8")
@@ -264,14 +334,20 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("--archive-root", source_qualifier)
         self.assertEqual(source_qualifier.count("--minimum-free-bytes 2147483648"), 2)
         self.assertIn("--archive-root", qualifier)
-        self.assertIn('"minimum_free_bytes": int(sys.argv[2])', qualifier)
+        self.assertIn("minimum_free_bytes = int(sys.argv[5])", qualifier)
         self.assertIn('source "$repository_root/scripts/pkg/bundle-sets.sh"', qualifier)
         self.assertIn("ryeos_bundle_set_names full", qualifier)
         self.assertIn('--source "$qualification_source"', qualifier)
+        self.assertIn("--node-profile full", qualifier)
+        self.assertIn('minimum_free_bytes="2147483648"', qualifier)
+        self.assertIn(
+            '"$node_root/.ai/node/policies/external_content.yaml"', qualifier
+        )
+        self.assertIn('"external_content_policy": json.loads(', qualifier)
         self.assertNotIn('--source "$bundle_source"', qualifier)
         self.assertNotIn("shutil.copyfile", qualifier)
         self.assertIn(
-            'python3 - "$qualification_root" "$minimum_free_bytes" <<\'PY\'',
+            'python3 - "$qualification_root" <<\'PY\'',
             qualifier,
         )
         self.assertIn('max_total_address_space_bytes"] = 1', qualifier)

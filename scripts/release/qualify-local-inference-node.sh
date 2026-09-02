@@ -23,7 +23,7 @@ trust_file=""
 qualification_parent="${RUNNER_TEMP:-/tmp}"
 online=0
 archive_root=""
-minimum_free_bytes="8589934592"
+minimum_free_bytes="2147483648"
 keep=0
 while (($#)); do
     case "$1" in
@@ -46,6 +46,10 @@ done
 [[ "$minimum_free_bytes" =~ ^[1-9][0-9]*$ ]] || usage
 if [[ "$online" -eq 1 ]]; then
     [[ -z "$archive_root" ]] || usage
+    [[ "$minimum_free_bytes" == "2147483648" ]] || {
+        echo "online qualification uses the full profile's exact 2147483648-byte free-space floor" >&2
+        exit 2
+    }
 else
     [[ -n "$archive_root" && -d "$archive_root" ]] || usage
 fi
@@ -57,6 +61,7 @@ qualification_parent="$(realpath "$qualification_parent")"
 if [[ -n "$archive_root" ]]; then
     archive_root="$(realpath "$archive_root")"
 fi
+
 repository_root="$(cd "$(dirname "$0")/../.." && pwd)"
 if [[ -n "$trust_file" ]]; then
     trust_file="$(realpath "$trust_file")"
@@ -185,39 +190,44 @@ external = {
         "minimum_free_bytes": minimum_free_bytes,
     },
     "managed_activation": {
-        "allow_online": not bool(archive_root),
-        "allowed_https_hosts": [] if archive_root else [
-            "github.com", "release-assets.githubusercontent.com"
-        ],
-        "max_redirects": 2,
-        "max_archives": len(realizations),
-        "max_compressed_bytes": sum(
-            item["maximum_compressed_bytes"] for item in realizations
-        ),
-        "max_expanded_bytes": sum(
-            item["maximum_expanded_bytes"] for item in realizations
-        ),
-        "max_members": sum(item["maximum_entries"] for item in realizations),
-        "max_member_bytes": max(item["maximum_file_bytes"] for item in bounds),
-        "max_concurrent_activations": 1,
-        "cache_budget_bytes": 2 * 1024**3,
-        "store_budget_bytes": 4 * 1024**3,
-        "minimum_free_bytes": minimum_free_bytes,
-        "max_attempts": 3,
+        "enabled": True,
+        "limits": {
+            "allow_online": not bool(archive_root),
+            "allowed_https_hosts": [] if archive_root else [
+                "github.com", "release-assets.githubusercontent.com"
+            ],
+            "max_redirects": 2,
+            "max_archives": len(realizations),
+            "max_compressed_bytes": sum(
+                item["maximum_compressed_bytes"] for item in realizations
+            ),
+            "max_expanded_bytes": sum(
+                item["maximum_expanded_bytes"] for item in realizations
+            ),
+            "max_members": sum(item["maximum_entries"] for item in realizations),
+            "max_member_bytes": max(item["maximum_file_bytes"] for item in bounds),
+            "max_concurrent_activations": 1,
+            "cache_budget_bytes": 2 * 1024**3,
+            "store_budget_bytes": 4 * 1024**3,
+            "minimum_free_bytes": minimum_free_bytes,
+            "max_attempts": 3,
+        },
     },
 }
 persistent = {
     "schema": 1,
+    "enabled": True,
     "limits": {
         "max_pool_groups": 4,
-        "max_total_processes": 1,
-        "max_total_address_space_bytes": 16 * 1024**3,
-        "max_total_cpu_seconds": 3600,
-        "max_open_streams": 8,
-        "max_active_streams": 1,
+        "max_total_processes": 4,
+        "max_total_address_space_bytes": 64 * 1024**3,
+        "max_total_cpu_seconds": 14400,
+        "max_real_uid_process_limit": 4096,
+        "max_open_streams": 32,
+        "max_active_streams": 4,
         "max_active_streams_per_subject": 1,
         "max_stream_backlog_bytes": 16 * 1024**2,
-        "max_total_backlog_bytes": 16 * 1024**2,
+        "max_total_backlog_bytes": 64 * 1024**2,
     },
 }
 Path(sys.argv[2]).write_text(json.dumps(external, indent=2) + "\n", encoding="utf-8")
@@ -430,17 +440,50 @@ PY
 
 init_args=(
     init --non-interactive --app-root "$node_root" --source "$qualification_source"
+    --node-profile full
 )
 if [[ -n "$trust_file" ]]; then
     init_args+=(--trust-file "$trust_file")
 fi
 HOME="$home_root" "$ryeos_bin" "${init_args[@]}" >/dev/null
-HOME="$home_root" "$ryeos_bin" node policy-apply external_content \
-    "$policy_root/external-content.json" --app-root "$node_root" --json \
-    > "$qualification_root/external-content-policy-result.json"
-HOME="$home_root" "$ryeos_bin" node policy-apply persistent_sessions \
-    "$policy_root/persistent-sessions.json" --app-root "$node_root" --json \
-    > "$qualification_root/persistent-sessions-policy-result.json"
+if [[ -n "$archive_root" ]]; then
+    HOME="$home_root" "$ryeos_bin" node policy-apply external_content \
+        "$policy_root/external-content.json" --app-root "$node_root" --json \
+        > "$qualification_root/external-content-policy-result.json"
+fi
+
+python3 - "$node_root/.ai/node/policies/external_content.yaml" \
+    "$qualification_root/external-policy-evidence.json" \
+    "$minimum_free_bytes" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+import yaml
+
+policy_path = Path(sys.argv[1])
+policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+expected = int(sys.argv[3])
+managed = policy["managed_activation"]
+if not managed["enabled"] or managed["limits"] is None:
+    raise SystemExit("installed policy does not enable managed activation")
+if policy["limits"]["minimum_free_bytes"] != expected:
+    raise SystemExit("installed external-content free-space floor differs from qualification")
+if managed["limits"]["minimum_free_bytes"] != expected:
+    raise SystemExit("installed managed-activation free-space floor differs from qualification")
+Path(sys.argv[2]).write_text(
+    json.dumps(
+        {
+            "source": str(policy_path),
+            "minimum_free_bytes": expected,
+            "managed_activation_enabled": True,
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n",
+    encoding="utf-8",
+)
+PY
 
 cache_root="$node_root/.ai/state/cache/managed-external-content/archives"
 [[ ! -e "$cache_root" ]] || {
@@ -1067,7 +1110,7 @@ import sys
 
 path = Path(sys.argv[1])
 policy = json.loads(path.read_text(encoding="utf-8"))
-policy["limits"]["max_total_address_space_bytes"] = 16 * 1024**3
+policy["limits"]["max_total_address_space_bytes"] = 64 * 1024**3
 path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
 PY
 HOME="$home_root" "$ryeos_bin" node policy-apply persistent_sessions \
@@ -1316,7 +1359,7 @@ evidence = {
 connection.close()
 PY
 
-python3 - "$qualification_root" "$minimum_free_bytes" <<'PY'
+python3 - "$qualification_root" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -1324,7 +1367,9 @@ import sys
 root = Path(sys.argv[1])
 summary = {
     "schema": "ryeos.local_inference_node_qualification.v1",
-    "minimum_free_bytes": int(sys.argv[2]),
+    "external_content_policy": json.loads(
+        (root / "external-policy-evidence.json").read_text()
+    ),
     "activation": json.loads((root / "activation-first.json").read_text()),
     "idempotent_activation": json.loads(
         (root / "activation-idempotent.json").read_text()

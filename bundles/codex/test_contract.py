@@ -10,6 +10,8 @@ import re
 import stat
 import unittest
 
+import yaml
+
 
 BUNDLE = Path(__file__).resolve().parent
 SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
@@ -20,6 +22,9 @@ ENVIRONMENT_ACTIVATION_PATH = (
     BUNDLE / ".ai/config/codex/environment-activation.yaml"
 )
 ENVIRONMENT_PATH = BUNDLE / ".ai/config/codex/environments/default.yaml"
+HOSTED_WORKFLOW_PROFILE_PATH = (
+    BUNDLE.parent / ".ai/node/init/profiles/hosted-workflow.yaml"
+)
 
 
 def source_manifest_digest() -> str:
@@ -164,6 +169,18 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn(f"    digest: {manifest_digest}", environment)
         self.assertIn("    - realization_id: developer-tools", environment)
         self.assertIn("      relative_directory: bin", environment)
+
+    def test_hosted_workflow_profile_admits_the_signed_worker(self) -> None:
+        worker = yaml.safe_load(WORKER_PATH.read_text(encoding="utf-8"))
+        profile = yaml.safe_load(
+            HOSTED_WORKFLOW_PROFILE_PATH.read_text(encoding="utf-8")
+        )
+        sessions = profile["policies"]["persistent_sessions"]
+        self.assertTrue(sessions["enabled"])
+        self.assertGreaterEqual(
+            sessions["limits"]["max_real_uid_process_limit"],
+            worker["session_resources"]["real_uid_process_limit"],
+        )
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
         activation = ACTIVATION_PATH.read_text(encoding="utf-8")
