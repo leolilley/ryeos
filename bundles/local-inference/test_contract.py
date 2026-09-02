@@ -523,6 +523,13 @@ class LocalInferenceContractTests(unittest.TestCase):
             '"authority_digest": record["coordinate"]["authority_digest"]',
             '"thread_id": expected_thread',
             'observation.get("produced_by_thread") != expected_thread',
+            'execution-thread-{profile.rsplit(\'-\', 1)[-1]}.txt',
+            'new_thread_id_for_item',
+            'threads-before-execution-4096.json',
+            'threads-after-execution-4096.json',
+            'threads-before-execution-2048.json',
+            'threads-after-execution-2048.json',
+            'if len(new) != 1 or len(matches) != 1:',
         ):
             self.assertIn(required_join, qualifier)
 

@@ -700,6 +700,39 @@ print(thread_id)
 PY
 }
 
+new_thread_id_for_item() {
+    local before_file="$1"
+    local after_file="$2"
+    local item_ref="$3"
+    local expected_status="$4"
+    python3 - "$before_file" "$after_file" "$item_ref" "$expected_status" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+before_path, after_path = map(Path, sys.argv[1:3])
+item_ref, expected_status = sys.argv[3:5]
+before = {
+    item["thread_id"]
+    for item in json.loads(before_path.read_text(encoding="utf-8")).get("threads", [])
+}
+after = json.loads(after_path.read_text(encoding="utf-8")).get("threads", [])
+new = [item for item in after if item.get("thread_id") not in before]
+matches = [
+    item for item in new
+    if item.get("item_ref") == item_ref and item.get("status") == expected_status
+]
+if len(new) != 1 or len(matches) != 1:
+    raise SystemExit(
+        f"expected one new {expected_status} thread for {item_ref}, observed {new!r}"
+    )
+thread_id = matches[0].get("thread_id")
+if not isinstance(thread_id, str) or not thread_id:
+    raise SystemExit(f"new thread for {item_ref} has no exact id")
+print(thread_id)
+PY
+}
+
 thread_service() {
     local service_ref="$1"
     local request_json="$2"
@@ -914,11 +947,9 @@ expected_profiles = {
     "qwen3-0.6b-cpu-2048": "worker:local-inference/qwen3-0.6b-cpu-2048",
 }
 expected_threads = {
-    profile: json.loads(
-        (qualification_root / f"executed-{profile.rsplit('-', 1)[-1]}.json").read_text(
-            encoding="utf-8"
-        )
-    )["thread_id"]
+    profile: (
+        qualification_root / f"execution-thread-{profile.rsplit('-', 1)[-1]}.txt"
+    ).read_text(encoding="utf-8").strip()
     for profile in expected_profiles
 }
 attempts_by_id = {item["attempt_id"]: item for item in attempts}
@@ -1300,6 +1331,8 @@ HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" \
     graph:qualification/live_tool_follow \
     > "$qualification_root/project-signing.json"
 
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-execution-4096.json"
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
     directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
     --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
@@ -1308,6 +1341,13 @@ assert_json_path "$qualification_root/executed-4096.json" status completed
 assert_json_path "$qualification_root/executed-4096.json" success true
 assert_json_path "$qualification_root/executed-4096.json" result OK
 assert_json_missing "$qualification_root/executed-4096.json" error
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-execution-4096.json"
+new_thread_id_for_item \
+    "$qualification_root/threads-before-execution-4096.json" \
+    "$qualification_root/threads-after-execution-4096.json" \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke completed \
+    > "$qualification_root/execution-thread-4096.txt"
 worker_pids > "$qualification_root/worker-pids-4096.txt"
 [[ -s "$qualification_root/worker-pids-4096.txt" ]] || {
     echo "4096 profile left no resident admitted worker" >&2
@@ -1320,6 +1360,8 @@ stop_node
     exit 1
 }
 start_node
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-execution-2048.json"
 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
     directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
     --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke \
@@ -1328,6 +1370,13 @@ assert_json_path "$qualification_root/executed-2048.json" status completed
 assert_json_path "$qualification_root/executed-2048.json" success true
 assert_json_path "$qualification_root/executed-2048.json" result OK
 assert_json_missing "$qualification_root/executed-2048.json" error
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-execution-2048.json"
+new_thread_id_for_item \
+    "$qualification_root/threads-before-execution-2048.json" \
+    "$qualification_root/threads-after-execution-2048.json" \
+    directive:local-inference/examples/qwen3_0_6b_cpu_2048_smoke completed \
+    > "$qualification_root/execution-thread-2048.txt"
 worker_pids > "$qualification_root/worker-pids-2048.txt"
 [[ -s "$qualification_root/worker-pids-2048.txt" ]] || {
     echo "2048 profile left no resident admitted worker" >&2
