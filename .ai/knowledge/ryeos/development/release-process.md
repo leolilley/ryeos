@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-29T01:43:10Z:b943fe533b82461f7a1c4f38a06fc6a652c4a4d6eb0aa24897791edc27a18bb9:x+6bEhkAIK1mvaS3YmnJpiTGri4YEommNUurU7DnOd6/blr+Z1YtiwXBWtRMc0e5RBxlgd34jC4cUqK99f/gDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-02T02:25:04Z:f9b4ecdd92c867ff8ecab8e417d0624eed9a0957f7cee6f933ee07db32a3885b:YMw9SbWrLFFG7R78rBxhJAf3Aoeutjn8kuHo9+UtjPNeA3bQAiMvpkEq90LAvJEGXZugVs/6a7JENcNAV9WvCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -199,9 +199,10 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 
 `--all` is REQUIRED: `populate-bundles.sh` refuses to rebuild the whole bundle
 set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
-`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-core-tools`
-for core-tools). `--jobs N` caps cargo parallelism if a full release build
-exhausts memory. The release Dockerfiles already pass `--all`.
+`--crates "<Cargo package ...>"` for a focused development rebuild (e.g.
+`--crates ryeosd` for a daemon-only correction). `--jobs N` caps Cargo
+parallelism if a full release build exhausts memory. The release Dockerfiles
+already pass `--all`.
 
 Do not manually copy binaries into bundle trees or hand-edit signed bundle YAML
 as a release fix.
@@ -414,8 +415,10 @@ Bundle rebuilding/republishing is opt-in and expensive:
   --populate --all --trust-source-publishers
 ```
 
-Use `--populate --crates "<crate ...>"` for an explicit subset. The publisher
-key defaults to `.dev-keys/PUBLISHER_DEV.pem` only when population is requested.
+Use `--populate --crates "<Cargo package ...>"` for an explicit development
+subset. The selected packages are rebuilt; unselected bundle payloads retain
+their exact existing artifact generations. The publisher key defaults to
+`.dev-keys/PUBLISHER_DEV.pem` only when population is requested.
 
 Important caveats:
 
@@ -440,9 +443,10 @@ Important caveats:
   ryeos node status
   ```
 
-- The default can preserve stale bundle binaries/signatures if the checkout
-  artifacts were not refreshed first. Pass `--populate --all` or
-  `--populate --crates "<crate ...>"` when regeneration is required.
+- The default deliberately installs the checkout's exact closed bundle
+  generation without comparing it to mutable source mtimes. Pass
+  `--populate --crates "<Cargo package ...>"` for focused regeneration;
+  release/E2E qualification uses `--populate --all`.
 - `--no-init` leaves initialized user state unchanged.
 - `--no-daemon-restart` leaves any daemon restart to you.
 - `--bundle-set hosted-node` intentionally installs only `core`,
@@ -463,8 +467,8 @@ refresh/sign bundles as bundles:
 
 This builds release binaries, stages bundle bin trees, signs signable bundle
 items, rebuilds CAS manifests, and emits trust documents. `--all` is required
-(or `--crates "<crate ...>"` to rebuild a subset) — populate refuses an implicit
-full build.
+(or `--crates "<Cargo package ...>"` for a development subset) — populate
+refuses an implicit full build.
 
 Do not:
 

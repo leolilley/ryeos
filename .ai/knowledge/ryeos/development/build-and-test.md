@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T21:21:33Z:2ec5fc70b48e6b60ac4e3b24d7cb056e0d1d9f70538ddfa72287dba59d9e416d:zgLurCnjLNHHvFMUyontwKlf/6Rcz95jn8Zer23UvWP5QOvug+LEdUN5tb2cSzO2sD3fYeEgdwXCbOkyVnd0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T02:25:04Z:04e5b742ca532562bc6d48ff2b3c8bd9cbd1f7463d38ce6f731a1cf08f1cdb01:wVR/FHW+sb6hPdkb22ofXkz/X2vhzxqgyK3u9iH9G3GHg7nGtklINIpm3p8VSR+DMG/0i4yuRRZKrk8gKjFUCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -79,9 +79,9 @@ directly:
 ```
 
 `--all` is required — populate refuses to rebuild the whole bundle set
-implicitly (exits 2 otherwise). Use `--crates "<crate ...>"` to rebuild only
-what changed (e.g. `--crates ryeos-core-tools`), and `--jobs N` to cap parallelism if
-a full release build runs the machine out of memory.
+implicitly (exits 2 otherwise). Use `--crates "<Cargo package ...>"` to rebuild
+only selected packages (e.g. `--crates ryeosd`), and `--jobs N` to cap
+parallelism if a full release build runs the machine out of memory.
 
 It does all of this as one atomic authoring refresh:
 
@@ -157,8 +157,9 @@ explicitly:
   --populate --all --trust-source-publishers
 ```
 
-Use `--populate --crates "<crate ...>"` instead when only named bundle-owned
-binaries need rebuilding.
+Use `--populate --crates "<Cargo package ...>"` when only selected packages
+need rebuilding. This also covers node-only packages such as `ryeosd`; every
+unselected bundle payload retains its existing exact artifact generation.
 
 ### Clean-cut execution-state upgrades
 

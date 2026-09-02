@@ -33,8 +33,8 @@ central-auth, standard, web, browser, ryeos-ui, hosted-node, codex,
 local-inference).
 
 Options:
-  --populate            Run scripts/populate-bundles.sh first (expensive; rebuilds
-                        bundle-owned release binaries and republishes bundles)
+  --populate            Run scripts/populate-bundles.sh first. Requires either a
+                        targeted --crates package list or explicit --all.
   --no-init             Install files but do not run ryeos init
   --no-daemon-restart   Do not stop/restart an already-running daemon
   --keep-shadows        Do not move /usr/local/bin or ~/.local/bin RyeOS shadows
@@ -55,20 +55,22 @@ Options:
                         (default: full)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
-  --crates "A B C"      With --populate, rebuild only these crates (e.g.
-                        --crates ryeos-core-tools to refresh just core-tools). Other
-                        bundle binaries must already exist in target/release.
+  --crates "A B C"      With --populate, rebuild only these Cargo packages (e.g.
+                        --crates ryeosd for a daemon-only source correction).
+                        Unselected bundle payloads retain their existing exact
+                        artifact generation and must already be built.
   --all                 With --populate, rebuild the whole bundle set. Required to
                         do a full rebuild — --populate refuses to build everything
                         implicitly (that full release build is what exhausts memory).
   -h, --help            Show this help
 
-Default behavior is incremental: install already-built binaries and bundle
-sources, stop any already-running daemon, move stale PATH shadows aside, run
-ryeos init using only the compiled official-publisher trust root, then restart
-the daemon if it was running before the install. Development/custom publisher
-documents require --trust-source-publishers. Pass --populate only when bundle
-artifacts actually need to be regenerated.
+Default behavior installs already-built user binaries and exact, closed source
+bundle generations without rebuilding or republishing their payloads. It stops
+any already-running daemon, moves stale PATH shadows aside, runs ryeos init
+using only the compiled official-publisher trust root, then restarts the daemon
+if it was running before the install. Development/custom publisher documents
+require --trust-source-publishers. Use --populate --crates ... for the focused
+development loop; reserve --populate --all for release/E2E qualification.
 EOF
 }
 
@@ -122,110 +124,6 @@ ryeos_user() {
 
 ryeos_status_quick() {
     RYEOS_TTY=never ryeos_user 10 node status 2>/dev/null || true
-}
-
-bundle_payload_bins() {
-    case "$1" in
-        core)
-            printf '%s\n' \
-                rye-parser-yaml-document \
-                rye-parser-yaml-header-document \
-                rye-parser-regex-kv \
-                rye-composer-identity \
-                ryeos-core-tools \
-                ryeos-session-exec \
-                ryeos-worker-execution-launch-preparer \
-                ryeos-worker-execution-runtime
-            ;;
-        standard)
-            printf '%s\n' \
-                ryeos-directive-runtime \
-                ryeos-directive-launch-preparer \
-                ryeos-graph-runtime \
-                ryeos-knowledge-runtime \
-                rye-composer-extends-chain \
-                ryeos-graph-effective-validator
-            ;;
-        ryeos-ui)
-            printf '%s\n' ryeos-tui web
-            ;;
-        web)
-            printf '%s\n' ryeos-web-tools
-            ;;
-        browser)
-            printf '%s\n' ryeos-browser-tools
-            ;;
-        codex)
-            printf '%s\n' ryeos-structured-session-bridge
-            ;;
-    esac
-}
-
-bundle_payload_binary_path() {
-    case "$1" in
-        ryeos-session-exec|ryeos-worker-execution-launch-preparer|ryeos-worker-execution-runtime|ryeos-structured-session-bridge)
-            printf '%s\n' "$static_target_dir/$1"
-            ;;
-        *)
-            printf '%s\n' "$target_dir/$1"
-            ;;
-    esac
-}
-
-foundational_newest_mtime() {
-    find \
-        "$repo_root/crates/engine/ryeos-engine/src" \
-        "$repo_root/crates/engine/ryeos-runtime/src" \
-        "$repo_root/crates/state/ryeos-state/src" \
-        "$repo_root/crates/daemon/ryeos-app/src" \
-        -type f -name '*.rs' -printf '%T@\n' 2>/dev/null \
-        | sort -rn | head -n1 | cut -d. -f1
-}
-
-validate_incremental_bundle_payload_sources() {
-    local newest bin source source_mtime name
-    local -a stale=()
-    newest="$(foundational_newest_mtime)"
-    for name in "$@"; do
-        while IFS= read -r bin; do
-            [[ -n "$bin" ]] || continue
-            source="$(bundle_payload_binary_path "$bin")"
-            [[ -x "$source" ]] || die "bundle payload binary missing: $source"
-            if [[ "$bin" == "ryeos-session-exec" \
-                || "$bin" == "ryeos-worker-execution-launch-preparer" \
-                || "$bin" == "ryeos-worker-execution-runtime" \
-                || "$bin" == "ryeos-structured-session-bridge" ]] && {
-                readelf -l "$source" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-                    || readelf -d "$source" | grep -Eq 'NEEDED'
-            }; then
-                die "refusing non-static admitted persistent-session payload: $source"
-            fi
-            # These payloads are standalone executables: Cargo proves they do
-            # not link the foundational RyeOS crates. Keep this set aligned
-            # with staged_foundational_release_bins_for_set in
-            # populate-bundles.sh so authoring and incremental install apply
-            # the same generation fence.
-            if [[ "$bin" != "ryeos-session-exec" \
-                && "$bin" != "ryeos-web-tools" \
-                && "$bin" != "ryeos-browser-tools" \
-                && -n "$newest" ]]; then
-                source_mtime="$(stat -c %Y "$source" 2>/dev/null || echo 0)"
-                if (( source_mtime < newest )); then
-                    stale+=("$bin")
-                fi
-            fi
-        done < <(bundle_payload_bins "$name")
-    done
-    if (( ${#stale[@]} > 0 )); then
-        ryeos_term_fail "refusing incremental install with payloads older than foundational RyeOS sources"
-        printf '    - %s\n' "${stale[@]}" >&2
-        die "rebuild the affected payloads or use --populate with the correct crate scope"
-    fi
-}
-
-publisher_fingerprint_from_trust_doc() {
-    local trust_file="$1"
-    sed -n 's/^fingerprint *= *"\([^"]*\)".*/\1/p' "$trust_file" | head -n1
 }
 
 # Refuse a non-official key in a source publisher document before stopping the
@@ -380,108 +278,6 @@ collect_selected_source_trust_args() {
     return 0
 }
 
-operator_fingerprint() {
-    local key_path="${init_app_root:-$invoking_user_home/.local/share/ryeos}/.ai/config/keys/signing/private_key.pem"
-    [[ -s "$key_path" ]] || return 1
-    openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
-        | tail -c 32 \
-        | sha256sum \
-        | cut -d' ' -f1
-}
-
-refresh_installed_bundle_payload() {
-    local name="$1"
-    local dest="$share_dir/$name"
-    local bin_dest="$dest/.ai/bin/x86_64-unknown-linux-gnu"
-    local bins=()
-    local b source
-    local trust_fp operator_fp
-
-    while IFS= read -r b; do
-        [[ -n "$b" ]] && bins+=("$b")
-    done < <(bundle_payload_bins "$name")
-    [[ ${#bins[@]} -gt 0 ]] || return 0
-
-    [[ -x "$target_dir/ryeos-core-tools" ]] || \
-        die "bundle payload refresh requires built binary: $target_dir/ryeos-core-tools"
-    # populate-bundles.sh now publishes one shared trust doc at
-    # bundles/.ai/PUBLISHER_TRUST.toml and removes per-bundle copies; accept
-    # the per-bundle doc when a bundle still ships one, else the shared doc.
-    local trust_doc="$dest/PUBLISHER_TRUST.toml"
-    [[ -f "$trust_doc" ]] || trust_doc="$share_dir/.ai/PUBLISHER_TRUST.toml"
-    [[ -f "$trust_doc" ]] || \
-        die "bundle payload refresh requires trust doc: $dest/PUBLISHER_TRUST.toml or $share_dir/.ai/PUBLISHER_TRUST.toml"
-    trust_fp="$(publisher_fingerprint_from_trust_doc "$trust_doc")"
-    operator_fp="$(operator_fingerprint || true)"
-    if [[ -z "$operator_fp" || "$trust_fp" != "$operator_fp" ]]; then
-        ryeos_term_note "skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
-        return 0
-    fi
-
-    ryeos_term_info "refreshing $name bundle payload"
-    sudo mkdir -p "$bin_dest"
-    for b in "${bins[@]}"; do
-        source="$(bundle_payload_binary_path "$b")"
-        [[ -x "$source" ]] || die "bundle payload binary missing: $source"
-        if [[ "$b" == "ryeos-session-exec" \
-            || "$b" == "ryeos-worker-execution-launch-preparer" \
-            || "$b" == "ryeos-worker-execution-runtime" \
-            || "$b" == "ryeos-structured-session-bridge" ]] && {
-            readelf -l "$source" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-                || readelf -d "$source" | grep -Eq 'NEEDED'
-        }; then
-            die "refusing non-static admitted persistent-session payload: $source"
-        fi
-        sudo install -Dm755 "$source" "$bin_dest/$b"
-    done
-
-    case "$name" in
-        core)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            ;;
-        standard)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$share_dir/core" \
-                --registry-root "$share_dir/core" \
-                --registry-root "$share_dir/standard" \
-                --owner "$owner" >/dev/null
-            ;;
-        ryeos-ui)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --registry-root "$share_dir/standard" \
-                --owner "$owner" >/dev/null
-            ;;
-        web)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            ;;
-        browser)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            ;;
-        codex)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --registry-root "$share_dir/standard" \
-                --owner "$owner" >/dev/null
-            ;;
-    esac
-}
-
 pid_from_status() {
     awk '
         /^pid:/ { print $2; exit }
@@ -589,7 +385,7 @@ key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
 bundle_set="full"
 jobs=""            # forwarded to populate as cargo -j N
-crates=""          # forwarded to populate to rebuild only these crates
+crates=""          # forwarded to populate to rebuild only these Cargo packages
 populate_all=0     # explicit opt-in to rebuild the whole bundle set
 
 while [[ $# -gt 0 ]]; do
@@ -635,7 +431,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --crates)
-            [[ $# -ge 2 ]] || die "--crates requires a space-separated crate list"
+            [[ $# -ge 2 ]] || die "--crates requires a space-separated Cargo package list"
             crates="$2"
             shift 2
             ;;
@@ -654,6 +450,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$repo_root"
+
+if [[ -n "$crates" && $populate_all -eq 1 ]]; then
+    die "--crates and --all are mutually exclusive build scopes"
+fi
+if [[ $run_populate -eq 0 && ( -n "$crates" || $populate_all -eq 1 ) ]]; then
+    die "--crates and --all require --populate"
+fi
 
 bundle_names=()
 while IFS= read -r _bundle_name; do
@@ -677,7 +480,6 @@ bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
 doc_dir="/usr/share/doc/ryeos"
 target_dir="$repo_root/target/release"
-static_target_dir="$repo_root/target/x86_64-unknown-linux-gnu/release"
 init_app_root="${RYEOS_APP_ROOT:-}"
 
 # Only user-facing binaries go in /usr/bin/.
@@ -698,7 +500,7 @@ if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     # Be explicit about scope — never trigger a full workspace rebuild implicitly.
     if [[ -z "$crates" && $populate_all -eq 0 ]]; then
-        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools), or --all to rebuild the whole '$bundle_set' set"
+        die "--populate needs an explicit scope: pass --crates \"<Cargo package ...>\" for a focused rebuild (e.g. --crates ryeosd), or --all to rebuild the whole '$bundle_set' set"
     fi
     ryeos_term_begin INSTALL "populating bundles"
     populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")
@@ -763,10 +565,6 @@ fi
 # build may recreate this closed evidence.
 require_closed_source_bundle_payloads "$repo_root" "${closed_payload_bundle_names[@]}" \
     || die "selected source bundle set is incomplete"
-
-if [[ $run_populate -eq 0 ]]; then
-    validate_incremental_bundle_payload_sources "${bundle_names[@]}"
-fi
 
 daemon_was_running=0
 if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
@@ -874,11 +672,6 @@ for name in "${bundle_names[@]}"; do
         [[ -s "$doc_dir/$name/$(basename "$pinned_contract")" ]] || \
             die "failed to install $name pinned workload contract"
     done
-done
-for name in "${bundle_names[@]}"; do
-    if [[ $run_populate -eq 0 ]]; then
-        refresh_installed_bundle_payload "$name"
-    fi
 done
 sudo chown -R root:root "$share_dir"
 

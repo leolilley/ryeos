@@ -257,20 +257,20 @@ authored and installed separately when an operator chooses to use one.
 ```bash
 git clone https://github.com/leolilley/ryeos.git
 cd ryeos
-cargo build
-./scripts/pkg/install-local-direct.sh --trust-source-publishers
+./scripts/pkg/install-local-direct.sh \
+  --populate --all --trust-source-publishers
 ```
 
-`scripts/pkg/install-local-direct.sh` installs the current built artifacts into
-the local packaged layout and initializes the user system space. It does not
-refresh bundle artifacts by default. Checkout bundles are normally signed by
-the development publisher, so the example makes that trust decision explicit.
+The first source install builds and publishes the complete artifact base.
+Subsequent installs reuse its exact closed bundle generations by default, or
+can rebuild only selected Cargo packages with `--populate --crates "..."`.
+Checkout bundles are normally signed by the development publisher, so the
+example makes that trust decision explicit.
 Without `--trust-source-publishers`, the installer accepts only the official
 publisher compiled into `ryeos` and rejects any source-supplied publisher
-document whose decoded key is non-official before changing the installed node. Use
-`scripts/pkg/install-local-direct.sh --populate --trust-source-publishers` only
-when bundle-owned binaries, CAS manifests, or signed bundle outputs actually
-need to be regenerated.
+document whose decoded key is non-official before changing the installed node.
+Use `--populate --crates "<package ...>"` for focused development rebuilds and
+reserve `--populate --all` for release/E2E qualification.
 
 ## Five-minute first run
 
@@ -424,7 +424,7 @@ Use the repository scripts rather than hand-editing derived bundle state.
 ./scripts/gate.sh                         # run workspace tests without refreshing bundles
 ./scripts/gate.sh --refresh-bundles       # explicit expensive bundle refresh, then tests
 ./scripts/pkg/install-local-direct.sh --trust-source-publishers  # install dev-signed artifacts
-./scripts/pkg/install-local-direct.sh --populate --trust-source-publishers  # refresh, then install
+./scripts/pkg/install-local-direct.sh --populate --crates ryeosd --trust-source-publishers  # focused daemon rebuild + install
 ```
 
 Common loops:
@@ -432,11 +432,11 @@ Common loops:
 | Change type                                | Recommended loop                                                                                      |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
 | Rust-only compile feedback                 | `cargo build` or targeted `cargo test -p <crate>`                                                     |
-| Rust affecting bundled binaries            | Targeted `cargo build --release -p <owner>`, then explicit bundle refresh only if needed.             |
+| Rust affecting bundled binaries            | `install-local-direct.sh --populate --crates "<package ...>" ...`; unselected payload generations remain exact. |
 | Bundle YAML, schemas, tools, or runtimes   | Targeted signing/publish flow; use `./scripts/gate.sh --refresh-bundles` only for release validation. |
 | Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh.                                  |
-| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` after building touched binaries.    |
-| Packaged layout repair                     | Add `--populate --trust-source-publishers` only when artifacts must be regenerated.                   |
+| Daemon/CLI behavior with installed bundles | Target only `ryeosd`, `ryeos-cli`, or both through `--populate --crates`, then install.               |
+| Packaged layout repair                     | Run without `--populate` to reinstall the existing exact closed artifact generation.                 |
 
 Hard rules for contributors and agents:
 
