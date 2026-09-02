@@ -26,7 +26,7 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let admitted_operator =
-        ryeos_app::operator_external_content::require_local_operator(&state, &context)
+        ryeos_app::operator_authority::require_local_configured_operator(&state, &context)
             .context("sign requires the configured local operator")?;
     if request.item_refs.is_empty() {
         bail!("sign requires at least one item ref");

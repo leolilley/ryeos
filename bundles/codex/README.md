@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:bbfde9417d7964151356e0e9dfc47b44c78aec3621693ddb8ebc0cd7dc6d71ac:2YkPiUrSkGQoUBi9fyZLcm4gKKJxL7OakqKdXzyRab5pOTL9zY1yoTT1FsoN/A9rrKlJ80vc447oycp/gjORBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:12e586e238bed42fdbd19224dd52e743b1a0b83d43f84548ba58357baaa91ce1:jRqI7MQuAoTnjO/eIzownqJ89/FnMCsyYFPGUnwvprBKOm64nqnRKLd8ejHHW3XgDjpJjpqzWq5/VbBV2XqbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -75,11 +75,12 @@ worker capacity.
 ## Operator flow
 
 This workflow is intended for a dedicated hosted endpoint. Complete Codex
-managed activation and node policy setup while the hosted configured
-operator is still a `local_client`. Provision the same configured-operator key
-at the source and hosted nodes. Separately admit the source node key on the
-hosted target as `remote_node` with only the generic forwarding-attestation
-scope:
+managed activation and node policy setup with the hosted node's own local
+operator. Keep that target-local signing key on the target. The source
+operator's private key remains only at the source; the target receives its
+public key later in a node-signed `remote_operator` grant. Separately admit the
+source node key on the hosted target as `remote_node` with only the generic
+forwarding-attestation scope:
 
 ```sh
 FORWARDING_SCOPE='ryeos.attest.request.forwarded-operator'
@@ -91,9 +92,12 @@ ryeos remote admit --remote hosted --token '<one-time-token>' \
   --label 'hosted operator forwarding node' --scopes "$FORWARDING_SCOPE"
 ```
 
-Then stop the hosted daemon and explicitly replace the configured-operator
-key's hosted `local_client` grant with a target-node-signed `remote_operator`
-grant. This is a semantic class conversion, not a scope update:
+Then stop the hosted daemon and install the source operator's public key in a
+target-node-signed `remote_operator` grant. A fresh hosted node has no incumbent
+grant for that fingerprint and needs no semantic conversion. If an exact
+incumbent grant for that source key is being reclassified or rebound, use
+`--allow-semantic-conversion` explicitly and never merge scopes across the
+transition:
 
 ```sh
 HOSTED_SCOPES='ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
@@ -101,7 +105,6 @@ RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
   --origin-site-id "site:<source>" \
-  --allow-semantic-conversion \
   --scopes "$HOSTED_SCOPES"
 ```
 
@@ -123,27 +126,29 @@ after the owner has authorized `handoff`; the peer node never becomes the
 session owner. This separation permits handoff back to a node whose operator
 key remains an ordinary local client.
 
-There is one authorized-key file per fingerprint. Local-only external-content
-maintenance therefore uses the same configured-operator key in an explicit
-quiesced class-transition ceremony: finish or terminate hosted sessions, stop
-the hosted daemon, and run:
+The hosted node's own local operator and the forwarded source operator are
+different principals with different authorized-key files. Local-only
+external-content maintenance therefore uses the target-local operator without
+reclassifying the forwarded source grant: finish or terminate hosted sessions,
+then run only the exact maintenance scopes through the target's local CLI.
+When narrowing that target-local bootstrap grant from `*`, replace its scope
+set explicitly through the same verified node-signed grant writer:
 
 ```sh
 MAINTENANCE_SCOPES='ryeos.execute.service.external-content/activate,ryeos.execute.service.external-content/release,ryeos.execute.service.external-content/scrub'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
-  --public-key "<configured_operator_raw_ed25519_base64>" \
-  --label "hosted operator local maintenance" \
-  --allow-semantic-conversion \
+  --public-key "<target_local_operator_raw_ed25519_base64>" \
+  --label "hosted target local maintenance" \
   --scopes "$MAINTENANCE_SCOPES"
 ```
 
-The supported local command mechanically acquires the daemon's exclusive state
-lock before a semantic conversion and refuses while the daemon owns it. Start
-the daemon and
-perform maintenance, stop it again, then reinstall the exact `remote_operator`
-grant above with `--allow-semantic-conversion`. A separate key cannot satisfy
-the configured-operator check. Never merge scopes across a class or origin
-transition.
+Same-class grant creation and scope replacement use descriptor-pinned
+compare-and-swap publication and daemon hot reload. A real class or origin
+transition additionally requires `--allow-semantic-conversion`, mechanically
+acquires stopped-node authority, and refuses while the daemon owns it. Perform
+maintenance through the target-local operator; the independently stored source
+`remote_operator` grant is unchanged throughout. Never merge scopes across a
+class or origin transition.
 
 The bundle registers daemon-local terminal aliases, but an activated hosted
 target deliberately rejects direct operator-key HTTP requests because they
@@ -299,12 +304,12 @@ handoff override nor broadens the hosted operator grant: the target-side calls
 reuse its existing object upload/HEAD scopes, and the peer node's bounded
 closure-read authority supplies the exact remote generation.
 
-The same configured-operator key must exist at both operator endpoints and use
-the origin-bound hosted grant above. The operator-owned push and launch
-deliberately use that key; ordinary node-key remote authorization cannot create
-or control this operator-owned workflow. A plain `local_client` grant is also
-incorrect: it erases forwarding origin and is rejected by this activation
-contract.
+The source operator key exists only at the source endpoint. The hosted target
+retains only its public key in the origin-bound grant above. Operator-owned
+push and launch deliberately preserve that source principal; ordinary node-key
+remote authorization cannot create or control the workflow. Classifying the
+source key as a plain `local_client` at the target is incorrect because it
+erases forwarding origin and is rejected by this activation contract.
 
 The coordinate is printed before remote contact; retain it until the accepted
 response echoes the same value. The returned `result.thread_id` is the remote

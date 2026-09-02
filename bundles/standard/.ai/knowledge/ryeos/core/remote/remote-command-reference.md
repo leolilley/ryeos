@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T00:33:45Z:325c4f45e1b9d3517f2f2bca9263b32eac17c404e716eb5ab4a2965669034633:xieqeda1MgAHyfiKYqsKbivpBMzeB73tvxblUNLdLwzq00vgZ9LACiWMxFVNMuc4weZjq7nqw5JghHEoSbkJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:c365bc2f43acff6228febaf514f84a92c5b2fee7724480a92ecb6938a1b7b376:SBACvWRxvdw+Jya/4ih7cDfsMNRWF5HvmP8eKZgenXCyH/0EXmbYXn88uZo8BUSPhobbZ30jzKD4qOEKGk18DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -242,19 +242,19 @@ reclassify any existing local-client, remote-node, remote-operator, bootstrap,
 or configured-operator grant. Admission claims are likewise create-only.
 
 Configured-operator continuity is provisioned only by an offline target-node
-action, not by remote delegation. With the target daemon stopped, the target
-operator replaces that key's grant with an origin-bound, exact-scope grant:
+action, not by remote delegation. With the target daemon stopped, its local
+operator installs the source operator's public key in an origin-bound,
+exact-scope grant:
 
 ```bash
 RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "operator forwarded from source" \
   --origin-site-id "site:<source>" \
-  --allow-semantic-conversion \
   --scopes "<comma-separated exact scopes>"
 ```
 
-Before that conversion, admit the source node key with the exact
+Before installing that grant, admit the source node key with the exact
 `ryeos.attest.request.forwarded-operator` scope. The source site ID is the
 canonical `site_id` reported by its running RyeOS identity. Confirm it after
 starting the source through its normal supervisor: the daemon forms this ID
@@ -269,18 +269,15 @@ also carry a primary-signed `required_origin_site_id` assertion, which must
 match the verified proof. Missing, partial, wrong-class, wrong-site, or invalid
 proof fails authentication.
 
-Authorized-key files are keyed by fingerprint, so conversion makes that exact
-configured-operator key remote-only. Local maintenance uses the same key after
-quiescing workflows and stopping the daemon: rerun the offline tool without
-`--origin-site-id`, with only local maintenance scopes and
-`--allow-semantic-conversion`; start the daemon and maintain; stop it; then
-reinstall the exact remote grant with the same explicit flag. A different key
-cannot pass an exact configured-operator check. Scope merging is forbidden
-across class or origin changes, and the offline tool reports previous and new
-class/origin values. The conversion flag also makes the tool acquire and retain
-the node's exclusive daemon state lock through publication; a live daemon
-therefore causes a mechanical refusal rather than relying on operator
-procedure.
+Authorized-key files are keyed by fingerprint, so the source operator is
+remote-only at the target. Its private key remains at the source. The target's
+independent local operator performs local maintenance under its own
+`local_client` grant without reclassifying the source grant. If an incumbent
+grant for the source fingerprint is deliberately changed between class or
+origin, scope merging is forbidden and `--allow-semantic-conversion` is
+required. The offline tool reports previous and new class/origin values and
+retains the node's exclusive daemon state lock through publication; a live
+daemon therefore causes a mechanical refusal.
 
 ## `ryeos remote push`
 

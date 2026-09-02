@@ -249,9 +249,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     validate_hash("expected local HEAD", &req.expected_local_head)?;
     validate_hash("expected remote HEAD", &req.expected_remote_head)?;
     let operator_fingerprint =
-        ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)?;
+        ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     let operator_authority_digest =
-        ryeos_app::operator_external_content::configured_operator_authority_digest(
+        ryeos_app::operator_authority::admitted_operator_authority_digest(
             &state,
             &operator_fingerprint,
         )?;
@@ -947,11 +947,10 @@ fn validate_current_route_and_authority(
     if state.threads.site_id() != operation.source_site_id {
         bail!("durable project-head reconciliation belongs to another source site");
     }
-    let authority_digest =
-        ryeos_app::operator_external_content::configured_operator_authority_digest(
-            state,
-            &operation.operator_fingerprint,
-        )?;
+    let authority_digest = ryeos_app::operator_authority::admitted_operator_authority_digest(
+        state,
+        &operation.operator_fingerprint,
+    )?;
     if authority_digest != operation.operator_authority_digest {
         bail!("durable project-head reconciliation operator grant changed");
     }

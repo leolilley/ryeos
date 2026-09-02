@@ -234,7 +234,7 @@ pub fn publish_activation_receipt(
         state.node_policy.require::<
             crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
         >()?,
-        &crate::operator_external_content::configured_operator_authority_digest(
+        &crate::operator_authority::admitted_operator_authority_digest(
             state,
             &operation.operator_fingerprint,
         )?,

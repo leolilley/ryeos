@@ -20,8 +20,8 @@ fn require_operator<'a>(
     state: &AppState,
     ctx: &'a HandlerContext,
 ) -> Result<&'a str, HandlerError> {
-    ryeos_app::operator_external_content::require_configured_operator(state, ctx)
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+    ryeos_app::operator_authority::require_admitted_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
     Ok(&ctx.fingerprint)
 }
 

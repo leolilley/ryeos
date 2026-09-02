@@ -188,8 +188,8 @@ fn owned_session(
     // Initial hosted execution is deliberately a single configured-operator
     // trust domain. Enforce that predicate before lookup so discovery and
     // timing do not turn owner rows into an accidental multi-tenant boundary.
-    ryeos_app::operator_external_content::require_configured_operator(state, ctx)
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+    ryeos_app::operator_authority::require_admitted_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
     let placement_thread_id = state
         .state_store
         .current_chain_placement_thread_id(chain_root_id)
@@ -220,8 +220,8 @@ async fn status(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+    ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
     let session = state
         .state_store
         .current_chain_placement_thread_id(&req.chain_root_id)
@@ -3593,8 +3593,8 @@ async fn resume_committed_handoff(
     ctx: &HandlerContext,
     state: &Arc<AppState>,
 ) -> Result<Option<Value>, HandlerError> {
-    ryeos_app::operator_external_content::require_configured_operator(state, ctx)
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+    ryeos_app::operator_authority::require_admitted_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
 
     // Startup recovery and an operator retry are two callers of the same
     // durable source operation. Once an exact operation exists, serialize

@@ -114,6 +114,11 @@ pub async fn start_with_progress(
         .arg(config.bind.to_string())
         .arg("--uds-path")
         .arg(&config.uds_path)
+        // The lifecycle controller has already resolved explicit start
+        // overrides against the stopped node's stored config. Preserve that
+        // same decision in the child; otherwise ryeosd reparses the stored
+        // file without the override authority and rejects the spawn.
+        .arg("--force")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_log))

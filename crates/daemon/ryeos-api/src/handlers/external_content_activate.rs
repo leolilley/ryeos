@@ -29,6 +29,7 @@ const MAX_MANAGED_TAR_EXTENSION_BYTES: u64 = ryeos_state::objects::MAX_EXTERNAL_
     as u64
     + ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES
     + 512;
+const MAX_IGNORED_PAX_TIMESTAMP_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,16 +84,14 @@ impl<'a> ActivationReceiptAuthority<'a> {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let operator = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)?;
+    let operator = ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     let activation = ryeos_app::managed_external_content::resolve_activation(
         &state,
         &req.activation_ref,
         req.mode,
     )?;
     let operator_authority_digest =
-        ryeos_app::operator_external_content::configured_operator_authority_digest(
-            &state, &operator,
-        )?;
+        ryeos_app::operator_authority::admitted_operator_authority_digest(&state, &operator)?;
     let operation = ManagedActivationJobOperation::new(
         &activation,
         operator,
@@ -242,7 +241,7 @@ impl<'a> CurrentActivationAuthority<'a> {
         operation: &'a ManagedActivationJobOperation,
     ) -> Result<Self> {
         let operator_authority_digest =
-            ryeos_app::operator_external_content::configured_operator_authority_digest(
+            ryeos_app::operator_authority::admitted_operator_authority_digest(
                 state,
                 &operation.operator_fingerprint,
             )?;
@@ -828,7 +827,7 @@ fn acquire_and_import(
     staging: &lillux::PinnedDirectory,
 ) -> Result<Vec<ImportedComponent>> {
     let operator_authority_digest =
-        ryeos_app::operator_external_content::configured_operator_authority_digest(
+        ryeos_app::operator_authority::admitted_operator_authority_digest(
             state,
             &operation.operator_fingerprint,
         )?;
@@ -1804,11 +1803,36 @@ fn apply_local_pax_extensions(value: &[u8], pending: &mut PendingTarExtensions) 
             key if key.starts_with(b"GNU.sparse.") => {
                 bail!("managed activation archive contains sparse PAX authority")
             }
+            b"mtime" | b"atime" | b"ctime" => {
+                validate_ignored_pax_timestamp(extension.value_bytes())?;
+            }
             _ => bail!("managed activation archive contains unsupported local PAX authority"),
         }
     }
     if !observed {
         bail!("managed activation local PAX extension is empty");
+    }
+    Ok(())
+}
+
+/// Accept bounded standard PAX timestamps without making archive metadata an
+/// extraction authority. Managed-content identity is defined by exact member
+/// bytes, paths, modes, and signed recipes; timestamps are deliberately not
+/// materialized or retained. All other unhandled PAX keys remain refused.
+fn validate_ignored_pax_timestamp(value: &[u8]) -> Result<()> {
+    if value.is_empty() || value.len() > MAX_IGNORED_PAX_TIMESTAMP_BYTES {
+        bail!("managed activation local PAX timestamp exceeds its byte bound");
+    }
+    let unsigned = value.strip_prefix(b"-").unwrap_or(value);
+    let mut parts = unsigned.split(|byte| *byte == b'.');
+    let whole = parts.next().unwrap_or_default();
+    let fractional = parts.next();
+    if whole.is_empty()
+        || !whole.iter().all(u8::is_ascii_digit)
+        || fractional.is_some_and(|part| part.is_empty() || !part.iter().all(u8::is_ascii_digit))
+        || parts.next().is_some()
+    {
+        bail!("managed activation local PAX timestamp is not canonical decimal data");
     }
     Ok(())
 }
@@ -3656,6 +3680,55 @@ mod tests {
             "PAX path fixture",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn local_pax_timestamps_are_bounded_ignored_metadata() {
+        fn pax_record(key: &str, value: &str) -> Vec<u8> {
+            let suffix = format!(" {key}={value}\n");
+            let mut length = suffix.len() + 1;
+            loop {
+                let next = suffix.len() + length.to_string().len();
+                if next == length {
+                    return format!("{length}{suffix}").into_bytes();
+                }
+                length = next;
+            }
+        }
+
+        for value in ["1786064549", "1786064549.0332766", "-1.25"] {
+            let mut pending = PendingTarExtensions::default();
+            apply_local_pax_extensions(&pax_record("mtime", value), &mut pending)
+                .expect("canonical bounded PAX timestamp must be ignored");
+            assert!(pending.path.is_none());
+            assert!(pending.link.is_none());
+        }
+
+        for (key, value) in [
+            ("mtime", "-.1"),
+            ("mtime", "1e9"),
+            ("mtime", "1."),
+            ("mtime", "1.2.3"),
+            ("uid", "1000"),
+        ] {
+            let error = apply_local_pax_extensions(
+                &pax_record(key, value),
+                &mut PendingTarExtensions::default(),
+            )
+            .expect_err("noncanonical or authoritative PAX metadata must be refused");
+            assert!(
+                error.to_string().contains("PAX"),
+                "unexpected refusal for {key}={value}: {error:#}"
+            );
+        }
+
+        let oversized = "1".repeat(MAX_IGNORED_PAX_TIMESTAMP_BYTES + 1);
+        let error = apply_local_pax_extensions(
+            &pax_record("mtime", &oversized),
+            &mut PendingTarExtensions::default(),
+        )
+        .expect_err("oversized PAX timestamp must be refused");
+        assert!(error.to_string().contains("byte bound"));
     }
 
     #[test]

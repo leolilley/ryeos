@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T08:05:37Z:9d99fa4883bc40857c22eb55d853c80056ac8ce73e8cc20ee159a456c18b2e10:rim07jhPoYoALofSw6a5H8ziEgaWVRsMLIaYi3PtOUA3dt8C2EFRxVoObVR/S+xwAdgk4uL6VLzOXEqPvZ5cAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:4144523d8b88376364cc66272bfcc31806b6891ffa29315d85d0d6ed3c36962e:euKHSVuCa6KZs3ipiCOeS3XrYUKVL87gjHEra6rAvQ/5DrJFPuF+hATmxd4SVWKTvwcIKGn4r34pd/YeyMjOBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -132,16 +132,16 @@ choose its authenticated origin.
 
 For configured-operator continuity, do not use admission claim or the remote
 authorize endpoint: both create ordinary remote-node/client authority. Stop
-the hosted target and use the supported local command to install the
-exact origin-bound operator grant. If the configured operator already has its bootstrap
-`local_client` grant, the explicit semantic-conversion flag is required:
+the hosted target and use its local operator to install the source operator's
+public key as an exact origin-bound operator grant. A fresh target needs no
+semantic-conversion flag; supply it only when an incumbent grant for that same
+fingerprint is deliberately being reclassified or rebound:
 
 ```bash
 RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "operator forwarded from source" \
   --origin-site-id "site:<source>" \
-  --allow-semantic-conversion \
   --scopes "<comma-separated exact workflow scopes>"
 ```
 
@@ -154,15 +154,13 @@ caller-signed required-origin assertion so a missing or wrongly classified
 grant/proof fails closed; the assertion only narrows verified authority and
 can never create it.
 
-One grant exists per key fingerprint, so the target classifies the configured
-operator key as remote. For local maintenance, quiesce hosted workflows, stop
-the daemon, explicitly convert the same configured-operator grant back to
-`local_client` without `--origin-site-id`, perform maintenance after restart,
-then stop and explicitly restore `remote_operator`. Both transitions require
-`--allow-semantic-conversion`; `--merge-scopes` is forbidden across them. A
-separate maintenance key cannot satisfy exact configured-operator policy. The
-offline tool holds the same exclusive state lock as the daemon throughout each
-conversion and refuses if the daemon is live.
+One grant exists per key fingerprint, so the target classifies the source
+operator key as remote. The target-local operator remains a separate
+`local_client` and performs local maintenance without changing the source
+grant. The offline tool holds the same exclusive state lock as the daemon
+throughout publication and refuses if the daemon is live. When an incumbent
+grant is deliberately reclassified, `--allow-semantic-conversion` is required
+and `--merge-scopes` is forbidden.
 
    Common remote-side scopes:
 

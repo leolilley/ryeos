@@ -299,7 +299,7 @@ impl RemoteClient {
         remote: &super::config::RemoteConfig,
         context: &crate::handler_context::HandlerContext,
     ) -> Result<Self> {
-        ryeos_app::operator_external_content::require_configured_operator(state, context)
+        ryeos_app::operator_authority::require_local_configured_operator(state, context)
             .context("configured operator required for operator-owned remote execution")?;
         let identity = Arc::new(
             NodeIdentity::load(&state.config.operator_signing_key_path)
@@ -327,7 +327,7 @@ impl RemoteClient {
         operator_fingerprint: &str,
         operator_authority_digest: &str,
     ) -> Result<Self> {
-        let current = ryeos_app::operator_external_content::configured_operator_authority_digest(
+        let current = ryeos_app::operator_authority::admitted_operator_authority_digest(
             state,
             operator_fingerprint,
         )?;

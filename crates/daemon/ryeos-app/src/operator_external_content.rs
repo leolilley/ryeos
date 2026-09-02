@@ -139,97 +139,13 @@ pub struct ScrubResponse {
     pub abandoned_staging_removed: usize,
 }
 
-/// Authenticate the configured local operator principal and return its raw
-/// key fingerprint for state objects whose schema stores fingerprints rather
-/// than canonical `fp:<digest>` principal IDs.
-pub fn require_local_operator(
-    state: &AppState,
-    context: &HandlerContext,
-) -> anyhow::Result<String> {
-    if context.authorized_key_class
-        != Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient)
-        || context.authenticated_origin_site_id.is_some()
-    {
-        bail!("external-content operator actions require a local_client configured operator");
-    }
-    require_configured_operator(state, context)
-}
-
-/// Authenticate the node's configured operator principal without constraining
-/// transport origin. Hosted execution is deliberately remote-operable: the
-/// authenticated origin is retained as evidence, but it cannot replace or
-/// weaken the exact configured-operator fingerprint check.
-pub fn require_configured_operator(
-    state: &AppState,
-    context: &HandlerContext,
-) -> anyhow::Result<String> {
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-        .context("load configured operator identity")?;
-    authenticated_configured_operator_fingerprint(context, &operator)
-}
-
-/// Resolve the exact current node-signed grant behind a configured-operator
-/// durable operation. Retaining this digest prevents restart recovery from
-/// silently surviving revocation, scope replacement, or a local/remote class
-/// transition of the same key.
-pub fn configured_operator_authority_digest(
-    state: &AppState,
-    operator_fingerprint: &str,
-) -> anyhow::Result<String> {
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-        .context("load configured operator identity")?;
-    if operator.fingerprint() != operator_fingerprint {
-        bail!("durable operation no longer belongs to the configured operator");
-    }
-    let grant = crate::identity::load_verified_authorized_key(
-        operator_fingerprint,
-        &state.config.authorized_keys_dir,
-        &state.identity,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("configured operator grant was revoked"))?;
-    if !matches!(
-        grant.principal_class,
-        crate::identity::AuthorizedKeyPrincipalClass::LocalClient
-            | crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator
-    ) {
-        bail!("configured operator grant changed to an ineligible principal class");
-    }
-    Ok(grant.source_file_hash)
-}
-
-fn authenticated_configured_operator_fingerprint(
-    context: &HandlerContext,
-    operator: &crate::identity::NodeIdentity,
-) -> anyhow::Result<String> {
-    context
-        .require_verified()
-        .map_err(|error| anyhow::anyhow!(error))?;
-    if context.fingerprint != operator.principal_id() {
-        bail!("action requires the configured operator");
-    }
-    match (
-        context.authorized_key_class,
-        context.authenticated_origin_site_id.as_deref(),
-    ) {
-        (Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient), None)
-        | (Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator), Some(_)) => {}
-        (Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteNode), _) => {
-            bail!("configured operator actions reject remote_node grants")
-        }
-        (Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator), None) => {
-            bail!("remote_operator request has no authenticated source-node forwarding proof")
-        }
-        _ => bail!("configured operator action requires an authenticated authorized-key class"),
-    }
-    Ok(operator.fingerprint().to_owned())
-}
-
 pub async fn import(
     state: Arc<AppState>,
     context: HandlerContext,
     request: ImportRequest,
 ) -> anyhow::Result<ImportResponse> {
-    let operator_fingerprint = require_local_operator(&state, &context)?;
+    let operator_fingerprint =
+        crate::operator_authority::require_local_configured_operator(&state, &context)?;
     validate_relative_path(&request.path)?;
     if request.maximum_bytes == 0 {
         bail!("external-content import maximum_bytes must be positive");
@@ -564,7 +480,8 @@ pub async fn bind(
     context: HandlerContext,
     request: BindRequest,
 ) -> anyhow::Result<BindResponse> {
-    let operator_fingerprint = require_local_operator(&state, &context)?;
+    let operator_fingerprint =
+        crate::operator_authority::require_local_configured_operator(&state, &context)?;
     bind_authorized(
         state,
         operator_fingerprint,
@@ -864,7 +781,7 @@ async fn bind_authorized(
 }
 
 pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Result<ScrubResponse> {
-    require_local_operator(&state, &context)?;
+    crate::operator_authority::require_local_configured_operator(&state, &context)?;
     let authority = state.state_store.pinned_state_authority()?;
     let _guard = authority.acquire_shared_guard()?;
     let _permit = state
@@ -949,7 +866,8 @@ pub async fn release(
     context: HandlerContext,
     request: ReleaseRequest,
 ) -> anyhow::Result<ReleaseResponse> {
-    let operator_fingerprint = require_local_operator(&state, &context)?;
+    let operator_fingerprint =
+        crate::operator_authority::require_local_configured_operator(&state, &context)?;
     if !lillux::valid_hash(&request.binding_id)
         || request
             .binding_id
@@ -1615,50 +1533,6 @@ mod tests {
                 require_import_store_capacity("fixture store", capacity, 100, 1_000, 10).is_err()
             );
         }
-    }
-
-    #[test]
-    fn configured_operator_auth_uses_principal_id_and_allows_remote_transport() {
-        let directory = tempfile::tempdir().unwrap();
-        let identity =
-            crate::identity::NodeIdentity::create(&directory.path().join("operator.pem")).unwrap();
-        let local = HandlerContext::new_with_authority(
-            identity.principal_id(),
-            vec!["*".to_owned()],
-            true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient),
-            None,
-        );
-        assert_eq!(
-            authenticated_configured_operator_fingerprint(&local, &identity).unwrap(),
-            identity.fingerprint()
-        );
-
-        let raw = HandlerContext::new(identity.fingerprint().to_owned(), vec![], true);
-        assert!(authenticated_configured_operator_fingerprint(&raw, &identity).is_err());
-        let remote = HandlerContext::new_with_authority(
-            identity.principal_id(),
-            vec!["*".to_owned()],
-            true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
-            Some("site:remote".to_owned()),
-        );
-        assert_eq!(
-            authenticated_configured_operator_fingerprint(&remote, &identity).unwrap(),
-            identity.fingerprint()
-        );
-
-        let confused_remote_node = HandlerContext::new_with_authority(
-            identity.principal_id(),
-            vec!["*".to_owned()],
-            true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteNode),
-            Some("site:remote".to_owned()),
-        );
-        assert!(
-            authenticated_configured_operator_fingerprint(&confused_remote_node, &identity)
-                .is_err()
-        );
     }
 }
 

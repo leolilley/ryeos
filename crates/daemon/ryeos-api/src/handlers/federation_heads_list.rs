@@ -48,8 +48,8 @@ pub async fn handle(
         ),
         (Some(chain_root_id), "") => {
             validate_chain_root_component(chain_root_id)?;
-            ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
-                .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+            ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)
+                .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
             let placement_thread_id = state
                 .state_store
                 .current_chain_placement_thread_id(chain_root_id)

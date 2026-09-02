@@ -46,6 +46,7 @@ pub mod managed_external_content_operation;
 pub mod node_config;
 pub mod node_document;
 pub mod node_policy;
+pub mod operator_authority;
 pub mod operator_external_content;
 pub mod persistent_session;
 pub mod principal;

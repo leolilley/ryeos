@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T10:47:31Z:194339c6e55ea4e8f29209104259dcaec100863bc081c3ce677c7f20352d5365:BepZhzSr2g8T8Uc3gUw1KJvuZdEIs7udvJxJLngmO0VxHX91VkJnTfzgQ9ofGdM52T5Q3P0xOY6RH2z0joJeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:5a3b4005d3f6512bd9f3b160556e227035b7e087c95f02f21b847df16f554d29:TMDe6nHc5/v48Gkw2UEP6w3zY76BQwgAy0GrG+7PWOzfh4aNIx8njm06lqaBf9vl5140d093BKU7vPtmeZrBCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -107,15 +107,18 @@ knowledge bundle.
    every node that may become a placement target. `offline` is accepted only
    when the exact archive is already present in that node's private managed
    cache.
-4. Provision the same configured-operator identity at the operator endpoint
-   and a dedicated hosted node. First admit the source node key on the target
+4. Keep the source operator private key at its operator endpoint and the
+   hosted node's independent local operator private key at the hosted node.
+   First admit the source node key on the target
    as `remote_node` with only
    `ryeos.attest.request.forwarded-operator`; this key co-signs the exact
    configured-operator request and proves source-node transit. Then stop the
-   hosted daemon and run the supported local command
+   hosted daemon and use its local operator to run the supported command
    `RYEOS_APP_ROOT=<hosted-root> ryeos authorize-client --public-key
-   <raw-base64> --origin-site-id site:<source>
-   --allow-semantic-conversion --scopes <exact-scopes>` on the hosted node.
+   <source-operator-raw-base64> --origin-site-id site:<source>
+   --scopes <exact-scopes>` on the hosted node. A fresh grant needs no
+   semantic-conversion flag; an intentional reclassification or origin change
+   of an incumbent grant does.
    Use the complete exact scope set printed in the Codex bundle README. The
    target-signed `remote_operator` grant constrains which source site may
    forward the operator; it is not transit proof without the separate
@@ -176,15 +179,15 @@ knowledge bundle.
    conditionally restores that manifest into a fresh placement before its
    worker is released.
 
-External-content maintenance after activation requires a quiesced class
-transition, not another identity. Finish or terminate hosted executions, stop
-the daemon, run offline `authorize-client` without `--origin-site-id`, with
-`--allow-semantic-conversion`, and with only the required local maintenance
-scopes (`external-content/activate` plus `release` or `scrub` only when that
-operation is actually required). Start the daemon and perform exact managed
-activation or cleanup; stop it again; then reinstall the exact `remote_operator` grant with
-`--allow-semantic-conversion`. Never use `--merge-scopes` across either
-transition. A separate key cannot pass the exact configured-operator check.
+External-content maintenance after activation uses the hosted node's own local
+operator, not the forwarded source operator. Finish or terminate hosted
+executions and invoke only the required local maintenance scopes
+(`external-content/activate` plus `release` or `scrub` only when that operation
+is actually required). Same-class scope replacement is an atomic node-signed
+grant update and is hot-reloaded; an actual class or origin transition requires
+explicit stopped-node semantic-conversion authority. The source
+`remote_operator` grant and source private key are untouched. Never use
+`--merge-scopes` across an actual class or origin transition.
 
 On daemon restart, the generic worker-execution runtime reclaims the same root
 thread and exact unpublished CoW workspace, starts a fresh pinned App Server
@@ -285,7 +288,8 @@ and prove:
 - bidirectional handoff peers use exact remote-node placement/closure/follow
   scopes, never configured-operator transport for autonomous internal jobs;
 - online delegation/admission create-only behavior, explicit stopped-daemon
-  class transition in both directions, and the complete maintenance ceremony;
+  replacement for any real class/origin transition, and target-local
+  maintenance without changing the forwarded source grant;
 - device login, confirmation, fresh-process continuity, refresh, and restart;
 - real turn, pushed events, approval, interruption, and blocked-route cancel;
 - daemon restart before/after contact, during approval, and after HEAD contact;

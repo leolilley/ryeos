@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T17:10:32Z:cbc778ff892b12fc201d6002b308d8b8fc34303e31478e71f6aa63dd8d220ed6:a6Vg397E9OiaueWhFWBqElyrMFDCUHlL3glPVQaROo6lATHFtjNlCbznLGgXZBYbEUsYI4XnzLacikQNe090Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:4026a1e165475af52a3cf9b7c28b032881770a50da237434080320ce4cbe6320:yvqkq+6dRYyzBfJ7Pn2uI5J6JieMqMxQxkI27HE+12/BbKW6Lvxf0fszhFCmLVHYlYQRT+VIhzDudvKfCtLvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -41,18 +41,21 @@ dead/unproved rows remain as exact cleanup evidence. The dedicated-session,
 credential-lock, and workspace ownership compare-and-swap transaction admits
 at most one current worker; recovery cannot erase or reuse a prior epoch.
 
-Every profile and worker-execution entry point admits only the exact configured
-operator fingerprint. Authenticated requests may use local or remote transport;
-local transport is not the predicate. Owner rows are defense in depth and do
-not claim hostile multi-principal isolation.
+Every profile and worker-execution entry point admits only an exact
+node-admitted operator principal: either the node's configured local operator
+or a node-signed, origin-bound `remote_operator` grant with verified
+source-node forwarding proof. Authenticated requests may use local or remote
+transport; local transport is not the predicate. Owner rows are defense in
+depth and do not claim hostile multi-principal isolation.
 
 Normal remote orchestration is node-to-node and therefore changes the acting
 principal to the source node. An operator-owned durable workflow cannot use
 that identity for its principal-scoped HEAD and later control. The generic
 remote push/run seam has an explicit configured-operator mode: the incoming
-request must already authenticate as the exact configured operator, the daemon
-then signs the outbound request with that same configured operator key, and
-the destination must authorize it with a node-signed, exact-scope
+request must already authenticate locally as the source node's exact
+configured operator, the source daemon then signs the outbound request with
+that same local key, and the destination retains only its public key in a
+node-signed, exact-scope
 `remote_operator` grant bound to the source site's canonical ID. The source
 node also co-signs the exact request, and the destination accepts that proof
 only from a separately admitted `remote_node` grant carrying

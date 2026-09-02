@@ -587,11 +587,12 @@ pub(super) async fn start(
         .requested_by
         .as_deref()
         .ok_or_else(|| anyhow!("dedicated-session root has no owner principal"))?;
-    let operator = ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-        .context("load configured local operator identity")?;
-    if owner != operator.principal_id() {
-        bail!("dedicated-session root is not owned by the configured local operator");
-    }
+    ryeos_app::operator_authority::retained_admitted_operator_authority_digest(
+        state,
+        owner,
+        &thread.origin_site_id,
+    )
+    .context("dedicated-session root owner no longer has exact admitted authority")?;
     let profile = state
         .state_store
         .credential_profile(&request.credential_profile_id)?

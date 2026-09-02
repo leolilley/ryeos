@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T15:37:08Z:55b391d4d15ecd9a744d141dbcfcd11b9c7d183aaeba14d064eeb2d963a186de:kwvhMVPHaeWmgZubuKwsM6X/wscTYc5Wi9D0Hj7xPKH/y9Subb09VV7cEzsr9vFhyHyBsRDq1r6pnBuTpoibAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:30f245110bb9357bedb39d9cb943088087e72f0b6b7d1854c884414e97890c84:0Mfa9wH5GpqkCKSJJIQgAlZh366K0yJh8BATVPNuvWLiU3+E5Oh9IBM92Md9zXFD6Jc0ulTpedADZVGIJwieCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -57,18 +57,18 @@ Daemon startup may repair the local user's authorized-key entry after
 never writes user trust.
 
 An opt-in `remote_operator` grant is the narrow exception for an
-operator-owned workflow forwarded by another RyeOS node. The principal is
-still the exact configured operator key, while the target node's signed grant
-constrains that key to one canonical `origin_site_id` and concrete scopes. The
+operator-owned workflow forwarded by another RyeOS node. The source request is
+still signed by that source node's configured operator key, while the target
+retains only its public key in a node-signed grant constrained to one canonical
+`origin_site_id` and concrete scopes. The
 target separately admits the source node key as `remote_node` with
 `ryeos.attest.request.forwarded-operator`; it must co-sign the exact primary
 request. Only the two verified grants plus that co-signature create
 authenticated remote origin. A caller header cannot create or remove it.
-Because a grant is keyed by fingerprint, converting a target's
-configured-operator grant to `remote_operator` classifies every use of that key
-at that target as remote and makes requests without the source-node proof fail.
-Local maintenance requires an explicit stopped-daemon conversion of the same
-configured-operator grant back to `local_client`, followed by restoration.
+The source operator private key never moves to the target. The target's own
+local operator remains a separate `local_client` for local maintenance.
+Because grants are keyed by fingerprint, every target-side use of the source
+key is remote and fails without the source-node proof.
 
 ## Vault X25519
 
