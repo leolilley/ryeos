@@ -598,8 +598,14 @@ class LocalInferenceContractTests(unittest.TestCase):
             'replay-thread-{profile.rsplit(\'-\', 1)[-1]}.json',
             'expected_replay_threads = {',
             'provider_calls_by_cache_key = {',
-            'provider_calls_by_cache_key[record["cache_key"]]["coordinate"]',
+            'provider_call = provider_calls_by_cache_key[record["cache_key"]]',
             'replayed["thread_id"] != expected_replay_thread',
+            'verify_exact_replay_tuple',
+            'observation["payload"].get("effect_coordinate_digest") != expected_coordinate',
+            'executed["thread_id"] != expected_source["produced_by_thread"]',
+            'replayed["payload"].get("replayed_from") != expected_source',
+            'for mutation in ("coordinate", "source", "execution_thread"):',
+            'replay tuple oracle accepted swapped {mutation} authority',
             '"replay_threads": {',
         ):
             self.assertIn(required_join, qualifier)

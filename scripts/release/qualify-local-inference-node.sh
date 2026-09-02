@@ -1105,12 +1105,14 @@ if len(
     {record["coordinate"]["outer_effective_definition_digest"] for record in provider_calls}
 ) != expected_count:
     raise SystemExit("exact worker profiles share outer effective program identity")
-observation_coordinates = {
-    observation["payload"]["effect_coordinate_digest"]
-    for observation in observations
-}
-if observation_coordinates != {record["cache_key"] for record in provider_calls}:
-    raise SystemExit("durable provider observations contradict exact call coordinates")
+records_by_cache_key = {record["cache_key"]: record for record in records}
+for observation in observations:
+    coordinate_digest = observation["payload"].get("effect_coordinate_digest")
+    record = records_by_cache_key.get(coordinate_digest)
+    if record is None or observation["payload"].get("record_hash") != record["record_hash"]:
+        raise SystemExit(
+            "durable provider observation does not name its exact call/replay tuple"
+        )
 records_by_hash = {record["record_hash"]: record for record in records}
 for operation in publication:
     proof = json.loads(operation["response_json"])
@@ -1728,7 +1730,6 @@ if final_observations[:2] != first_observations:
 observations_by_hash = {}
 for item in final_observations:
     observations_by_hash.setdefault(item["payload"].get("record_hash"), []).append(item)
-attempt_ids = {item["attempt_id"] for item in before["attempts"]}
 expected_replay_threads = {
     profile: json.loads(
         (root / f"replay-thread-{profile.rsplit('-', 1)[-1]}.json").read_text()
@@ -1740,6 +1741,22 @@ provider_calls_by_cache_key = {
 }
 if set(provider_calls_by_cache_key) != set(before_records):
     raise SystemExit("provider-call objects do not exactly cover replay records")
+def verify_exact_replay_tuple(record, executed, replayed, provider_call):
+    expected_coordinate = record["cache_key"]
+    for observation in (executed, replayed):
+        if observation["payload"].get("effect_coordinate_digest") != expected_coordinate:
+            raise ValueError("provider observation names another effect coordinate")
+    first_observation = provider_call["first_observation"]
+    expected_source = {
+        "attempt_id": first_observation["attempt_id"],
+        "produced_by_thread": first_observation["produced_by_thread"],
+    }
+    if executed["thread_id"] != expected_source["produced_by_thread"]:
+        raise ValueError("executed event is not attached to its first-observation thread")
+    if replayed["payload"].get("replayed_from") != expected_source:
+        raise ValueError("replay event does not name its exact first observation")
+
+verified_pairs = []
 for record in before_records.values():
     pair = observations_by_hash.get(record["record_hash"], [])
     if len(pair) != 2:
@@ -1760,9 +1777,8 @@ for record in before_records.values():
         raise SystemExit("second provider observation is not replay evidence")
     if replayed["payload"]["publication"] != "not_applicable":
         raise SystemExit("replayed provider observation falsely claims publication")
-    provider_id = provider_calls_by_cache_key[record["cache_key"]]["coordinate"][
-        "provider_id"
-    ]
+    provider_call = provider_calls_by_cache_key[record["cache_key"]]
+    provider_id = provider_call["coordinate"]["provider_id"]
     expected_replay_thread = expected_replay_threads.get(provider_id)
     if expected_replay_thread is None:
         raise SystemExit("replayed provider record names an unexpected provider coordinate")
@@ -1770,13 +1786,42 @@ for record in before_records.values():
         raise SystemExit(
             f"provider {provider_id} replay observation belongs to the wrong replay thread"
         )
-    replay_source = replayed["payload"].get("replayed_from")
-    if not isinstance(replay_source, dict):
-        raise SystemExit("replayed provider observation omits its exact source")
-    if replay_source.get("produced_by_thread") != executed["thread_id"]:
-        raise SystemExit("replayed provider observation names the wrong source thread")
-    if replay_source.get("attempt_id") not in attempt_ids:
-        raise SystemExit("replayed provider observation names an unknown source attempt")
+    try:
+        verify_exact_replay_tuple(record, executed, replayed, provider_call)
+    except ValueError as error:
+        raise SystemExit(f"provider {provider_id} replay tuple is invalid: {error}") from error
+    verified_pairs.append((record, executed, replayed, provider_call))
+
+# Exercise the same tuple oracle against the cross-profile substitutions it
+# exists to reject. The positive evidence alone is insufficient if the oracle
+# would also accept these legal-shape but wrong-authority combinations.
+if len(verified_pairs) != 2:
+    raise SystemExit("replay tuple negative checks require the two exact profiles")
+for mutation in ("coordinate", "source", "execution_thread"):
+    mutated = []
+    for record, executed, replayed, provider_call in verified_pairs:
+        mutated.append((record, json.loads(json.dumps(executed)), json.loads(json.dumps(replayed)), provider_call))
+    if mutation == "coordinate":
+        values = [item[2]["payload"]["effect_coordinate_digest"] for item in mutated]
+        mutated[0][2]["payload"]["effect_coordinate_digest"] = values[1]
+        mutated[1][2]["payload"]["effect_coordinate_digest"] = values[0]
+    elif mutation == "source":
+        values = [item[2]["payload"]["replayed_from"] for item in mutated]
+        mutated[0][2]["payload"]["replayed_from"] = values[1]
+        mutated[1][2]["payload"]["replayed_from"] = values[0]
+    else:
+        values = [item[1]["thread_id"] for item in mutated]
+        mutated[0][1]["thread_id"] = values[1]
+        mutated[1][1]["thread_id"] = values[0]
+    rejected = False
+    for record, executed, replayed, provider_call in mutated:
+        try:
+            verify_exact_replay_tuple(record, executed, replayed, provider_call)
+        except ValueError:
+            rejected = True
+            break
+    if not rejected:
+        raise SystemExit(f"replay tuple oracle accepted swapped {mutation} authority")
 PY
 
 # Qualify the directive-native tool path under the same restored node policy.
