@@ -3072,6 +3072,10 @@ async fn load_execution_control_snapshot_cached(
 pub struct NativeLaunchResult {
     pub thread: Value,
     pub result: Value,
+    /// Exact terminal project generation committed by the authoritative
+    /// thread finalization. `None` when terminal policy publishes no project
+    /// generation, including projectless and discard execution.
+    pub result_project_snapshot_hash: Option<String>,
 }
 
 /// Spawn-gate: refuse to spawn an effective item whose composed trust class
@@ -6905,6 +6909,10 @@ async fn run_claimed_thread_row_inner(
     // audit record is written, destroy the backend workspace synchronously.
     // Nothing may write beneath `runtime_state_root` after this point, or it
     // would recreate a closed workspace outside the lifecycle journal.
+    let result_project_snapshot_hash = state
+        .state_store
+        .authoritative_result_project_snapshot(&thread_id)
+        .map_err(BuildAndLaunchError::Internal)?;
     if owns_workspace && !hosted_candidate_workspace_closed {
         let terminal_publication = provenance
             .project_authority()
@@ -6914,10 +6922,6 @@ async fn run_claimed_thread_row_inner(
                     "managed COW runtime has no terminal publication authority"
                 ))
             })?;
-        let result_project_snapshot_hash = state
-            .state_store
-            .authoritative_result_project_snapshot(&thread_id)
-            .map_err(BuildAndLaunchError::Internal)?;
         let workspace_lifeline = provenance.workspace_lifeline();
         if let Err(error) = super::runner::close_managed_runtime_workspace(
             state,
@@ -6942,6 +6946,7 @@ async fn run_claimed_thread_row_inner(
     // diagnostics surfaced via `record_callback_warning`.
     Ok(NativeLaunchResult {
         thread: serde_json::to_value(&thread_detail)?,
+        result_project_snapshot_hash,
         result: json!({
             "success": runtime_result.success,
             "status": runtime_result.status,
@@ -8595,6 +8600,7 @@ async fn finalize_recovered_hosted_candidate_disposition(
     kick_follow_resume_if_ready(state, &finalized.chain_root_id);
     Ok(NativeLaunchResult {
         thread: serde_json::to_value(&finalized)?,
+        result_project_snapshot_hash: Some(candidate_snapshot_hash.to_owned()),
         result: json!({
             "success": fallback.runtime_result.success,
             "status": fallback.runtime_result.status,

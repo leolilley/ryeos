@@ -2192,7 +2192,7 @@ fn map_forward_error_to_dispatch(
         RemoteForwardError::MissingSnapshotHash => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
-                detail: "remote result missing snapshot_hash".into(),
+                detail: "remote result missing authoritative result_project_snapshot_hash".into(),
             }
         }
         RemoteForwardError::PullLocalConflict { path } => {

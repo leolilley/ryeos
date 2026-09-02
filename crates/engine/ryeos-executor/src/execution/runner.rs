@@ -1514,6 +1514,9 @@ fn finalize_completion(
 pub struct WaitResult {
     pub finalized_thread: ThreadDetail,
     pub result: Value,
+    /// Exact terminal project generation committed by this execution, when
+    /// its project publication policy retains one.
+    pub result_project_snapshot_hash: Option<String>,
     /// The `--debug-raw` block (resolved cmd/args/cwd/env keys + exit code and
     /// size-limited raw stdout/stderr), present only when the flag was set.
     pub debug: Option<Value>,
@@ -3897,6 +3900,7 @@ pub async fn run_and_wait(
     Ok(WaitOutcome::Executed(WaitResult {
         finalized_thread: finalized,
         result: result_value,
+        result_project_snapshot_hash,
         debug: debug_block,
         dispatch_effect,
     }))

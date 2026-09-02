@@ -447,6 +447,7 @@ async fn dispatch_managed_subprocess(
     Ok(json!({
         "thread": result.thread,
         "result": result.result,
+        "result_project_snapshot_hash": result.result_project_snapshot_hash,
     }))
 }
 
@@ -1456,6 +1457,7 @@ async fn dispatch_tool_subprocess(
                 let mut envelope = json!({
                     "thread": result.finalized_thread,
                     "result": result.result,
+                    "result_project_snapshot_hash": result.result_project_snapshot_hash,
                 });
                 if let Some(debug) = result.debug {
                     envelope["debug"] = debug;

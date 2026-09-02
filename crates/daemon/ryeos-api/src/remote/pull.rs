@@ -1563,18 +1563,15 @@ fn is_pull_transaction_artifact_name(name: &str) -> bool {
 
 fn acquire_pull_apply_lock(
     project_root: &lillux::PinnedDirectory,
-) -> Result<lillux::ExclusiveFileLock, PullResultsError> {
+) -> Result<lillux::PinnedDirectoryLock, PullResultsError> {
     project_root.ensure_path_binding()?;
-    let lock = lillux::ExclusiveFileLock::acquire_in_with_timeout(
-        project_root,
-        std::ffi::OsStr::new("ryeos-pull"),
-        std::time::Duration::from_secs(5),
-    )
-    .map_err(|error| {
-        PullResultsError::RecoveryRequired(format!(
-            "could not acquire the project pull/apply lock: {error:#}"
-        ))
-    })?;
+    let lock = project_root
+        .lock_exclusive_with_timeout(lillux::time::Duration::from_secs(5))
+        .map_err(|error| {
+            PullResultsError::RecoveryRequired(format!(
+                "could not acquire the project pull/apply lock: {error:#}"
+            ))
+        })?;
     project_root.ensure_path_binding()?;
     Ok(lock)
 }
@@ -2088,49 +2085,16 @@ fn load_project_file(cas: &CasStore, file_hash: &str) -> Result<ProjectFile, Pul
     ProjectFile::from_value(&object).map_err(PullResultsError::Other)
 }
 
-/// Extract snapshot_hash from a remote execute response.
+/// Extract the authoritative terminal project generation from a remote
+/// execute response.
 ///
-/// The snapshot hash is set by fold-back as a thread facet.
+/// The execution boundary projects this exact thread-finalization fact. Do
+/// not infer publication authority from workload results or mutable facets.
 pub fn extract_snapshot_hash(response: &Value) -> Option<String> {
-    // Try from the top-level thread result
     response
-        .get("snapshot_hash")
+        .get("result_project_snapshot_hash")
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or_else(|| {
-            // Try from facets
-            response
-                .get("facets")
-                .and_then(|f| f.get("snapshot_hash"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .or_else(|| {
-            // Try from nested result structure
-            response
-                .get("result")
-                .and_then(|r| r.get("snapshot_hash"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .or_else(|| {
-            // Try from thread.result (dispatch wraps result as {thread:{...}, result:{...}})
-            response
-                .get("thread")
-                .and_then(|t| t.get("result"))
-                .and_then(|r| r.get("snapshot_hash"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .or_else(|| {
-            // Try from thread facets
-            response
-                .get("thread")
-                .and_then(|t| t.get("facets"))
-                .and_then(|f| f.get("snapshot_hash"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
 }
 
 #[cfg(test)]
@@ -2356,21 +2320,21 @@ mod tests {
     // ── extract_snapshot_hash coverage ──
 
     #[test]
-    fn extract_snapshot_hash_top_level() {
-        let v = serde_json::json!({ "snapshot_hash": "abc123" });
+    fn extract_snapshot_hash_from_authoritative_execution_field() {
+        let v = serde_json::json!({ "result_project_snapshot_hash": "abc123" });
         assert_eq!(extract_snapshot_hash(&v), Some("abc123".into()));
     }
 
     #[test]
-    fn extract_snapshot_hash_from_facets() {
-        let v = serde_json::json!({ "facets": { "snapshot_hash": "fac123" } });
-        assert_eq!(extract_snapshot_hash(&v), Some("fac123".into()));
-    }
-
-    #[test]
-    fn extract_snapshot_hash_from_thread_result() {
-        let v = serde_json::json!({ "thread": { "result": { "snapshot_hash": "thr123" } } });
-        assert_eq!(extract_snapshot_hash(&v), Some("thr123".into()));
+    fn extract_snapshot_hash_does_not_infer_workload_authority() {
+        for v in [
+            serde_json::json!({ "snapshot_hash": "legacy" }),
+            serde_json::json!({ "facets": { "snapshot_hash": "facet" } }),
+            serde_json::json!({ "result": { "snapshot_hash": "workload" } }),
+            serde_json::json!({ "thread": { "result": { "snapshot_hash": "thread" } } }),
+        ] {
+            assert!(extract_snapshot_hash(&v).is_none(), "accepted {v}");
+        }
     }
 
     #[test]

@@ -185,8 +185,9 @@ pub enum RemoteForwardError {
     /// Remote /execute failed.
     #[error("remote execute failed: {0}")]
     ExecuteFailed(String),
-    /// Remote result has no snapshot hash.
-    #[error("remote result missing snapshot hash — async remote execute not supported")]
+    /// A wait-mode execution promised a retained terminal project generation,
+    /// but its authoritative execution envelope omitted that identity.
+    #[error("remote result missing authoritative result_project_snapshot_hash")]
     MissingSnapshotHash,
     /// Pull found local workspace changes since push.
     #[error("local workspace conflict at '{path}' — local files changed since push")]

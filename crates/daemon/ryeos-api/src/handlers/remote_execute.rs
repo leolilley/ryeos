@@ -316,7 +316,7 @@ fn remote_forward_error_to_handler_error(e: forward::RemoteForwardError) -> Hand
             HandlerError::BadRequest(message)
         }
         forward::RemoteForwardError::MissingSnapshotHash => HandlerError::BadRequest(
-            "remote execution completed but no snapshot_hash in result — async remote execute is not supported"
+            "remote execution completed without the authoritative result_project_snapshot_hash required by its retain-result policy"
                 .into(),
         ),
         forward::RemoteForwardError::PullLocalConflict { path } => {
