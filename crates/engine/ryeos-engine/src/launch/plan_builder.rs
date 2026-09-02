@@ -2675,8 +2675,9 @@ category: ryeos/core/subprocess\n";
             dispatch.args[3],
         );
 
-        // Runtime parameter stdin remains typed and includes the authoritative
-        // injected project path.
+        // Runtime parameter stdin remains typed and contains only invocation
+        // input. The project root is already carried by the explicit runtime
+        // argument above; it was not part of this invocation's parameters.
         let crate::contracts::PlanStdin::RuntimeParameters {
             parameters: stdin,
             project_path,
@@ -2685,14 +2686,7 @@ category: ryeos/core/subprocess\n";
             panic!("expected typed runtime parameters stdin");
         };
         assert_eq!(stdin["message"], "hello");
-        assert!(
-            project_path
-                .as_ref()
-                .unwrap()
-                .to_string_lossy()
-                .contains("rye_plan_test"),
-            "project_path should be typed, got: {project_path:?}"
-        );
+        assert_eq!(project_path, &None);
 
         // timeout_secs from the runtime config
         assert_eq!(dispatch.timeout_secs, 120);

@@ -266,10 +266,9 @@ fn compile_stdin_template(
     if compiled.whole_direct_root_reference() == Some("params_json") {
         let mut parameters = parameters.clone();
         let project_path = match (parameters.as_object_mut(), project_root) {
-            (Some(object), Some(project_root)) => {
-                object.remove("project_path");
-                Some(project_root.to_path_buf())
-            }
+            (Some(object), Some(project_root)) => object
+                .remove("project_path")
+                .map(|_| project_root.to_path_buf()),
             _ => None,
         };
         return Ok(PlanStdin::RuntimeParameters {
@@ -410,13 +409,10 @@ pub enum HandlerPhase {
 /// `resolved_params` is planner scratch: non-root runtime handlers place
 /// timeout and cancellation policy there so later handlers can compile the
 /// process-control contract. Only a root `config_resolve` contribution is
-/// tool input. Keeping that projection explicit prevents execution policy
-/// from silently becoming an argument to every `${params_json}` runtime.
-fn subprocess_invocation_params(
-    original_params: &Value,
-    resolved_params: &Value,
-    project_root: Option<&Path>,
-) -> Value {
+/// tool input. Project authority is not invented here; an explicitly supplied
+/// `project_path` remains in the invocation until `compile_stdin_template`
+/// converts that one field into a relocatable typed binding.
+fn subprocess_invocation_params(original_params: &Value, resolved_params: &Value) -> Value {
     let mut invocation = original_params.clone();
     if let Some(resolved_config) = resolved_params.get("resolved_config") {
         if !invocation.is_object() {
@@ -426,12 +422,6 @@ fn subprocess_invocation_params(
             .as_object_mut()
             .expect("invocation converted to object")
             .insert("resolved_config".to_owned(), resolved_config.clone());
-    }
-    if let (Some(project_root), Some(object)) = (project_root, invocation.as_object_mut()) {
-        object.insert(
-            "project_path".to_owned(),
-            Value::String(project_root.to_string_lossy().into_owned()),
-        );
     }
     invocation
 }
@@ -765,8 +755,7 @@ pub fn compile_with_handlers(
     // runtime execution policy on the planner side of the ABI. Root-owned
     // resolved configuration remains an explicit tool input; non-root timeout
     // and cancellation values do not become caller parameters.
-    let invocation_params =
-        subprocess_invocation_params(ctx.original_params, &ctx.params, project_root.as_deref());
+    let invocation_params = subprocess_invocation_params(ctx.original_params, &ctx.params);
     ctx.template_ctx.params_json = invocation_params.to_string();
 
     let node_trust_ref = ctx.node_trust_store;
@@ -1069,28 +1058,32 @@ mod tests {
             "cancellation_grace_secs": 5,
         });
 
-        assert_eq!(
-            subprocess_invocation_params(&original, &resolved, None),
-            original
-        );
+        assert_eq!(subprocess_invocation_params(&original, &resolved), original);
     }
 
     #[test]
-    fn root_resolved_config_and_project_authority_remain_typed_input() {
+    fn explicit_project_path_and_root_resolved_config_remain_typed_input() {
         let project = PathBuf::from("/admitted/project");
         let invocation = subprocess_invocation_params(
-            &json!({"message": "hello"}),
+            &json!({"message": "hello", "project_path": "/caller-controlled"}),
             &json!({
                 "message": "hello",
                 "resolved_config": {"model": "qualified"},
                 "timeout": 86400,
             }),
-            Some(&project),
         );
         let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         ctx.params_json = invocation.to_string();
         let stdin =
             compile_stdin_template("${params_json}", &ctx, &invocation, Some(&project)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdin.materialize().unwrap()).unwrap(),
+            json!({
+                "message": "hello",
+                "project_path": "/admitted/project",
+                "resolved_config": {"model": "qualified"},
+            })
+        );
         let PlanStdin::RuntimeParameters {
             parameters,
             project_path,
@@ -1107,6 +1100,37 @@ mod tests {
             })
         );
         assert_eq!(project_path.as_deref(), Some(project.as_path()));
+    }
+
+    #[test]
+    fn project_backed_runtime_does_not_invent_project_path_input() {
+        let project = PathBuf::from("/admitted/project");
+        let invocation = subprocess_invocation_params(
+            &json!({}),
+            &json!({
+                "timeout": 86400,
+                "cancellation_mode": "graceful",
+                "cancellation_grace_secs": 5,
+            }),
+        );
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params_json = invocation.to_string();
+        let stdin =
+            compile_stdin_template("${params_json}", &ctx, &invocation, Some(&project)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdin.materialize().unwrap()).unwrap(),
+            json!({})
+        );
+        let PlanStdin::RuntimeParameters {
+            parameters,
+            project_path,
+        } = stdin
+        else {
+            panic!("direct params_json must remain structured");
+        };
+
+        assert_eq!(parameters, json!({}));
+        assert_eq!(project_path, None);
     }
 
     #[test]
