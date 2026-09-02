@@ -853,6 +853,19 @@ for expected in "${expected_files[@]}"; do
         >> "$evidence_dir/observed-files.sha256"
 done
 
+"$find_bin" "$project" -xdev -mindepth 1 \
+    \( -name '.ryeos-pull.lock' \
+       -o -name '.ryeos-pull-staging-*' \
+       -o -name '.ryeos-pull-backup-*' \
+       -o -name '.ryeos-quarantine.*' \) \
+    -printf '%P\0' \
+    | LC_ALL=C "$sort_bin" -z \
+    > "$evidence_dir/transaction-artifacts-after.nul"
+if [[ -s "$evidence_dir/transaction-artifacts-after.nul" ]]; then
+    echo "remote round trip left a reserved pull transaction artifact in the source project" >&2
+    exit 1
+fi
+
 printf '%s\n' passed > "$status_file"
 (
     cd "$evidence_dir"
@@ -881,6 +894,7 @@ printf '%s\n' passed > "$status_file"
         source-client-authority.json \
         source-commit.txt \
         source-status.txt \
+        transaction-artifacts-after.nul \
         > evidence.sha256
 )
 

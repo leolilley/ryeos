@@ -58,6 +58,9 @@ elif [[ "$args" == *" remote execute "* ]]; then
             "$FAKE_FSMONITOR_MARKER" > "$project/fsmonitor.sh"
         chmod +x "$project/fsmonitor.sh"
     fi
+    if [[ "${FAKE_LEAVE_TRANSACTION_ARTIFACT:-0}" == 1 ]]; then
+        : > "$project/.ryeos-pull.lock"
+    fi
     printf '%s\n' qualified > "$project/result.txt"
     printf '%s\n' '{"job_id":"remote-execute:00000000-0000-4000-8000-000000000001","push":{"snapshot_hash":"sha256:source"},"remote":{"snapshot_hash":"sha256:result","result":{"status":"completed"}},"pull":{"snapshot_hash":"sha256:result","files_updated":1,"files_deleted":0}}'
 elif [[ "$args" == *"service:sync/jobs/list"* ]]; then
@@ -325,6 +328,24 @@ fi
 test "$(cat "$tmp/degraded/status")" = failed
 unset FAKE_DEGRADED
 
+transaction_artifact_project="$tmp/transaction-artifact-project"
+git clone -q "$project" "$transaction_artifact_project"
+export FAKE_LEAVE_TRANSACTION_ARTIFACT=1
+if "$root/scripts/dev/qualify-configured-remote.sh" \
+    --remote stronger \
+    --project "$transaction_artifact_project" \
+    --remote-project /srv/ryeos/projects/qualification \
+    --item-ref tool:qualification/run \
+    --evidence-dir "$tmp/transaction-artifact-rejected" \
+    --ryeos-bin "$fake_ryeos" \
+    --ref-binding model=worker:models/qualified >/dev/null 2>&1; then
+    echo "expected retained pull transaction residue to reject the probe" >&2
+    exit 1
+fi
+unset FAKE_LEAVE_TRANSACTION_ARTIFACT
+test "$(cat "$tmp/transaction-artifact-rejected/status")" = failed
+test -s "$tmp/transaction-artifact-rejected/transaction-artifacts-after.nul"
+
 identity_case=0
 for identity_mode in FAKE_IDENTITY_INCOMPLETE FAKE_IDENTITY_MISMATCH; do
     identity_case=$((identity_case + 1))
@@ -355,6 +376,7 @@ printf '%s\n' '{ "probe": true }' > "$tmp/input.json"
     --expect-file "result.txt=$expected_hash"
 
 test "$(cat "$tmp/evidence/status")" = passed
+test ! -s "$tmp/evidence/transaction-artifacts-after.nul"
 test "$(stat -c %a "$tmp/evidence")" = 700
 grep -qx '{"probe":true}' "$tmp/evidence/input.json"
 grep -qx remote-execute:00000000-0000-4000-8000-000000000001 "$tmp/evidence/remote-execute-job-id.txt"

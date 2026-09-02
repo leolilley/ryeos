@@ -1871,6 +1871,51 @@ impl PinnedDirectory {
         }
     }
 
+    /// Serialize cooperating mutations of this exact directory namespace,
+    /// failing after a bounded monotonic wait. The lock is held on the pinned
+    /// directory inode itself and creates no namespace entry.
+    pub fn lock_exclusive_with_timeout(
+        &self,
+        timeout: crate::time::Duration,
+    ) -> Result<PinnedDirectoryLock> {
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            anyhow::bail!("pinned directory locking is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let file = self.directory.try_clone()?;
+            let started = crate::time::MonotonicTimer::start();
+            loop {
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    return Ok(PinnedDirectoryLock {
+                        inner: Arc::new(PinnedDirectoryLockInner { file }),
+                    });
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(error)
+                        .with_context(|| format!("lock pinned directory {}", self.path.display()));
+                }
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    let holder = crate::locks::linux_flock_holder_pid(&file)
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    anyhow::bail!(
+                        "timed out after {:.1}s waiting to lock pinned directory {} (holder pid: {holder})",
+                        timeout.as_secs_f64(),
+                        self.path.display()
+                    );
+                }
+                std::thread::sleep(
+                    crate::time::Duration::from_millis(50).min(timeout.saturating_sub(elapsed)),
+                );
+            }
+        }
+    }
+
     /// Compare the concrete directory inodes behind two independently pinned
     /// paths. This lets lock holders prove that the namespace used for a later
     /// mutation is still the directory in which the held lock was acquired.
@@ -5531,6 +5576,30 @@ mod tests {
         let guard = first.lock_exclusive().unwrap();
 
         assert!(guard.ensure_protects(&second).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_directory_lock_is_bounded_and_leaves_no_namespace_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let contender = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let before = contender.entry_names().unwrap();
+        let guard = holder.lock_exclusive().unwrap();
+
+        let error = contender
+            .lock_exclusive_with_timeout(crate::time::Duration::from_millis(20))
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(contender.entry_names().unwrap(), before);
+
+        drop(guard);
+        let acquired = contender
+            .lock_exclusive_with_timeout(crate::time::Duration::from_millis(100))
+            .unwrap();
+        acquired.ensure_protects(&contender).unwrap();
+        drop(acquired);
+        assert_eq!(contender.entry_names().unwrap(), before);
     }
 
     #[cfg(unix)]

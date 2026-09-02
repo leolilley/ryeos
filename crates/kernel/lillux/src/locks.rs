@@ -581,7 +581,7 @@ impl FileLockGuard {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_flock_holder_pid(file: &fs::File) -> Option<i64> {
+pub(crate) fn linux_flock_holder_pid(file: &fs::File) -> Option<i64> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = file.metadata().ok()?;
     let major = libc::major(metadata.dev());
@@ -597,7 +597,7 @@ fn linux_flock_holder_pid(file: &fs::File) -> Option<i64> {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn linux_flock_holder_pid(_file: &fs::File) -> Option<i64> {
+pub(crate) fn linux_flock_holder_pid(_file: &fs::File) -> Option<i64> {
     None
 }
 
