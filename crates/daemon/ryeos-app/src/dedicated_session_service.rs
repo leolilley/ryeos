@@ -1181,6 +1181,29 @@ pub async fn execute_command(
     payload: Value,
 ) -> Result<Value> {
     let initial = current_session(state, placement_thread_id)?;
+    let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+        "command_kind": command_kind,
+        "payload": payload,
+    }))?;
+    // A settled duplicate is a read of retained authority, not a new hosted
+    // operation. Resolve it before the appendability/credential/worker gates
+    // so an exact retry remains available after the root is terminal without
+    // reopening history or touching the old worker.
+    if let Some(record) = state.state_store.settled_dedicated_session_command_replay(
+        placement_thread_id,
+        idempotency_key,
+        command_kind,
+        &request_digest,
+        &payload,
+    )? {
+        if authoritative_settled_command_replay(state, &initial, &record)? {
+            return Ok(json!({
+                "command_sequence": record.command_sequence,
+                "state": record.state,
+                "result": record.result,
+            }));
+        }
+    }
     let _root_operation =
         begin_hosted_root_operation(&state.state_store, &initial.placement_thread_id)?;
     let _credential_contact =
@@ -1190,10 +1213,6 @@ pub async fn execute_command(
     let worker_boot_epoch = session
         .worker_boot_epoch
         .ok_or_else(|| anyhow!("dedicated session has no attached worker"))?;
-    let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
-        "command_kind": command_kind,
-        "payload": payload,
-    }))?;
     let (protocol_profile_hash, protocol_schema_hashes) =
         structured_protocol_identity(state, &session.admitted_capsule_hash)?;
     let observation_limit = command_observation_limit(command_kind)?;
@@ -1210,6 +1229,9 @@ pub async fn execute_command(
             })?;
     match record.state.as_str() {
         "completed" | "failed" => {
+            if !authoritative_settled_command_replay(state, &session, &record)? {
+                bail!("settled command projection has no exact authoritative root testimony");
+            }
             return Ok(json!({
                 "command_sequence": record.command_sequence,
                 "state": record.state,
@@ -1598,6 +1620,25 @@ fn command_fact_exists(
     request_digest: &str,
     worker_boot_epoch: u64,
 ) -> Result<bool> {
+    Ok(command_fact_payload(
+        state,
+        session,
+        event_type,
+        command_sequence,
+        request_digest,
+        worker_boot_epoch,
+    )?
+    .is_some())
+}
+
+fn command_fact_payload(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    event_type: &str,
+    command_sequence: u64,
+    request_digest: &str,
+    worker_boot_epoch: u64,
+) -> Result<Option<Value>> {
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_command_fact.v1",
         "chain_root_id":session.chain_root_id,
@@ -1628,9 +1669,116 @@ fn command_fact_exists(
         if !exact {
             bail!("hosted command operation id is bound to contradictory root testimony");
         }
+        return Ok(Some(payload));
+    }
+    Ok(None)
+}
+
+fn authoritative_settled_command_replay(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    record: &crate::runtime_db::DedicatedSessionCommandRecord,
+) -> Result<bool> {
+    if !matches!(record.state.as_str(), "completed" | "failed") {
+        return Ok(false);
+    }
+    if !committed_command_fact_exists(state, session, record)? {
+        return Ok(false);
+    }
+    let retryable_uncontacted = record.result.as_ref().is_some_and(|result| {
+        result.get("retryable_uncontacted").and_then(Value::as_bool) == Some(true)
+    });
+    if retryable_uncontacted {
+        if record.state != "failed" {
+            bail!("retryable uncontacted command projection is not failed");
+        }
+        let expected_result = json!({
+            "error":"worker epoch ended before contact",
+            "retryable_uncontacted":true,
+        });
+        if record.result.as_ref() != Some(&expected_result) {
+            bail!("retryable uncontacted command projection has a contradictory result");
+        }
+        let fact = command_fact_payload(
+            state,
+            session,
+            "hosted_command.failed_uncontacted",
+            record.command_sequence,
+            &record.request_digest,
+            record.worker_boot_epoch,
+        )?;
+        return Ok(fact.is_some_and(|payload| {
+            payload.get("origin").and_then(Value::as_str) == Some("daemon_verified_process")
+                && payload
+                    .get("retryable_uncontacted")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }));
+    }
+
+    let result = record.result.as_ref().unwrap_or(&Value::Null);
+    let redacted = result.get("redacted").and_then(Value::as_bool) == Some(true);
+    let recovered_from_root_chain = result
+        .get("recovered_from_root_chain")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let projected_response_digest = if redacted {
+        let object = result
+            .as_object()
+            .ok_or_else(|| anyhow!("redacted command projection is not an object"))?;
+        let exact_shape = object.len() == 2
+            || (object.len() == 3
+                && object
+                    .get("recovered_from_root_chain")
+                    .and_then(Value::as_bool)
+                    == Some(true));
+        if !exact_shape
+            || !object.contains_key("redacted")
+            || !object.contains_key("response_digest")
+        {
+            bail!("redacted command projection has a contradictory shape");
+        }
+        result
+            .get("response_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| lillux::valid_hash(digest))
+            .ok_or_else(|| anyhow!("redacted command projection has no response digest"))?
+            .to_owned()
+    } else {
+        ryeos_state::objects::canonical_value_digest(result)?
+    };
+    if let Some(payload) = command_fact_payload(
+        state,
+        session,
+        "hosted_command.settled",
+        record.command_sequence,
+        &record.request_digest,
+        record.worker_boot_epoch,
+    )? {
+        let exact = payload.get("origin").and_then(Value::as_str) == Some("daemon_observed_io")
+            && payload.get("response_digest").and_then(Value::as_str)
+                == Some(projected_response_digest.as_str())
+            && payload.get("succeeded").and_then(Value::as_bool)
+                == Some(record.state == "completed");
+        if !exact {
+            bail!("settled command projection contradicts authoritative root testimony");
+        }
         return Ok(true);
     }
-    Ok(false)
+    if record.state != "completed" {
+        return Ok(false);
+    }
+    if !redacted || !recovered_from_root_chain {
+        return Ok(false);
+    }
+    Ok(find_authoritative_command_observation_batch(
+        state,
+        session,
+        record.worker_boot_epoch,
+        record.command_sequence,
+        &record.request_digest,
+    )?
+    .is_some_and(|(_, response_digest)| response_digest == projected_response_digest))
 }
 
 fn committed_command_fact_exists(

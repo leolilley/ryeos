@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:4026a1e165475af52a3cf9b7c28b032881770a50da237434080320ce4cbe6320:yvqkq+6dRYyzBfJ7Pn2uI5J6JieMqMxQxkI27HE+12/BbKW6Lvxf0fszhFCmLVHYlYQRT+VIhzDudvKfCtLvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T20:55:25Z:01b7184e197335bd434bae8195fc6bf44f4936eb9bc3bd5787ccd80d7e77a737:+0tpVvoYvj5FBCYEj+pvTDQn+u0wvrQIzdar1zKXP53w+iQECIYVAipA2yCrdDca1n1SqUwZ8kWFmz/VjWW2DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -395,7 +395,16 @@ Restart can therefore rebuild a dispatched command from that batch instead of
 incorrectly downgrading authoritative success to outcome-unknown. A terminal
 root is classified from its closed chain without attempting an impossible
 append: no contact fact is uncontacted, contact without a response batch is
-unknown, and a response batch proves completion.
+unknown, and a response batch proves completion. An exact retry of an already
+settled command is a read of that retained authority only after RyeOS verifies
+the projection against the exact committed-command testimony and its settlement,
+verified-uncontacted failure, or admitted response-batch fact. RyeOS resolves
+that proved replay before root appendability, credential, and worker-contact
+admission, so the same retained result remains available after terminalization without
+reopening history or contacting the retired worker. A new or unsettled command
+still follows the ordinary appendability gate and fails closed on a terminal
+root. Reuse of the idempotency key for different authority is rejected before
+that gate.
 
 Approval consent covers one exact action inside the admitted ceiling. It never
 expands authority. The outbox reserves the decision, writes its root

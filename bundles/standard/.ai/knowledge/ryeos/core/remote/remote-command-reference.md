@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:c365bc2f43acff6228febaf514f84a92c5b2fee7724480a92ecb6938a1b7b376:SBACvWRxvdw+Jya/4ih7cDfsMNRWF5HvmP8eKZgenXCyH/0EXmbYXn88uZo8BUSPhobbZ30jzKD4qOEKGk18DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T20:32:26Z:9690facd9dd7551eca555c4652b21119fc06a276d917ee5ed4bc3d0bc0fa608d:8K2Tz47/qc4vOLJrtlE3EyRAleK4+fL5vrRP1RN3zkMwsrgZQJeUr+zKzBnALmy8EF94PaUitzn4h/fLRZExCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -278,6 +278,14 @@ origin, scope merging is forbidden and `--allow-semantic-conversion` is
 required. The offline tool reports previous and new class/origin values and
 retains the node's exclusive daemon state lock through publication; a live
 daemon therefore causes a mechanical refusal.
+
+Remote request authorization does not itself make project content trusted. If
+a pushed project contains executable project-authored items, the project
+snapshot must carry the source author's public trust document in its existing
+`.ai/config/keys/trusted/<fingerprint>.toml` tier (or the target operator must
+have made a separate explicit node-trust decision). This is public verification
+material only. Never copy the source private key, and never infer content trust
+from a `remote_operator` grant.
 
 ## `ryeos remote push`
 

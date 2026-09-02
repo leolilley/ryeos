@@ -5102,6 +5102,24 @@ impl StateStore {
         g.runtime_db.reserve_dedicated_session_command(command)
     }
 
+    pub fn settled_dedicated_session_command_replay(
+        &self,
+        placement_thread_id: &str,
+        idempotency_key: &str,
+        command_kind: &str,
+        request_digest: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<DedicatedSessionCommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.settled_dedicated_session_command_replay(
+            placement_thread_id,
+            idempotency_key,
+            command_kind,
+            request_digest,
+            payload,
+        )
+    }
+
     pub fn dedicated_session_checkpoint_settlement_digest(
         &self,
         placement_thread_id: &str,

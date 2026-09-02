@@ -4251,6 +4251,26 @@ fn read_dedicated_command_by_key(
     .transpose()
 }
 
+fn validate_dedicated_session_command_authority(
+    placement_thread_id: &str,
+    idempotency_key: &str,
+    command_kind: &str,
+    request_digest: &str,
+    payload: &serde_json::Value,
+) -> Result<String> {
+    for (label, value, max) in [
+        ("command session id", placement_thread_id, 256),
+        ("command idempotency key", idempotency_key, 256),
+        ("command kind", command_kind, 128),
+        ("command request digest", request_digest, 128),
+    ] {
+        validate_bounded_runtime_text(label, value, max)?;
+    }
+    let payload_json = serde_json::to_string(payload)?;
+    validate_bounded_runtime_text("command payload", &payload_json, 256 * 1024)?;
+    Ok(payload_json)
+}
+
 impl RuntimeDb {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
@@ -5695,16 +5715,13 @@ impl RuntimeDb {
         &self,
         command: NewDedicatedSessionCommand<'_>,
     ) -> Result<DedicatedSessionCommandRecord> {
-        for (label, value, max) in [
-            ("command session id", command.placement_thread_id, 256),
-            ("command idempotency key", command.idempotency_key, 256),
-            ("command kind", command.command_kind, 128),
-            ("command request digest", command.request_digest, 128),
-        ] {
-            validate_bounded_runtime_text(label, value, max)?;
-        }
-        let payload_json = serde_json::to_string(command.payload)?;
-        validate_bounded_runtime_text("command payload", &payload_json, 256 * 1024)?;
+        let payload_json = validate_dedicated_session_command_authority(
+            command.placement_thread_id,
+            command.idempotency_key,
+            command.command_kind,
+            command.request_digest,
+            command.payload,
+        )?;
         let epoch = i64::try_from(command.worker_boot_epoch)
             .context("worker boot epoch exceeds SQLite range")?;
         let tx = self.conn.unchecked_transaction()?;
@@ -5804,6 +5821,42 @@ impl RuntimeDb {
         .ok_or_else(|| anyhow!("committed command disappeared"))?;
         tx.commit()?;
         Ok(record)
+    }
+
+    /// Return an already-settled command for an exact idempotent replay.
+    ///
+    /// This lookup deliberately does not require the session's current worker
+    /// epoch: a terminal root has no live worker authority, while the retained
+    /// command row already binds the exact epoch that produced its result.
+    /// New or unsettled commands return `None` and must still pass ordinary
+    /// root-operation and worker-contact admission.
+    pub fn settled_dedicated_session_command_replay(
+        &self,
+        placement_thread_id: &str,
+        idempotency_key: &str,
+        command_kind: &str,
+        request_digest: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<DedicatedSessionCommandRecord>> {
+        let _payload_json = validate_dedicated_session_command_authority(
+            placement_thread_id,
+            idempotency_key,
+            command_kind,
+            request_digest,
+            payload,
+        )?;
+        let Some(existing) =
+            read_dedicated_command_by_key(&self.conn, placement_thread_id, idempotency_key)?
+        else {
+            return Ok(None);
+        };
+        if existing.command_kind != command_kind
+            || existing.request_digest != request_digest
+            || existing.payload != *payload
+        {
+            bail!("command idempotency key was reused for different authority");
+        }
+        Ok(matches!(existing.state.as_str(), "completed" | "failed").then_some(existing))
     }
 
     /// Prove every workload-contact outbox owned by one placement is settled
@@ -13659,6 +13712,28 @@ mod tests {
             })
             .unwrap();
         assert_eq!(projected.state, "completed");
+        let replay = db
+            .settled_dedicated_session_command_replay(
+                "T-recover",
+                "reattach-terminal-two",
+                "reattach",
+                &"f".repeat(64),
+                &payload,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.command_sequence, terminal_recovered.command_sequence);
+        assert_eq!(replay.state, "completed");
+        assert!(
+            db.settled_dedicated_session_command_replay(
+                "T-recover",
+                "reattach-terminal-two",
+                "route",
+                &"f".repeat(64),
+                &payload,
+            )
+            .is_err()
+        );
         assert_eq!(
             db.dedicated_session("T-recover").unwrap().unwrap().state,
             "outcome_unknown"
