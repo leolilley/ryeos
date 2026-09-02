@@ -22,6 +22,43 @@ use serde_json::Value;
 
 use crate::state::AppState;
 
+/// Exact, non-secret reason a retained content realization cannot be admitted.
+///
+/// Absence is an operator-correctable resource state, not an internal launch
+/// failure.  Keeping it typed lets generic execution surfaces report a stable
+/// code without matching an error string or learning anything about the
+/// workload that requested the content.
+#[derive(Debug, thiserror::Error)]
+#[error("external-content consumer has no active operator binding")]
+pub struct ExternalContentBindingUnavailable {
+    pub manifest_hash: String,
+    pub consumer_ref: String,
+}
+
+fn require_admission_binding(
+    state: &AppState,
+    cas: &lillux::CasStore,
+    manifest_hash: &str,
+    consumer_ref: &str,
+    publisher_fingerprint: &str,
+) -> anyhow::Result<ryeos_state::objects::ExternalContentBinding> {
+    crate::operator_external_content::active_binding_from_store(
+        &state.state_store,
+        cas,
+        manifest_hash,
+        consumer_ref,
+        publisher_fingerprint,
+    )?
+    .map(|(_, binding)| binding)
+    .ok_or_else(|| {
+        ExternalContentBindingUnavailable {
+            manifest_hash: manifest_hash.to_owned(),
+            consumer_ref: consumer_ref.to_owned(),
+        }
+        .into()
+    })
+}
+
 /// Admission evidence retained until the finalized launch capsule becomes the
 /// authoritative durable root.
 pub struct AdmittedExternalRealizations {
@@ -755,13 +792,7 @@ fn seal_pinned_content_realization(
     let consumer_publisher = consumer_publisher.ok_or_else(|| {
         anyhow::anyhow!("retained external-content consumer has no verified publisher fingerprint")
     })?;
-    crate::operator_external_content::require_active_binding(
-        state,
-        cas,
-        digest,
-        consumer_ref,
-        consumer_publisher,
-    )?;
+    require_admission_binding(state, cas, digest, consumer_ref, consumer_publisher)?;
     if declaration.locator.is_some() {
         anyhow::bail!(
             "external content `{}` must bind retained bytes without a live locator",
@@ -925,13 +956,7 @@ fn seal_pinned_large_realization(
     let consumer_publisher = consumer_publisher.ok_or_else(|| {
         anyhow::anyhow!("large-content consumer has no verified publisher fingerprint")
     })?;
-    crate::operator_external_content::require_active_binding(
-        state,
-        cas,
-        digest,
-        consumer_ref,
-        consumer_publisher,
-    )?;
+    require_admission_binding(state, cas, digest, consumer_ref, consumer_publisher)?;
     if declaration.locator.is_some() {
         anyhow::bail!(
             "external content `{}` must bind large bytes from the retained store, not a live locator",

@@ -502,6 +502,71 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("contents: read", source_qualifier)
         self.assertNotIn("contents: write", source_qualifier)
 
+    def test_release_qualification_pins_exact_profile_and_release_authority(self) -> None:
+        qualifier = NODE_QUALIFIER_PATH.read_text(encoding="utf-8")
+
+        # Provider evidence is a relational proof, not two unordered sets of
+        # distinct values. Each call record joins its provider/worker pair to
+        # the exact accounting attempt and the corresponding execution thread.
+        self.assertIn('expected_profiles = {', qualifier)
+        for profile in PROFILE_SPECS:
+            self.assertIn(
+                f'"{profile}": "worker:local-inference/{profile}"',
+                qualifier,
+            )
+        for required_join in (
+            'attempts_by_id = {item["attempt_id"]: item for item in attempts}',
+            'provider_id = record["coordinate"]["provider_id"]',
+            'transport.get("worker_ref") != expected_worker',
+            'attempts_by_id.get(observation.get("attempt_id"))',
+            '"config_hash": record["coordinate"]["provider_config_hash"]',
+            '"authority_digest": record["coordinate"]["authority_digest"]',
+            '"thread_id": expected_thread',
+            'observation.get("produced_by_thread") != expected_thread',
+        ):
+            self.assertIn(required_join, qualifier)
+
+        # The cache/lease negative must occur in one daemon generation and
+        # without a validation between release and launch.
+        ready = qualifier.index(
+            'validation-release-ready-qwen3-0.6b-cpu-4096.json'
+        )
+        release = qualifier.index(
+            'thread_service service:external-content/release', ready
+        )
+        launch = qualifier.index('released_refusal_raw=', release)
+        released_projection = qualifier.index(
+            'validation-released-$profile.json', launch
+        )
+        self.assertLess(ready, release)
+        self.assertLess(release, launch)
+        self.assertLess(launch, released_projection)
+        self.assertNotIn("stop_node", qualifier[ready:released_projection])
+        self.assertNotIn(" validate ", qualifier[release:launch])
+
+        # Only the exact structured absence is accepted. Raw rendered CLI
+        # diagnostics are transient and the retained evidence is closed JSON.
+        for exact_contract in (
+            'status != 404',
+            'body.get("code") != "external_content_binding_unavailable"',
+            'body.get("retryable") is not False',
+            'expected_binding = "worker:local-inference/qwen3-0.6b-cpu-4096"',
+            'threads-before-release-refusal.json',
+            'threads-after-release-refusal.json',
+            'bank-before-release-refusal.json',
+            'bank-after-release-refusal.json',
+            'if before != after:',
+            '"worker_contact": False',
+            '"schema": "ryeos.local_inference_binding_refusal_proof.v1"',
+            'released-binding-launch-refusal.json',
+        ):
+            self.assertIn(exact_contract, qualifier)
+        self.assertIn(
+            'rm -f -- "$qualification_root/.released-binding-launch-refusal.raw"',
+            qualifier,
+        )
+        self.assertNotIn("released-binding-launch-refusal.txt", qualifier)
+
     def test_toolchain_embeds_the_exact_llvm_notice_closure(self) -> None:
         author = AUTHOR_PATH.read_text(encoding="utf-8")
         expected = {

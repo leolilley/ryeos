@@ -4505,7 +4505,11 @@ async fn prepare_managed_launch_authority(
             &mut prepared_launch,
             admitted_capsule.is_some() && !cross_site_continuation,
         )
-        .map_err(BuildAndLaunchError::Internal)?;
+        .map_err(|error| {
+            super::persistent_session::classify_prepared_session_admission_error(&error)
+                .map(BuildAndLaunchError::from)
+                .unwrap_or_else(|| BuildAndLaunchError::Internal(error))
+        })?;
     let effective_caps = if let Some(capsule) = admitted_capsule.as_ref() {
         // Capability authority is part of the admitted execution closure.
         // Recovery must not reopen the composed item or its runtime-authority

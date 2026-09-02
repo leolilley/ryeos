@@ -148,6 +148,10 @@ done < <(ryeos_bundle_set_names full)
 node_started=0
 cleanup() {
     local status="$1"
+    # Raw CLI diagnostics are transient parser input only. They may contain
+    # host paths from an unrelated failure and are never qualification
+    # evidence, including when a failed node is retained for diagnosis.
+    rm -f -- "$qualification_root/.released-binding-launch-refusal.raw"
     if [[ "$node_started" -eq 1 ]]; then
         HOME="$home_root" RYEOS_APP_ROOT="$node_root" \
             PATH="$(dirname "$ryeos_bin"):$PATH" \
@@ -793,7 +797,7 @@ PY
 snapshot_provider_bank() {
     local evidence_file="$1"
     local expected_count="$2"
-    python3 - "$node_root" "$evidence_file" "$expected_count" <<'PY'
+    python3 - "$node_root" "$evidence_file" "$expected_count" "$qualification_root" <<'PY'
 import json
 from pathlib import Path
 import sqlite3
@@ -801,6 +805,7 @@ import sys
 
 node = Path(sys.argv[1])
 expected_count = int(sys.argv[3])
+qualification_root = Path(sys.argv[4])
 accounting_path = node / ".ai/state/accounting.sqlite3"
 operational_path = node / ".ai/state/operational.sqlite3"
 generation = json.loads(
@@ -904,10 +909,53 @@ workers = {
 }
 if workers != expected_workers:
     raise SystemExit(f"provider coordinates name the wrong exact workers: {workers!r}")
+expected_profiles = {
+    "qwen3-0.6b-cpu-4096": "worker:local-inference/qwen3-0.6b-cpu-4096",
+    "qwen3-0.6b-cpu-2048": "worker:local-inference/qwen3-0.6b-cpu-2048",
+}
+expected_threads = {
+    profile: json.loads(
+        (qualification_root / f"executed-{profile.rsplit('-', 1)[-1]}.json").read_text(
+            encoding="utf-8"
+        )
+    )["thread_id"]
+    for profile in expected_profiles
+}
+attempts_by_id = {item["attempt_id"]: item for item in attempts}
+if len(attempts_by_id) != len(attempts):
+    raise SystemExit("provider attempt ids are not unique")
 for record in provider_calls:
     if record.get("cache_key") not in {item["cache_key"] for item in records}:
         raise SystemExit("provider-call object is absent from the replay index")
     transport = record["coordinate"]["transport"]
+    provider_id = record["coordinate"]["provider_id"]
+    expected_worker = expected_profiles.get(provider_id)
+    if expected_worker is None or transport.get("worker_ref") != expected_worker:
+        raise SystemExit(
+            "provider coordinate does not bind the exact profile/worker pair: "
+            f"provider={provider_id!r}, worker={transport.get('worker_ref')!r}"
+        )
+    observation = record["first_observation"]
+    attempt = attempts_by_id.get(observation.get("attempt_id"))
+    if attempt is None:
+        raise SystemExit("provider first observation names no accounting attempt")
+    expected_thread = expected_threads[provider_id]
+    exact_attempt_fields = {
+        "provider_id": provider_id,
+        "config_hash": record["coordinate"]["provider_config_hash"],
+        "authority_digest": record["coordinate"]["authority_digest"],
+        "thread_id": expected_thread,
+    }
+    for field, expected in exact_attempt_fields.items():
+        if attempt[field] != expected:
+            raise SystemExit(
+                f"provider {provider_id} attempt {field}: "
+                f"expected={expected!r}, observed={attempt[field]!r}"
+            )
+    if observation.get("produced_by_thread") != expected_thread:
+        raise SystemExit(
+            f"provider {provider_id} observation was produced by the wrong execution thread"
+        )
     for field in (
         "effective_definition_digest",
         "capsule_hash",
@@ -1747,9 +1795,11 @@ evidence = {
 connection.close()
 PY
 
-# A successful static projection is observation, never a lease. Release one
-# exact current binding after validation, then prove both a fresh validation
-# and a real launch re-check live binding authority without worker contact.
+# A successful static projection is observation, never a lease. In one daemon
+# generation, validate the exact profile as ready, release its current binding,
+# and immediately launch before any intervening validation. The launch must
+# re-check live authority, return the exact typed absence, and make no thread,
+# provider-attempt, or worker contact. Only then project both consumers again.
 stop_node
 start_node
 [[ -z "$(worker_pids)" ]] || {
@@ -1757,9 +1807,153 @@ start_node
     exit 1
 }
 binding_id="$(tr -d '\n' < "$qualification_root/release-binding-id-4096.txt")"
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-release-ready-validation.json"
+HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" validate \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --no-project --input '{}' \
+    > "$qualification_root/validation-release-ready-qwen3-0.6b-cpu-4096.json"
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-release-ready-validation.json"
+[[ -z "$(worker_pids)" ]] || {
+    echo "release-ready validation contacted a local-inference worker" >&2
+    exit 1
+}
+python3 - "$qualification_root" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+value = json.loads(
+    (root / "validation-release-ready-qwen3-0.6b-cpu-4096.json").read_text()
+)
+
+def find(item):
+    if isinstance(item, dict):
+        if "runtime_preparation" in item and "admission_ready" in item:
+            return item
+        for child in item.values():
+            found = find(child)
+            if found is not None:
+                return found
+    elif isinstance(item, list):
+        for child in item:
+            found = find(child)
+            if found is not None:
+                return found
+    return None
+
+def thread_ids(path):
+    value = json.loads(path.read_text())
+    found = set()
+    def walk(item):
+        if isinstance(item, dict):
+            if isinstance(item.get("thread_id"), str):
+                found.add(item["thread_id"])
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+    walk(value)
+    return found
+
+result = find(value)
+dependency = next(iter(result["runtime_preparation"]["execution_dependencies"].values()))
+if not result["admission_ready"] or not dependency["admission_ready"]:
+    raise SystemExit("exact 4096 profile was not ready immediately before release")
+if thread_ids(root / "threads-before-release-ready-validation.json") != thread_ids(
+    root / "threads-after-release-ready-validation.json"
+):
+    raise SystemExit("release-ready validation changed thread inventory")
+PY
+snapshot_provider_bank "$qualification_root/bank-before-release-refusal.json" 2
 thread_service service:external-content/release \
     "{\"binding_id\":\"$binding_id\"}" \
     "$qualification_root/released-binding-4096.json"
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-before-release-refusal.json"
+released_refusal_raw="$qualification_root/.released-binding-launch-refusal.raw"
+if NO_COLOR=1 HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
+    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
+    --no-project --no-stream --input '{}' \
+    > "$released_refusal_raw" 2>&1; then
+    echo "execution reused validation after its exact binding was released" >&2
+    exit 1
+fi
+[[ -z "$(worker_pids)" ]] || {
+    echo "released-binding launch refusal contacted a local-inference worker" >&2
+    exit 1
+}
+thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
+    "$qualification_root/threads-after-release-refusal.json"
+snapshot_provider_bank "$qualification_root/bank-after-release-refusal.json" 2
+python3 - "$qualification_root" "$released_refusal_raw" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+root, raw_path = map(Path, sys.argv[1:3])
+raw = raw_path.read_text(encoding="utf-8")
+match = re.search(r"HTTP\s+(\d+):\s*(\{[^\r\n]*\})", raw)
+if match is None:
+    raise SystemExit("released-binding launch returned no structured HTTP error")
+status = int(match.group(1))
+try:
+    body = json.loads(match.group(2))
+except json.JSONDecodeError as error:
+    raise SystemExit(f"released-binding launch error body is not exact JSON: {error}")
+expected_binding = "worker:local-inference/qwen3-0.6b-cpu-4096"
+if status != 404:
+    raise SystemExit(f"released-binding launch returned HTTP {status}, expected 404")
+if body.get("code") != "external_content_binding_unavailable":
+    raise SystemExit(f"released-binding launch returned the wrong code: {body.get('code')!r}")
+if body.get("retryable") is not False or body.get("binding") != expected_binding:
+    raise SystemExit("released-binding launch error contradicts exact binding authority")
+
+def thread_ids(path):
+    value = json.loads(path.read_text())
+    found = set()
+    def walk(item):
+        if isinstance(item, dict):
+            if isinstance(item.get("thread_id"), str):
+                found.add(item["thread_id"])
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+    walk(value)
+    return found
+
+if thread_ids(root / "threads-before-release-refusal.json") != thread_ids(
+    root / "threads-after-release-refusal.json"
+):
+    raise SystemExit("released-binding launch refusal changed thread inventory")
+before = json.loads((root / "bank-before-release-refusal.json").read_text())
+after = json.loads((root / "bank-after-release-refusal.json").read_text())
+if before != after:
+    raise SystemExit("released-binding launch refusal changed provider accounting/replay state")
+proof = {
+    "schema": "ryeos.local_inference_binding_refusal_proof.v1",
+    "http_status": status,
+    "code": body["code"],
+    "retryable": body["retryable"],
+    "binding": body["binding"],
+    "thread_inventory_unchanged": True,
+    "provider_bank_unchanged": True,
+    "worker_contact": False,
+}
+(root / "released-binding-launch-refusal.json").write_text(
+    json.dumps(proof, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+raw_path.unlink()
+PY
 thread_service service:threads/list '{"limit":200,"sort":"newest"}' \
     "$qualification_root/threads-before-released-validation.json"
 for profile in qwen3-0.6b-cpu-4096 qwen3-0.6b-cpu-2048; do
@@ -1835,18 +2029,6 @@ if model["status"] != "missing_binding" or model["binding_digest"] is not None:
 if not retained["admission_ready"] or not retained_dependency["admission_ready"]:
     raise SystemExit("consumer-specific release affected the other exact profile")
 PY
-if HOME="$home_root" RYEOS_APP_ROOT="$node_root" "$ryeos_bin" execute \
-    directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-    --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-    --no-project --no-stream --input '{}' \
-    > "$qualification_root/released-binding-launch-refusal.txt" 2>&1; then
-    echo "execution reused validation after its exact binding was released" >&2
-    exit 1
-fi
-[[ -z "$(worker_pids)" ]] || {
-    echo "released-binding launch refusal contacted a local-inference worker" >&2
-    exit 1
-}
 
 python3 - "$qualification_root" "$evidence_output" <<'PY'
 import json
@@ -1957,9 +2139,12 @@ summary = {
     "released_binding": json.loads(
         (root / "released-binding-4096.json").read_text()
     ),
-    "released_binding_launch_refusal": (
-        root / "released-binding-launch-refusal.txt"
-    ).read_text(),
+    "release_transition_validation": json.loads(
+        (root / "validation-release-ready-qwen3-0.6b-cpu-4096.json").read_text()
+    ),
+    "released_binding_launch_refusal": json.loads(
+        (root / "released-binding-launch-refusal.json").read_text()
+    ),
 }
 (root / "qualification.json").write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n",

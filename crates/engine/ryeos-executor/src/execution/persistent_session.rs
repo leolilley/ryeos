@@ -329,6 +329,27 @@ pub(crate) fn admit_or_verify_prepared_sessions(
     Ok(AdmittedSessionPublications { publications })
 }
 
+/// Preserve the operator-correctable external-content absence across the
+/// otherwise opaque admission boundary. All other failures retain their
+/// existing internal/integrity classification.
+pub(crate) fn classify_prepared_session_admission_error(
+    error: &anyhow::Error,
+) -> Option<crate::dispatch_error::DispatchError> {
+    let unavailable = error
+        .downcast_ref::<ryeos_app::external_content_admission::ExternalContentBindingUnavailable>(
+    )?;
+    Some(
+        crate::dispatch_error::DispatchError::LaunchResourceNotFound {
+            code: "external_content_binding_unavailable".to_owned(),
+            message: format!(
+                "no active operator binding for manifest {} and consumer {}",
+                unavailable.manifest_hash, unavailable.consumer_ref
+            ),
+            binding: Some(unavailable.consumer_ref.clone()),
+        },
+    )
+}
+
 /// Project the preparer-selected dependencies through current read-side
 /// source, content-binding, target, and node session-policy authority. The
 /// projection deliberately excludes prepared runtime data, secrets, host
@@ -1780,6 +1801,27 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_content_binding_keeps_its_typed_launch_classification() {
+        let error = anyhow::Error::new(
+            ryeos_app::external_content_admission::ExternalContentBindingUnavailable {
+                manifest_hash: "a".repeat(64),
+                consumer_ref: "worker:fixture/exact".to_owned(),
+            },
+        )
+        .context("admit prepared content dependency");
+        let dispatch = classify_prepared_session_admission_error(&error).unwrap();
+        assert!(matches!(
+            dispatch,
+            crate::dispatch_error::DispatchError::LaunchResourceNotFound {
+                ref code,
+                ref binding,
+                ..
+            } if code == "external_content_binding_unavailable"
+                && binding.as_deref() == Some("worker:fixture/exact")
+        ));
+    }
 
     #[test]
     fn executable_search_requires_a_materialized_directory() {
