@@ -41,7 +41,7 @@ impl NodeInitProfile {
         if self.exact_bundles.is_empty() {
             bail!("node policy set exact_bundles is empty");
         }
-        validate_sorted_unique_names("exact bundle", &self.exact_bundles)?;
+        validate_sorted_unique_bundle_names(&self.exact_bundles)?;
         validate_policy_bodies(policy_table, &self.policies, source_file)
     }
 
@@ -90,7 +90,7 @@ impl NodePolicyGeneration {
         let generation = validate_policy_generation(policy_table, policies, source_file)?;
         Ok(NodePolicyUpdate {
             generation,
-            expected_digest: Some(self.digest.clone()),
+            expected: ExpectedPolicyGeneration::ExactDigest(self.digest.clone()),
         })
     }
 }
@@ -99,7 +99,13 @@ impl NodePolicyGeneration {
 /// cannot bypass section compilation or pathname validation.
 pub struct NodePolicyUpdate {
     generation: NodePolicyGeneration,
-    expected_digest: Option<String>,
+    expected: ExpectedPolicyGeneration,
+}
+
+enum ExpectedPolicyGeneration {
+    Absent,
+    ExactDigest(String),
+    PresentSchemaCut,
 }
 
 impl NodePolicyUpdate {
@@ -112,7 +118,17 @@ impl NodePolicyUpdate {
     pub fn initial(generation: NodePolicyGeneration) -> Self {
         Self {
             generation,
-            expected_digest: None,
+            expected: ExpectedPolicyGeneration::Absent,
+        }
+    }
+
+    /// Replace one pinned predecessor generation that the current registry
+    /// cannot decode. Only an explicit stopped-node schema-cut operation may
+    /// select this expectation.
+    pub fn schema_cut(generation: NodePolicyGeneration) -> Self {
+        Self {
+            generation,
+            expected: ExpectedPolicyGeneration::PresentSchemaCut,
         }
     }
 }
@@ -121,12 +137,13 @@ pub fn validate_init_profile_name(value: &str) -> Result<()> {
     validate_policy_name("node init profile", value)
 }
 
-fn validate_sorted_unique_names(label: &str, values: &[String]) -> Result<()> {
+fn validate_sorted_unique_bundle_names(values: &[String]) -> Result<()> {
     let mut previous: Option<&str> = None;
     for value in values {
-        validate_policy_name(label, value)?;
+        ryeos_engine::protocol_vocabulary::validate_bundle_name(value)
+            .map_err(|error| anyhow::anyhow!("invalid exact bundle name `{value}`: {error}"))?;
         if previous.is_some_and(|candidate| candidate >= value.as_str()) {
-            bail!("node init profile {label} names must be sorted and unique");
+            bail!("node init profile exact bundle names must be sorted and unique");
         }
         previous = Some(value);
     }
@@ -252,6 +269,57 @@ pub fn load_optional_policy_generation(
     load_policy_generation_from_directory(app_root, &directory, trust_store, policy_table).map(Some)
 }
 
+/// Prove that an explicit schema cut is replacing a bounded, node-signed
+/// policy generation without interpreting its predecessor section schemas.
+/// This is intentionally meaning-blind: the current registry may be unable to
+/// decode the very generation the operator is retiring.
+pub fn validate_schema_cut_policy_occupant(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<()> {
+    let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
+        .context("node has no existing policy generation to replace")?;
+    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)
+}
+
+fn validate_schema_cut_directory_occupant(
+    app_root: &Path,
+    directory: &lillux::PinnedDirectory,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<()> {
+    let node_fingerprint = crate::node_config::loader::node_identity_fingerprint(app_root)?;
+    let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
+    if entries.is_empty() {
+        bail!("existing node policy generation is empty");
+    }
+    let mut names = BTreeMap::new();
+    for entry in entries {
+        if entry.entry_type != lillux::secure_fs::PinnedEntryType::Regular {
+            bail!("existing node policy generation contains a non-regular entry");
+        }
+        let path = Path::new(&entry.name);
+        if path.extension().and_then(OsStr::to_str) != Some("yaml") {
+            bail!("existing node policy generation contains an unsupported filename");
+        }
+        let name = path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .context("existing node policy filename is not UTF-8")?;
+        validate_policy_name("existing node policy section", name)?;
+        let file = directory
+            .open_pinned_regular(&entry.name, false)?
+            .context("existing node policy entry disappeared")?;
+        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
+        if verified.signer_fingerprint != node_fingerprint {
+            bail!("existing policy generation is not signed by the current node identity");
+        }
+        if names.insert(name.to_owned(), ()).is_some() {
+            bail!("existing node policy generation contains duplicate section names");
+        }
+    }
+    Ok(())
+}
+
 fn load_policy_generation_from_directory(
     app_root: &Path,
     directory: &lillux::PinnedDirectory,
@@ -332,19 +400,38 @@ pub fn publish_policy_update(
         .context("pin node root for policy publication")?;
     let target_name = OsStr::new(POLICIES_DIRECTORY);
     let current = node_root.open_child_directory(target_name)?;
-    let current_digest = current
-        .as_ref()
-        .map(|directory| {
-            load_policy_generation_from_directory(app_root, directory, trust_store, &policy_table)
-                .map(|generation| generation.digest)
-        })
-        .transpose()?;
-    if current_digest != update.expected_digest {
-        bail!(
-            "node policy generation changed before publication: expected {:?}, found {:?}",
-            update.expected_digest,
-            current_digest
-        );
+    match &update.expected {
+        ExpectedPolicyGeneration::Absent if current.is_some() => {
+            bail!("node policy generation appeared before initial publication")
+        }
+        ExpectedPolicyGeneration::Absent => {}
+        ExpectedPolicyGeneration::ExactDigest(expected) => {
+            let current = current
+                .as_ref()
+                .context("node policy generation disappeared before replacement")?;
+            let found = load_policy_generation_from_directory(
+                app_root,
+                current,
+                trust_store,
+                &policy_table,
+            )?
+            .digest;
+            if &found != expected {
+                bail!(
+                    "node policy generation changed before publication: expected {expected}, found {found}"
+                );
+            }
+        }
+        ExpectedPolicyGeneration::PresentSchemaCut if current.is_none() => {
+            bail!("node policy generation disappeared before explicit schema cut")
+        }
+        ExpectedPolicyGeneration::PresentSchemaCut => {
+            validate_schema_cut_directory_occupant(
+                app_root,
+                current.as_ref().expect("presence checked above"),
+                trust_store,
+            )?;
+        }
     }
 
     let staging_name = OsString::from(POLICY_STAGING_DIRECTORY);

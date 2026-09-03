@@ -233,6 +233,23 @@ not use it for release images. See the
 [official publisher trust contract](bundles/standard/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
 for the complete operator contract.
 
+When an upgrade intentionally changes the signed node-policy schema or the
+image's exact bundle-set profile, stop the old container and opt into the
+one-time clean cut on its persistent volume:
+
+```bash
+docker run -e RYEOS_RESET_NODE_POLICY_GENERATION=1 \
+  -v ryeos-data:/data ghcr.io/leolilley/ryeos-standard:latest
+```
+
+The entrypoint asks one locked init to replace the complete signed policy
+generation and align the trusted profile's prospective exact bundle inventory.
+The prior fence is invalidated before mutation and a new signed completion
+fence is written before the daemon starts. It preserves
+identity, trust, vault credentials, execution history, project heads, and all
+other node state. Remove the variable after the successful upgrade; policy
+replacement is never automatic.
+
 The release gate exercises default-disabled startup and signed execution
 without extra capabilities or an isolation backend. Back up the `ryeos-data`
 volume before upgrades; it contains node identity, trust, vault, and durable

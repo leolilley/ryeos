@@ -11,6 +11,7 @@ pub mod admission;
 pub mod bundle_events;
 pub mod bundle_outbox;
 pub mod bundle_projection;
+pub mod capability;
 pub mod chain;
 pub mod event_types;
 pub mod external_content;

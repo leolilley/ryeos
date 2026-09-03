@@ -863,6 +863,7 @@ mod tests {
             source_last_event_hash: "3".repeat(64),
             successor_placement_thread_id: "T-target".into(),
             placement_attestation_hash: "4".repeat(64),
+            source_accounting_transfer_hash: None,
             transition_subject_hash: "5".repeat(64),
             target_node_signer_fingerprint: lillux::crypto::fingerprint(&target.verifying_key()),
         };
@@ -923,7 +924,12 @@ mod tests {
             "item_trust_class": "trusted",
             "kind_schema_content_hash": "33".repeat(32),
             "resolved_from": {
-                "node_default": { "node_policy": "missing_config" }
+                "node_default": { "node_policy": {
+                    "path": ".ai/node/policies/thread_history.yaml",
+                    "space": "node",
+                    "content_hash": "44".repeat(32),
+                    "signer_fingerprint": "55".repeat(32)
+                } }
             }
         })
     }

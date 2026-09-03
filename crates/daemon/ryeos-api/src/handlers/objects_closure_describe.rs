@@ -2,51 +2,33 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-const DEFAULT_MAX_OBJECTS: usize = 10_000;
-const DEFAULT_MAX_BLOBS: usize = 10_000;
-const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
-const DEFAULT_MAX_TOTAL_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
-const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
-const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
-const DEFAULT_MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
-const MAX_OBJECTS_LIMIT: usize = 100_000;
-const MAX_BLOBS_LIMIT: usize = 100_000;
-const MAX_OBJECT_BYTES_LIMIT: u64 = 32 * 1024 * 1024;
-const MAX_TOTAL_OBJECT_BYTES_LIMIT: u64 = 512 * 1024 * 1024;
-const MAX_BLOB_BYTES_LIMIT: u64 = 512 * 1024 * 1024;
-const MAX_TOTAL_BLOB_BYTES_LIMIT: u64 = 1024 * 1024 * 1024;
-const MAX_RESPONSE_BYTES_LIMIT: u64 = 1024 * 1024 * 1024;
-const MAX_LINKS_PER_OBJECT_LIMIT: usize = 100_000;
-const MAX_ROOTS: usize = 1_024;
-
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub roots: Vec<String>,
-    #[serde(default = "default_max_objects")]
-    pub max_objects: usize,
-    #[serde(default = "default_max_blobs")]
-    pub max_blobs: usize,
-    #[serde(default = "default_max_object_bytes")]
-    pub max_object_bytes: u64,
-    #[serde(default = "default_max_total_object_bytes")]
-    pub max_total_object_bytes: u64,
-    #[serde(default = "default_max_blob_bytes")]
-    pub max_blob_bytes: u64,
-    #[serde(default = "default_max_total_blob_bytes")]
-    pub max_total_blob_bytes: u64,
-    #[serde(default = "default_max_response_bytes")]
-    pub max_response_bytes: u64,
-    #[serde(default = "default_max_links_per_object")]
-    pub max_links_per_object: usize,
+    #[serde(default)]
+    pub max_objects: Option<usize>,
+    #[serde(default)]
+    pub max_blobs: Option<usize>,
+    #[serde(default)]
+    pub max_object_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_total_object_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_blob_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_total_blob_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_response_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_links_per_object: Option<usize>,
     #[serde(default)]
     pub allow_incomplete: bool,
     /// Permit `objects/closure/get` to return the complete CAS/object closure
@@ -59,45 +41,89 @@ pub struct Request {
     pub allow_untransported_large_objects: bool,
 }
 
-fn default_max_objects() -> usize {
-    DEFAULT_MAX_OBJECTS
+pub(crate) struct AdmittedRequest {
+    pub roots: Vec<String>,
+    pub max_objects: usize,
+    pub max_blobs: usize,
+    pub max_object_bytes: u64,
+    pub max_total_object_bytes: u64,
+    pub max_blob_bytes: u64,
+    pub max_total_blob_bytes: u64,
+    pub max_response_bytes: u64,
+    pub max_links_per_object: usize,
+    pub allow_incomplete: bool,
+    pub allow_untransported_large_objects: bool,
 }
 
-fn default_max_blobs() -> usize {
-    DEFAULT_MAX_BLOBS
-}
-
-fn default_max_object_bytes() -> u64 {
-    DEFAULT_MAX_OBJECT_BYTES
-}
-
-fn default_max_total_object_bytes() -> u64 {
-    DEFAULT_MAX_TOTAL_OBJECT_BYTES
-}
-
-fn default_max_blob_bytes() -> u64 {
-    DEFAULT_MAX_BLOB_BYTES
-}
-
-fn default_max_total_blob_bytes() -> u64 {
-    DEFAULT_MAX_TOTAL_BLOB_BYTES
-}
-
-fn default_max_response_bytes() -> u64 {
-    DEFAULT_MAX_RESPONSE_BYTES
-}
-
-fn default_max_links_per_object() -> usize {
-    DEFAULT_MAX_LINKS_PER_OBJECT
+pub(crate) fn admit_request(req: Request, state: &AppState) -> Result<AdmittedRequest> {
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+    )?;
+    let limits = policy.intersect_for_serving(
+        ryeos_app::node_policy::sections::object_closure::RequestedObjectTransferLimits {
+            max_objects: req.max_objects,
+            max_blobs: req.max_blobs,
+            max_object_bytes: req.max_object_bytes,
+            max_total_object_bytes: req.max_total_object_bytes,
+            max_blob_bytes: req.max_blob_bytes,
+            max_total_blob_bytes: req.max_total_blob_bytes,
+            max_response_bytes: req.max_response_bytes,
+            max_links_per_object: req.max_links_per_object,
+        },
+    )?;
+    if req.roots.len() > limits.max_roots {
+        bail!(
+            "object-closure root count exceeds node policy: {} > {}",
+            req.roots.len(),
+            limits.max_roots
+        );
+    }
+    Ok(AdmittedRequest {
+        roots: req.roots,
+        max_objects: limits.max_objects,
+        max_blobs: limits.max_blobs,
+        max_object_bytes: limits.max_object_bytes,
+        max_total_object_bytes: limits.max_total_object_bytes,
+        max_blob_bytes: limits.max_blob_bytes,
+        max_total_blob_bytes: limits.max_total_blob_bytes,
+        max_response_bytes: limits.max_response_bytes,
+        max_links_per_object: limits.max_links_per_object,
+        allow_incomplete: req.allow_incomplete,
+        allow_untransported_large_objects: req.allow_untransported_large_objects,
+    })
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    let req = admit_request(req, &state)?;
     let report = collect_limited_closure(&req, state)?;
-    Ok(closure_summary_json(&report, false))
+    let response = closure_summary_json(&report, false);
+    enforce_serialized_response_limit(&response, req.max_response_bytes)?;
+    Ok(response)
+}
+
+pub(crate) fn enforce_serialized_response_limit(
+    response: &Value,
+    max_response_bytes: u64,
+) -> Result<()> {
+    let serialized_bytes = u64::try_from(
+        serde_json::to_vec(response)
+            .context("serialize object-closure response for exact byte admission")?
+            .len(),
+    )
+    .unwrap_or(u64::MAX);
+    if serialized_bytes > max_response_bytes {
+        bail!(
+            "object closure response exceeds max_response_bytes: {} > {}",
+            serialized_bytes,
+            max_response_bytes
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn collect_limited_closure(
-    req: &Request,
+    req: &AdmittedRequest,
     state: Arc<AppState>,
 ) -> Result<ryeos_state::object_closure::ObjectClosureReport> {
     let authority = state
@@ -109,43 +135,73 @@ pub(crate) fn collect_limited_closure(
 }
 
 pub(crate) fn collect_limited_closure_with_cas(
-    req: &Request,
+    req: &AdmittedRequest,
     cas: &lillux::CasStore,
 ) -> Result<ryeos_state::object_closure::ObjectClosureReport> {
     if req.roots.is_empty() {
         bail!("roots must not be empty");
-    }
-    if req.roots.len() > MAX_ROOTS {
-        bail!("too many roots: max {MAX_ROOTS}");
     }
     for root in &req.roots {
         if !lillux::valid_hash(root) || root.bytes().any(|b| b.is_ascii_uppercase()) {
             bail!("invalid closure root hash: {root}");
         }
     }
-    if req.max_objects == 0 || req.max_objects > MAX_OBJECTS_LIMIT {
-        bail!("max_objects must be between 1 and {MAX_OBJECTS_LIMIT}");
+    if req.max_objects == 0
+        || req.max_objects > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
+    {
+        bail!(
+            "max_objects must be between 1 and {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
+        );
     }
-    if req.max_blobs > MAX_BLOBS_LIMIT {
-        bail!("max_blobs must not exceed {MAX_BLOBS_LIMIT}");
+    if req.max_blobs > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOBS {
+        bail!(
+            "max_blobs must not exceed {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOBS
+        );
     }
-    if req.max_object_bytes == 0 || req.max_object_bytes > MAX_OBJECT_BYTES_LIMIT {
-        bail!("max_object_bytes must be between 1 and {MAX_OBJECT_BYTES_LIMIT}");
+    if req.max_object_bytes == 0
+        || req.max_object_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES
+    {
+        bail!(
+            "max_object_bytes must be between 1 and {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES
+        );
     }
-    if req.max_total_object_bytes > MAX_TOTAL_OBJECT_BYTES_LIMIT {
-        bail!("max_total_object_bytes must not exceed {MAX_TOTAL_OBJECT_BYTES_LIMIT}");
+    if req.max_total_object_bytes
+        > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES
+    {
+        bail!(
+            "max_total_object_bytes must not exceed {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES
+        );
     }
-    if req.max_blob_bytes > MAX_BLOB_BYTES_LIMIT {
-        bail!("max_blob_bytes must not exceed {MAX_BLOB_BYTES_LIMIT}");
+    if req.max_blob_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOB_BYTES {
+        bail!(
+            "max_blob_bytes must not exceed {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_BLOB_BYTES
+        );
     }
-    if req.max_total_blob_bytes > MAX_TOTAL_BLOB_BYTES_LIMIT {
-        bail!("max_total_blob_bytes must not exceed {MAX_TOTAL_BLOB_BYTES_LIMIT}");
+    if req.max_total_blob_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES {
+        bail!(
+            "max_total_blob_bytes must not exceed {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES
+        );
     }
-    if req.max_response_bytes > MAX_RESPONSE_BYTES_LIMIT {
-        bail!("max_response_bytes must not exceed {MAX_RESPONSE_BYTES_LIMIT}");
+    if req.max_response_bytes > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES {
+        bail!(
+            "max_response_bytes must not exceed {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES
+        );
     }
-    if req.max_links_per_object == 0 || req.max_links_per_object > MAX_LINKS_PER_OBJECT_LIMIT {
-        bail!("max_links_per_object must be between 1 and {MAX_LINKS_PER_OBJECT_LIMIT}");
+    if req.max_links_per_object == 0
+        || req.max_links_per_object
+            > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT
+    {
+        bail!(
+            "max_links_per_object must be between 1 and {}",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT
+        );
     }
 
     let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
@@ -155,6 +211,7 @@ pub(crate) fn collect_limited_closure_with_cas(
             max_objects: req.max_objects,
             max_blobs: req.max_blobs,
             max_object_bytes: req.max_object_bytes,
+            max_total_object_bytes: req.max_total_object_bytes,
             max_blob_bytes: req.max_blob_bytes,
             max_total_blob_bytes: req.max_total_blob_bytes,
             max_links_per_object: req.max_links_per_object,

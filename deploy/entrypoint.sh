@@ -67,11 +67,31 @@ build_ryeos_init_args() {
     return 1
   }
   INIT_ARGS=(init --non-interactive --app-root "$app_root" --source "$source_dir")
-  if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
-    INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
-  else
-    echo "[entrypoint] preserving existing signed node policy generation"
-  fi
+  case "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" in
+    0|"")
+      if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
+        INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
+      else
+        echo "[entrypoint] preserving existing signed node policy generation"
+      fi
+      ;;
+    1)
+      if [[ -e "$policy_generation" || -L "$policy_generation" ]]; then
+        echo "[entrypoint] explicitly replacing obsolete signed node policy generation"
+        INIT_ARGS+=(
+          --node-profile "$RYEOS_INIT_NODE_PROFILE"
+          --replace-node-policy-generation
+          --confirm-node-policy-generation-replacement
+        )
+      else
+        INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
+      fi
+      ;;
+    *)
+      echo "[entrypoint] invalid RYEOS_RESET_NODE_POLICY_GENERATION value; use 0 (default) or 1" >&2
+      return 1
+      ;;
+  esac
 }
 
 main() {

@@ -37,6 +37,14 @@ impl StateLock {
         })
     }
 
+    /// Acquire the same exact state authority with a bounded wait for kernel
+    /// teardown of a crashed predecessor generation.
+    pub fn acquire_with_timeout(lock_path: &Path, timeout: std::time::Duration) -> Result<Self> {
+        Ok(Self {
+            inner: lillux::ExactExclusiveFileLock::acquire_with_timeout(lock_path, timeout)?,
+        })
+    }
+
     /// Acquire the already-existing operator lock without creating or writing
     /// any filesystem entry. Read-only inspections use this to prove daemon
     /// exclusion without changing the inspected state namespace.
@@ -111,6 +119,44 @@ mod tests {
 
         let after_failed_acquire = fs::read_to_string(&lock_path).unwrap();
         assert_eq!(after_failed_acquire, holder_pid);
+    }
+
+    #[test]
+    fn bounded_acquire_never_steals_live_state_authority() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+        let _lock1 = StateLock::acquire(&lock_path).unwrap();
+        let holder_pid = fs::read_to_string(&lock_path).unwrap();
+
+        let error =
+            StateLock::acquire_with_timeout(&lock_path, std::time::Duration::from_millis(75))
+                .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("after waiting 0.1s"),
+            "bounded acquisition did not report its refusal: {error:#}"
+        );
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), holder_pid);
+    }
+
+    #[test]
+    fn bounded_acquire_obtains_the_exact_lock_after_holder_release() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+        let holder = StateLock::acquire(&lock_path).unwrap();
+        let waiter_path = lock_path.clone();
+        let waiter = std::thread::spawn(move || {
+            StateLock::acquire_with_timeout(&waiter_path, std::time::Duration::from_secs(1))
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(holder);
+        let acquired = waiter
+            .join()
+            .expect("bounded lock waiter panicked")
+            .expect("bounded waiter did not acquire the released exact lock");
+        assert!(StateLock::acquire(&lock_path).is_err());
+        drop(acquired);
+        StateLock::acquire(&lock_path).expect("released bounded lock was not reacquirable");
     }
 
     #[test]

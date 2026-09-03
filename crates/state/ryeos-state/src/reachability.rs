@@ -349,7 +349,12 @@ mod tests {
             "item_trust_class": "trusted",
             "kind_schema_content_hash": "33".repeat(32),
             "resolved_from": {
-                "node_default": { "node_policy": "missing_config" }
+                "node_default": { "node_policy": {
+                    "path": ".ai/node/policies/thread_history.yaml",
+                    "space": "node",
+                    "content_hash": "44".repeat(32),
+                    "signer_fingerprint": "55".repeat(32)
+                } }
             },
         })
     }
@@ -392,6 +397,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -576,6 +582,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": event_hash,
             "last_chain_seq": 2,
@@ -824,6 +831,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -859,6 +867,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -954,6 +963,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,

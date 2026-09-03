@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T08:05:36Z:6564b347a6f5ce478f13c30f90d9c21b1206439d3193611fd9f82310197d0161:3v/T0YBX33CnafPIpMC4OsV8Trcz5abuRTN4uvD9a3brLKoBy0K90q5j3E7swJ2cyyaJHA+30nYuWe0pnzfbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:d31dc6bd3fa9677d5c2accfd6ecdfec1530f7bb5162266c0f0981adc2b968afd:sR9ZEt/1NMUwfPOOImaNg3+LFsnoGuWSs1ERf3MT0QiY5Au0UIwSDR5IhsCoKTEWId4Se6PM4Zk1xnY5HL5MBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -39,9 +39,11 @@ are local-node operations and ignore `RYEOSD_URL`.
 `ryeos init` is implemented by `ryeos-node` and is authoritative for
 operator-owned setup. It creates layout, user key, node key, self-trust,
 official/additional publisher trust, discovers and plans bundles,
-installs and registers bundles, creates vault key material, atomically
-materializes the selected complete policy generation, writes its read-only
-derived sync view, and verifies post-init trust. Every distribution explicitly selects one complete
+installs and registers bundles, creates vault key material, materializes the
+selected complete policy generation, writes its read-only derived sync view,
+and commits a signed whole-init fence over registrations and policy generation
+before startup may proceed. The prior fence is durably invalidated before the
+first mutation. Every distribution explicitly selects one complete
 publisher-signed source-root init profile with `--node-profile <name>`.
 Selection verifies the profile's exact bundle inventory, then materializes the
 complete generation beneath `.ai/node/policies/` under the node's own signer.
@@ -111,6 +113,12 @@ install an independently authored backend bundle, apply a complete isolation
 section through `ryeos node policy-apply isolation <source.yaml>` while the
 daemon is stopped, validate with `ryeos node doctor`, and restart. See [Execution
 Isolation](node/execution-isolation.md).
+
+Remote CAS traversal and transfer capacity is likewise node-owned. The
+mandatory `.ai/node/policies/object_closure.yaml` member supplies the exact
+receive/serve ceilings used by handoff, federation, remote import, and local
+admission. Callers may narrow those ceilings but cannot widen them; see
+[Object Closure Policy](node/object-closure-policy.md).
 
 For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator
 Init](node/operator-init.md), and [Identity Model](identity-model.md).

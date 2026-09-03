@@ -510,14 +510,21 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         ryeos_executor::execution::cache::MaterializationPruneReport::default()
     };
 
-    let mut result = gc::run_gc_with_pinned_authority(
-        state_authority,
-        cas_guard,
-        Some(signer),
-        params,
-        &operational_roots,
-    )
-    .context("GC pipeline failed")?;
+    let run_gc = || {
+        gc::run_gc_with_pinned_authority(
+            state_authority,
+            cas_guard,
+            Some(signer),
+            params,
+            &operational_roots,
+        )
+        .context("GC pipeline failed")
+    };
+    let mut result = if params.compact && !params.dry_run {
+        state_store.with_project_head_compaction_authority(run_gc)?
+    } else {
+        run_gc()?
+    };
     let limits = external_content_limits;
     let store = if params.dry_run {
         ryeos_state::LargeObjectStore::open_under(state_authority.runtime_directory())?

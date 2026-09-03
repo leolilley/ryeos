@@ -3220,11 +3220,9 @@ enum RunningContinuationKind<'a> {
 pub struct RemoteAdoptionContinuationAuthority {
     pub placement_attestation_hash: String,
     pub placement: crate::worker_handoff::WorkerPlacementAdmissionEvidence,
-    pub resume_rebind: crate::worker_handoff::RemoteResumeContextRebind,
-    pub target_resume_context: crate::launch_metadata::ResumeContext,
-    /// Exact source-ledger readback captured after worker quiescence. Required
-    /// iff the admitted launch carries financial accounting authority.
-    pub source_accounting_frontier: Option<crate::accounting_db::AccountingHandoffFrontier>,
+    /// Irreversible, externally anchored source-ledger export. Required iff
+    /// the admitted launch carries financial accounting authority.
+    pub source_accounting_transfer: Option<ryeos_state::objects::AccountingAllowanceTransfer>,
     /// Exact target key pinned by the configured remote used for this
     /// placement. It is an in-memory verification operand, not chain authority
     /// and never widens the node's local head trust store.
@@ -3368,7 +3366,10 @@ fn validate_remote_adoption_runtime_seed(
     inner: &Inner,
     transition: &ryeos_state::sync::AdmittedChainWriterTransition,
     require_adopted_head: bool,
-) -> Result<crate::launch_metadata::RuntimeLaunchMetadata> {
+) -> Result<(
+    crate::launch_metadata::RuntimeLaunchMetadata,
+    Option<(String, ryeos_state::objects::AccountingAllowanceTransfer)>,
+)> {
     transition.validate()?;
     let evidence = &transition.evidence;
     if evidence.target_node_signer_fingerprint != inner.signer.fingerprint() {
@@ -3381,7 +3382,11 @@ fn validate_remote_adoption_runtime_seed(
         .ok_or_else(|| anyhow!("remote adoption placement attestation is absent"))?;
     let placement_attestation = ryeos_state::objects::Attestation::from_value(&placement_value)?;
     placement_attestation.verify_with_key(&transition.target_node_verifying_key)?;
-    if placement_attestation.is_expired_at(&lillux::time::iso8601_now())? {
+    // Expiry is the pre-commit admission lease. Once the exact target-signed
+    // head exists, replay and crash recovery must not reinterpret that durable
+    // authority as expired. All immutable placement/writer/capsule facts are
+    // still reverified below, as is the exact adopted head when requested.
+    if !require_adopted_head && placement_attestation.is_expired_at(&lillux::time::iso8601_now())? {
         bail!("remote adoption placement attestation is expired");
     }
     let placement = crate::worker_handoff::WorkerPlacementAdmissionEvidence::from_attestation(
@@ -3457,6 +3462,7 @@ fn validate_remote_adoption_runtime_seed(
     let expected_writer = crate::worker_handoff::chain_writer_transition_from_placement(
         &placement,
         evidence.placement_attestation_hash.clone(),
+        evidence.source_accounting_transfer_hash.clone(),
         evidence.source_node_signer_fingerprint.clone(),
         evidence.target_node_signer_fingerprint.clone(),
     );
@@ -3472,6 +3478,37 @@ fn validate_remote_adoption_runtime_seed(
     {
         bail!("remote adoption writer grant differs from its admitted transition");
     }
+    let accounting_transfer = match (
+        placement.accounting.source_scope.as_ref(),
+        evidence.source_accounting_transfer_hash.as_ref(),
+    ) {
+        (None, None) if placement.accounting.target_scope.is_none() => None,
+        (Some(source_scope), Some(hash)) => {
+            let value = cas
+                .get_object(hash)?
+                .ok_or_else(|| anyhow!("remote adoption accounting transfer is absent"))?;
+            let transfer: ryeos_state::objects::AccountingAllowanceTransfer =
+                serde_json::from_value(value)?;
+            if transfer.content_hash()? != *hash
+                || &transfer.source_scope != source_scope
+                || placement.accounting.target_scope.as_ref() != Some(&transfer.target_scope)
+                || transfer.operation_id != placement.operation_id
+                || transfer.source_chain_root_id != placement.chain_root_id
+                || transfer.source_placement_thread_id != placement.source_placement_thread_id
+                || transfer.source_financial_high_water_before
+                    != placement.accounting.source_financial_high_water
+                || transfer.source_charged_usd_nanos
+                    != placement.accounting.source_charged_usd_nanos
+                || transfer.target_cap_usd_nanos != placement.accounting.target_cap_usd_nanos
+                || transfer.target_directive_cap_usd_nanos
+                    != placement.accounting.target_directive_cap_usd_nanos
+            {
+                bail!("remote adoption accounting transfer contradicts placement authority");
+            }
+            Some((hash.clone(), transfer))
+        }
+        _ => bail!("remote adoption accounting transfer presence contradicts its placement"),
+    };
 
     let seed_value = cas
         .get_object(&placement.target_runtime_seed_hash)?
@@ -3712,7 +3749,7 @@ fn validate_remote_adoption_runtime_seed(
             bail!("adopted remote source settlement contradicts its checkpoint restore");
         }
     }
-    Ok(target_launch_metadata)
+    Ok((target_launch_metadata, accounting_transfer))
 }
 
 fn validate_thread_id_path_component(thread_id: &str) -> Result<()> {
@@ -4642,6 +4679,28 @@ impl StateStore {
         f(&g.state_db)
     }
 
+    /// Prove a returning locally owned chain against one exact target-authored
+    /// head before target-private placement state is consulted.
+    pub fn verify_returning_chain_owner_anchor(
+        &self,
+        chain_root_id: &str,
+        candidate_head: &str,
+        owner_principal: &str,
+        origin_site_id: &str,
+        required_signer: &str,
+    ) -> Result<String> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db.verify_current_chain_anchor_for_candidate(
+            chain_root_id,
+            candidate_head,
+            required_signer,
+            owner_principal,
+            origin_site_id,
+            &guard,
+        )
+    }
+
     /// Resolve the sole durable source-role handoff currently fencing one
     /// hosted placement. The existing sync-job ledger is authoritative; this
     /// query deliberately does not introduce a second placement registry.
@@ -4692,8 +4751,105 @@ impl StateStore {
         reservation: NewCredentialProfileReservation<'_>,
     ) -> Result<CredentialProfileReservationRecord> {
         let g = self.lock()?;
+        let current = g
+            .state_db
+            .read_project_head(reservation.project_principal_key, reservation.project_hash)?;
+        if current.as_deref() != Some(reservation.target_project_head_hash) {
+            bail!("target project HEAD changed before handoff reservation");
+        }
         g.runtime_db
             .reserve_credential_profile_generation(reservation)
+    }
+
+    pub fn release_project_head_fence(&self, reservation_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.release_project_head_fence(reservation_id)
+    }
+
+    pub fn write_project_head_ref(
+        &self,
+        principal_key: &str,
+        project_hash: &str,
+        project_snapshot_hash: &str,
+        signer: &dyn Signer,
+        cas_mutation_guard: &ryeos_state::recovery::CasMutationGuard,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+        g.state_db.write_project_head_ref(
+            principal_key,
+            project_hash,
+            project_snapshot_hash,
+            signer,
+            cas_mutation_guard,
+        )
+    }
+
+    pub fn advance_project_head_ref(
+        &self,
+        principal_key: &str,
+        project_hash: &str,
+        new_snapshot_hash: &str,
+        expected_current_hash: &str,
+        signer: &dyn Signer,
+        cas_mutation_guard: &ryeos_state::recovery::CasMutationGuard,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+        g.state_db.advance_project_head_ref(
+            principal_key,
+            project_hash,
+            new_snapshot_hash,
+            expected_current_hash,
+            signer,
+            cas_mutation_guard,
+        )
+    }
+
+    pub fn advance_project_head_ref_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        principal_key: &str,
+        project_hash: &str,
+        new_snapshot_hash: &str,
+        expected_current_hash: &str,
+        signer: &dyn Signer,
+        cas_mutation_guard: &ryeos_state::recovery::CasMutationGuard,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner cannot publish state for thread {thread_id}");
+        }
+        g.runtime_db
+            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+        g.state_db.advance_project_head_ref(
+            principal_key,
+            project_hash,
+            new_snapshot_hash,
+            expected_current_hash,
+            signer,
+            cas_mutation_guard,
+        )
+    }
+
+    /// Run online project compaction while preventing any handoff from
+    /// acquiring a target project-HEAD fence. Compaction still owns the
+    /// cross-process CAS guard and write barrier at its outer maintenance
+    /// boundary; this mutex closes the RuntimeDb reservation race.
+    pub fn with_project_head_compaction_authority<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        let g = self.lock()?;
+        g.runtime_db.require_no_active_project_head_fences()?;
+        f()
     }
 
     pub fn credential_profile_reservation_for_successor(
@@ -5120,6 +5276,16 @@ impl StateStore {
         )
     }
 
+    pub fn dedicated_session_command(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+    ) -> Result<Option<DedicatedSessionCommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .dedicated_session_command(placement_thread_id, command_sequence)
+    }
+
     pub fn dedicated_session_checkpoint_settlement_digest(
         &self,
         placement_thread_id: &str,
@@ -5224,6 +5390,28 @@ impl StateStore {
     ) -> Result<ObservationBatchReservation> {
         let g = self.lock()?;
         g.runtime_db.reserve_dedicated_observation_batch(
+            placement_thread_id,
+            worker_boot_epoch,
+            first_sequence,
+            through_sequence,
+            previous_digest,
+            batch_digest,
+            canonical_batch,
+        )
+    }
+
+    pub fn exact_dedicated_observation_batch_exists(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        through_sequence: u64,
+        previous_digest: Option<&str>,
+        batch_digest: &str,
+        canonical_batch: &serde_json::Value,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.exact_dedicated_observation_batch_exists(
             placement_thread_id,
             worker_boot_epoch,
             first_sequence,
@@ -5366,10 +5554,26 @@ impl StateStore {
         &self,
         placement_thread_id: &str,
         worker_boot_epoch: u64,
+        expected_route_command_sequence: Option<u64>,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db
-            .reserve_dedicated_session_completion(placement_thread_id, worker_boot_epoch)
+        g.runtime_db.reserve_dedicated_session_completion(
+            placement_thread_id,
+            worker_boot_epoch,
+            expected_route_command_sequence,
+        )
+    }
+
+    pub fn require_dedicated_session_route_frontier(
+        &self,
+        placement_thread_id: &str,
+        expected_route_command_sequence: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.require_dedicated_session_route_frontier(
+            placement_thread_id,
+            expected_route_command_sequence,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5810,25 +6014,11 @@ impl StateStore {
         }
         self.state_authority.ensure_guard(permit.cas_guard())?;
         let cas = self.state_authority.cas_store()?;
-        let stored_metadata = cas.put_blob(&prepared.source_launch_metadata_bytes)?;
-        if stored_metadata.hash != prepared.object.source_launch_metadata_blob_hash {
-            bail!("stored source placement launch metadata digest changed");
-        }
         let object_value = prepared.object.to_value()?;
         let stored_manifest = cas.put_object(&object_value)?;
         if stored_manifest.hash != manifest_hash {
             bail!("stored placement transfer manifest digest changed");
         }
-        g.state_db
-            .record_cas_entry(&ryeos_state::NewCasEntryAttribution {
-                hash: stored_metadata.hash,
-                entry_kind: ryeos_state::CasEntryKind::Blob,
-                bytes: u64::try_from(prepared.source_launch_metadata_bytes.len())?,
-                source_principal: Some(format!("fp:{}", g.signer.fingerprint())),
-                source_peer: None,
-                job_id: Some(job.job_id.clone()),
-                state: ryeos_state::CasEntryState::Local,
-            })?;
         g.state_db
             .record_cas_entry(&ryeos_state::NewCasEntryAttribution {
                 hash: manifest_hash,
@@ -6744,6 +6934,7 @@ impl StateStore {
         prepared_seed: &crate::worker_handoff::PreparedPlacementRuntimeSeed,
         attestation: &ryeos_state::objects::Attestation,
         progress: &crate::worker_handoff::WorkerSessionHandoffProgress,
+        admission_limits: ryeos_state::object_closure::ObjectClosureLimits,
     ) -> Result<ryeos_state::admission::AdmissionResult> {
         target_capsule.validate()?;
         prepared_seed.object.validate()?;
@@ -6780,7 +6971,7 @@ impl StateStore {
         let admission = ryeos_state::admission::publish_admission_attestation(
             &g.state_db,
             attestation,
-            ryeos_state::object_closure::ObjectClosureLimits::default(),
+            admission_limits,
             g.signer.as_ref(),
             permit.cas_guard(),
         )?;
@@ -6828,6 +7019,9 @@ impl StateStore {
         &self,
         staged: ryeos_state::sync::StagedChainImport,
         transition: &ryeos_state::sync::AdmittedChainWriterTransition,
+        admit_accounting: impl FnOnce(
+            Option<&(String, ryeos_state::objects::AccountingAllowanceTransfer)>,
+        ) -> Result<()>,
     ) -> Result<ryeos_state::sync::ImportResult> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
@@ -6839,8 +7033,9 @@ impl StateStore {
             g.signer.as_ref(),
             permit.cas_guard(),
         )?;
-        let target_launch_metadata =
+        let (target_launch_metadata, accounting_transfer) =
             validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, true)?;
+        admit_accounting(accounting_transfer.as_ref())?;
         g.runtime_db.install_imported_thread_runtime(
             &transition.evidence.successor_placement_thread_id,
             &transition.evidence.chain_root_id,
@@ -6856,11 +7051,15 @@ impl StateStore {
     pub fn recover_remote_adoption_runtime(
         &self,
         transition: &ryeos_state::sync::AdmittedChainWriterTransition,
+        admit_accounting: impl FnOnce(
+            Option<&(String, ryeos_state::objects::AccountingAllowanceTransfer)>,
+        ) -> Result<()>,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let target_launch_metadata =
+        let (target_launch_metadata, accounting_transfer) =
             validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, true)?;
+        admit_accounting(accounting_transfer.as_ref())?;
         g.runtime_db.install_imported_thread_runtime(
             &transition.evidence.successor_placement_thread_id,
             &transition.evidence.chain_root_id,
@@ -8813,7 +9012,7 @@ impl StateStore {
             source_thread_id,
             chain_root_id,
             RunningContinuationKind::RemoteAdoption { authority },
-            Some(&authority.target_resume_context),
+            None,
             None,
             Some(
                 &authority
@@ -8970,46 +9169,72 @@ impl StateStore {
             }
         }
 
-        // Require the source's complete captured launch identity: the successor
-        // must be able to fold the chain, and a follow successor must retain the
-        // replay declaration needed to suspend again after it resumes.
-        let source_launch_metadata = source_runtime.launch_metadata.ok_or_else(|| {
-            anyhow!(
-                "source thread {source_thread_id} has no captured ResumeContext; \
-                 cannot create a launchable continuation successor"
-            )
-        })?;
-        let source_resume_context = source_launch_metadata
-            .resume_context
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| {
-                anyhow!(
-                    "source thread {source_thread_id} has no captured ResumeContext; \
-                     cannot create a launchable continuation successor"
+        // Same-node continuations inherit operational launch metadata. A
+        // remote adoption deliberately does not: its portable source
+        // authority is the admitted capsule, while its successor authority is
+        // the target-attested capsule and runtime seed.
+        let source_launch_metadata = source_runtime.launch_metadata;
+        let source_resume_context =
+            if matches!(&kind, RunningContinuationKind::RemoteAdoption { .. }) {
+                None
+            } else {
+                Some(
+                    source_launch_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.resume_context.as_ref())
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "source thread {source_thread_id} has no captured ResumeContext; \
+                             cannot create a launchable continuation successor"
+                            )
+                        })?,
                 )
-            })?;
+            };
         let remote_frontier = if let RunningContinuationKind::RemoteAdoption { authority } = &kind {
             authority.placement.validate()?;
             let placement = &authority.placement;
+            let source_capsule_hash = source_row
+                .admitted_launch_capsule_hash
+                .as_deref()
+                .ok_or_else(|| anyhow!("remote adoption source has no admitted launch capsule"))?;
+            let source_capsule =
+                load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
+            source_capsule.validate_durable_handoff_eligibility()?;
+            let source_sealed =
+                crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                    &source_capsule,
+                )?;
             match (
-                source_launch_metadata.accounting_scope.as_ref(),
-                authority.source_accounting_frontier.as_ref(),
+                source_capsule.accounting_scope.as_ref(),
+                authority.source_accounting_transfer.as_ref(),
             ) {
                 (None, None) if placement.accounting.source_scope.is_none() => {}
-                (Some(scope), Some(frontier))
-                    if scope == &frontier.source_scope
+                (Some(scope), Some(transfer))
+                    if scope == &transfer.source_scope
                         && placement.accounting.source_scope.as_ref() == Some(scope)
                         && placement.accounting.source_financial_high_water
-                            == frontier.financial_high_water
+                            == transfer.source_financial_high_water_before
                         && placement.accounting.source_charged_usd_nanos
-                            == frontier.charged_usd_nanos
+                            == transfer.source_charged_usd_nanos
                         && placement.accounting.source_remaining_cap_usd_nanos
-                            == frontier.remaining_cap_usd_nanos
+                            == transfer.source_execution_available_before_usd_nanos
                         && placement
                             .accounting
                             .source_remaining_directive_cap_usd_nanos
-                            == frontier.remaining_directive_cap_usd_nanos => {}
+                            == transfer.source_directive_available_before_usd_nanos
+                        && placement.accounting.target_scope.as_ref()
+                            == Some(&transfer.target_scope)
+                        && placement.accounting.allocation_mode.as_deref()
+                            == Some(transfer.allocation_mode.as_str())
+                        && placement.accounting.target_cap_usd_nanos
+                            == transfer.target_cap_usd_nanos
+                        && placement.accounting.target_directive_cap_usd_nanos
+                            == transfer.target_directive_cap_usd_nanos
+                        && transfer.operation_id == placement.operation_id
+                        && transfer.source_chain_root_id == placement.chain_root_id
+                        && transfer.source_placement_thread_id
+                            == placement.source_placement_thread_id => {}
                 _ => bail!(
                     "remote adoption accounting evidence is not the exact settled source frontier"
                 ),
@@ -9017,19 +9242,13 @@ impl StateStore {
             if placement.chain_root_id != chain_root_id
                 || placement.source_placement_thread_id != source_thread_id
                 || placement.successor_placement_thread_id != successor.thread_id
-                || placement.owner_principal != source_resume_context.principal_identifier()
-                || placement.origin_site_id != source_resume_context.origin_site_id
-                || placement.source_site_id != source_resume_context.current_site_id
-                || placement.target_site_id != authority.target_resume_context.current_site_id
+                || placement.owner_principal != source_sealed.handoff_principal_identifier()?
+                || placement.origin_site_id != source_sealed.handoff_origin_site_id()
+                || placement.source_site_id != source_sealed.handoff_current_site_id()
             {
                 bail!(
                     "remote adoption placement does not name the exact source, successor, owner, and sites"
                 );
-            }
-            let expected_target_resume =
-                source_resume_context.for_remote_worker_adoption(&authority.resume_rebind)?;
-            if expected_target_resume != authority.target_resume_context {
-                bail!("remote adoption target ResumeContext differs from its typed rebind");
             }
             if successor.current_site_id != placement.target_site_id
                 || successor.origin_site_id != placement.origin_site_id
@@ -9075,8 +9294,7 @@ impl StateStore {
                             .source_candidate_snapshot_hash
                             .as_str(),
                     )
-                || session.credential_profile_id
-                    != authority.resume_rebind.source_credential_profile_id
+                || session.credential_profile_id != source_sealed.worker_credential_profile_id()?
                 || session.remote_thread_id.as_deref()
                     != Some(
                         placement
@@ -9095,6 +9313,7 @@ impl StateStore {
                 .worker_process(worker_instance_id)?
                 .ok_or_else(|| anyhow!("remote adoption source worker projection is missing"))?;
             if worker.placement_thread_id != source_thread_id
+                || session.worker_boot_epoch != Some(worker.boot_epoch)
                 || worker.state != runtime_db::WorkerProcessState::Dead
                 || worker.cleanup_state != "reaped"
             {
@@ -9217,7 +9436,11 @@ impl StateStore {
             None
         };
         if matches!(&kind, RunningContinuationKind::GraphFollowResume)
-            && source_launch_metadata.native_resume.is_none()
+            && source_launch_metadata
+                .as_ref()
+                .expect("non-remote continuation source metadata was required above")
+                .native_resume
+                .is_none()
         {
             bail!("follow-resume source thread {source_thread_id} does not declare native_resume");
         }
@@ -9278,32 +9501,10 @@ impl StateStore {
                     })?;
                 let source_capsule =
                     load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
-                crate::worker_handoff::validate_cross_site_capsule_transition(
-                    &source_capsule,
-                    &source_resume_context,
-                    &target_capsule,
-                    &authority.target_resume_context,
-                    &authority.resume_rebind,
-                    &authority.placement,
-                    &self.state_authority.cas_store()?,
-                )?;
-                let source_sealed = source_launch_metadata
-                    .sealed_root_request
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("remote adoption source has no sealed invocation"))?;
-                let expected_target_sealed = source_sealed.for_remote_worker_adoption_invocation(
-                    &source_resume_context,
-                    &authority.target_resume_context,
-                    &authority.resume_rebind,
-                )?;
-                let target_sealed: crate::thread_lifecycle::SealedRootExecutionRequest =
-                    serde_json::from_value(target_capsule.sealed_invocation.clone())
-                        .context("decode remote adoption target sealed invocation")?;
-                if serde_json::to_value(&target_sealed)?
-                    != serde_json::to_value(&expected_target_sealed)?
-                {
-                    bail!("remote adoption target capsule carries a different sealed invocation");
-                }
+                let target_sealed =
+                    crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                        &target_capsule,
+                    )?;
                 let cas = self.state_authority.cas_store()?;
                 let seed_value = cas
                     .get_object(&authority.placement.target_runtime_seed_hash)?
@@ -9347,12 +9548,21 @@ impl StateStore {
                     .map(serde_json::to_value)
                     .transpose()?
                     == Some(serde_json::to_value(&target_sealed)?);
-                if metadata.resume_context.as_ref() != Some(&authority.target_resume_context)
-                    || metadata.continuation_source_thread_id.as_deref() != Some(source_thread_id)
+                let target_resume = metadata.resume_context.as_ref().ok_or_else(|| {
+                    anyhow!("target-authored runtime seed has no resume authority")
+                })?;
+                if metadata.continuation_source_thread_id.as_deref() != Some(source_thread_id)
                     || !seed_sealed_matches
                 {
                     bail!("target-authored runtime seed changed its resume or source authority");
                 }
+                crate::worker_handoff::validate_cross_site_capsule_transition(
+                    &source_capsule,
+                    &target_capsule,
+                    target_resume,
+                    &authority.placement,
+                    &cas,
+                )?;
                 if metadata.admitted_launch_capsule()?.as_ref() != Some(&target_capsule) {
                     bail!(
                         "remote adoption target metadata does not reproduce its admitted capsule"
@@ -9361,6 +9571,12 @@ impl StateStore {
                 metadata
             }
             _ => {
+                let source_launch_metadata = source_launch_metadata
+                    .as_ref()
+                    .expect("non-remote continuation source metadata was required above");
+                let source_resume_context = source_resume_context
+                    .as_ref()
+                    .expect("non-remote continuation source resume was required above");
                 let prepared = successor_launch_metadata.cloned();
                 let mut metadata = prepared.clone().unwrap_or_else(|| {
                     source_launch_metadata
@@ -9392,14 +9608,11 @@ impl StateStore {
             );
         }
         match &kind {
-            RunningContinuationKind::RemoteAdoption { authority } => {
-                successor_resume_context.validate_remote_worker_adoption_from(
-                    &source_resume_context,
-                    &authority.resume_rebind,
-                )?;
-            }
+            RunningContinuationKind::RemoteAdoption { .. } => {}
             _ => successor_resume_context.validate_continuation_transition_from(
-                &source_resume_context,
+                source_resume_context
+                    .as_ref()
+                    .expect("non-remote continuation source resume was required above"),
                 source_result_snapshot_hash,
                 crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
             )?,
@@ -9476,9 +9689,21 @@ impl StateStore {
         let local_runtime_seeded = !matches!(&kind, RunningContinuationKind::RemoteAdoption { .. });
         if local_runtime_seeded {
             if let Some(prepared) = successor_launch_metadata
-                && (prepared.native_resume != source_launch_metadata.native_resume
-                    || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
-                    || prepared.launch_driver != source_launch_metadata.launch_driver)
+                && (prepared.native_resume
+                    != source_launch_metadata
+                        .as_ref()
+                        .expect("local continuation source metadata was required above")
+                        .native_resume
+                    || prepared.cancellation_mode
+                        != source_launch_metadata
+                            .as_ref()
+                            .expect("local continuation source metadata was required above")
+                            .cancellation_mode
+                    || prepared.launch_driver
+                        != source_launch_metadata
+                            .as_ref()
+                            .expect("local continuation source metadata was required above")
+                            .launch_driver)
             {
                 bail!(
                     "prepared successor execution policy differs from its source launch metadata"
@@ -9512,9 +9737,24 @@ impl StateStore {
                 {
                     bail!("remote adoption source snapshot contradicts placement authority");
                 }
+                let accounting_transfer_hash = authority
+                    .source_accounting_transfer
+                    .as_ref()
+                    .map(|transfer| -> Result<String> {
+                        transfer.validate()?;
+                        if transfer.operation_id != placement.operation_id {
+                            bail!("accounting export belongs to another handoff operation");
+                        }
+                        self.state_authority.ensure_guard(permit.cas_guard())?;
+                        self.state_authority
+                            .cas_store()?
+                            .store_object(&serde_json::to_value(transfer)?)
+                    })
+                    .transpose()?;
                 let grant_evidence = crate::worker_handoff::chain_writer_transition_from_placement(
                     placement,
                     authority.placement_attestation_hash.clone(),
+                    accounting_transfer_hash.clone(),
                     g.signer.fingerprint().to_string(),
                     target_signer_fingerprint.clone(),
                 );
@@ -9549,6 +9789,7 @@ impl StateStore {
                     chain_writer_grant_hash: writer_grant_hash,
                     target_launch_capsule_hash: placement.target_launch_capsule_hash.clone(),
                     target_runtime_seed_hash: placement.target_runtime_seed_hash.clone(),
+                    source_accounting_transfer_hash: accounting_transfer_hash,
                     source_site_id: placement.source_site_id.clone(),
                     target_site_id: placement.target_site_id.clone(),
                     target_node_signer_fingerprint: target_signer_fingerprint.clone(),
@@ -14279,7 +14520,7 @@ impl StateStore {
                 || existing.roots.len() != 3
                 || existing.roots[0] != reservation_hash
                 || existing.roots[2] != target_head.target_hash
-                || existing.max_attempts != 16
+                || existing.max_attempts != ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS
             {
                 bail!("remote follow terminal job identity is already bound to another delivery");
             }
@@ -14381,7 +14622,7 @@ impl StateStore {
                 target_head.target_hash.clone(),
             ],
             heads: vec![target_head.target_hash],
-            max_attempts: 16,
+            max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
         })?;
         g.state_db.update_sync_job(
             &job_id,
@@ -15459,7 +15700,7 @@ mod tests {
             uploaded_hashes: Vec::new(),
             fetched_hashes: Vec::new(),
             attempt_count: 0,
-            max_attempts: 16,
+            max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
             last_error: None,
             result,
             created_at: "2026-08-29T00:00:00Z".to_owned(),
@@ -15644,6 +15885,146 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
+        let tmp = tempdir().expect("tempdir");
+        let runtime_state_dir = tmp.path().join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+            .expect("test node identity");
+        let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
+        let store = StateStore::new_with_head_trust(
+            tmp.path().to_path_buf(),
+            runtime_state_dir.clone(),
+            runtime_state_dir.join("runtime.sqlite3"),
+            signer.clone(),
+            WriteBarrier::new(),
+            Arc::new(head_trust),
+        )
+        .expect("state store");
+        let authority = store.pinned_state_authority().expect("state authority");
+        let guard = authority.acquire_shared_guard().expect("CAS guard");
+        let principal_key = "1".repeat(64);
+        let project_hash = "2".repeat(64);
+        let initial_head = "3".repeat(64);
+        let next_head = "4".repeat(64);
+        store
+            .write_project_head_ref(
+                &principal_key,
+                &project_hash,
+                &initial_head,
+                signer.as_ref(),
+                &guard,
+            )
+            .expect("initial project HEAD");
+
+        store
+            .create_credential_profile(NewCredentialProfile {
+                profile_id: "P-project-fence",
+                owner_principal: "fp:operator",
+                home_id: "home-project-fence",
+            })
+            .expect("credential profile");
+        store
+            .acquire_credential_profile(
+                "P-project-fence",
+                "fp:operator",
+                "credential-enrollment:project-fence",
+            )
+            .expect("credential lock");
+        let login_epoch = store
+            .begin_credential_enrollment(
+                "P-project-fence",
+                "credential-enrollment:project-fence",
+                "credential-login:project-fence",
+                i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+            )
+            .expect("begin credential enrollment");
+        let credential_generation = store
+            .complete_credential_enrollment(
+                "P-project-fence",
+                "credential-enrollment:project-fence",
+                "credential-login:project-fence",
+                login_epoch,
+                &json!({"account":"project-fence"}),
+            )
+            .expect("complete credential enrollment");
+        store
+            .release_credential_profile("P-project-fence", "credential-enrollment:project-fence")
+            .expect("release enrollment lock");
+        store
+            .reserve_credential_profile_generation(NewCredentialProfileReservation {
+                reservation_id: "reservation-project-fence",
+                operation_id: "operation-project-fence",
+                successor_thread_id: "T-project-fence-target",
+                profile_id: "P-project-fence",
+                owner_principal: "fp:operator",
+                credential_generation,
+                subject_contract_digest: &"5".repeat(64),
+                subject_digest: &"6".repeat(64),
+                checkpoint_manifest_hash: &"7".repeat(64),
+                upstream_session_id: "upstream-project-fence",
+                project_principal_key: &principal_key,
+                project_hash: &project_hash,
+                target_project_head_hash: &initial_head,
+            })
+            .expect("handoff reservation");
+
+        let error = store
+            .advance_project_head_ref(
+                &principal_key,
+                &project_hash,
+                &next_head,
+                &initial_head,
+                signer.as_ref(),
+                &guard,
+            )
+            .expect_err("active handoff fence must reject project mutation");
+        assert!(format!("{error:#}").contains("fenced by worker handoff reservation"));
+        assert_eq!(
+            store
+                .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+                .unwrap()
+                .as_deref(),
+            Some(initial_head.as_str())
+        );
+
+        let compact_called = std::sync::atomic::AtomicBool::new(false);
+        let error = store
+            .with_project_head_compaction_authority(|| {
+                compact_called.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect_err("online project compaction must share the handoff fence");
+        assert!(format!("{error:#}").contains("active worker handoff"));
+        assert!(!compact_called.load(Ordering::SeqCst));
+
+        store
+            .release_project_head_fence("reservation-project-fence")
+            .expect("authoritative adoption releases project fence");
+        store
+            .with_project_head_compaction_authority(|| {
+                compact_called.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect("released fence permits project compaction");
+        assert!(compact_called.load(Ordering::SeqCst));
+        store
+            .advance_project_head_ref(
+                &principal_key,
+                &project_hash,
+                &next_head,
+                &initial_head,
+                signer.as_ref(),
+                &guard,
+            )
+            .expect("released fence permits exact project CAS");
     }
 
     fn handoff_test_operation(

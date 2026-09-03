@@ -13,7 +13,9 @@ use serde_json::Value;
 
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use crate::remote::client::{ObjectsClosureRequestOptions, RemoteClient};
+use crate::remote::client::{
+    NodeAdmittedObjectsClosureRequestOptions, ObjectsClosureRequestOptions, RemoteClient,
+};
 use crate::remote::{config, import};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
@@ -32,8 +34,6 @@ use ryeos_app::worker_handoff::{
     WorkerSessionHandoffJobOperation, WorkerSessionHandoffProgress,
 };
 use ryeos_executor::executor::ServiceAvailability;
-
-const MAX_HANDOFF_CLOSURE_BYTES: u64 = 48 * 1024 * 1024;
 
 struct PreparedTargetPlacement {
     response: WorkerPlacementPrepareResponse,
@@ -123,7 +123,6 @@ fn target_handoff_operation_lock(job_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 struct SourcePlacementOperands {
     manifest: ryeos_state::objects::PlacementTransferManifest,
-    launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     launch_capsule: ryeos_state::objects::AdmittedLaunchCapsule,
     source_snapshot: ryeos_state::objects::ThreadSnapshot,
     restore: ryeos_state::objects::WorkerSessionRestore,
@@ -131,7 +130,6 @@ struct SourcePlacementOperands {
 }
 
 struct SourcePreflightOperands {
-    launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     launch_capsule: ryeos_state::objects::AdmittedLaunchCapsule,
     source_snapshot: ryeos_state::objects::ThreadSnapshot,
 }
@@ -159,28 +157,23 @@ pub async fn preflight(
         &source_remote.remote.principal_id,
     )?;
     let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
-    let mut preflight_roots = vec![
-        req.source_chain_head_hash.clone(),
-        req.source_launch_capsule_hash.clone(),
-    ];
+    let mut preflight_roots = vec![req.source_chain_head_hash.clone()];
     if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
         preflight_roots.push(hash.clone());
     }
+    let closure_options = NodeAdmittedObjectsClosureRequestOptions::for_node(
+        &state,
+        ObjectsClosureRequestOptions {
+            allow_incomplete: false,
+            allow_untransported_large_objects: true,
+            ..Default::default()
+        },
+    )
+    .map_err(internal)?;
     let closure = source_client
         .objects_closure_get_with_total_timeout(
             &preflight_roots,
-            ObjectsClosureRequestOptions {
-                max_objects: Some(16_384),
-                max_blobs: Some(16_384),
-                max_object_bytes: Some(2 * 1024 * 1024),
-                max_total_object_bytes: Some(16 * 1024 * 1024),
-                max_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                max_total_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                max_response_bytes: Some(64 * 1024 * 1024),
-                max_links_per_object: Some(65_536),
-                allow_incomplete: false,
-                allow_untransported_large_objects: true,
-            },
+            closure_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
         .await
@@ -244,41 +237,12 @@ pub async fn preflight(
             ));
         }
     }
-    let mut payload = import::closure_response_to_export_payload(
+    let payload = import::closure_response_to_export_payload(
         &req.chain_root_id,
         &req.source_chain_head_hash,
         &closure.entries,
     )
     .map_err(internal)?;
-    let metadata_bytes = lillux::canonical_json(&req.source_launch_metadata)
-        .map_err(internal)?
-        .into_bytes();
-    if lillux::sha256_hex(&metadata_bytes) != req.source_launch_metadata_blob_hash {
-        return Err(HandlerError::BadRequest(
-            "source preflight launch metadata changed digest".into(),
-        ));
-    }
-    if let Some(existing) = payload
-        .entries
-        .iter()
-        .find(|entry| entry.hash == req.source_launch_metadata_blob_hash)
-    {
-        if !existing.is_blob || existing.data != metadata_bytes {
-            return Err(HandlerError::BadRequest(
-                "source preflight closure contradicts launch metadata".into(),
-            ));
-        }
-    } else {
-        payload.total_bytes = payload
-            .total_bytes
-            .checked_add(metadata_bytes.len())
-            .ok_or_else(|| internal("preflight payload byte count overflow"))?;
-        payload.entries.push(ryeos_state::sync::SyncEntry {
-            hash: req.source_launch_metadata_blob_hash.clone(),
-            is_blob: true,
-            data: metadata_bytes,
-        });
-    }
     let operation = WorkerPlacementPreflightJobOperation::from_request(
         WorkerHandoffJobRole::Target,
         source_remote.config_key.clone(),
@@ -302,11 +266,7 @@ pub async fn preflight(
                 operation: operation.to_value().map_err(internal)?,
                 peer: Some(source_remote.config_key.clone()),
                 roots: {
-                    let mut roots = vec![
-                        req.source_chain_head_hash.clone(),
-                        req.source_launch_capsule_hash.clone(),
-                        req.source_launch_metadata_blob_hash.clone(),
-                    ];
+                    let mut roots = vec![req.source_chain_head_hash.clone()];
                     if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
                         roots.push(hash.clone());
                     }
@@ -326,6 +286,33 @@ pub async fn preflight(
         response
             .validate_against(&req, state.identity.verifying_key())
             .map_err(internal)?;
+        let capsule =
+            load_target_launch_capsule(&state, &response.evidence.source_launch_capsule_hash)
+                .map_err(internal)?;
+        let current = current_target_operator_authority(
+            &state,
+            &response.evidence.owner_principal,
+            &response.evidence.origin_site_id,
+            &capsule,
+        )
+        .map_err(internal)?;
+        if current != response.evidence.target_operator_authority {
+            return Err(HandlerError::Forbidden(
+                "target operator grant changed after preflight".into(),
+            ));
+        }
+        let current_anchor = returning_local_operator_anchor(
+            &state,
+            &current,
+            &response.evidence.chain_root_id,
+            &response.evidence.source_chain_head_hash,
+        )
+        .map_err(internal)?;
+        if current_anchor != response.evidence.target_chain_owner_anchor_hash {
+            return Err(HandlerError::Forbidden(
+                "target chain owner anchor changed after preflight".into(),
+            ));
+        }
         return serde_json::to_value(response).map_err(internal);
     }
 
@@ -463,6 +450,33 @@ pub async fn prepare(
         &preflight_response.preflight_attestation,
     )
     .map_err(internal)?;
+    let preflight_capsule =
+        load_target_launch_capsule(&state, &preflight_evidence.source_launch_capsule_hash)
+            .map_err(internal)?;
+    let current_operator = current_target_operator_authority(
+        &state,
+        &preflight_evidence.owner_principal,
+        &preflight_evidence.origin_site_id,
+        &preflight_capsule,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if current_operator != preflight_evidence.target_operator_authority {
+        return Err(HandlerError::Forbidden(
+            "target operator grant changed after preflight".into(),
+        ));
+    }
+    let current_anchor = returning_local_operator_anchor(
+        &state,
+        &current_operator,
+        &preflight_evidence.chain_root_id,
+        &preflight_evidence.source_chain_head_hash,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if current_anchor != preflight_evidence.target_chain_owner_anchor_hash {
+        return Err(HandlerError::Forbidden(
+            "target chain owner anchor changed after preflight".into(),
+        ));
+    }
     if preflight_operation.role != WorkerHandoffJobRole::Target
         || preflight_operation.preflight_id != req.preflight_id
         || preflight_operation.owner_principal != owner
@@ -526,18 +540,15 @@ pub async fn prepare(
     let closure = source_client
         .objects_closure_get_with_total_timeout(
             &roots,
-            ObjectsClosureRequestOptions {
-                max_objects: Some(16_384),
-                max_blobs: Some(16_384),
-                max_object_bytes: Some(2 * 1024 * 1024),
-                max_total_object_bytes: Some(16 * 1024 * 1024),
-                max_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                max_total_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                max_response_bytes: Some(64 * 1024 * 1024),
-                max_links_per_object: Some(65_536),
-                allow_incomplete: false,
-                allow_untransported_large_objects: true,
-            },
+            NodeAdmittedObjectsClosureRequestOptions::for_node(
+                &state,
+                ObjectsClosureRequestOptions {
+                    allow_incomplete: false,
+                    allow_untransported_large_objects: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(internal)?,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
         .await
@@ -890,6 +901,12 @@ fn replay_terminal_target_adoption(
                     "target adoption retry contradicts its signed terminal receipt".into(),
                 ));
             }
+            let placement =
+                load_terminal_local_placement(state, &request.placement_attestation_hash)
+                    .map_err(internal)?;
+            validate_target_placement_for_adoption(&placement, request, &receipt.target_operation)
+                .map_err(internal)?;
+            validate_accepted_target_handoff_accounting(state, &placement).map_err(internal)?;
             (
                 receipt.target_operation.source_site_id,
                 WorkerPlacementAdoptResult::Attached {
@@ -1089,18 +1106,15 @@ pub async fn abort(
     let closure = source_client
         .objects_closure_get_with_total_timeout(
             &source_roots,
-            ObjectsClosureRequestOptions {
-                max_objects: Some(16_384),
-                max_blobs: Some(16_384),
-                max_object_bytes: Some(2 * 1024 * 1024),
-                max_total_object_bytes: Some(16 * 1024 * 1024),
-                max_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                max_total_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                max_response_bytes: Some(64 * 1024 * 1024),
-                max_links_per_object: Some(65_536),
-                allow_incomplete: false,
-                allow_untransported_large_objects: true,
-            },
+            NodeAdmittedObjectsClosureRequestOptions::for_node(
+                &state,
+                ObjectsClosureRequestOptions {
+                    allow_incomplete: false,
+                    allow_untransported_large_objects: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(internal)?,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
         .await
@@ -1170,6 +1184,11 @@ pub async fn abort(
         .state_store
         .publish_worker_handoff_abort_fence(&retained_operation, &req.abort_chain_head_hash)
         .map_err(internal)?;
+    if let Some(ledger) = state.accounting.as_ref() {
+        ledger
+            .abort_handoff_target_scope(&retained_operation.operation_id)
+            .map_err(internal)?;
+    }
 
     let reservation = state
         .state_store
@@ -1392,6 +1411,70 @@ fn validate_abort_operation_against_target_preflight_attestation(
     Ok(())
 }
 
+fn accept_target_handoff_accounting(
+    state: &AppState,
+    placement: &WorkerPlacementAdmissionEvidence,
+    transfer: Option<&(String, ryeos_state::objects::AccountingAllowanceTransfer)>,
+) -> Result<()> {
+    match (placement.accounting.target_scope.as_ref(), transfer) {
+        (None, None) if placement.accounting.source_scope.is_none() => Ok(()),
+        (Some(_), Some((hash, transfer))) => state
+            .accounting
+            .as_ref()
+            .context("accounted target adoption has no ledger")?
+            .accept_handoff_allowance(hash, transfer),
+        _ => bail!("target accounting transfer presence contradicts placement authority"),
+    }
+}
+
+fn validate_accepted_target_handoff_accounting(
+    state: &AppState,
+    placement: &WorkerPlacementAdmissionEvidence,
+) -> Result<()> {
+    match (
+        placement.accounting.source_scope.as_ref(),
+        placement.accounting.target_scope.as_ref(),
+    ) {
+        (None, None) => Ok(()),
+        (Some(_), Some(scope)) => state
+            .accounting
+            .as_ref()
+            .context("accounted target adoption has no ledger")?
+            .validate_accepted_handoff_target_scope(
+                &placement.operation_id,
+                scope,
+                &placement.chain_root_id,
+                placement.accounting.target_cap_usd_nanos,
+                placement.accounting.target_directive_cap_usd_nanos,
+            ),
+        _ => bail!("target accounting scopes contradict placement authority"),
+    }
+}
+
+fn validate_runnable_target_handoff_accounting(
+    state: &AppState,
+    placement: &WorkerPlacementAdmissionEvidence,
+) -> Result<()> {
+    match (
+        placement.accounting.source_scope.as_ref(),
+        placement.accounting.target_scope.as_ref(),
+    ) {
+        (None, None) => Ok(()),
+        (Some(_), Some(scope)) => state
+            .accounting
+            .as_ref()
+            .context("accounted target adoption has no ledger")?
+            .validate_runnable_handoff_target_scope(
+                &placement.operation_id,
+                scope,
+                &placement.chain_root_id,
+                placement.accounting.target_cap_usd_nanos,
+                placement.accounting.target_directive_cap_usd_nanos,
+            ),
+        _ => bail!("target accounting scopes contradict placement authority"),
+    }
+}
+
 async fn adopt_authorized(
     req: WorkerPlacementAdoptRequest,
     owner: String,
@@ -1442,6 +1525,13 @@ async fn adopt_authorized(
             .ok_or_else(|| internal("target terminal receipt disappeared"))?
         {
             ryeos_app::worker_handoff::WorkerHandoffTargetTerminalEvidence::Adoption(receipt) => {
+                let placement =
+                    load_terminal_local_placement(&state, &req.placement_attestation_hash)
+                        .map_err(internal)?;
+                validate_target_placement_for_adoption(&placement, &req, &operation)
+                    .map_err(internal)?;
+                validate_accepted_target_handoff_accounting(&state, &placement)
+                    .map_err(internal)?;
                 settle_target_adoption_job_from_receipt(&state, &job_id, &receipt)
                     .map_err(internal)?;
             }
@@ -1546,10 +1636,12 @@ async fn adopt_authorized(
             &req,
         )
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-        let placement = load_local_placement(&state, &req.placement_attestation_hash)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        let placement =
+            load_runnable_committed_local_placement(&state, &req.placement_attestation_hash)
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         validate_target_placement_for_adoption(&placement, &req, &operation)
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        validate_runnable_target_handoff_accounting(&state, &placement).map_err(internal)?;
         let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
             &placement.credential_reservation.profile_id,
         )
@@ -1634,7 +1726,15 @@ async fn adopt_authorized(
             .map_err(internal)?;
         import::require_local_large_object_dependencies(&state, &large_object_requirements)
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-        if u64::try_from(payload.total_bytes).map_err(internal)? > 64 * 1024 * 1024 {
+        let transfer_policy = state
+            .node_policy
+            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+            .map_err(internal)?;
+        if u64::try_from(payload.total_bytes).map_err(internal)?
+            > transfer_policy
+                .max_staged_payload_bytes()
+                .map_err(internal)?
+        {
             return Err(internal(
                 "staged worker chain exceeds the admitted recovery payload ceiling",
             ));
@@ -1645,18 +1745,15 @@ async fn adopt_authorized(
         let closure = source_client
             .objects_closure_get_with_total_timeout(
                 std::slice::from_ref(&req.target_chain_head_hash),
-                ObjectsClosureRequestOptions {
-                    max_objects: Some(16_384),
-                    max_blobs: Some(16_384),
-                    max_object_bytes: Some(2 * 1024 * 1024),
-                    max_total_object_bytes: Some(16 * 1024 * 1024),
-                    max_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                    max_total_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
-                    max_response_bytes: Some(64 * 1024 * 1024),
-                    max_links_per_object: Some(65_536),
-                    allow_incomplete: false,
-                    allow_untransported_large_objects: true,
-                },
+                NodeAdmittedObjectsClosureRequestOptions::for_node(
+                    &state,
+                    ObjectsClosureRequestOptions {
+                        allow_incomplete: false,
+                        allow_untransported_large_objects: true,
+                        ..Default::default()
+                    },
+                )
+                .map_err(internal)?,
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
             )
             .await
@@ -1725,20 +1822,21 @@ async fn adopt_authorized(
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     validate_target_placement_for_adoption(&placement, &req, &operation)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let evidence = ryeos_app::worker_handoff::chain_writer_transition_from_placement(
-        &placement,
-        req.placement_attestation_hash.clone(),
-        source_signer.to_owned(),
-        state.identity.fingerprint().to_owned(),
-    );
     let writer = load_attestation(&state, &req.writer_grant_hash).map_err(internal)?;
     writer
         .verify_with_key(&source_key)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    if ryeos_state::objects::ChainWriterTransitionEvidence::from_attestation(&writer)
-        .map_err(internal)?
-        != evidence
-    {
+    let observed_evidence =
+        ryeos_state::objects::ChainWriterTransitionEvidence::from_attestation(&writer)
+            .map_err(internal)?;
+    let evidence = ryeos_app::worker_handoff::chain_writer_transition_from_placement(
+        &placement,
+        req.placement_attestation_hash.clone(),
+        observed_evidence.source_accounting_transfer_hash.clone(),
+        source_signer.to_owned(),
+        state.identity.fingerprint().to_owned(),
+    );
+    if observed_evidence != evidence {
         return Err(HandlerError::BadRequest(
             "source writer grant differs from target placement evidence".into(),
         ));
@@ -1850,7 +1948,9 @@ async fn adopt_authorized(
     }) {
         state
             .state_store
-            .recover_remote_adoption_runtime(&transition)
+            .recover_remote_adoption_runtime(&transition, |transfer| {
+                accept_target_handoff_accounting(&state, &placement, transfer)
+            })
             .map_err(internal)?;
     } else {
         let authority = state
@@ -1868,9 +1968,15 @@ async fn adopt_authorized(
         // equality here would incorrectly make one-way placement permanent.
         state
             .state_store
-            .finalize_remote_adoption_import(staged, &transition)
+            .finalize_remote_adoption_import(staged, &transition, |transfer| {
+                accept_target_handoff_accounting(&state, &placement, transfer)
+            })
             .map_err(internal)?;
     }
+    state
+        .state_store
+        .release_project_head_fence(&placement.credential_reservation.reservation_id)
+        .map_err(internal)?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     {
         qualification_measurements.event_replay_ms = Some(event_replay_started.elapsed_millis());
@@ -1921,6 +2027,20 @@ async fn adopt_authorized(
                 Some(worker_attach_started.elapsed_millis());
         }
         return Ok(response);
+    }
+    let target_capsule = load_target_launch_capsule(&state, &placement.target_launch_capsule_hash)
+        .map_err(internal)?;
+    let current_operator_authority = current_target_operator_authority(
+        &state,
+        &placement.owner_principal,
+        &placement.origin_site_id,
+        &target_capsule,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if current_operator_authority != placement.target_operator_authority {
+        return Err(HandlerError::Forbidden(
+            "target operator grant changed before private state installation".into(),
+        ));
     }
     let transfer =
         load_transfer_manifest(&state, &operation.transfer_manifest_hash).map_err(internal)?;
@@ -2406,7 +2526,8 @@ pub async fn reconcile_observed_target_handoff_attachments_before_detachment(
                 writer_grant_hash: writer_grant_hash.to_owned(),
             };
             request.validate()?;
-            let placement = load_local_placement(state, placement_attestation_hash)?;
+            let placement =
+                load_runnable_committed_local_placement(state, placement_attestation_hash)?;
             validate_target_placement_for_adoption(&placement, &request, &operation)?;
             // A worker can be atomically attached to its session, then fail
             // readiness and be exactly reaped before ProcessAttached is
@@ -2987,6 +3108,9 @@ fn recover_staged_target_abort(
     state
         .state_store
         .publish_worker_handoff_abort_fence(operation, abort_head)?;
+    if let Some(ledger) = state.accounting.as_ref() {
+        ledger.abort_handoff_target_scope(&operation.operation_id)?;
+    }
     let reservation = state
         .state_store
         .credential_profile_reservation_for_successor(&operation.successor_placement_thread_id)?;
@@ -3078,12 +3202,139 @@ fn load_attestation(state: &AppState, hash: &str) -> Result<ryeos_state::objects
 }
 
 fn load_local_placement(state: &AppState, hash: &str) -> Result<WorkerPlacementAdmissionEvidence> {
+    load_local_placement_with_requirements(state, hash, true, true)
+}
+
+/// Reload runnable placement authority after the exact target adoption has
+/// committed.
+///
+/// The attestation expiry is an admission lease for reaching the irreversible
+/// source/target cut. It is not a lease on the already target-signed chain
+/// head. Recovery still rechecks the current local operator grant because it
+/// can attach a process and use private credential state.
+fn load_runnable_committed_local_placement(
+    state: &AppState,
+    hash: &str,
+) -> Result<WorkerPlacementAdmissionEvidence> {
+    load_local_placement_with_requirements(state, hash, false, true)
+}
+
+/// Verify immutable placement testimony for replay of an already permanent
+/// target terminal receipt. A later grant revocation cannot erase historical
+/// settlement, and this path neither launches a worker nor opens private
+/// credential state.
+fn load_terminal_local_placement(
+    state: &AppState,
+    hash: &str,
+) -> Result<WorkerPlacementAdmissionEvidence> {
+    load_local_placement_with_requirements(state, hash, false, false)
+}
+
+fn load_local_placement_with_requirements(
+    state: &AppState,
+    hash: &str,
+    require_unexpired_lease: bool,
+    require_current_operator_grant: bool,
+) -> Result<WorkerPlacementAdmissionEvidence> {
     let attestation = load_attestation(state, hash)?;
     attestation.verify_with_key(state.identity.verifying_key())?;
-    if attestation.is_expired_at(&lillux::time::iso8601_now())? {
+    if require_unexpired_lease && attestation.is_expired_at(&lillux::time::iso8601_now())? {
         bail!("target placement attestation is expired");
     }
-    WorkerPlacementAdmissionEvidence::from_attestation(&attestation)
+    let placement = WorkerPlacementAdmissionEvidence::from_attestation(&attestation)?;
+    if require_current_operator_grant {
+        let capsule = load_target_launch_capsule(state, &placement.target_launch_capsule_hash)?;
+        let current = current_target_operator_authority(
+            state,
+            &placement.owner_principal,
+            &placement.origin_site_id,
+            &capsule,
+        )?;
+        if current != placement.target_operator_authority {
+            bail!("target operator grant changed after placement admission");
+        }
+    }
+    Ok(placement)
+}
+
+fn load_target_launch_capsule(
+    state: &AppState,
+    hash: &str,
+) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let capsule = load_source_launch_capsule(&authority.cas_store()?, hash)?;
+    drop(guard);
+    Ok(capsule)
+}
+
+fn current_target_operator_authority(
+    state: &AppState,
+    owner_principal: &str,
+    origin_site_id: &str,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+) -> Result<ryeos_app::operator_authority::AdmittedOperatorAuthority> {
+    let admitted = ryeos_app::operator_authority::retained_admitted_operator_authority(
+        state,
+        owner_principal,
+        origin_site_id,
+    )?;
+    admitted.require_covers(&capsule.effective_caps)?;
+    if let Some(parent_caps) = capsule.parent_delegation_caps.as_ref() {
+        admitted.require_covers(parent_caps)?;
+    }
+    Ok(admitted)
+}
+
+fn returning_local_operator_anchor(
+    state: &AppState,
+    admitted: &ryeos_app::operator_authority::AdmittedOperatorAuthority,
+    chain_root_id: &str,
+    source_chain_head_hash: &str,
+) -> Result<Option<String>> {
+    if admitted.principal_class != ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient {
+        return Ok(None);
+    }
+    state
+        .state_store
+        .verify_returning_chain_owner_anchor(
+            chain_root_id,
+            source_chain_head_hash,
+            &admitted.owner_principal,
+            state.threads.site_id(),
+            state.identity.fingerprint(),
+        )
+        .map(Some)
+}
+
+fn abort_pre_cut_target_preparation(
+    state: &AppState,
+    operation_id: &str,
+    credential_reservation_id: &str,
+) -> Result<()> {
+    let accounting_result = state
+        .accounting
+        .as_ref()
+        .map(|ledger| ledger.abort_handoff_target_scope(operation_id))
+        .transpose()
+        .map(|_| ());
+    let credential_result = state
+        .state_store
+        .release_credential_profile_reservation(credential_reservation_id);
+    match (accounting_result, credential_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(accounting), Ok(())) => {
+            Err(accounting
+                .context("abort target accounting after pre-cut operator-authority change"))
+        }
+        (Ok(()), Err(credential)) => Err(credential.context(
+            "release target credential reservation after pre-cut operator-authority change",
+        )),
+        (Err(accounting), Err(credential)) => bail!(
+            "target operator authority changed before publication; accounting cleanup failed: {accounting:#}; credential cleanup failed: {credential:#}"
+        ),
+    }
 }
 
 fn load_transfer_manifest(
@@ -3541,17 +3792,13 @@ fn settle_target_adoption_job_from_receipt(
     ) {
         bail!("terminal adoption receipt conflicts with another target disposition");
     }
-    let progress = WorkerSessionHandoffProgress::from_value(
-        job.result
-            .clone()
-            .context("active target adoption job has no progress")?,
-    )?;
-    ryeos_app::worker_handoff::validate_projected_target_adoption(
-        &job,
-        &operation,
-        &progress,
-        &receipt.request,
-    )?;
+    // Receipt publication already required and atomically signed the exact
+    // ProcessAttached projection. A crash may occur after that permanent head
+    // is published but before the operational job/attempt is completed; retry
+    // reconciliation is then allowed to rewrite the mutable job phase. Do not
+    // make that later projection a second authority for folding the retained
+    // receipt. The verified receipt, matching immutable operation, and exact
+    // request/response coordinates are sufficient terminal testimony.
     state.state_store.with_state_db(|db| {
         db.update_sync_job(
             job_id,
@@ -3634,17 +3881,6 @@ async fn prepare_after_staging(
     source: &SourcePlacementOperands,
     preflight: &WorkerPlacementPreflightEvidence,
 ) -> Result<PreparedTargetPlacement> {
-    let source_resume = source
-        .launch_metadata
-        .resume_context
-        .as_ref()
-        .context("source placement has no ResumeContext")?;
-    if source_resume.current_site_id != req.source_site_id
-        || source_resume.origin_site_id != source.manifest.origin_site_id
-        || source_resume.principal_identifier() != owner
-    {
-        bail!("source launch ledger contradicts transfer owner or sites");
-    }
     if preflight.preflight_id != req.preflight_id
         || preflight.owner_principal != owner
         || preflight.chain_root_id != req.chain_root_id
@@ -3662,6 +3898,24 @@ async fn prepare_after_staging(
         || preflight.outer_exact_program_hash != source.launch_capsule.exact_program_hash
     {
         bail!("final source placement differs from target preflight evidence");
+    }
+    let target_operator_authority = current_target_operator_authority(
+        state,
+        owner,
+        &source.manifest.origin_site_id,
+        &source.launch_capsule,
+    )?;
+    if target_operator_authority != preflight.target_operator_authority {
+        bail!("target operator grant changed after preflight");
+    }
+    let target_chain_owner_anchor_hash = returning_local_operator_anchor(
+        state,
+        &target_operator_authority,
+        &req.chain_root_id,
+        &preflight.source_chain_head_hash,
+    )?;
+    if target_chain_owner_anchor_hash != preflight.target_chain_owner_anchor_hash {
+        bail!("target chain owner anchor changed after preflight");
     }
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
@@ -3742,6 +3996,9 @@ async fn prepare_after_staging(
             subject_digest: &subject_digest,
             checkpoint_manifest_hash: &source.manifest.checkpoint_manifest_hash,
             upstream_session_id: &source.restore.upstream_session_id,
+            project_principal_key: &principal_key,
+            project_hash: &target_project_hash,
+            target_project_head_hash: &target_head,
         },
     )?;
     let credential_reservation = CredentialGenerationReservation {
@@ -3765,7 +4022,7 @@ async fn prepare_after_staging(
         target_ledger_identity,
         &req.operation_id,
     )?;
-    if source.launch_metadata.accounting_scope != accounting.source_scope {
+    if source.launch_capsule.accounting_scope != accounting.source_scope {
         bail!("source accounting request differs from its launch capsule");
     }
     if let Some(target_scope) = accounting.target_scope.as_ref() {
@@ -3773,7 +4030,12 @@ async fn prepare_after_staging(
             .accounting
             .as_ref()
             .context("target accounting ledger is unavailable")?;
-        ledger.admit_handoff_target_scope(
+        ledger.prepare_handoff_target_scope(
+            &req.operation_id,
+            accounting
+                .source_scope
+                .as_ref()
+                .context("accounted target placement has no source scope")?,
             target_scope,
             &req.chain_root_id,
             accounting.target_cap_usd_nanos,
@@ -3793,20 +4055,17 @@ async fn prepare_after_staging(
         target_original_snapshot_hash: Some(candidate.to_owned()),
         target_original_pushed_head_ref: None,
         target_state_root: None,
-        source_credential_profile_id: source_profile_id(source_resume)?,
+        source_credential_profile_id: source_profile_id(&source.launch_capsule)?,
         credential_reservation: credential_reservation.clone(),
+        target_operator_authority: target_operator_authority.clone(),
     };
-    let target_resume = source_resume.for_remote_worker_adoption(&resume_rebind)?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     let project_materialization_started = lillux::time::MonotonicTimer::start();
     let prepared = ryeos_executor::execution::launch::prepare_remote_machine_successor_launch(
         state,
         &source.manifest.successor_placement_thread_id,
         &source.manifest.source_placement_thread_id,
-        &source.launch_metadata,
         &source.launch_capsule,
-        source_resume,
-        &target_resume,
         &resume_rebind,
         accounting.target_scope.clone(),
     )
@@ -3815,6 +4074,10 @@ async fn prepare_after_staging(
     #[cfg(any(test, feature = "handoff-test-support"))]
     let project_materialization_ms = project_materialization_started.elapsed_millis();
     let target_metadata = prepared.launch_metadata().clone();
+    let target_resume = target_metadata
+        .resume_context
+        .as_ref()
+        .context("target placement preparation produced no resume authority")?;
     let target_capsule = target_metadata
         .admitted_launch_capsule()?
         .context("target placement preparation produced no launch capsule")?;
@@ -3882,6 +4145,7 @@ async fn prepare_after_staging(
         target_sessions,
         target_capsule.execution_realization_hash.clone(),
         credential_reservation.clone(),
+        target_operator_authority,
         project_rebind,
         accounting,
         target_capsule_hash.clone(),
@@ -3892,14 +4156,78 @@ async fn prepare_after_staging(
     let guard = authority.acquire_shared_guard()?;
     ryeos_app::worker_handoff::validate_cross_site_capsule_transition(
         &source.launch_capsule,
-        source_resume,
         &target_capsule,
-        &target_resume,
-        &resume_rebind,
+        target_resume,
         &placement,
         &authority.cas_store()?,
     )?;
     drop(guard);
+    let transfer_policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+    let admission_limits = ryeos_state::object_closure::ObjectClosureLimits {
+        max_objects: transfer_policy.max_objects,
+        max_blobs: transfer_policy.max_blobs,
+        max_object_bytes: transfer_policy.max_object_bytes,
+        max_total_object_bytes: transfer_policy.max_total_object_bytes,
+        max_blob_bytes: transfer_policy.max_blob_bytes,
+        max_total_blob_bytes: transfer_policy.max_total_blob_bytes,
+        max_links_per_object: transfer_policy.max_links_per_object,
+    };
+    let final_authority_check = (|| -> Result<()> {
+        let current = current_target_operator_authority(
+            state,
+            owner,
+            &source.manifest.origin_site_id,
+            &source.launch_capsule,
+        )?;
+        if current != preflight.target_operator_authority {
+            bail!("target operator grant changed before placement publication");
+        }
+        let anchor = returning_local_operator_anchor(
+            state,
+            &current,
+            &req.chain_root_id,
+            &preflight.source_chain_head_hash,
+        )?;
+        if anchor != preflight.target_chain_owner_anchor_hash {
+            bail!("target chain owner anchor changed before placement publication");
+        }
+        let current_project_head = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(&principal_key, &target_project_hash))?;
+        if current_project_head.as_deref() != Some(preflight.target_project_head_hash.as_str()) {
+            bail!("target project HEAD changed before placement publication");
+        }
+        let reservation = state
+            .state_store
+            .credential_profile_reservation_for_successor(
+                &source.manifest.successor_placement_thread_id,
+            )?
+            .context("target project HEAD fence disappeared before placement publication")?;
+        if reservation.reservation_id != credential_reservation.reservation_id
+            || reservation.project_principal_key != principal_key
+            || reservation.project_hash != target_project_hash
+            || reservation.target_project_head_hash != preflight.target_project_head_hash
+            || reservation.project_fence_state != "active"
+        {
+            bail!("target project HEAD fence changed before placement publication");
+        }
+        Ok(())
+    })();
+    if let Err(authority_error) = final_authority_check {
+        abort_pre_cut_target_preparation(
+            state,
+            &req.operation_id,
+            &credential_reservation.reservation_id,
+        )
+        .with_context(|| {
+            format!(
+                "target operator authority changed before placement publication: {authority_error:#}"
+            )
+        })?;
+        return Err(authority_error);
+    }
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let attestation = placement.sign_attestation(&signer)?;
     let attestation_hash =
@@ -3928,6 +4256,7 @@ async fn prepare_after_staging(
         &prepared_seed,
         &attestation,
         &progress,
+        admission_limits,
     )?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     reach_target_handoff_crash_boundary(
@@ -3968,6 +4297,18 @@ async fn preflight_after_staging(
     source: &SourcePreflightOperands,
 ) -> Result<WorkerPlacementPreflightResponse> {
     let owner = req.owner_principal.as_str();
+    let target_operator_authority = current_target_operator_authority(
+        state,
+        owner,
+        &req.origin_site_id,
+        &source.launch_capsule,
+    )?;
+    let target_chain_owner_anchor_hash = returning_local_operator_anchor(
+        state,
+        &target_operator_authority,
+        &req.chain_root_id,
+        &req.source_chain_head_hash,
+    )?;
     if state
         .threads
         .get_thread(&req.successor_placement_thread_id)?
@@ -3983,16 +4324,7 @@ async fn preflight_after_staging(
     {
         bail!("proposed successor placement already exists or is reserved");
     }
-    let source_resume = source
-        .launch_metadata
-        .resume_context
-        .as_ref()
-        .context("source preflight placement has no ResumeContext")?;
-    if source_resume.current_site_id != req.source_site_id
-        || source_resume.origin_site_id != req.origin_site_id
-        || source_resume.principal_identifier() != owner
-        || source.source_snapshot.requested_by.as_deref() != Some(owner)
-    {
+    if source.source_snapshot.requested_by.as_deref() != Some(owner) {
         bail!("source preflight launch ledger contradicts owner or sites");
     }
     let target_project_path = canonical_target_project_path(&req.target_project_path)?;
@@ -4066,18 +4398,15 @@ async fn preflight_after_staging(
         target_original_snapshot_hash: Some(target_head.clone()),
         target_original_pushed_head_ref: None,
         target_state_root: None,
-        source_credential_profile_id: source_profile_id(source_resume)?,
+        source_credential_profile_id: source_profile_id(&source.launch_capsule)?,
         credential_reservation: preview_reservation,
+        target_operator_authority: target_operator_authority.clone(),
     };
-    let target_resume = source_resume.for_remote_worker_adoption(&resume_rebind)?;
     let prepared = ryeos_executor::execution::launch::prepare_remote_machine_successor_launch(
         state,
         &req.successor_placement_thread_id,
         &req.source_placement_thread_id,
-        &source.launch_metadata,
         &source.launch_capsule,
-        source_resume,
-        &target_resume,
         &resume_rebind,
         None,
     )
@@ -4111,6 +4440,8 @@ async fn preflight_after_staging(
         target_isolation_digest,
         target_head,
         target_profile.credential_generation,
+        target_operator_authority,
+        target_chain_owner_anchor_hash,
     )?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let preflight_attestation = evidence.sign_attestation(&signer)?;
@@ -4209,27 +4540,17 @@ fn load_source_preflight_operands(
     {
         bail!("preflight source snapshot contradicts its request");
     }
-    let metadata_bytes = cas
-        .get_blob(&request.source_launch_metadata_blob_hash)?
-        .context("preflight source launch metadata is absent")?;
-    let metadata_value: Value = serde_json::from_slice(&metadata_bytes)?;
-    if lillux::sha256_hex(&metadata_bytes) != request.source_launch_metadata_blob_hash
-        || lillux::canonical_json(&metadata_value)?.as_bytes() != metadata_bytes
-        || metadata_value != request.source_launch_metadata
-    {
-        bail!("preflight source launch metadata changed");
-    }
-    let launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
-        serde_json::from_value(metadata_value)?;
-    launch_metadata.validate()?;
-    let launch_capsule = launch_metadata
-        .admitted_launch_capsule()?
-        .context("preflight source metadata has no launch capsule")?;
-    if launch_capsule.content_hash()? != request.source_launch_capsule_hash {
-        bail!("preflight source metadata reproduces another launch capsule");
-    }
+    let launch_capsule = load_source_launch_capsule(&cas, &request.source_launch_capsule_hash)?;
+    launch_capsule.validate_durable_handoff_eligibility()?;
+    ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &launch_capsule,
+    )?
+    .validate_worker_handoff_source(
+        &request.owner_principal,
+        &request.source_site_id,
+        &request.origin_site_id,
+    )?;
     Ok(SourcePreflightOperands {
-        launch_metadata,
         launch_capsule,
         source_snapshot,
     })
@@ -4272,27 +4593,16 @@ fn load_source_placement_operands(
     {
         bail!("source placement snapshot contradicts transfer manifest");
     }
-    let metadata_bytes = cas
-        .get_blob(&manifest.source_launch_metadata_blob_hash)?
-        .context("source launch metadata is absent")?;
-    if u64::try_from(metadata_bytes.len())? != manifest.source_launch_metadata_size_bytes
-        || lillux::sha256_hex(&metadata_bytes) != manifest.source_launch_metadata_blob_hash
-    {
-        bail!("source launch metadata size or digest changed");
-    }
-    let metadata_value: Value = serde_json::from_slice(&metadata_bytes)?;
-    if lillux::canonical_json(&metadata_value)?.as_bytes() != metadata_bytes {
-        bail!("source launch metadata is not canonical JSON");
-    }
-    let launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
-        serde_json::from_value(metadata_value)?;
-    launch_metadata.validate()?;
-    let launch_capsule = launch_metadata
-        .admitted_launch_capsule()?
-        .context("source metadata has no admitted launch capsule")?;
-    if launch_capsule.content_hash()? != manifest.source_launch_capsule_hash {
-        bail!("source launch metadata reproduces another capsule");
-    }
+    let launch_capsule = load_source_launch_capsule(&cas, &manifest.source_launch_capsule_hash)?;
+    launch_capsule.validate_durable_handoff_eligibility()?;
+    ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &launch_capsule,
+    )?
+    .validate_worker_handoff_source(
+        &manifest.owner_principal,
+        &manifest.source_site_id,
+        &manifest.origin_site_id,
+    )?;
     let manifest_value = cas
         .get_object(&manifest.checkpoint_manifest_hash)?
         .context("worker checkpoint manifest is absent")?;
@@ -4345,20 +4655,27 @@ fn load_source_placement_operands(
         &restore.portable_state.selector_contract,
         &restore.upstream_session_id,
     )?;
-    launch_metadata
-        .resume_context
-        .as_ref()
-        .and_then(|resume| resume.stable_project_identity.as_ref())
-        .map(|identity| identity.display_path.clone())
-        .context("source placement has no stable project endpoint")?;
     Ok(SourcePlacementOperands {
         manifest: manifest.clone(),
-        launch_metadata,
         launch_capsule,
         source_snapshot,
         restore,
         portable_tree,
     })
+}
+
+fn load_source_launch_capsule(
+    cas: &lillux::CasStore,
+    expected_hash: &str,
+) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
+    let value = cas
+        .get_object(expected_hash)?
+        .context("source admitted launch capsule is absent")?;
+    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
+    if capsule.content_hash()? != expected_hash {
+        bail!("source admitted launch capsule changed digest");
+    }
+    Ok(capsule)
 }
 
 fn source_project_path_from_payload(
@@ -4368,25 +4685,19 @@ fn source_project_path_from_payload(
     let entry = payload
         .entries
         .iter()
-        .find(|entry| entry.is_blob && entry.hash == manifest.source_launch_metadata_blob_hash)
-        .context("transfer payload omits source launch metadata")?;
-    if u64::try_from(entry.data.len())? != manifest.source_launch_metadata_size_bytes
-        || lillux::sha256_hex(&entry.data) != manifest.source_launch_metadata_blob_hash
-    {
-        bail!("transfer launch metadata size or digest changed");
-    }
+        .find(|entry| !entry.is_blob && entry.hash == manifest.source_launch_capsule_hash)
+        .context("transfer payload omits source launch capsule")?;
     let value: Value = serde_json::from_slice(&entry.data)?;
-    if lillux::canonical_json(&value)?.as_bytes() != entry.data {
-        bail!("transfer launch metadata is not canonical JSON");
+    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash
+        || lillux::canonical_json(&value)?.as_bytes() != entry.data
+    {
+        bail!("transfer launch capsule content identity changed");
     }
-    let metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
-        serde_json::from_value(value)?;
-    metadata.validate()?;
-    metadata
-        .resume_context
-        .as_ref()
-        .and_then(|resume| resume.stable_project_identity.as_ref())
-        .map(|identity| identity.display_path.clone())
+    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
+    capsule
+        .project_authority
+        .project_root_projection()
+        .map(Path::to_path_buf)
         .context("source placement has no stable project endpoint")
 }
 
@@ -4455,13 +4766,10 @@ fn persistent_programs(
     Ok(programs)
 }
 
-fn source_profile_id(resume: &ryeos_app::launch_metadata::ResumeContext) -> Result<String> {
-    resume
-        .parameters
-        .get("credential_profile_id")
-        .and_then(Value::as_str)
+fn source_profile_id(capsule: &ryeos_state::objects::AdmittedLaunchCapsule) -> Result<String> {
+    ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(capsule)?
+        .worker_credential_profile_id()
         .map(str::to_owned)
-        .context("source worker parameters have no credential profile")
 }
 
 struct TargetAdoptionAttempt {

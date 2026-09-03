@@ -72,6 +72,7 @@ impl NodePolicyTable {
             Box::new(sections::ingest_ignore::IngestIgnorePolicySection),
             Box::new(sections::isolation::IsolationPolicySection),
             Box::new(sections::maintenance::NodeMaintenancePolicySection),
+            Box::new(sections::object_closure::NodeObjectClosurePolicySection),
             Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
             Box::new(sections::thread_history::ThreadHistoryPolicySection),
         ])

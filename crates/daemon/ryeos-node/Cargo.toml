@@ -8,6 +8,10 @@ license.workspace = true
 name = "ryeos_node"
 path = "src/lib.rs"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }

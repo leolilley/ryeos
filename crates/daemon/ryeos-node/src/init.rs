@@ -45,7 +45,7 @@
 //! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
 //! (starting with `.`) are also skipped.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -119,6 +119,10 @@ pub struct InitOptions {
     /// an exact bundle inventory and the first complete node-policy
     /// generation. It is create-once and never becomes live policy authority.
     pub node_profile: Option<String>,
+    /// Explicitly replace one existing complete policy generation from the
+    /// selected trusted profile as part of this same stopped-node init
+    /// transaction. This is never inferred from a mismatch.
+    pub replace_node_policy_generation: bool,
     /// Skip preflight verification of source bundles (trust + signatures).
     /// Used in dev/test when source bundles are not yet signed and populated.
     /// DO NOT expose this as a CLI flag — production installs always verify.
@@ -165,7 +169,7 @@ pub struct InitReport {
     pub next_steps: Vec<String>,
 }
 
-const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v1";
+const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v2";
 const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
 const INIT_SEED_MAX_BYTES: u64 = ryeos_app::node_document::MAX_ITEM_BYTES;
 
@@ -176,6 +180,7 @@ struct InitCompletionBody {
     operator_fingerprint: String,
     node_fingerprint: String,
     vault_fingerprint: String,
+    policy_generation_digest: String,
     registration_digests: BTreeMap<String, String>,
 }
 
@@ -191,6 +196,7 @@ pub struct InitCompletionReport {
     pub operator_fingerprint: String,
     pub node_fingerprint: String,
     pub vault_fingerprint: String,
+    pub policy_generation_digest: String,
     pub bundles_verified: usize,
 }
 
@@ -411,7 +417,7 @@ fn run_init_internal(
     let selected_node_profile = opts
         .node_profile
         .as_deref()
-        .map(|name| load_init_node_profile(&opts.source_dir, name, &seed_trust_store))
+        .map(|name| load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store))
         .transpose()?;
     if let Some(profile) = selected_node_profile.as_ref() {
         let mut available = discovered.into_iter().collect::<BTreeMap<_, _>>();
@@ -436,13 +442,21 @@ fn run_init_internal(
     }
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
     let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
-    let current_node_policy_generation =
+    let current_node_policy_generation = if opts.replace_node_policy_generation {
+        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(
+            &opts.app_root,
+            &seed_trust_store,
+        )
+        .context("prove existing signed policy generation for explicit schema cut")?;
+        None
+    } else {
         ryeos_app::node_policy::generation::load_optional_policy_generation(
             &opts.app_root,
             &seed_trust_store,
             &policy_table,
         )
-        .context("load current node policy generation")?;
+        .context("load current node policy generation")?
+    };
     let selected_generation = selected_node_profile
         .as_ref()
         .map(|profile| {
@@ -455,6 +469,9 @@ fn run_init_internal(
     ) {
         (None, None) => {
             bail!("node initialization requires an explicit publisher-signed --node-profile")
+        }
+        (None, Some(selected)) if opts.replace_node_policy_generation => {
+            Some(ryeos_app::node_policy::generation::NodePolicyUpdate::schema_cut(selected))
         }
         (None, Some(selected)) => {
             Some(ryeos_app::node_policy::generation::NodePolicyUpdate::initial(selected))
@@ -574,6 +591,11 @@ fn run_init_internal(
     // order while dependency generations are activated in plan order.
     let bundle_registry_lock =
         ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&opts.app_root)?;
+    // This file is the whole-node generation commit point. Remove its prior
+    // occupant durably before the first bundle tree or registration changes;
+    // a crash anywhere below must leave startup refusing the incomplete
+    // generation rather than accepting the preceding completion record.
+    invalidate_init_completion(&opts.app_root)?;
     let mut bundles_installed = Vec::new();
     for (index, name) in plan.install_order.iter().enumerate() {
         progress(
@@ -705,6 +727,18 @@ fn run_init_internal(
 
         bundles_installed.push(name.clone());
     }
+    if selected_node_profile.is_some() {
+        let desired = plan.bundles.keys().cloned().collect::<BTreeSet<_>>();
+        for name in installed_bundle_names(&opts.app_root)? {
+            if desired.contains(&name) {
+                continue;
+            }
+            let transaction = bundle_registry_lock.acquire_bundle(&name)?;
+            transaction.reconcile(&node_key)?;
+            transaction.begin_remove()?;
+            transaction.commit_absent()?;
+        }
+    }
     drop(bundle_registry_lock);
 
     // ── 8. Vault X25519 keypair ──
@@ -801,6 +835,7 @@ fn run_init_internal(
         &user_fp,
         &node_fp,
         &vault_pubkey_fingerprint,
+        prospective_policy.generation_digest(),
     )?;
     let next_steps = Vec::new();
 
@@ -819,7 +854,17 @@ fn run_init_internal(
 fn init_completion_path(app_root: &Path) -> PathBuf {
     app_root
         .join(ryeos_engine::AI_DIR)
-        .join("config/onboarding/init-completion-v1.json")
+        .join("config/onboarding/init-completion.json")
+}
+
+fn invalidate_init_completion(app_root: &Path) -> Result<()> {
+    let path = init_completion_path(app_root);
+    lillux::remove_file_durable(&path).map_err(|error| {
+        anyhow!(
+            "invalidate init completion {} before node-generation mutation: {error}",
+            path.display()
+        )
+    })
 }
 
 fn registration_digests(app_root: &Path) -> Result<BTreeMap<String, String>> {
@@ -835,10 +880,13 @@ fn registration_digests(app_root: &Path) -> Result<BTreeMap<String, String>> {
             continue;
         }
         let name = path
-            .file_name()
+            .file_stem()
             .and_then(|name| name.to_str())
             .ok_or_else(|| anyhow!("bundle registration filename is not UTF-8"))?
             .to_string();
+        if !is_valid_bundle_name(&name) {
+            bail!("bundle registration name is invalid: {name}");
+        }
         let bytes = lillux::read_regular_file_bounded_no_follow(&path, 1024 * 1024)?;
         digests.insert(name, lillux::sha256_hex(&bytes));
     }
@@ -848,18 +896,84 @@ fn registration_digests(app_root: &Path) -> Result<BTreeMap<String, String>> {
     Ok(digests)
 }
 
+fn installed_bundle_names(app_root: &Path) -> Result<BTreeSet<String>> {
+    const MAX_INSTALLED_BUNDLES: usize = 256;
+    const MAX_INSTALLED_BUNDLE_ROOT_ENTRIES: usize = MAX_INSTALLED_BUNDLES * 2;
+    let mut names = BTreeSet::new();
+    let registration_directory = app_root.join(ryeos_engine::AI_DIR).join("node/bundles");
+    if let Some(directory) = lillux::PinnedDirectory::open(&registration_directory)? {
+        for entry in directory.entries_no_follow_bounded(MAX_INSTALLED_BUNDLES)? {
+            if entry.entry_type != lillux::secure_fs::PinnedEntryType::Regular {
+                bail!("installed bundle registration entry is not a regular file");
+            }
+            let path = Path::new(&entry.name);
+            if path.extension().and_then(|value| value.to_str()) != Some("yaml") {
+                bail!("installed bundle registration has an unsupported filename");
+            }
+            let name = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .context("installed bundle registration name is not UTF-8")?;
+            if !is_valid_bundle_name(name) {
+                bail!("installed bundle registration name is invalid: {name}");
+            }
+            names.insert(name.to_owned());
+        }
+    }
+    let bundle_directory = app_root.join(ryeos_engine::AI_DIR).join("bundles");
+    if let Some(directory) = lillux::PinnedDirectory::open(&bundle_directory)? {
+        let mut transaction_locks = 0usize;
+        for entry in directory.entries_no_follow_bounded(MAX_INSTALLED_BUNDLE_ROOT_ENTRIES)? {
+            let entry_name = entry
+                .name
+                .to_str()
+                .context("installed bundle root entry name is not UTF-8")?;
+            if entry.entry_type == lillux::secure_fs::PinnedEntryType::Regular {
+                let is_transaction_lock = entry_name
+                    .strip_prefix('.')
+                    .and_then(|name| name.strip_suffix(".lock"))
+                    .is_some_and(is_valid_bundle_name);
+                if !is_transaction_lock {
+                    bail!("installed bundle root contains unsupported regular entry {entry_name}");
+                }
+                transaction_locks = transaction_locks.saturating_add(1);
+                if transaction_locks > MAX_INSTALLED_BUNDLES {
+                    bail!("installed bundle root contains too many transaction locks");
+                }
+                // Lillux's per-target transaction lock is a lasting
+                // coordination anchor named `.<bundle>.lock`. It is not an
+                // installed bundle and remains valid after bundle removal.
+                continue;
+            }
+            if entry.entry_type != lillux::secure_fs::PinnedEntryType::Directory {
+                bail!("installed bundle root contains an unsupported entry");
+            }
+            if !is_valid_bundle_name(entry_name) {
+                bail!("installed bundle directory name is invalid: {entry_name}");
+            }
+            names.insert(entry_name.to_owned());
+            if names.len() > MAX_INSTALLED_BUNDLES {
+                bail!("too many installed bundle directories");
+            }
+        }
+    }
+    Ok(names)
+}
+
 fn write_init_completion(
     app_root: &Path,
     signing_key: &SigningKey,
     operator_fingerprint: &str,
     node_fingerprint: &str,
     vault_fingerprint: &str,
+    policy_generation_digest: &str,
 ) -> Result<()> {
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_string(),
         operator_fingerprint: operator_fingerprint.to_string(),
         node_fingerprint: node_fingerprint.to_string(),
         vault_fingerprint: vault_fingerprint.to_string(),
+        policy_generation_digest: policy_generation_digest.to_string(),
         registration_digests: registration_digests(app_root)?,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
@@ -880,6 +994,80 @@ fn write_init_completion(
         lillux::atomic_write(&path, &bytes)
             .map_err(|error| anyhow!("write init completion {}: {error}", path.display()))
     })
+}
+
+fn seal_current_init_completion(
+    app_root: &Path,
+    expected_policy_generation_digest: Option<&str>,
+) -> Result<()> {
+    let operator_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/signing/private_key.pem");
+    let operator_pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
+    )?);
+    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
+    let operator_fingerprint = compute_fingerprint(&operator_key.verifying_key());
+
+    let node_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/private_key.pem");
+    let node_pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&node_key_path, 32 * 1024)?,
+    )?);
+    let node_key = SigningKey::from_pkcs8_pem(node_pem.as_str())?;
+    let node_fingerprint = compute_fingerprint(&node_key.verifying_key());
+
+    let vault_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/vault/public_key.pem");
+    let vault_fingerprint = lillux::vault::read_public_key(&vault_path)?.fingerprint();
+    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))?;
+    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+        app_root,
+        &trust_store,
+        &ryeos_app::node_policy::NodePolicyTable::new(),
+    )?;
+    if expected_policy_generation_digest.is_some_and(|expected| generation.digest() != expected) {
+        bail!("published node policy generation differs from the prepared replacement");
+    }
+
+    write_init_completion(
+        app_root,
+        &operator_key,
+        &operator_fingerprint,
+        &node_fingerprint,
+        &vault_fingerprint,
+        generation.digest(),
+    )
+}
+
+/// Advance the whole-init commit point after a stopped-node policy update.
+///
+/// Policy publication is already fail-closed: after its generation digest
+/// changes, the preceding completion record no longer validates. This final
+/// write is the commit point that makes the newly published generation
+/// startable. Re-running the same policy update repairs a crash in that gap.
+pub fn seal_init_completion_after_policy_update(
+    app_root: &Path,
+    expected_policy_generation_digest: &str,
+    state_lock: &ryeos_app::state_lock::StateLock,
+) -> Result<()> {
+    state_lock
+        .ensure_protects_app_root(app_root)
+        .context("init-completion publication requires this app root's state lock")?;
+    seal_current_init_completion(app_root, Some(expected_policy_generation_digest))
+}
+
+/// Seal the exact initialized state authored by an integration-test fixture.
+///
+/// This is deliberately available only when the `test-support` feature is
+/// selected. Fixtures build the same keys, policy generation, and bundle
+/// registrations as `run_init`, but must finish planting test-only bundles
+/// before the registration set can be signed as one complete transaction.
+#[cfg(feature = "test-support")]
+pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
+    seal_current_init_completion(app_root, None)
 }
 
 pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionReport>> {
@@ -945,10 +1133,20 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if registrations != document.body.registration_digests {
         bail!("bundle registrations differ from the signed init completion record");
     }
+    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))?;
+    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+        app_root,
+        &trust_store,
+        &ryeos_app::node_policy::NodePolicyTable::new(),
+    )?;
+    if generation.digest() != document.body.policy_generation_digest {
+        bail!("node policy generation differs from the signed init completion record");
+    }
     Ok(Some(InitCompletionReport {
         operator_fingerprint,
         node_fingerprint: document.body.node_fingerprint,
         vault_fingerprint,
+        policy_generation_digest: document.body.policy_generation_digest,
         bundles_verified: registrations.len(),
     }))
 }
@@ -1016,7 +1214,7 @@ fn source_node_init_dir(source_dir: &Path) -> PathBuf {
         .join("init")
 }
 
-fn load_init_node_profile(
+pub fn load_trusted_init_node_profile(
     source_dir: &Path,
     name: &str,
     trust_store: &TrustStore,
@@ -1603,6 +1801,7 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            replace_node_policy_generation: false,
             skip_preflight: true,
         }
     }
@@ -1613,6 +1812,24 @@ mod tests {
             &target_source.join(".ai"),
         )
         .expect("copy source-root seed data");
+    }
+
+    #[test]
+    fn bundle_inventory_accepts_only_canonical_regular_transaction_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_root = tmp.path().join(ryeos_engine::AI_DIR).join("bundles");
+        fs::create_dir_all(&bundle_root).unwrap();
+
+        fs::write(bundle_root.join(".core.lock"), b"").unwrap();
+        assert!(installed_bundle_names(tmp.path()).unwrap().is_empty());
+
+        fs::write(bundle_root.join("unexpected"), b"").unwrap();
+        assert!(installed_bundle_names(tmp.path()).is_err());
+        fs::remove_file(bundle_root.join("unexpected")).unwrap();
+
+        fs::remove_file(bundle_root.join(".core.lock")).unwrap();
+        std::os::unix::fs::symlink("missing", bundle_root.join(".core.lock")).unwrap();
+        assert!(installed_bundle_names(tmp.path()).is_err());
     }
 
     #[test]
@@ -1650,9 +1867,14 @@ mod tests {
         assert!(state.join(".ai/node/bundles/standard.yaml").exists());
         let core_registration = fs::read_to_string(state.join(".ai/node/bundles/core.yaml"))
             .expect("read core registration");
-        assert!(
-            core_registration.contains("ryeos.register.command.root.help"),
-            "core registration should include source-root grant caps: {core_registration}"
+        let registration_body: serde_json::Value = serde_yaml::from_str(
+            &lillux::signature::strip_signature_lines_with_envelope(&core_registration, "#", None),
+        )
+        .expect("parse signed core registration body");
+        assert_eq!(
+            registration_body,
+            bundle_registration_value(&state.join(".ai/bundles/core")),
+            "bundle registration must name only its node-owned installed path; command authority comes from node policy"
         );
         // Kind schemas inside core
         assert!(
@@ -1695,6 +1917,7 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-node".to_owned()),
+            replace_node_policy_generation: false,
             skip_preflight: true,
         };
 
@@ -1795,6 +2018,100 @@ mod tests {
     }
 
     #[test]
+    fn init_completion_fences_in_progress_init_and_bundle_reconciliation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = make_opts(&state, &user);
+        run_init(&opts).expect("initial generation");
+        assert!(verify_init_completion(&state).unwrap().is_some());
+
+        invalidate_init_completion(&state).expect("open init transaction");
+        assert!(verify_init_completion(&state).unwrap().is_none());
+        run_init(&opts).expect("complete replacement after interrupted init");
+        assert!(verify_init_completion(&state).unwrap().is_some());
+
+        let node_key = SigningKey::from_pkcs8_pem(
+            &fs::read_to_string(state.join(".ai/node/identity/private_key.pem")).unwrap(),
+        )
+        .unwrap();
+        let lock =
+            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&state).unwrap();
+        let transaction = lock.acquire_bundle("standard").unwrap();
+        transaction.begin_remove().unwrap();
+        assert!(verify_init_completion(&state).unwrap().is_some());
+        drop(transaction);
+        drop(lock);
+        let repaired =
+            ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(&state, &node_key)
+                .unwrap();
+        assert_eq!(repaired.len(), 1);
+        let error = verify_init_completion(&state)
+            .expect_err("reconciled mutation must invalidate the prior whole-init fence");
+        assert!(
+            format!("{error:#}").contains("bundle registrations differ"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn stopped_policy_update_advances_the_whole_init_commit_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = make_opts(&state, &user);
+        run_init(&opts).expect("initial generation");
+
+        let state_lock = ryeos_app::state_lock::StateLock::acquire(
+            &ryeos_app::state_lock::default_lock_path(&state),
+        )
+        .expect("stopped-node authority");
+        let table = ryeos_app::node_policy::NodePolicyTable::new();
+        let trust_store =
+            TrustStore::load(None, &state.join(".ai/config")).expect("current node trust store");
+        let current = ryeos_app::node_policy::generation::load_policy_generation(
+            &state,
+            &trust_store,
+            &table,
+        )
+        .expect("current policy generation");
+        let mut policies = current.policies().clone();
+        policies.insert(
+            "ingest_ignore".to_owned(),
+            serde_json::json!({"schema": 1, "additional_patterns": ["*.trace"]}),
+        );
+        let update = current
+            .prepare_replacement(&table, policies, Path::new("operator-policy.yaml"))
+            .expect("prepared policy replacement");
+        let replacement_digest = update.generation().digest().to_owned();
+        let identity = ryeos_app::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .expect("node identity");
+        ryeos_app::node_policy::generation::publish_policy_update(
+            &state,
+            &update,
+            &identity,
+            &trust_store,
+            &state_lock,
+        )
+        .expect("publish replacement policy");
+
+        let error = verify_init_completion(&state)
+            .expect_err("preceding whole-init commit must not admit the new policy generation");
+        assert!(
+            format!("{error:#}").contains("node policy generation differs"),
+            "{error:#}"
+        );
+        seal_init_completion_after_policy_update(&state, &replacement_digest, &state_lock)
+            .expect("advance whole-init commit point");
+        let completion = verify_init_completion(&state)
+            .expect("verify replacement commit")
+            .expect("replacement completion");
+        assert_eq!(completion.policy_generation_digest, replacement_digest);
+    }
+
+    #[test]
     fn reinit_admits_the_prospective_generation_without_decoding_the_predecessor() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -1849,6 +2166,60 @@ mod tests {
     }
 
     #[test]
+    fn explicit_policy_cut_reconciles_the_profiles_exact_bundle_inventory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        let node_key = fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap();
+        let operator_key = fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap();
+        fs::write(state.join(".ai/state/preserved-sentinel"), b"preserved").unwrap();
+
+        let replacement = InitOptions {
+            app_root: state.clone(),
+            source_dir: workspace_root().join("bundles"),
+            trust_files: vec![dev_trust_file()],
+            node_profile: Some("hosted-workflow".to_owned()),
+            replace_node_policy_generation: true,
+            skip_preflight: true,
+        };
+        run_init(&replacement).expect("replace policy and exact bundle inventory");
+
+        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let profile = load_trusted_init_node_profile(
+            &workspace_root().join("bundles"),
+            "hosted-workflow",
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            installed_bundle_names(&state).unwrap(),
+            profile.exact_bundles().iter().cloned().collect()
+        );
+        assert_eq!(
+            fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap(),
+            node_key
+        );
+        assert_eq!(
+            fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap(),
+            operator_key
+        );
+        assert_eq!(
+            fs::read(state.join(".ai/state/preserved-sentinel")).unwrap(),
+            b"preserved"
+        );
+    }
+
+    #[test]
+    fn explicit_policy_cut_requires_an_existing_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut opts = make_opts(&tmp.path().join("state"), &tmp.path().join("home"));
+        opts.replace_node_policy_generation = true;
+        let error = run_init(&opts).expect_err("schema cut must not become initial publication");
+        assert!(format!("{error:#}").contains("no existing policy generation"));
+    }
+
+    #[test]
     fn run_init_fails_when_selected_node_profile_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
@@ -1865,6 +2236,7 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            replace_node_policy_generation: false,
             skip_preflight: true,
         };
 
@@ -1885,6 +2257,7 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
             node_profile: Some("full".to_owned()),
+            replace_node_policy_generation: false,
             skip_preflight: true,
         };
 
@@ -2264,6 +2637,7 @@ typo_field: oops
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            replace_node_policy_generation: false,
             skip_preflight: true,
         };
 

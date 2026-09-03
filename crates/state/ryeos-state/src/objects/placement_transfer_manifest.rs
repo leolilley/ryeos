@@ -2,15 +2,15 @@
 //!
 //! This object is a durable sync-job operand, not chain or placement
 //! authority.  It lets a target fetch a complete source chain plus the
-//! source's secret-free operational launch ledger without embedding large
-//! JSON in an HTTP request or `sync_jobs.operation_json`.
+//! exact checkpoint and project candidate together with the historical source
+//! chain. Runtime launch metadata remains private to its owning node.
 
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PLACEMENT_TRANSFER_MANIFEST_KIND: &str = "placement_transfer_manifest";
-pub const PLACEMENT_TRANSFER_MANIFEST_SCHEMA: u32 = 2;
+pub const PLACEMENT_TRANSFER_MANIFEST_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,8 +30,6 @@ pub struct PlacementTransferManifest {
     pub checkpoint_manifest_hash: String,
     pub project_candidate_snapshot_hash: String,
     pub source_launch_capsule_hash: String,
-    pub source_launch_metadata_blob_hash: String,
-    pub source_launch_metadata_size_bytes: u64,
 }
 
 impl PlacementTransferManifest {
@@ -50,8 +48,6 @@ impl PlacementTransferManifest {
         checkpoint_manifest_hash: String,
         project_candidate_snapshot_hash: String,
         source_launch_capsule_hash: String,
-        source_launch_metadata_blob_hash: String,
-        source_launch_metadata_size_bytes: u64,
     ) -> anyhow::Result<Self> {
         let manifest = Self {
             schema: PLACEMENT_TRANSFER_MANIFEST_SCHEMA,
@@ -69,8 +65,6 @@ impl PlacementTransferManifest {
             checkpoint_manifest_hash,
             project_candidate_snapshot_hash,
             source_launch_capsule_hash,
-            source_launch_metadata_blob_hash,
-            source_launch_metadata_size_bytes,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -130,20 +124,11 @@ impl PlacementTransferManifest {
                 "source launch capsule",
                 self.source_launch_capsule_hash.as_str(),
             ),
-            (
-                "source launch metadata blob",
-                self.source_launch_metadata_blob_hash.as_str(),
-            ),
         ] {
             super::thread_snapshot::validate_canonical_hash(
                 &format!("placement transfer {label}"),
                 hash,
             )?;
-        }
-        if self.source_launch_metadata_size_bytes == 0
-            || self.source_launch_metadata_size_bytes > super::MAX_PLACEMENT_RUNTIME_METADATA_BYTES
-        {
-            bail!("placement transfer source launch metadata exceeds its byte ceiling");
         }
         Ok(())
     }
@@ -186,8 +171,6 @@ mod tests {
             "4".repeat(64),
             "5".repeat(64),
             "6".repeat(64),
-            "7".repeat(64),
-            4096,
         )
         .unwrap();
         assert_eq!(

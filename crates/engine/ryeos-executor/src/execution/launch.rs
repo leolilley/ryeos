@@ -3336,10 +3336,10 @@ fn recover_admitted_effective_caps(
 /// Source-aware capability bounding for a detached follow child (see
 /// [`CapabilityPolicy::FollowChildHybrid`]).
 ///
-/// Parent coverage uses grant-side wildcard matching
-/// (`cap_matches(parent_grant, required)`): a parent `ryeos.execute.tool.*` covers
-/// a child-declared `ryeos.execute.tool.echo`, but the child keeps its own exact
-/// `tool.echo` shape — the parent's wildcard is never copied onto the child.
+/// Parent coverage uses conservative capability-pattern containment: a parent
+/// `ryeos.execute.tool.*` covers a child-declared
+/// `ryeos.execute.tool.echo`, but the child keeps its own exact `tool.echo`
+/// shape — the parent's wildcard is never copied onto the child.
 fn apply_follow_child_hybrid(
     parent_effective_caps: &[String],
     declared: Vec<String>,
@@ -3347,15 +3347,20 @@ fn apply_follow_child_hybrid(
     item_ref: &str,
     child_execute_cap: &str,
 ) -> Result<Vec<String>, BuildAndLaunchError> {
-    let parent_implies = |required: &str| {
+    let parent_matches_value = |required: &str| {
         parent_effective_caps
             .iter()
             .any(|grant| ryeos_runtime::authorizer::cap_matches(grant, required))
     };
+    let parent_covers_pattern = |required: &str| {
+        parent_effective_caps
+            .iter()
+            .any(|grant| ryeos_state::capability::pattern_covers(grant, required))
+    };
 
     // Admission: the parent must itself hold execute authority over the child
     // item — a follow child may only run what the parent could have dispatched.
-    if !parent_implies(child_execute_cap) {
+    if !parent_matches_value(child_execute_cap) {
         return Err(BuildAndLaunchError::CapabilityRejected {
             reason: format!(
                 "follow-child admission denied for `{item_ref}`: parent lacks execute authority \
@@ -3371,7 +3376,7 @@ fn apply_follow_child_hybrid(
     // parent, and is kept at the child's exact shape (never widened to the
     // parent's wildcard).
     for cap in declared {
-        if !parent_implies(&cap) {
+        if !parent_covers_pattern(&cap) {
             return Err(BuildAndLaunchError::CapabilityRejected {
                 reason: format!(
                     "follow-child capability escalation for `{item_ref}`: child declares delegated \
@@ -6165,6 +6170,7 @@ async fn run_claimed_thread_row_inner(
                 &thread_id,
                 launch_owner,
                 &scope.execution_budget_id,
+                scope.directive_budget_id.as_deref(),
                 &chain_root_id,
                 credential_binding.as_ref().map(|digest| digest.as_str()),
             )
@@ -7341,6 +7347,7 @@ async fn prepare_follow_child_launch_inner(
                         "existing follow-child launch metadata has no finalized sealed root request"
                     )
                 })?;
+            sealed_request.validate_current_operator_authority(state)?;
             if sealed_request.project_context() != &resume.project_context
                 || sealed_request.project_authority() != &resume.project_authority
                 || sealed_request.project_authority() != provenance.project_authority()
@@ -7874,34 +7881,32 @@ async fn prepare_machine_successor_launch_with_bootstrap(
 }
 
 /// Prepare one cross-site machine successor without consulting or creating a
-/// source-node runtime row on this node. The source launch ledger is an
-/// authenticated transfer operand; this node independently replays the sealed
-/// target invocation, admits its local persistent sessions/realization, and
-/// returns a held preparation with no launch claim or process.
+/// source-node runtime row on this node. The chain-reachable admitted launch
+/// capsule is the sole portable program authority; this node independently
+/// rebinds its sealed invocation, admits local persistent sessions,
+/// realization and isolation, and returns a held preparation with no launch
+/// claim or process.
 pub async fn prepare_remote_machine_successor_launch(
     state: &AppState,
     successor_thread_id: &str,
     source_thread_id: &str,
-    source_launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     source_launch_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
-    source_resume: &ryeos_app::launch_metadata::ResumeContext,
-    target_resume: &ryeos_app::launch_metadata::ResumeContext,
     resume_rebind: &ryeos_app::worker_handoff::RemoteResumeContextRebind,
     target_accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
-    source_launch_metadata.validate()?;
-    target_resume
-        .validate_remote_worker_adoption_from(source_resume, resume_rebind)
+    source_launch_capsule.validate()?;
+    let (target_resume, target_sealed) =
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::for_remote_worker_adoption_from_capsule(
+            source_launch_capsule,
+            resume_rebind,
+        )
         .map_err(BuildAndLaunchError::Internal)?;
-    let source_sealed = source_launch_metadata
-        .sealed_root_request
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("remote source has no sealed launch invocation"))?;
-    let target_sealed = source_sealed
-        .for_remote_worker_adoption_invocation(source_resume, target_resume, resume_rebind)
-        .map_err(BuildAndLaunchError::Internal)?;
-    let mut template = source_launch_metadata
-        .continuation_successor_seed(target_resume.clone())
+    let mut template = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+        .with_launch_driver(source_launch_capsule.launch_driver)
+        .with_admitted_artifact_identity(source_launch_capsule.artifact_identity.clone())
+        .with_admitted_execution_closure(source_launch_capsule.execution_closure.clone())
+        .with_execution_realization_hash(source_launch_capsule.execution_realization_hash.clone())
+        .with_resume_context(target_resume.clone())
         .with_continuation_source(source_thread_id)
         .with_continuation_runtime_bootstrap(
             ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::ExternallyRestoredState,
@@ -7911,7 +7916,7 @@ pub async fn prepare_remote_machine_successor_launch(
     let mut prepared = prepare_successor_launch(
         state,
         successor_thread_id,
-        target_resume,
+        &target_resume,
         SuccessorMode::Machine,
         None,
         Some(&template),
@@ -10659,6 +10664,18 @@ mod tests {
         // execute.tool.* is wider than the parent grant → rejected.
         let parent = caps(&["ryeos.execute.tool.echo"]);
         assert!(apply_policy(&["ryeos.execute.tool.*"], &[], hybrid(&parent), CHILD_EXEC).is_err());
+
+        let narrow_parent = caps(&["ryeos.execute.tool.echo", "ryeos.get.vault.?"]);
+        assert!(
+            apply_policy(
+                &["ryeos.get.vault.*"],
+                &[],
+                hybrid(&narrow_parent),
+                CHILD_EXEC
+            )
+            .is_err(),
+            "single-character value matching must not authorize a broader delegated pattern"
+        );
     }
 
     #[test]

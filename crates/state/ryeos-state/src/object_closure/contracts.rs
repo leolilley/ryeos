@@ -52,6 +52,7 @@ struct ObjectContract {
 }
 
 pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
+    "accounting_allowance_transfer",
     "admitted_execution_realization",
     "admitted_launch_capsule",
     "attestation",
@@ -81,6 +82,11 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
 ];
 
 const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
+    ObjectContract {
+        kind: crate::objects::ACCOUNTING_ALLOWANCE_TRANSFER_KIND,
+        validate: validate_accounting_allowance_transfer,
+        links: links_leaf,
+    },
     ObjectContract {
         kind: crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND,
         validate: validate_admitted_execution_realization,
@@ -251,6 +257,12 @@ pub(super) fn links(value: &Value) -> Result<Option<ContractLinks>, String> {
 
 fn validate_admitted_launch_capsule(value: &Value) -> anyhow::Result<()> {
     crate::objects::AdmittedLaunchCapsule::from_current_value(value.clone()).map(|_| ())
+}
+
+fn validate_accounting_allowance_transfer(value: &Value) -> anyhow::Result<()> {
+    let transfer: crate::objects::AccountingAllowanceTransfer =
+        serde_json::from_value(value.clone())?;
+    transfer.validate()
 }
 
 fn validate_admitted_execution_realization(value: &Value) -> anyhow::Result<()> {
@@ -539,9 +551,6 @@ fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, Str
     ] {
         super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
     }
-    links
-        .blob_hashes
-        .push(manifest.source_launch_metadata_blob_hash);
     Ok(links)
 }
 
@@ -872,6 +881,14 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
                 &mut links.object_edges,
             )?;
         }
+        if let Some(hash) = &remote.source_accounting_transfer_hash {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::ACCOUNTING_ALLOWANCE_TRANSFER_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
     }
     Ok(links)
 }
@@ -1080,6 +1097,7 @@ mod tests {
     #[test]
     fn placement_transfer_roots_its_project_candidate() {
         let candidate = "7".repeat(64);
+        let source_capsule = "5".repeat(64);
         let manifest = crate::objects::PlacementTransferManifest::new(
             "1".repeat(64),
             "owner".into(),
@@ -1093,9 +1111,7 @@ mod tests {
             "3".repeat(64),
             "4".repeat(64),
             candidate.clone(),
-            "5".repeat(64),
-            "6".repeat(64),
-            4096,
+            source_capsule.clone(),
         )
         .unwrap();
 
@@ -1103,6 +1119,12 @@ mod tests {
         assert!(links.object_edges.iter().any(|edge| {
             edge.hash == candidate && edge.expected == ExpectedObject::Kind("project_snapshot")
         }));
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == source_capsule
+                && edge.expected == ExpectedObject::Kind("admitted_launch_capsule")
+        }));
+        assert_eq!(links.object_edges.len(), 4);
+        assert!(links.blob_hashes.is_empty());
     }
 
     #[test]

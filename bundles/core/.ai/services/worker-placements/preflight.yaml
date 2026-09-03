@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T16:27:42Z:83fb92079c7bc011ac9848ae21f3ae9f17ae212724bda9c046baacb67ba00173:CjXVseym68Eg001IKHJudQ0N38BL7cCvVFBQqZeUXvXKU94us1dGCUmEtH3rFgrcTe10Mm/gK19h3MJ9PxiGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:7ae1617671ecd24104c3c4a5cc4834467b00b636b941bdd4de145bfabe6a19a6:JQ5CfyOeUfIHTiCqwT17VfhCTmzUjbY3axnaHyExMNg1aDCsUzPCk9JVGZGGX/IxXwbaYZL22LnjdkdzuY8JBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.preflight
 required_caps: ["ryeos.execute.service.worker-placements/preflight"]
@@ -14,8 +14,6 @@ schema:
   source_chain_head_hash: string
   source_last_event_hash: string
   source_launch_capsule_hash: string
-  source_launch_metadata: object
-  source_launch_metadata_blob_hash: string
   target_project_path: string
   project_route_digest: string
   target_credential_profile_id: string

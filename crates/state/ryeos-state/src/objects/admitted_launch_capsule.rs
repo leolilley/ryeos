@@ -7,7 +7,11 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 16;
+// v17 seals the flat exact node-history policy provenance carried by the v12
+// root execution request. v18 binds a remotely adopted invocation to its
+// exact target-node operator grant generation; predecessor capsules cannot be
+// interpreted as current private-execution authority.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 18;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 
 const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
@@ -18,6 +22,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "executor_ref",
     "executor_route",
     "handler_context",
+    "admitted_operator_authority",
     "item_ref",
     "kind",
     "launch_mode",
@@ -47,6 +52,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
 ];
 
 const INVOCATION_ONLY_FIELDS: &[&str] = &[
+    "admitted_operator_authority",
     "captured_history_policy",
     "current_site_id",
     "handler_context",
@@ -835,6 +841,14 @@ pub struct AdmittedLaunchCapsule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_scope: Option<AdmittedAccountingScope>,
     pub effective_caps: Vec<String>,
+    /// Delegating parent's exact capability set for a followed or detached
+    /// child. Required-nullable so cross-site continuation preserves the
+    /// graph admission identity without consulting source runtime state. The
+    /// original engine admission separately bounds child-declared grants;
+    /// `effective_caps` also contains child-owned runtime-manifest grants and
+    /// therefore is not wholly covered by this parent set.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub parent_delegation_caps: Option<Vec<String>>,
     pub runtime_ref: String,
     pub executor_ref: String,
 }
@@ -853,6 +867,7 @@ pub struct AdmittedLaunchAuthority {
     pub execution_closure: AdmittedExecutionClosure,
     pub accounting_scope: Option<AdmittedAccountingScope>,
     pub effective_caps: Vec<String>,
+    pub parent_delegation_caps: Option<Vec<String>>,
     pub runtime_ref: String,
     pub executor_ref: String,
 }
@@ -885,6 +900,21 @@ impl AdmittedLaunchAuthority {
         caps.dedup();
         if caps != self.effective_caps {
             anyhow::bail!("launch authority capabilities are not canonical");
+        }
+        if let Some(parent_caps) = &self.parent_delegation_caps {
+            let mut canonical_parent_caps = parent_caps.clone();
+            for cap in &canonical_parent_caps {
+                validate_trimmed_control_free(
+                    "launch authority parent delegation capability",
+                    cap,
+                    false,
+                )?;
+            }
+            canonical_parent_caps.sort();
+            canonical_parent_caps.dedup();
+            if &canonical_parent_caps != parent_caps {
+                anyhow::bail!("launch authority parent delegation capabilities are not canonical");
+            }
         }
         Ok(())
     }
@@ -1057,6 +1087,7 @@ impl AdmittedLaunchCapsule {
             execution_closure: self.execution_closure.clone(),
             accounting_scope: self.accounting_scope.clone(),
             effective_caps: self.effective_caps.clone(),
+            parent_delegation_caps: self.parent_delegation_caps.clone(),
             runtime_ref: self.runtime_ref.clone(),
             executor_ref: self.executor_ref.clone(),
         }
@@ -1136,6 +1167,24 @@ impl AdmittedLaunchCapsule {
                 anyhow::anyhow!("prepared runtime launch has no required_secrets array")
             })?;
         Ok(!required.is_empty())
+    }
+
+    /// Prove this exact admitted launch can cross a durable worker-placement
+    /// boundary. Request-scoped ownership cannot survive disconnection, and
+    /// opaque required-secret values have no portable generation/digest fence
+    /// in the capsule. Credential-profile reservations are modeled separately
+    /// by the placement protocol and are therefore not ambient secret input.
+    pub fn validate_durable_handoff_eligibility(&self) -> anyhow::Result<()> {
+        self.validate()?;
+        if !self.lifecycle_authority.permits_durable_handoff() {
+            anyhow::bail!("durable worker handoff requires daemon-owned lifecycle authority");
+        }
+        if self.requires_unversioned_secret_input()? {
+            anyhow::bail!(
+                "durable worker handoff refuses an admitted launch with unversioned required secrets"
+            );
+        }
+        Ok(())
     }
 
     /// External realization set sealed into this capsule's exact program,
@@ -1458,6 +1507,23 @@ impl AdmittedLaunchCapsule {
         if canonical_caps != self.effective_caps {
             anyhow::bail!("admitted launch capsule capabilities are not canonical");
         }
+        if let Some(parent_caps) = &self.parent_delegation_caps {
+            let mut canonical_parent_caps = parent_caps.clone();
+            for capability in &canonical_parent_caps {
+                validate_trimmed_control_free(
+                    "launch capsule parent delegation capability",
+                    capability,
+                    false,
+                )?;
+            }
+            canonical_parent_caps.sort();
+            canonical_parent_caps.dedup();
+            if &canonical_parent_caps != parent_caps {
+                anyhow::bail!(
+                    "admitted launch capsule parent delegation capabilities are not canonical"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1501,6 +1567,7 @@ impl AdmittedLaunchCapsule {
             && self.execution_closure == other.execution_closure
             && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
+            && self.parent_delegation_caps == other.parent_delegation_caps
             && self.runtime_ref == other.runtime_ref
             && self.executor_ref == other.executor_ref
             && self
@@ -1515,43 +1582,7 @@ impl AdmittedLaunchCapsule {
         &self,
     ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
         self.validate()?;
-        let Self {
-            execution_closure:
-                AdmittedExecutionClosure::ManagedRuntime {
-                    prepared_runtime_launch,
-                    ..
-                },
-            ..
-        } = self
-        else {
-            anyhow::bail!("direct execution has no persistent-session capsule map");
-        };
-        let sessions = prepared_runtime_launch
-            .get("admitted_sessions")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| {
-                anyhow::anyhow!("prepared runtime launch has no admitted_sessions object")
-            })?;
-        if sessions.len() > 64 {
-            anyhow::bail!("prepared runtime launch exceeds its persistent-session count ceiling");
-        }
-        sessions
-            .iter()
-            .map(|(name, value)| {
-                validate_trimmed_control_free("persistent-session dependency name", name, false)?;
-                if name.len() > 256 {
-                    anyhow::bail!("persistent-session dependency name exceeds its byte ceiling");
-                }
-                let hash = value.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("persistent-session capsule hash must be a string")
-                })?;
-                super::thread_snapshot::validate_canonical_hash(
-                    "persistent-session capsule",
-                    hash,
-                )?;
-                Ok((name.clone(), hash.to_owned()))
-            })
-            .collect()
+        admitted_persistent_session_capsules_from_closure(&self.execution_closure)
     }
 
     /// Compare the immutable portable admission shared across two node-bound
@@ -1566,33 +1597,6 @@ impl AdmittedLaunchCapsule {
     ) -> anyhow::Result<bool> {
         self.validate()?;
         target.validate()?;
-        let closure_matches = match (&self.execution_closure, &target.execution_closure) {
-            (
-                AdmittedExecutionClosure::ManagedRuntime {
-                    prepared_runtime_launch: source_prepared,
-                    runtime_descriptor_document: source_runtime,
-                    protocol_descriptor_document: source_protocol,
-                    executor_blob_hash: source_executor,
-                },
-                AdmittedExecutionClosure::ManagedRuntime {
-                    prepared_runtime_launch: target_prepared,
-                    runtime_descriptor_document: target_runtime,
-                    protocol_descriptor_document: target_protocol,
-                    executor_blob_hash: target_executor,
-                },
-            ) => {
-                cross_site_prepared_runtime_launch_projection(source_prepared)?
-                    == cross_site_prepared_runtime_launch_projection(target_prepared)?
-                    && source_runtime == target_runtime
-                    && source_protocol == target_protocol
-                    && source_executor == target_executor
-            }
-            (
-                AdmittedExecutionClosure::DirectItemExecutor { .. },
-                AdmittedExecutionClosure::DirectItemExecutor { .. },
-            ) => self.execution_closure == target.execution_closure,
-            _ => false,
-        };
         Ok(self.schema == target.schema
             && self.kind == target.kind
             && self.exact_program == target.exact_program
@@ -1600,12 +1604,84 @@ impl AdmittedLaunchCapsule {
             && self.lifecycle_authority == target.lifecycle_authority
             && self.launch_driver == target.launch_driver
             && self.artifact_identity == target.artifact_identity
-            && closure_matches
+            && cross_site_execution_closure_matches(
+                &self.execution_closure,
+                &target.execution_closure,
+            )?
             && self.source_binding_hash == target.source_binding_hash
             && self.effective_caps == target.effective_caps
+            && self.parent_delegation_caps == target.parent_delegation_caps
             && self.runtime_ref == target.runtime_ref
             && self.executor_ref == target.executor_ref)
     }
+}
+
+fn admitted_persistent_session_capsules_from_closure(
+    closure: &AdmittedExecutionClosure,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let AdmittedExecutionClosure::ManagedRuntime {
+        prepared_runtime_launch,
+        ..
+    } = closure
+    else {
+        anyhow::bail!("direct execution has no persistent-session capsule map");
+    };
+    let sessions = prepared_runtime_launch
+        .get("admitted_sessions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            anyhow::anyhow!("prepared runtime launch has no admitted_sessions object")
+        })?;
+    if sessions.len() > 64 {
+        anyhow::bail!("prepared runtime launch exceeds its persistent-session count ceiling");
+    }
+    sessions
+        .iter()
+        .map(|(name, value)| {
+            validate_trimmed_control_free("persistent-session dependency name", name, false)?;
+            if name.len() > 256 {
+                anyhow::bail!("persistent-session dependency name exceeds its byte ceiling");
+            }
+            let hash = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!("persistent-session capsule hash must be a string")
+            })?;
+            super::thread_snapshot::validate_canonical_hash("persistent-session capsule", hash)?;
+            Ok((name.clone(), hash.to_owned()))
+        })
+        .collect()
+}
+
+fn cross_site_execution_closure_matches(
+    source: &AdmittedExecutionClosure,
+    target: &AdmittedExecutionClosure,
+) -> anyhow::Result<bool> {
+    Ok(match (source, target) {
+        (
+            AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: source_prepared,
+                runtime_descriptor_document: source_runtime,
+                protocol_descriptor_document: source_protocol,
+                executor_blob_hash: source_executor,
+            },
+            AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: target_prepared,
+                runtime_descriptor_document: target_runtime,
+                protocol_descriptor_document: target_protocol,
+                executor_blob_hash: target_executor,
+            },
+        ) => {
+            cross_site_prepared_runtime_launch_projection(source_prepared)?
+                == cross_site_prepared_runtime_launch_projection(target_prepared)?
+                && source_runtime == target_runtime
+                && source_protocol == target_protocol
+                && source_executor == target_executor
+        }
+        (
+            AdmittedExecutionClosure::DirectItemExecutor { .. },
+            AdmittedExecutionClosure::DirectItemExecutor { .. },
+        ) => source == target,
+        _ => false,
+    })
 }
 
 fn cross_site_prepared_runtime_launch_projection(
@@ -1704,7 +1780,7 @@ mod tests {
             "raw_content_digest": source_digest,
         });
         let sealed_invocation = serde_json::json!({
-            "schema_version": 10,
+            "schema_version": 13,
             "kind": "fixture",
             "item_ref": item_ref,
             "executor_ref": executor_ref,
@@ -1714,6 +1790,7 @@ mod tests {
             "current_site_id": "site:fixture-a",
             "origin_site_id": "site:fixture-a",
             "handler_context": null,
+            "admitted_operator_authority": null,
             "target_site_id": null,
             "requested_by": null,
             "usage_subject": null,
@@ -1848,6 +1925,7 @@ mod tests {
             source_binding_hash: None,
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
+            parent_delegation_caps: None,
             runtime_ref: "runtime:direct".to_string(),
             executor_ref: "tool:test/executor".to_string(),
         }
@@ -1903,6 +1981,7 @@ mod tests {
             source_binding_hash: None,
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
+            parent_delegation_caps: None,
             runtime_ref: "runtime:test/directive".to_string(),
             executor_ref: "executor:test/subprocess".to_string(),
         }
@@ -2112,6 +2191,56 @@ mod tests {
     }
 
     #[test]
+    fn durable_handoff_rejects_request_scoped_and_subject_secret_authority() {
+        let mut request_scoped = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        request_scoped.lifecycle_authority = ExecutionLifecycleAuthority::REQUEST_SCOPED;
+        assert!(
+            request_scoped
+                .validate_durable_handoff_eligibility()
+                .unwrap_err()
+                .to_string()
+                .contains("daemon-owned lifecycle authority")
+        );
+
+        let mut secret = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        secret.sealed_invocation["verified_subject"]["metadata"]["required_secrets"] =
+            serde_json::json!(["OPAQUE_TOKEN"]);
+        secret.exact_program =
+            project_sealed_root_exact_program(&secret.sealed_invocation).unwrap();
+        secret.exact_program_hash = lillux::sha256_hex(
+            lillux::canonical_json(&secret.exact_program)
+                .unwrap()
+                .as_bytes(),
+        );
+        assert!(
+            secret
+                .validate_durable_handoff_eligibility()
+                .unwrap_err()
+                .to_string()
+                .contains("unversioned required secrets")
+        );
+    }
+
+    #[test]
+    fn durable_handoff_rejects_managed_runtime_secret_authority() {
+        let capsule = managed_capsule(serde_json::json!({
+            "required_secrets": ["RUNTIME_TOKEN"],
+            "admitted_sessions": {},
+        }));
+        assert!(
+            capsule
+                .validate_durable_handoff_eligibility()
+                .unwrap_err()
+                .to_string()
+                .contains("unversioned required secrets")
+        );
+    }
+
+    #[test]
     fn continuation_program_comparison_separates_realization_rebinding() {
         let mut source = direct_capsule(DirectExecutableIdentity::NodePolicy);
         source.lifecycle_authority = ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
@@ -2160,6 +2289,63 @@ mod tests {
             format!("{error:#}").contains("missing field `execution_closure`"),
             "unexpected error chain: {error:#}"
         );
+    }
+
+    #[test]
+    fn current_decoder_requires_explicit_nullable_parent_delegation_ceiling() {
+        let capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        let mut value = capsule.to_value();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_delegation_caps");
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("parent_delegation_caps"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            AdmittedLaunchCapsule::from_current_value(capsule.to_value())
+                .unwrap()
+                .parent_delegation_caps,
+            None
+        );
+    }
+
+    #[test]
+    fn capsule_parent_delegation_identity_is_canonical_and_distinct_from_runtime_caps() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        capsule.parent_delegation_caps = Some(vec![
+            "ryeos.read.project.live".to_string(),
+            "ryeos.write.project".to_string(),
+        ]);
+        capsule.validate().unwrap();
+
+        let mut duplicate = capsule.clone();
+        duplicate.parent_delegation_caps = Some(vec![
+            "ryeos.read.project.live".to_string(),
+            "ryeos.read.project.live".to_string(),
+        ]);
+        assert!(duplicate.validate().is_err());
+
+        let mut unsorted = capsule.clone();
+        unsorted.parent_delegation_caps = Some(vec![
+            "ryeos.write.project".to_string(),
+            "ryeos.read.project.live".to_string(),
+        ]);
+        assert!(unsorted.validate().is_err());
+
+        capsule.effective_caps = vec![
+            "ryeos.execute.tool.echo".to_string(),
+            "ryeos.get.vault.child-bundle/oauth".to_string(),
+        ];
+        capsule.parent_delegation_caps = Some(vec!["ryeos.execute.tool.*".to_string()]);
+        capsule.validate().unwrap();
+        capsule.launch_authority().validate().unwrap();
     }
 
     #[test]
@@ -2348,6 +2534,15 @@ mod tests {
         assert_eq!(
             target.admitted_persistent_session_capsules().unwrap(),
             std::collections::BTreeMap::from([("worker".into(), "2".repeat(64))])
+        );
+
+        let mut changed_parent_ceiling = source.clone();
+        changed_parent_ceiling.parent_delegation_caps =
+            Some(vec!["ryeos.read.project.live".to_string()]);
+        assert!(
+            !source
+                .same_cross_site_continuation_program_admission(&changed_parent_ceiling)
+                .unwrap()
         );
 
         let AdmittedExecutionClosure::ManagedRuntime {

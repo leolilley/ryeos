@@ -1097,7 +1097,7 @@ mod isolation_generation_tests {
     use super::*;
 
     #[test]
-    fn retained_generation_allows_nested_read_only_engine() {
+    fn retained_generation_operation_allows_nested_generation_read_lock() {
         let app_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("bundles"))
             .unwrap();
@@ -1123,9 +1123,13 @@ mod isolation_generation_tests {
         let path = app_root.path().to_path_buf();
         let (tx, rx) = std::sync::mpsc::channel();
         let nested = std::thread::spawn(move || {
-            let result = load_locked_registered_isolation(&path)
-                .map(|_| ())
-                .map_err(|error| format!("{error:#}"));
+            // Exercise the generation-lock invariant directly. A complete
+            // nested engine requires a real signed node and bundle generation;
+            // an empty temporary root is not a valid current-schema fixture.
+            let result =
+                crate::bundle_transaction::BundleRegistryReadLock::acquire_for_composition(&path)
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:#}"));
             tx.send(result).unwrap();
         });
         let composition = rx.recv_timeout(std::time::Duration::from_secs(1));

@@ -145,6 +145,9 @@ pub struct SharedFileLock {
 /// used for long-lived operational exclusion files such as a node's
 /// `operator.lock`.
 pub struct ExactExclusiveFileLock {
+    #[cfg(unix)]
+    file: crate::exec::ForkChildCloseFile,
+    #[cfg(not(unix))]
     file: fs::File,
     parent: fs::File,
     target_name: CString,
@@ -154,18 +157,32 @@ impl ExactExclusiveFileLock {
     /// Open or create `target`, acquire `LOCK_EX | LOCK_NB`, and publish the
     /// current PID as diagnostic content only after the lease is held.
     pub fn acquire(target: &Path) -> Result<Self> {
-        Self::acquire_inner(target, true)
+        Self::acquire_inner(target, true, None)
+    }
+
+    /// Acquire the exact operational lock with a bounded wait.
+    ///
+    /// Crash-supervised processes use this while a killed predecessor's
+    /// pre-exec descendants finish kernel teardown. The same descriptor-pinned
+    /// pathname checks and exclusive flock apply throughout; expiry never
+    /// weakens mutual exclusion.
+    pub fn acquire_with_timeout(target: &Path, timeout: std::time::Duration) -> Result<Self> {
+        Self::acquire_inner(target, true, Some(timeout))
     }
 
     /// Acquire an already-existing target without creating or modifying it.
     pub fn acquire_existing_read_only(target: &Path) -> Result<Self> {
-        Self::acquire_inner(target, false)
+        Self::acquire_inner(target, false, None)
     }
 
-    fn acquire_inner(target: &Path, create_missing: bool) -> Result<Self> {
+    fn acquire_inner(
+        target: &Path,
+        create_missing: bool,
+        wait_timeout: Option<std::time::Duration>,
+    ) -> Result<Self> {
         #[cfg(not(unix))]
         {
-            let _ = (target, create_missing);
+            let _ = (target, create_missing, wait_timeout);
             anyhow::bail!("exact operational file locking is unavailable on this platform")
         }
         #[cfg(unix)]
@@ -174,6 +191,11 @@ impl ExactExclusiveFileLock {
             use std::os::fd::{AsRawFd as _, FromRawFd as _};
             use std::os::unix::ffi::OsStrExt as _;
 
+            // Retain the transient barrier from before opening the descriptor
+            // until its long-lived child-close registration is visible. A
+            // direct-attachment fork can therefore never inherit the lock in
+            // the gap between those operations.
+            let fork_sensitive_descriptors = crate::exec::retain_fork_sensitive_descriptors();
             let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
             let parent = open_directory_no_follow(parent_path, create_missing)?;
             let target_name = target
@@ -229,21 +251,34 @@ impl ExactExclusiveFileLock {
                     target.display()
                 );
             }
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-                {
-                    let holder = linux_flock_holder_pid(&file)
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    anyhow::bail!(
-                        "state lock held by another process (pid: {holder}); stop the daemon or other standalone service before proceeding"
-                    );
+            let started = std::time::Instant::now();
+            loop {
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
                 }
-                return Err(error).with_context(|| {
-                    format!("acquire exact operational lock {}", target.display())
-                });
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::WouldBlock
+                    && error.raw_os_error() != Some(libc::EWOULDBLOCK)
+                {
+                    return Err(error).with_context(|| {
+                        format!("acquire exact operational lock {}", target.display())
+                    });
+                }
+                if let Some(timeout) = wait_timeout
+                    && started.elapsed() < timeout
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    continue;
+                }
+                let holder = linux_flock_holder_pid(&file)
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let wait = wait_timeout
+                    .map(|timeout| format!(" after waiting {:.1}s", timeout.as_secs_f64()))
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "state lock held by another process (pid: {holder}){wait}; stop the daemon or other standalone service before proceeding"
+                );
             }
             if create_missing {
                 file.set_len(0)?;
@@ -254,6 +289,8 @@ impl ExactExclusiveFileLock {
                     parent.sync_all()?;
                 }
             }
+            let file = crate::exec::register_fork_child_close_file(file);
+            drop(fork_sensitive_descriptors);
             Ok(Self {
                 file,
                 parent,

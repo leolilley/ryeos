@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-02T12:38:43Z:6e0db97566ca42a2cbc8c77a41f7535101aedc4654554430f0ec0c7867c25045:ke3qnkBppR+Q5WspW23xWaCWGdbFsav0Tpw2KgPTT0uWAqs5uIDuGfVztc3rzoVrURAa0yrHLljTDCiJtMnWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:613b7d6b4ba82c41dac4a0398b990ebc2eb1dfbae5abd089228f0b7b2e6a44de:Un6a1ICA0RYUWiri7Up3M6k2GjZe1zmk0hqPd2ArcK9hh1Z9Sr9TPlKmlfgqhYaA7cT6HNRx+RzKVp2un8kZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -112,6 +112,17 @@ policies:
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
+  object_closure:
+    schema: 1
+    max_roots: 256
+    max_objects: 32768
+    max_blobs: 32768
+    max_object_bytes: 33554432
+    max_total_object_bytes: 67108864
+    max_blob_bytes: 134217728
+    max_total_blob_bytes: 134217728
+    max_response_bytes: 268435456
+    max_links_per_object: 100000
   thread_history:
     schema: 1
     default_retention: durable

@@ -96,6 +96,7 @@ async fn cli_initialized_but_stopped_suggests_start() {
         .expect("register core");
     common::fast_fixture::register_standard_bundle(&state_path, &fixture)
         .expect("register standard");
+    common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
     let ryeos = ryeos_binary();
     let out = tokio::process::Command::new(&ryeos)
@@ -445,6 +446,7 @@ async fn state_lock_prevents_concurrent_daemons() {
         .expect("populate initialized state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core bundle");
+    common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
     let _state_lock = ryeos_app::state_lock::StateLock::acquire(
         &ryeos_app::state_lock::default_lock_path(&state_path),

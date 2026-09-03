@@ -238,6 +238,14 @@ async fn incomplete_closure_response(
             Json(json!({ "error": "root not found" })),
         ));
     };
+    let object_bytes = lillux::canonical_json(&value)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("{e:#}") })),
+            )
+        })?
+        .len();
     Ok(Json(json!({
         "closure": {
             "roots": [root.clone()],
@@ -249,7 +257,7 @@ async fn incomplete_closure_response(
             "malformed_objects": [],
             "unsupported_objects": []
         },
-        "object_bytes": 0,
+        "object_bytes": object_bytes,
         "blob_bytes": 0,
         "entries": [{
             "hash": root,
@@ -286,14 +294,15 @@ async fn admit_subject(state: Arc<AppState>, subject_hash: String) -> String {
     let admitted = admission_submit::handle(
         admission_submit::Request {
             subject_hash,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         state,
     )
@@ -310,14 +319,15 @@ async fn import_admitted_head_mirrors_remote_closure_and_records_job() {
     let admitted = admission_submit::handle(
         admission_submit::Request {
             subject_hash: subject_hash.clone(),
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         remote_state.clone(),
     )
@@ -337,7 +347,7 @@ async fn import_admitted_head_mirrors_remote_closure_and_records_job() {
         remote_import_admitted_head::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             subject_hash: Some(subject_hash.clone()),
             limit: 100,
             max_objects: Some(16),
@@ -413,7 +423,7 @@ async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
         remote_sync_admitted_heads::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             limit: 100,
             max_imports: Some(2),
             max_objects: Some(16),
@@ -437,7 +447,7 @@ async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
         remote_sync_admitted_heads::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             limit: 100,
             max_imports: None,
             max_objects: Some(16),
@@ -461,7 +471,7 @@ async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
         remote_sync_admitted_heads::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             limit: 100,
             max_imports: None,
             max_objects: Some(16),
@@ -550,7 +560,7 @@ async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
         remote_sync_admitted_heads::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             limit: 100,
             max_imports: None,
             max_objects: Some(16),
@@ -567,7 +577,7 @@ async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
     .await
     .unwrap_err();
     assert!(
-        format!("{err:#}").contains("incomplete after local verification"),
+        format!("{err:#}").contains("does not contain a complete typed object closure"),
         "unexpected error: {err:#}"
     );
 
@@ -582,10 +592,11 @@ async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
                 .get_cas_entry(CasEntryKind::Object, &good_attestation)?
                 .expect("good attestation should be mirrored before later failure");
             assert_eq!(good_attestation_entry.state, CasEntryState::Mirrored);
-            let bad = db
-                .get_cas_entry(CasEntryKind::Object, &bad_subject)?
-                .expect("bad subject should be staged before local verification fails");
-            assert_eq!(bad.state, CasEntryState::Staged);
+            assert!(
+                db.get_cas_entry(CasEntryKind::Object, &bad_subject)?
+                    .is_none(),
+                "an invalid remote closure must be rejected before any of its entries are staged"
+            );
             let jobs = db.list_sync_jobs_by_state(Some(SyncJobState::Failed), 10)?;
             let job = jobs
                 .iter()
@@ -606,7 +617,7 @@ async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
                 result["error"]
                     .as_str()
                     .unwrap()
-                    .contains("incomplete after local verification")
+                    .contains("does not contain a complete typed object closure")
             );
             assert!(!job.fetched_hashes.contains(&bad_attestation));
             Ok::<_, anyhow::Error>(())
@@ -624,14 +635,15 @@ async fn import_admitted_head_rejects_wrong_pinned_key() {
     admission_submit::handle(
         admission_submit::Request {
             subject_hash: subject_hash.clone(),
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         remote_state.clone(),
     )
@@ -654,7 +666,7 @@ async fn import_admitted_head_rejects_wrong_pinned_key() {
         remote_import_admitted_head::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             subject_hash: Some(subject_hash),
             limit: 100,
             max_objects: Some(16),
@@ -702,7 +714,7 @@ async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
         remote_sync_admitted_heads::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             limit: 100,
             max_imports: None,
             max_objects: Some(16),
@@ -767,14 +779,15 @@ async fn import_admitted_head_rejects_remote_closure_completeness_lie_before_mir
     admission_submit::handle(
         admission_submit::Request {
             subject_hash: subject_hash.clone(),
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         remote_state.clone(),
     )
@@ -795,7 +808,7 @@ async fn import_admitted_head_rejects_remote_closure_completeness_lie_before_mir
         remote_import_admitted_head::Request {
             remote: "upstream".to_string(),
             project: None,
-            policy: "local-node-v1".to_string(),
+            policy: "local-node-v2".to_string(),
             subject_hash: Some(subject_hash.clone()),
             limit: 100,
             max_objects: Some(16),
@@ -813,17 +826,18 @@ async fn import_admitted_head_rejects_remote_closure_completeness_lie_before_mir
     .unwrap_err();
 
     assert!(
-        format!("{err:#}").contains("incomplete after local verification"),
+        format!("{err:#}").contains("does not contain a complete typed object closure"),
         "unexpected error: {err:#}"
     );
 
     local_state
         .state_store
         .with_state_db(|db| {
-            let subject = db
-                .get_cas_entry(CasEntryKind::Object, &subject_hash)?
-                .expect("subject should be staged before local closure verification fails");
-            assert_eq!(subject.state, CasEntryState::Staged);
+            assert!(
+                db.get_cas_entry(CasEntryKind::Object, &subject_hash)?
+                    .is_none(),
+                "an invalid remote closure must be rejected before any entry is staged"
+            );
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-02T10:46:49Z:f7d29db6e4e488749bf5b893cf24337851e2b56c7f17a7541cf61d3ca6d60a82:fLUgQlOnZLO7rIS5qbP13mNAhzP+yCFijrjXzbmT6s9HCzIxHUcLC7oxjXG4voOVkvZRPjziLuirTWjU2CzmBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:e076a13c3bd4a32c17ed34cabbd151ce7a7521f6a27d92e3ffe0905bce3962c3:HtykOldLkr2yiHgxVANtHhhJWZL4csHCyWWl8DZXVPVFMH0POJDtxlaGX0FUdpMNmgMtiB6nJJ9Afj6LjOPpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -92,6 +92,17 @@ policies:
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
+  object_closure:
+    schema: 1
+    max_roots: 256
+    max_objects: 32768
+    max_blobs: 32768
+    max_object_bytes: 33554432
+    max_total_object_bytes: 67108864
+    max_blob_bytes: 134217728
+    max_total_blob_bytes: 134217728
+    max_response_bytes: 268435456
+    max_links_per_object: 100000
   thread_history:
     schema: 1
     default_retention: durable

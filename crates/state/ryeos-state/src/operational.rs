@@ -16,14 +16,14 @@ use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
-// Dispatch-effect records retain complete launch and caller authority. Epoch 6
-// is the clean-cut activation for effect-record/key schema 4 and launch-capsule
-// schema 16: predecessor rows omit caller/project/lifecycle/accounting
-// authority from their reusable key and must be retired. Provider-call records
-// do not carry that dependency and remain current.
-const REPLAY_INDEX_EPOCH: i32 = 6;
+// Dispatch-effect records retain complete launch and caller authority. Epoch 8
+// is the clean-cut activation for launch-capsule schema 18, which seals the
+// exact target-node operator grant used by a remotely adopted invocation.
+// Predecessor rows cannot prove that authority and must be retired.
+// Provider-call records do not carry that dependency and remain current.
+const REPLAY_INDEX_EPOCH: i32 = 8;
 #[cfg(test)]
-const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 16;
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 18;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -132,7 +132,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 6);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 8);
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -293,17 +293,24 @@ CREATE TABLE replay_index_epoch (
 INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
 "#;
 
-/// Exact epoch-5 → epoch-6 cut: dispatch effects now bind complete launch and
-/// authenticated caller authority. Provider-call evidence remains current and
-/// must survive this activation.
+/// Exact immediate-predecessor cut. Dispatch effects from epoch 6 omit the
+/// capsule-17 parent delegation ceiling; provider-call evidence is independent
+/// of that launch authority and remains current.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
 DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
-UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;
+"#;
+
+/// A skipped replay generation is not interpreted piecemeal. The explicit
+/// reset still succeeds, but discards every replay row because intermediate
+/// compatibility was not proven.
+const STALE_UNIFIED_REPLAY_INDEX_RESET_DDL: &str = r#"
+DELETE FROM replay_records;
 "#;
 
 /// A store upgraded directly from the pre-unified operational layout has no
 /// current namespace table to preserve. Its explicit clean cut discards both
-/// predecessor indexes before entering epoch 4; durable CAS objects remain.
+/// predecessor indexes before entering the current epoch; durable CAS objects
+/// remain.
 const LEGACY_REPLAY_INDEX_RESET_DDL: &str = r#"
 DROP TABLE effect_records;
 DROP TABLE provider_call_records;
@@ -321,8 +328,6 @@ CREATE TABLE replay_records (
 CREATE INDEX idx_replay_records_retention
     ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
 CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
-
-UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -2241,6 +2246,41 @@ fn assert_operational_identity(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn replay_layout_entries(
+    conn: &Connection,
+) -> Result<Vec<(String, String, String, Option<String>)>> {
+    conn.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+           AND (name IN ('effect_records', 'provider_call_records')
+                OR tbl_name IN ('effect_records', 'provider_call_records'))
+         ORDER BY type, name",
+    )?
+    .query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .context("read predecessor replay-index schema")
+}
+
+fn assert_exact_legacy_replay_layout(conn: &Connection, path: &Path) -> Result<()> {
+    let reference = Connection::open_in_memory().context("open legacy replay reference schema")?;
+    reference
+        .execute_batch(EFFECT_RECORDS_DDL)
+        .context("build effect replay reference schema")?;
+    reference
+        .execute_batch(PROVIDER_CALL_RECORDS_DDL)
+        .context("build provider-call replay reference schema")?;
+    if replay_layout_entries(conn)? != replay_layout_entries(&reference)? {
+        anyhow::bail!(
+            "unrecognized predecessor replay-index layout in {}; refusing destructive reset",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bool) -> Result<()> {
     let stored = replay_index_epoch(conn)?;
     if stored == REPLAY_INDEX_EPOCH {
@@ -2259,12 +2299,6 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
         }
         .into());
     }
-    if stored != REPLAY_INDEX_EPOCH - 1 {
-        anyhow::bail!(
-            "operational replay-index epoch {stored} is not the proven predecessor of {REPLAY_INDEX_EPOCH}; refusing explicit reset of {}",
-            path.display()
-        );
-    }
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .context("verify operational database before replay-index reset")?;
@@ -2281,19 +2315,41 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
             |row| row.get(0),
         )
         .context("inspect predecessor replay-index layout")?;
+    if has_unified_replay_index {
+        // Epoch contents may be stale, but a unified predecessor must retain
+        // the exact current physical schema before any row is discarded.
+        assert_current(conn, path).context("validate unified replay predecessor before reset")?;
+    } else {
+        // The only admitted pre-unified shape is the exact v2/v3 pair. Do not
+        // let DROP TABLE normalize an unknown/corrupt table into something
+        // that merely looks current after the destructive cut.
+        assert_exact_legacy_replay_layout(conn, path)?;
+    }
     let tx = conn
         .unchecked_transaction()
         .context("begin explicit replay-index reset")?;
-    tx.execute_batch(if has_unified_replay_index {
+    let preserve_provider_records = has_unified_replay_index && stored == REPLAY_INDEX_EPOCH - 1;
+    tx.execute_batch(if preserve_provider_records {
         REPLAY_INDEX_RESET_DDL
+    } else if has_unified_replay_index {
+        STALE_UNIFIED_REPLAY_INDEX_RESET_DDL
     } else {
         LEGACY_REPLAY_INDEX_RESET_DDL
     })
     .context("recreate current replay indexes")?;
+    tx.execute(
+        "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
+        rusqlite::params![REPLAY_INDEX_EPOCH],
+    )
+    .context("stamp current replay-index epoch")?;
+    assert_current(&tx, path).context("validate replay-index reset before commit")?;
+    if replay_index_epoch(&tx)? != REPLAY_INDEX_EPOCH {
+        anyhow::bail!("replay-index reset did not establish the current epoch");
+    }
     tx.commit().context("commit explicit replay-index reset")?;
     tracing::warn!(
         database = %path.display(),
-        preserved_provider_records = has_unified_replay_index,
+        preserved_provider_records = preserve_provider_records,
         "explicitly activated current replay indexes"
     );
     Ok(())
@@ -4400,14 +4456,14 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 6)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 5)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 8)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 7)"));
     }
 
     #[test]
     fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
-        assert_eq!(REPLAY_INDEX_EPOCH, 6);
-        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 16);
+        assert_eq!(REPLAY_INDEX_EPOCH, 8);
+        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 18);
         assert_eq!(
             DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
             crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
@@ -4542,34 +4598,20 @@ mod tests {
                      DROP INDEX idx_replay_records_record_hash;
                      DROP TABLE replay_records;
                      DROP TABLE replay_index_epoch;
-                     CREATE TABLE effect_records (
-                        cache_key TEXT PRIMARY KEY,
-                        answer_digest TEXT NOT NULL,
-                        record_hash TEXT NOT NULL,
-                        produced_at TEXT NOT NULL,
-                        last_replayed_at TEXT NOT NULL
-                     );
-                     CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
-                     CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
-                     INSERT INTO effect_records VALUES (
+                     PRAGMA user_version=3;",
+                )
+                .unwrap();
+            db.conn.execute_batch(EFFECT_RECORDS_DDL).unwrap();
+            db.conn.execute_batch(PROVIDER_CALL_RECORDS_DDL).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO effect_records VALUES (
                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                         'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                         'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
                         '2026-01-01T00:00:00Z',
                         '2026-01-01T00:00:00Z'
-                     );
-                     CREATE TABLE provider_call_records (
-                        cache_key TEXT PRIMARY KEY,
-                        answer_digest TEXT NOT NULL,
-                        record_hash TEXT NOT NULL,
-                        produced_at TEXT NOT NULL,
-                        last_replayed_at TEXT NOT NULL
-                     );
-                     CREATE INDEX idx_provider_call_records_last_replayed
-                        ON provider_call_records(last_replayed_at);
-                     CREATE INDEX idx_provider_call_records_record_hash
-                        ON provider_call_records(record_hash);
-                     PRAGMA user_version=3;",
+                     );",
                 )
                 .unwrap();
         }
@@ -4587,7 +4629,110 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_closure_cut_preserves_current_provider_replay_rows() {
+    fn replay_reset_refuses_malformed_unified_layout_without_mutation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO replay_records VALUES (
+                        'provider.call',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     ALTER TABLE replay_records ADD COLUMN unexpected TEXT;
+                     UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;",
+                )
+                .unwrap();
+        }
+
+        assert!(OperationalDb::open_for_explicit_replay_reset(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(replay_index_epoch(&conn).unwrap(), 6);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replay_records", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let unexpected: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('replay_records') WHERE name = 'unexpected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unexpected, 1);
+    }
+
+    #[test]
+    fn replay_reset_refuses_malformed_legacy_layout_without_mutation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP INDEX idx_replay_records_retention;
+                     DROP INDEX idx_replay_records_record_hash;
+                     DROP TABLE replay_records;
+                     CREATE TABLE effect_records (
+                        cache_key TEXT PRIMARY KEY,
+                        answer_digest TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        produced_at TEXT NOT NULL,
+                        last_replayed_at TEXT NOT NULL,
+                        unexpected TEXT
+                     );
+                     CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
+                     CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+                     CREATE TABLE provider_call_records (
+                        cache_key TEXT PRIMARY KEY,
+                        answer_digest TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        produced_at TEXT NOT NULL,
+                        last_replayed_at TEXT NOT NULL
+                     );
+                     CREATE INDEX idx_provider_call_records_last_replayed
+                        ON provider_call_records(last_replayed_at);
+                     CREATE INDEX idx_provider_call_records_record_hash
+                        ON provider_call_records(record_hash);
+                     INSERT INTO effect_records VALUES (
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z',
+                        'retained'
+                     );
+                     UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
+                )
+                .unwrap();
+        }
+
+        assert!(OperationalDb::open_for_explicit_replay_reset(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(replay_index_epoch(&conn).unwrap(), 4);
+        let retained: String = conn
+            .query_row("SELECT unexpected FROM effect_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(retained, "retained");
+        let unified: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='replay_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unified, 0);
+    }
+
+    #[test]
+    fn skipped_replay_generations_discard_all_unproven_rows() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
@@ -4623,6 +4768,46 @@ mod tests {
                 .downcast_ref::<ReplayIndexActivationRequired>()
                 .is_some()
         );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+    }
+
+    #[test]
+    fn immediate_replay_predecessor_preserves_provider_rows_only() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO replay_records VALUES (
+                        'dispatch.effect',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     INSERT INTO replay_records VALUES (
+                        'provider.call',
+                        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );",
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
+                    rusqlite::params![REPLAY_INDEX_EPOCH - 1],
+                )
+                .unwrap();
+        }
+
+        assert!(OperationalDb::open(&path).is_err());
         let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
         let rows: Vec<(String, String)> = db
             .conn
@@ -6173,8 +6358,8 @@ mod tests {
             .update_sync_job(
                 "job-transition",
                 &SyncJobUpdate {
-                    state: SyncJobState::Completed,
-                    phase: "done".to_string(),
+                    state: SyncJobState::Retryable,
+                    phase: "retryable".to_string(),
                     roots: None,
                     heads: None,
                     uploaded_hashes: vec![],

@@ -1055,19 +1055,20 @@ struct DescriptorForkBarrierState {
     waiting_forks: usize,
     fork_quiesced: bool,
     pending_fork_control_fds: BTreeSet<i32>,
+    fork_child_close_fds: BTreeSet<i32>,
 }
 
 struct DescriptorForkBarrier {
     state: Mutex<DescriptorForkBarrierState>,
     changed: Condvar,
-    waiting_control_closers: AtomicUsize,
+    waiting_descriptor_closers: AtomicUsize,
 }
 
 fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
     DIRECT_ATTACHMENT_FORK_BARRIER.get_or_init(|| DescriptorForkBarrier {
         state: Mutex::new(DescriptorForkBarrierState::default()),
         changed: Condvar::new(),
-        waiting_control_closers: AtomicUsize::new(0),
+        waiting_descriptor_closers: AtomicUsize::new(0),
     })
 }
 
@@ -1183,14 +1184,18 @@ impl Drop for ForkSensitiveDescriptorLease {
 struct QuiescedForkSensitiveDescriptors;
 
 impl QuiescedForkSensitiveDescriptors {
-    fn pending_fork_control_fds(&self) -> Vec<i32> {
+    fn fork_child_close_fds(&self) -> Vec<i32> {
         let barrier = direct_attachment_fork_barrier();
         let state = barrier
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
-        state.pending_fork_control_fds.iter().copied().collect()
+        state
+            .pending_fork_control_fds
+            .union(&state.fork_child_close_fds)
+            .copied()
+            .collect()
     }
 
     fn register_pending_fork_control(
@@ -1205,6 +1210,98 @@ impl QuiescedForkSensitiveDescriptors {
                 .fork_quiesced
         );
         register_pending_fork_control_file(release_writer)
+    }
+}
+
+/// A long-lived exact descriptor which remains open in the parent but is
+/// closed in every direct-attachment fork child before that child enters its
+/// durable pre-exec hold. This is stronger than `FD_CLOEXEC`: the hold occurs
+/// before exec and must not retain advisory locks or equivalent authority.
+#[cfg(unix)]
+pub(crate) struct ForkChildCloseFile {
+    fd: i32,
+    file: Option<std::fs::File>,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for ForkChildCloseFile {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        self.file
+            .as_ref()
+            .expect("fork-child-close descriptor is present")
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for ForkChildCloseFile {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForkChildCloseFile {
+    fn drop(&mut self) {
+        let barrier = direct_attachment_fork_barrier();
+        barrier
+            .waiting_descriptor_closers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_add(1)
+            })
+            .expect("fork-child-close descriptor closer count overflow");
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.fork_quiesced {
+            state = barrier
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        // Close the parent descriptor before removing its child-close
+        // registration. A concurrent fork can therefore observe either a
+        // live registered descriptor or no live descriptor, never an
+        // unregistered live authority.
+        drop(self.file.take());
+        assert!(
+            state.fork_child_close_fds.remove(&self.fd),
+            "fork-child-close descriptor was not registered"
+        );
+        let previous_closers = barrier
+            .waiting_descriptor_closers
+            .fetch_sub(1, Ordering::SeqCst);
+        assert_ne!(
+            previous_closers, 0,
+            "fork-child-close descriptor closer count underflow"
+        );
+        barrier.changed.notify_all();
+    }
+}
+
+/// Register an already-open descriptor while its caller retains a
+/// fork-sensitive lease acquired before opening it.
+#[cfg(unix)]
+pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCloseFile {
+    let fd = file.as_raw_fd();
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        !state.fork_quiesced,
+        "fork-child-close descriptor registered during a fork"
+    );
+    assert!(
+        state.fork_child_close_fds.insert(fd),
+        "fork-child-close descriptor was already registered"
+    );
+    ForkChildCloseFile {
+        fd,
+        file: Some(file),
     }
 }
 
@@ -1226,7 +1323,7 @@ impl Drop for PendingForkControlDescriptor {
     fn drop(&mut self) {
         let barrier = direct_attachment_fork_barrier();
         barrier
-            .waiting_control_closers
+            .waiting_descriptor_closers
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 count.checked_add(1)
             })
@@ -1250,7 +1347,7 @@ impl Drop for PendingForkControlDescriptor {
         // open in the parent and therefore inheritable.
         drop(self.writer.take());
         let previous_closers = barrier
-            .waiting_control_closers
+            .waiting_descriptor_closers
             .fetch_sub(1, Ordering::SeqCst);
         assert_ne!(
             previous_closers, 0,
@@ -1341,7 +1438,7 @@ fn quiesce_fork_sensitive_descriptors(
         .expect("fork-sensitive descriptor waiter count overflow");
     while state.fork_quiesced
         || state.retained_scopes != 0
-        || barrier.waiting_control_closers.load(Ordering::SeqCst) != 0
+        || barrier.waiting_descriptor_closers.load(Ordering::SeqCst) != 0
     {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -1354,7 +1451,7 @@ fn quiesce_fork_sensitive_descriptors(
                 "timed out waiting for fork-sensitive descriptor authority to quiesce; retained scopes: {}; fork already quiesced: {}; pending fork-control closers: {}",
                 retained_descriptor_scope_diagnostic(&state),
                 state.fork_quiesced,
-                barrier.waiting_control_closers.load(Ordering::SeqCst)
+                barrier.waiting_descriptor_closers.load(Ordering::SeqCst)
             ));
         }
         let (next, _) = barrier
@@ -1382,7 +1479,7 @@ struct AttachmentWorkerGate {
     cwd_directory: Option<std::fs::File>,
     child_status_reader_fd: i32,
     child_release_writer_fd: i32,
-    inherited_pending_control_fds: Vec<i32>,
+    inherited_child_close_fds: Vec<i32>,
 }
 
 /// A running subprocess that can be waited on later.
@@ -2432,7 +2529,7 @@ pub fn lib_spawn_awaiting_attachment(
                 format!("Failed to spawn awaiting attachment: {error}"),
             )
         })?;
-    let inherited_pending_control_fds = fork_sensitive_descriptors.pending_fork_control_fds();
+    let inherited_child_close_fds = fork_sensitive_descriptors.fork_child_close_fds();
     let (status_reader, status_writer) = attachment_pipe("readiness", start)?;
     let (release_reader, release_writer) = attachment_pipe("release", start)?;
     let child_status_reader_fd = status_reader.as_raw_fd();
@@ -2443,7 +2540,7 @@ pub fn lib_spawn_awaiting_attachment(
         cwd_directory,
         child_status_reader_fd,
         child_release_writer_fd,
-        inherited_pending_control_fds,
+        inherited_child_close_fds,
     };
 
     // A child held before exec retains every CLOEXEC descriptor inherited at
@@ -2765,7 +2862,7 @@ fn lib_spawn_with_stdio(
                         gate.cwd_directory
                             .as_ref()
                             .map(|directory| directory.as_raw_fd()),
-                        gate.inherited_pending_control_fds.clone(),
+                        gate.inherited_child_close_fds.clone(),
                     )
                 });
         unsafe {
@@ -3557,12 +3654,12 @@ fn direct_attachment_identity_pre_exec(
     status_reader_fd: i32,
     release_writer_fd: i32,
     cwd_directory_fd: Option<i32>,
-    inherited_pending_control_fds: &[i32],
+    inherited_child_close_fds: &[i32],
 ) -> std::io::Result<()> {
     unsafe {
         libc::close(status_reader_fd);
         libc::close(release_writer_fd);
-        for fd in inherited_pending_control_fds {
+        for fd in inherited_child_close_fds {
             libc::close(*fd);
         }
 

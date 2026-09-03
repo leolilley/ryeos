@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T08:05:36Z:a290c24e05da24dbeec988a078265a16650ce15842d6098c1ac2c5e760e01816:ylPBQ8ZLm+8DxSGEPkyOaIngKfqW+sQtjc0CTlUe3OhSy1X6ULkrAs6JN2jBuaWCeP9gcQXmoa/KSbZP/xTTAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:71d087ced1d9406a6ab36981cc83710088ecaa531c7ac38872f2c0a6da68cfce:OiJz8wfVy2RRSqzoAEgiKtGzP4wx/USG+DCyF/AZTYmX6whnrTETgvrY6xaGZfrVoMtwqiB+yhZuxt7oOXe9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -40,27 +40,36 @@ and absence fails rather than manufacturing an implicit default.
 7. Pin any additional `--trust-file` publisher docs.
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
-10. If a node init profile was selected, verify its publisher signature, require
-    its sorted `exact_bundles` inventory to equal the discovered bundle
-    inventory, validate every typed policy section, and refuse a conflict with
-    an existing nonempty policy generation.
+10. If a node init profile was selected, verify its publisher signature, use
+    its sorted `exact_bundles` as the prospective complete installed inventory,
+    require every selected bundle to exist in the discovered source, validate
+    every typed policy section, and refuse a conflict with an existing
+    nonempty policy generation unless the explicit schema-cut flags were
+    supplied.
 11. Compose and admit the exact prospective source generation. An existing
     enforced policy must resolve and inspect its selected backend here even
     when ordinary test preflight is skipped.
 12. Preflight-verify source bundles unless explicitly skipped by tests.
-13. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
-    write signed registrations under `<system>/.ai/node/bundles/`.
+13. Install/replace selected bundles and remove registrations outside the
+    prospective exact inventory under the same locked init. Installed bundle
+    roots live beneath `<system>/.ai/bundles/<name>/`; signed registrations
+    live beneath `<system>/.ai/node/bundles/`.
     Before selected-backend activation, resolve and inspect its exact completed
     staging tree.
 14. Create/load the vault X25519 keypair.
 15. When no generation exists, require the selected node init profile and
-    atomically publish all of its policies beneath
+    publish all of its policies beneath
     `<system>/.ai/node/policies/`, signed by the node key. With an existing
     generation, an omitted selection preserves it and an explicit selection
-    must be identical. Init authors no implicit isolation, ingest-ignore, or
-    other policy fallback. Materialize only the read-only sync view derived
-    from the admitted generation.
-16. Reload trust and verify official publisher, user key, and node key
+    must be identical unless explicit replacement is selected. Init authors no
+    implicit isolation, ingest-ignore, or other policy fallback. Materialize
+    only the read-only sync view derived from the admitted generation.
+16. Write the signed init-completion fence only after the intended bundle
+    registration inventory and policy generation have completed. The prior
+    fence is durably absent throughout every bundle/policy mutation. Daemon
+    startup re-verifies it after the state lock and any interrupted per-bundle
+    reconciliation, refusing partial crash results.
+17. Reload trust and verify official publisher, user key, and node key
     are trusted.
 
 The init report includes the app root, operator/node key fingerprints,
@@ -92,6 +101,15 @@ choice:
   `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
 - the local source installer may opt in with `--trust-source-publishers`.
 
+Persisted container nodes preserve their complete signed policy generation by
+default. When a release intentionally cuts that policy schema or changes the
+image's exact init-profile bundle inventory, the operator may set
+`RYEOS_RESET_NODE_POLICY_GENERATION=1` for one stopped-container boot. The
+entrypoint asks one locked init to replace that generation from the trusted
+baked profile, align the prospective exact bundle inventory, and publish its
+completion fence before starting the daemon. All other node state is
+preserved; remove the variable after the successful cut.
+
 Release containers pass no packaged trust documents to `ryeos init`.
 Development opt-ins trust every publisher document in the selected source
 boundary, so use them only after independently verifying that source. The
@@ -118,3 +136,10 @@ fallback or overwrites a different existing node-signed generation. Stopped
 node policy changes use the typed `ryeos node policy-apply` boundary. See
 [Execution Isolation](execution-isolation.md) for the isolation section's
 complete accepted body.
+
+When the current registry adds or removes a mandatory section, the predecessor
+generation is intentionally undecodable and `policy-apply` cannot treat it as
+current authority. Use the explicit stopped-node
+`ryeos node reset policy-generation --node-profile <name> --confirm` cutover
+against the trusted packaged source. There is no implicit migration or
+fallback.

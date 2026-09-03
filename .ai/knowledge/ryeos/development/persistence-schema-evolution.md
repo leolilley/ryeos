@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-01T00:15:48Z:41bd90d54845b0a4ec32d948a538942e5daa2d2923ffc462b8f1b0e5047b26ca:1XFSbPpjTlP9o1ePtb3OQMP5Ji9IA88CkWeC4SHih02c1J3StFlOhhWhLjz7exhy5zK6RmAW/OKpBRW/a4WtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:235491dd1291a4fc466769af6a9ee6be7c050a0eec6eef15eca4a52b88694b8e:zlYN8tvz37XgPKcYiBhQfatyu2ykh64afaCAU0k1wtKl8ywx+tZKRb22Q8F+X4815PTvVc2+4JhJFe49PqVqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.9.0"
+version: "2.0.0"
 ```
 
 # Persistence Schema Evolution
@@ -29,12 +29,13 @@ occupied. Removing old readers does not make the number reusable.
 
 The current clean-cut execution formats include:
 
-- thread snapshot schema 10;
+- sealed root execution request schema 13;
+- thread snapshot schema 11;
 - project snapshot schema 5;
-- admitted launch capsule schema 16;
-- runtime launch metadata epoch 21;
+- admitted launch capsule schema 18;
+- runtime launch metadata epoch 23;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 19 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 21 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,7 +60,7 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 19 retains the epoch-8 hosted-worker substrate,
+Runtime epoch 21 retains the epoch-8 hosted-worker substrate,
 credential-generation fencing, command/approval contact ledgers, observation
 frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
 and multi-epoch process-history contracts, the epoch-9 exact
@@ -97,8 +98,23 @@ authentication from a principal string. Machine continuations cannot replace
 the principal, operator continuations rebind it only from a fresh authenticated
 handler, and remote placement clears source-node handler authority. There is no
 epoch-18 reader, handler-context reconstruction fallback, alternate inline
-ledger, operation-ID compatibility alias, or migration. No execution-history
-reader or migration for epochs 1 through 18 remains. An explicit reset
+ledger, operation-ID compatibility alias, or migration. Epoch 20 admits sealed
+root execution request schema 12, thread snapshot schema 11, admitted launch
+capsule schema 17, and launch metadata epoch 22. Every enclosing durable
+contract advances because captured node-history policy provenance changed from
+the predecessor tagged `signed_config`/`missing_config` wrapper to the flat
+exact signed policy-item identity. No current reader reinterprets the old
+nested shape. Epoch 21 admits sealed root execution request schema 13,
+admitted launch capsule schema 18, and launch metadata epoch 23. A remotely
+adopted invocation now seals the exact current target-node operator grant that
+authorized access to target-private project and credential state. That grant
+is placement authority and remains excluded from portable exact-program
+identity. No execution-history reader or migration for epochs 1 through 20
+remains. Epoch 21 also makes the handoff credential reservation the durable
+owner of the exact target project-HEAD fence from target preparation through
+authoritative adoption. Every online project-HEAD writer, including compact
+GC, serializes with that reservation authority; predecessor reservation rows
+cannot authorize this contract. An explicit reset
 classifies ownership and ordering solely from the outer runtime application-ID
 family and epoch. Once the store is proven to be an intact, strictly older
 RyeOS RuntimeDb, every predecessor table, index, view, trigger, row, and
@@ -130,7 +146,10 @@ store. The exact appended-column intermediate produced by the original v6
 migrator is also recognized and repaired; no unknown layout is modified.
 
 Replay indexes inside that stable database have their own clean-cut epoch,
-currently epoch 6.
+currently epoch 8. Epoch 8 binds dispatch-effect replay to admitted launch
+capsule schema 18, including the exact target-node operator grant sealed by a
+remotely adopted invocation. An epoch-7 record cannot prove that authority and
+is therefore retired rather than reinterpreted.
 They are not authority-compatible merely because the surrounding SQLite schema
 is current: a dispatch-effect record retains its complete admitted execution
 closure, including the exact admitted-launch-capsule schema. When that closure
@@ -141,12 +160,40 @@ the explicit offline activation command:
 ryeos node reset replay-indexes --confirm
 ```
 
-That operation retires only predecessor `dispatch.effect` rows. It preserves
-current provider-call evidence, credential profiles, sync state, admission
-attestations, accounting state, signed heads, and CAS bytes. The next ordinary
-GC reclaims objects that are no longer rooted. Launch-capsule schema changes
-must therefore make an explicit replay-epoch decision; they must never leave
-predecessor effect rows silently pinning an undecodable closure.
+For the exact immediate predecessor, that operation retires only
+`dispatch.effect` rows and preserves provider-call evidence because the epoch
+transition explicitly proves that namespace remains current. If a node skipped
+one or more replay generations, the same explicit reset still succeeds but
+retires every replay row; RyeOS does not compose unshipped compatibility claims
+across the skipped epochs. Credential profiles, sync state, admission
+attestations, accounting state, signed heads, and CAS bytes are preserved in
+both cases. The next ordinary GC reclaims objects that are no longer rooted.
+Launch-capsule schema changes must therefore make an explicit replay-epoch
+decision; they must never leave predecessor effect rows silently pinning an
+undecodable closure.
+
+`accounting.sqlite3` is the durable financial source of truth paired with its
+node-local external financial anchor. Accounting schema v2 extends the exact v1
+ledger with launch-gate directive bindings and operation-keyed cross-site
+allowance export/import tables. Its sole automatic migration accepts only the
+fully validated exact v1 application ID and complete v1 table/index SQL, then
+applies the additive v2 contract in one immediate transaction. Every retained
+v1 gate is materialized with an explicit null directive binding because v1
+committed execution-budget authority only; the migration never infers broader
+launch authority from per-attempt directive rows. It then validates the
+complete resulting schema before commit. This is a forward migration of
+financial authority, not an execution-format compatibility reader.
+
+The v2 export transition atomically records the externally anchored financial
+sequence, immutable transfer receipt, and per-account debit rows. Target import
+creates zero-use `prepared` accounts, then records the exact rooted source
+transfer and activates them atomically during remote adoption. An exported
+source allowance is irreversible: recovery completes the associated writer cut
+instead of aborting or refunding it. Startup verification recomputes transfer
+receipt identity, financial-transition linkage, per-account debit aggregates,
+and rejects open predecessor gates that lack the current exact directive
+binding. Unknown or malformed accounting layouts still fail closed and are
+never normalized.
 
 ## Rebuildable SQLite projections
 

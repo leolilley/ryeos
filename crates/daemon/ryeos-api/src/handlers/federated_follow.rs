@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use crate::remote::client::{ObjectsClosureRequestOptions, RemoteClient};
+use crate::remote::client::{
+    NodeAdmittedObjectsClosureRequestOptions, ObjectsClosureRequestOptions, RemoteClient,
+};
 use crate::remote::{config, import};
 use ryeos_app::federated_follow::{
     REMOTE_FOLLOW_DELIVERY_OPERATION, REMOTE_FOLLOW_DELIVERY_SERVICE,
@@ -21,7 +23,6 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-const MAX_TERMINAL_CLOSURE_BYTES: u64 = 32 * 1024 * 1024;
 const DELIVERY_EVENT: &str = "remote_follow_terminal.delivered";
 
 fn authenticated_target_node(
@@ -96,24 +97,35 @@ async fn deliver_locked(
         .strip_prefix("fp:")
         .ok_or_else(|| internal("configured target principal is not a fingerprint"))?;
     let target_client = RemoteClient::from_remote_cfg(&state, &target_remote.remote);
+    let reservation_value =
+        load_local_object(&state, &req.reservation_attestation_hash).map_err(internal)?;
+    let reservation_data = lillux::canonical_json(&reservation_value)
+        .map_err(internal)?
+        .into_bytes();
+    let reservation_entry = ryeos_state::sync::SyncEntry {
+        hash: req.reservation_attestation_hash.clone(),
+        is_blob: false,
+        data: reservation_data,
+    };
+    let closure_options = NodeAdmittedObjectsClosureRequestOptions::for_node(
+        &state,
+        ObjectsClosureRequestOptions {
+            allow_incomplete: false,
+            allow_untransported_large_objects: true,
+            ..Default::default()
+        },
+    )
+    .map_err(internal)?;
+    let fetch_options = closure_options
+        .reserving_supplemental_entry(&reservation_entry)
+        .map_err(internal)?;
     let closure = target_client
         .objects_closure_get(
             &[
                 req.target_chain_head_hash.clone(),
                 req.terminal_attestation_hash.clone(),
             ],
-            ObjectsClosureRequestOptions {
-                max_objects: Some(16_384),
-                max_blobs: Some(4_096),
-                max_object_bytes: Some(2 * 1024 * 1024),
-                max_total_object_bytes: Some(24 * 1024 * 1024),
-                max_blob_bytes: Some(MAX_TERMINAL_CLOSURE_BYTES),
-                max_total_blob_bytes: Some(MAX_TERMINAL_CLOSURE_BYTES),
-                max_response_bytes: Some(48 * 1024 * 1024),
-                max_links_per_object: Some(65_536),
-                allow_incomplete: false,
-                allow_untransported_large_objects: true,
-            },
+            fetch_options,
         )
         .await
         .map_err(|error| {
@@ -154,8 +166,6 @@ async fn deliver_locked(
         ));
     }
 
-    let reservation_value =
-        load_local_object(&state, &req.reservation_attestation_hash).map_err(internal)?;
     let reservation_attestation = ryeos_state::objects::Attestation::from_value(&reservation_value)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     reservation_attestation
@@ -191,24 +201,12 @@ async fn deliver_locked(
         &closure.entries,
     )
     .map_err(internal)?;
-    if !payload
-        .entries
-        .iter()
-        .any(|entry| entry.hash == req.reservation_attestation_hash)
-    {
-        let data = lillux::canonical_json(&reservation_value)
-            .map_err(internal)?
-            .into_bytes();
-        payload.total_bytes = payload
-            .total_bytes
-            .checked_add(data.len())
-            .ok_or_else(|| internal("remote follow payload size overflow"))?;
-        payload.entries.push(ryeos_state::sync::SyncEntry {
-            hash: req.reservation_attestation_hash.clone(),
-            is_blob: false,
-            data,
-        });
-    }
+    import::append_admitted_supplemental_entry(
+        &mut payload,
+        reservation_entry,
+        closure_options.limits(),
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let operation = RemoteFollowDeliveryJobOperation::new(
         RemoteFollowDeliveryJobRole::Parent,
         req.operation_id.clone(),
@@ -240,7 +238,7 @@ async fn deliver_locked(
                     req.target_chain_head_hash.clone(),
                 ],
                 heads: vec![req.target_chain_head_hash.clone()],
-                max_attempts: 16,
+                max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
             },
         )
         .map_err(internal)?;
@@ -254,12 +252,6 @@ async fn deliver_locked(
             .validate_against(&req)
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         return serde_json::to_value(response).map_err(internal);
-    }
-    if job.attempts_exhausted() {
-        terminalize_exhausted_delivery_job(&state, &job).map_err(internal)?;
-        return Err(internal(
-            "remote follow parent delivery exhausted its admitted attempts",
-        ));
     }
     let attempt_id = format!("remote-follow-parent-attempt:{}", uuid::Uuid::new_v4());
     state
@@ -554,10 +546,6 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                         continue;
                     }
                 };
-            if job.attempts_exhausted() {
-                terminalize_exhausted_delivery_job(state, &job)?;
-                continue;
-            }
             let Some(request_value) = job.result.clone() else {
                 continue;
             };
@@ -667,55 +655,27 @@ fn settle_attempt(
         let latest = db
             .get_sync_job(&job.job_id)?
             .context("remote follow delivery job disappeared")?;
-        let exhausted =
-            retry_would_exhaust_delivery(job_state, latest.attempt_count, latest.max_attempts);
-        let settled_job_state = if exhausted {
-            ryeos_state::SyncJobState::Failed
-        } else {
-            job_state
-        };
-        let settled_phase = if exhausted {
-            "attempts_exhausted"
-        } else {
-            phase
-        };
-        let settled_error = if exhausted {
-            error.clone().or_else(|| {
-                Some("remote follow delivery exhausted its admitted attempts".to_owned())
-            })
-        } else {
-            error.clone()
-        };
         db.finish_sync_job_attempt_and_update_job(
             attempt_id,
             &ryeos_state::FinishSyncJobAttempt {
                 state: attempt_state,
-                phase: settled_phase.to_owned(),
-                error: settled_error.clone(),
+                phase: phase.to_owned(),
+                error: error.clone(),
                 result: result.clone(),
             },
             &job.job_id,
             &ryeos_state::SyncJobUpdate {
-                state: settled_job_state,
-                phase: settled_phase.to_owned(),
+                state: job_state,
+                phase: phase.to_owned(),
                 roots: None,
                 heads: None,
                 uploaded_hashes: latest.uploaded_hashes,
                 fetched_hashes: latest.fetched_hashes,
-                last_error: settled_error,
+                last_error: error,
                 result: result.or(latest.result),
             },
         )
     })
-}
-
-fn retry_would_exhaust_delivery(
-    requested_state: ryeos_state::SyncJobState,
-    attempt_count: u64,
-    max_attempts: u64,
-) -> bool {
-    requested_state == ryeos_state::SyncJobState::Retryable
-        && ryeos_state::sync_job_attempts_exhausted(attempt_count, max_attempts)
 }
 
 fn validate_target_delivery_job_binding(
@@ -733,24 +693,12 @@ fn validate_target_delivery_job_binding(
                 request.target_chain_head_hash.clone(),
             ]
         || job.heads != vec![request.target_chain_head_hash.clone()]
-        || job.max_attempts != 16
+        || job.max_attempts != ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS
         || !job.attempt_count_is_valid()
     {
         bail!("remote follow delivery job changed its retained authority");
     }
     Ok(())
-}
-
-fn terminalize_exhausted_delivery_job(
-    state: &AppState,
-    job: &ryeos_state::SyncJobRecord,
-) -> Result<()> {
-    terminalize_delivery_job(
-        state,
-        job,
-        "attempts_exhausted",
-        "remote follow delivery exhausted its admitted attempts".to_owned(),
-    )
 }
 
 fn terminalize_invalid_delivery_job(
@@ -900,7 +848,7 @@ mod authority_tests {
             uploaded_hashes: Vec::new(),
             fetched_hashes: Vec::new(),
             attempt_count: 1,
-            max_attempts: 16,
+            max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
             last_error: None,
             result: Some(serde_json::to_value(&request).unwrap()),
             created_at: "2026-08-29T00:00:00Z".to_owned(),
@@ -913,21 +861,47 @@ mod authority_tests {
     }
 
     #[test]
-    fn final_failed_delivery_attempt_terminalizes_instead_of_sticking_retryable() {
-        assert!(!retry_would_exhaust_delivery(
-            ryeos_state::SyncJobState::Retryable,
-            15,
-            16,
-        ));
-        assert!(retry_would_exhaust_delivery(
-            ryeos_state::SyncJobState::Retryable,
-            16,
-            16,
-        ));
-        assert!(!retry_would_exhaust_delivery(
-            ryeos_state::SyncJobState::Completed,
-            16,
-            16,
-        ));
+    fn delivery_binding_requires_logically_unbounded_retry_authority() {
+        let operation = RemoteFollowDeliveryJobOperation::new(
+            RemoteFollowDeliveryJobRole::Target,
+            "1".repeat(64),
+            "2".repeat(64),
+            "fp:owner".to_owned(),
+            "T-child".to_owned(),
+            "site:parent".to_owned(),
+            "site:target".to_owned(),
+        )
+        .unwrap();
+        let request = RemoteFollowTerminalDeliveryRequest {
+            operation_id: operation.operation_id.clone(),
+            reservation_attestation_hash: operation.reservation_attestation_hash.clone(),
+            terminal_attestation_hash: "3".repeat(64),
+            child_chain_root_id: operation.child_chain_root_id.clone(),
+            target_chain_head_hash: "4".repeat(64),
+            parent_site_id: operation.parent_site_id.clone(),
+            target_site_id: operation.target_site_id.clone(),
+        };
+        let mut job = ryeos_state::SyncJobRecord {
+            job_id: format!("remote-follow-terminal-target:{}", operation.operation_id),
+            operation_type: REMOTE_FOLLOW_DELIVERY_OPERATION.to_owned(),
+            operation: operation.to_value().unwrap(),
+            peer: Some(operation.parent_site_id.clone()),
+            state: ryeos_state::SyncJobState::Retryable,
+            phase: "delivery_retryable".to_owned(),
+            roots: vec!["2".repeat(64), "3".repeat(64), "4".repeat(64)],
+            heads: vec!["4".repeat(64)],
+            uploaded_hashes: Vec::new(),
+            fetched_hashes: Vec::new(),
+            attempt_count: 50_000,
+            max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
+            last_error: None,
+            result: Some(serde_json::to_value(&request).unwrap()),
+            created_at: "2026-08-29T00:00:00Z".to_owned(),
+            updated_at: "2026-08-29T00:00:00Z".to_owned(),
+            finished_at: None,
+        };
+        validate_target_delivery_job_binding(&job, &operation, &request).unwrap();
+        job.max_attempts = 16;
+        assert!(validate_target_delivery_job_binding(&job, &operation, &request).is_err());
     }
 }

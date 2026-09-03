@@ -4367,6 +4367,56 @@ impl StateDb {
         )
     }
 
+    /// Verify, under the exact chain lock, that the current trusted head is
+    /// signed by `required_signer` and is an ancestor of `candidate_head`.
+    /// The returned hash is the precise local anchor observed by the caller.
+    pub fn verify_current_chain_anchor_for_candidate(
+        &self,
+        chain_root_id: &str,
+        candidate_head: &str,
+        required_signer: &str,
+        required_owner: &str,
+        required_origin_site_id: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<String> {
+        let authority = self.pinned_authority()?;
+        authority.ensure_guard(cas_mutation_guard)?;
+        let chain_lock = self.acquire_existing_chain_lock(chain_root_id)?;
+        let current = chain_lock
+            .read_verified_head(self.trust_store.as_ref())?
+            .ok_or_else(|| anyhow::anyhow!("chain has no current trusted head"))?;
+        if current.signer != required_signer {
+            anyhow::bail!("current chain head is not signed by the required authority");
+        }
+        let root = {
+            let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+            chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                chain_root_id,
+                self.trust_store.as_ref(),
+                &mut head_cache,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("chain has no authoritative root snapshot"))?
+        };
+        if root.chain_root_id != chain_root_id
+            || root.thread_id != chain_root_id
+            || root.requested_by.as_deref() != Some(required_owner)
+            || root.origin_site_id != required_origin_site_id
+        {
+            anyhow::bail!("chain has no exact target-authored owner anchor");
+        }
+        crate::sync::verify_chain_closure_anchored_pinned(
+            &authority.cas_store()?,
+            chain_root_id,
+            candidate_head,
+            &current.target_hash,
+        )?;
+        Ok(current.target_hash)
+    }
+
     /// Read the current authoritative snapshot through a trust-verified chain
     /// head and the verified in-memory head cache. This never consults the
     /// rebuildable projection. `None` means that the chain head or requested
@@ -5991,12 +6041,26 @@ fn verify_chain_writer_transition_adoption(
         || remote.target_placement_attestation_hash != evidence.placement_attestation_hash
         || remote.chain_writer_grant_hash != transition.writer_grant_hash
         || remote.target_launch_capsule_hash != evidence.transition_subject_hash
+        || remote.source_accounting_transfer_hash != evidence.source_accounting_transfer_hash
         || remote.source_site_id != evidence.source_site_id
         || remote.target_site_id != evidence.target_site_id
         || remote.target_node_signer_fingerprint != evidence.target_node_signer_fingerprint
         || remote.successor_thread_id != evidence.successor_placement_thread_id
     {
         anyhow::bail!("remote continuation event differs from its writer grant");
+    }
+    if let Some(hash) = &remote.source_accounting_transfer_hash {
+        let value = cas
+            .get_object(hash)?
+            .ok_or_else(|| anyhow::anyhow!("accounting allowance transfer is absent"))?;
+        let transfer: crate::objects::AccountingAllowanceTransfer = serde_json::from_value(value)?;
+        if transfer.content_hash()? != *hash
+            || transfer.operation_id != evidence.operation_id
+            || transfer.source_chain_root_id != evidence.chain_root_id
+            || transfer.source_placement_thread_id != evidence.source_placement_thread_id
+        {
+            anyhow::bail!("accounting allowance transfer contradicts its writer grant");
+        }
     }
     let runtime_seed_value = cas
         .get_object(&remote.target_runtime_seed_hash)?
@@ -6238,7 +6302,8 @@ mod tests {
         assert!(
             startup_error
                 .to_string()
-                .contains("thread-history discard is incomplete")
+                .contains("offline execution-history reset is incomplete"),
+            "unexpected startup error: {startup_error:#}"
         );
 
         let report = db

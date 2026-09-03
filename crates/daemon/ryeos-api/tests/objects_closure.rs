@@ -9,14 +9,14 @@ use ryeos_api::handlers::{objects_closure_describe, objects_closure_get};
 fn request(root: String, max_objects: usize) -> objects_closure_describe::Request {
     objects_closure_describe::Request {
         roots: vec![root],
-        max_objects,
-        max_blobs: 16,
-        max_object_bytes: 1024,
-        max_total_object_bytes: 4096,
-        max_blob_bytes: 1024,
-        max_total_blob_bytes: 4096,
-        max_response_bytes: 8192,
-        max_links_per_object: 16,
+        max_objects: Some(max_objects),
+        max_blobs: Some(16),
+        max_object_bytes: Some(1024),
+        max_total_object_bytes: Some(4096),
+        max_blob_bytes: Some(1024),
+        max_total_blob_bytes: Some(4096),
+        max_response_bytes: Some(8192),
+        max_links_per_object: Some(16),
         allow_incomplete: false,
         allow_untransported_large_objects: false,
     }
@@ -128,7 +128,7 @@ async fn closure_get_enforces_blob_byte_budget() {
     let (_tmp, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
-    req.max_blob_bytes = 1;
+    req.max_blob_bytes = Some(1);
 
     let err = objects_closure_get::handle(req, Arc::new(state))
         .await
@@ -196,7 +196,7 @@ async fn closure_get_enforces_object_byte_budget() {
     let (_tmp, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
-    req.max_total_object_bytes = 1;
+    req.max_total_object_bytes = Some(1);
 
     let err = objects_closure_get::handle(req, Arc::new(state))
         .await
@@ -227,4 +227,41 @@ async fn closure_describe_enforces_max_objects() {
         .unwrap_err();
 
     assert!(err.to_string().contains("exceeds max_objects"));
+}
+
+#[tokio::test]
+async fn closure_serving_intersects_peer_ceiling_with_node_policy() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (root, _, _) = store_fixture(&state);
+    let mut req = request(root.clone(), 16);
+    req.max_total_blob_bytes = Some(128 * 1024 * 1024 + 1);
+    let response = objects_closure_describe::handle(req, Arc::new(state))
+        .await
+        .unwrap();
+    assert_eq!(response["complete"], true);
+    assert_eq!(response["roots"], serde_json::json!([root]));
+}
+
+#[tokio::test]
+async fn closure_request_root_fan_in_cannot_exceed_node_policy() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (root, _, _) = store_fixture(&state);
+    let mut req = request(root.clone(), 16);
+    req.roots = vec![root; 257];
+    let error = objects_closure_describe::handle(req, Arc::new(state))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("root count exceeds node policy"));
+}
+
+#[tokio::test]
+async fn closure_describe_enforces_exact_serialized_response_budget() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (root, _, _) = store_fixture(&state);
+    let mut req = request(root, 16);
+    req.max_response_bytes = Some(1);
+    let error = objects_closure_describe::handle(req, Arc::new(state))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeds max_response_bytes"));
 }

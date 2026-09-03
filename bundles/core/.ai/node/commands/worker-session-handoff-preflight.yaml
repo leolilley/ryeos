@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-26T15:16:44Z:14c11ba13b1809120de7ea0baeb5593ce96d1ffb73ebbeca5e3cef1aff015555:aOBz+OjZtAvY/qBGxftmWA09I2FdzRqYItqxkZ4x0juisr8QjyF4dHDc2YciOn08XRtXO6QlgJDNeGFRRgRNCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:81880920263160135eceee76eef3e59cf9b9bc2c32438d424f4fe905b2cf3442:lrjLuBNqKPjuHP9earrmho680x5yiWCzbVLwwjXWVOOq6dCbRndvNAXhhBtoXz9V9ftB78Edv8LmFmgVqB/XAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [worker, session, handoff-preflight]
-description: "Preflight one cross-site worker handoff before quiescing its source"
+description: "Preflight one frozen, reaped, checkpoint-published cross-site worker placement"
 forms:
   - slots:
       - field: chain_root_id

@@ -1235,22 +1235,20 @@ fn post_execution_foldback(
                 );
             }
             let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-            state
-                .state_store
-                .with_state_db_owned(thread_id, launch_owner, |db| {
-                    crate::execution::advance_after_foldback(
-                        &authority,
-                        &cas_mutation_guard,
-                        db,
-                        &signer,
-                        principal_key,
-                        &project_hash,
-                        new_tree_hash,
-                        base_snapshot_hash,
-                        expected_hash,
-                        &mut publication,
-                    )
-                })?
+            crate::execution::advance_after_foldback(
+                &authority,
+                &cas_mutation_guard,
+                &state.state_store,
+                thread_id,
+                launch_owner,
+                &signer,
+                principal_key,
+                &project_hash,
+                new_tree_hash,
+                base_snapshot_hash,
+                expected_hash,
+                &mut publication,
+            )?
         }
     } else {
         base_snapshot_hash.to_string()
@@ -2917,6 +2915,11 @@ fn validate_recovered_direct_request_authority(
             "direct recovery operational capability ceiling contradicts its admitted capsule"
         );
     }
+    let sealed =
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+            capsule,
+        )?;
+    sealed.validate_current_operator_authority(state)?;
     let authoritative =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::restore_from_admitted_capsule(
             capsule,
@@ -5681,6 +5684,7 @@ pub fn execution_params_from_sealed_root_request(
     sealed: &SealedRootExecutionRequest,
     provenance_override: Option<ExecutionProvenance>,
 ) -> Result<ExecutionParams> {
+    sealed.validate_current_operator_authority(state)?;
     let provenance = match provenance_override {
         Some(provenance) => provenance,
         None => execution_provenance_from_resume_context(state, resume)?.0,

@@ -25,7 +25,9 @@ use super::validate_object_kind;
 /// managed runtime terminal state stores only its non-derivable supplement.
 /// v10: retained-current-HEAD authority embeds the exact principal/project
 /// destination and admitted compare-and-swap base.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 10;
+/// v11: captured node-history policy provenance uses the flat exact signed
+/// item identity rather than the predecessor tagged config wrapper.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 11;
 
 /// Maximum compact-JSON bytes retained across a terminal snapshot's result and
 /// error values. Terminal content has its own bounded contract: it is not an

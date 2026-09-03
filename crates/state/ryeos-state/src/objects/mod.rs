@@ -13,6 +13,21 @@
 //! Distributed trust types:
 //! - [`Attestation`] — signed claim about a CAS object
 
+use serde::Deserialize as _;
+
+/// Deserialize one field whose wire presence is mandatory while `null`
+/// remains a meaningful explicit value. Unlike Serde's default `Option`
+/// handling, a missing field therefore fails the current-schema clean cut.
+pub(crate) fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
@@ -161,9 +176,10 @@ pub use state_manifest::{
     StateManifestBlob,
 };
 pub use thread_event::{
-    EventDurability, MAX_HOSTED_SESSION_OBSERVATION_EVENTS, MAX_STRUCTURED_OBSERVATION_BATCH_BYTES,
-    MAX_THREAD_EVENT_SERIALIZED_BYTES, REMOTE_CONTINUATION_AUTHORITY_SCHEMA,
-    RemoteContinuationAuthority, ThreadEvent,
+    ACCOUNTING_ALLOWANCE_TRANSFER_KIND, ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA,
+    AccountingAllowanceTransfer, EventDurability, MAX_HOSTED_SESSION_OBSERVATION_EVENTS,
+    MAX_STRUCTURED_OBSERVATION_BATCH_BYTES, MAX_THREAD_EVENT_SERIALIZED_BYTES,
+    REMOTE_CONTINUATION_AUTHORITY_SCHEMA, RemoteContinuationAuthority, ThreadEvent,
 };
 pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,

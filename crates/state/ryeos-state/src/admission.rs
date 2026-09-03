@@ -74,6 +74,27 @@ pub fn admit_root(
         );
     }
 
+    // Revalidate the exact current closure before considering idempotent
+    // reuse. A retained head proves a prior admission policy decision; it
+    // cannot bypass the current node's narrower receive/admission limits.
+    let closure = collect_object_closure_with_cas_and_limits(
+        &cas,
+        [request.subject_hash.clone()],
+        request.limits,
+    )
+    .context("failed to collect admission closure")?;
+
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "admission closure incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
+            closure.missing_objects.len(),
+            closure.missing_blobs.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len()
+        );
+    }
+    verify_closure_content_hashes(&cas, &closure)?;
+
     if let Some(existing) = db.read_generic_head_ref(
         &format!("admissions/{}", request.policy),
         &request.subject_hash,
@@ -109,24 +130,6 @@ pub fn admit_root(
         });
     }
 
-    let closure = collect_object_closure_with_cas_and_limits(
-        &cas,
-        [request.subject_hash.clone()],
-        request.limits,
-    )
-    .context("failed to collect admission closure")?;
-
-    if !closure.is_complete() {
-        anyhow::bail!(
-            "admission closure incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
-            closure.missing_objects.len(),
-            closure.missing_blobs.len(),
-            closure.malformed_objects.len(),
-            closure.unsupported_objects.len()
-        );
-    }
-    verify_closure_content_hashes(&cas, &closure)?;
-
     let evidence = json!({
         "closure": {
             "root_count": closure.roots.len(),
@@ -137,6 +140,7 @@ pub fn admit_root(
             "max_objects": request.limits.max_objects,
             "max_blobs": request.limits.max_blobs,
             "max_object_bytes": request.limits.max_object_bytes,
+            "max_total_object_bytes": request.limits.max_total_object_bytes,
             "max_blob_bytes": request.limits.max_blob_bytes,
             "max_total_blob_bytes": request.limits.max_total_blob_bytes,
             "max_links_per_object": request.limits.max_links_per_object,
@@ -285,6 +289,26 @@ pub fn publish_admission_attestation(
         anyhow::bail!("admission attestation was not signed by the publishing node");
     }
 
+    // Revalidate the exact current closure before considering idempotent
+    // reuse. A retained head proves a prior admission policy decision; it
+    // cannot bypass the current node's narrower receive/admission limits.
+    let closure = collect_object_closure_with_cas_and_limits(
+        &cas,
+        [attestation.subject_hash.clone()],
+        limits,
+    )
+    .context("failed to collect typed admission closure")?;
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "typed admission closure incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
+            closure.missing_objects.len(),
+            closure.missing_blobs.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len()
+        );
+    }
+    verify_closure_content_hashes(&cas, &closure)?;
+
     if let Some(existing) = db.read_generic_head_ref(
         &format!("admissions/{}", attestation.policy),
         &attestation.subject_hash,
@@ -322,23 +346,6 @@ pub fn publish_admission_attestation(
             reused_existing: true,
         });
     }
-
-    let closure = collect_object_closure_with_cas_and_limits(
-        &cas,
-        [attestation.subject_hash.clone()],
-        limits,
-    )
-    .context("failed to collect typed admission closure")?;
-    if !closure.is_complete() {
-        anyhow::bail!(
-            "typed admission closure incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
-            closure.missing_objects.len(),
-            closure.missing_blobs.len(),
-            closure.malformed_objects.len(),
-            closure.unsupported_objects.len()
-        );
-    }
-    verify_closure_content_hashes(&cas, &closure)?;
 
     let attestation_value = attestation.to_value();
     let canonical = lillux::canonical_json(&attestation_value)
@@ -552,6 +559,12 @@ mod tests {
         .unwrap();
         assert!(second.reused_existing);
         assert_eq!(second.attestation_hash, result.attestation_hash);
+
+        let mut narrowed = AdmissionRequest::accepted(second.subject_hash, "test.policy.v1");
+        narrowed.limits.max_object_bytes = 1;
+        let error = admit_root(&db, &narrowed, &signer, &signer.verifying_key(), &guard)
+            .expect_err("prior head must not bypass current closure limits");
+        assert!(format!("{error:#}").contains("exceeds byte limit"));
     }
 
     #[test]
@@ -661,6 +674,18 @@ mod tests {
         .unwrap();
         assert!(retry.reused_existing);
         assert_eq!(retry.attestation_hash, first.attestation_hash);
+
+        let mut narrowed = ObjectClosureLimits::default();
+        narrowed.max_object_bytes = 1;
+        let limit_error = publish_admission_attestation(
+            &db,
+            &build("2026-08-27T00:00:01Z", json!({"operation_id":"op"})),
+            narrowed,
+            &signer,
+            &guard,
+        )
+        .expect_err("prior typed head must not bypass current closure limits");
+        assert!(format!("{limit_error:#}").contains("exceeds byte limit"));
 
         let conflict = publish_admission_attestation(
             &db,

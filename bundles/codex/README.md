@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:12e586e238bed42fdbd19224dd52e743b1a0b83d43f84548ba58357baaa91ce1:jRqI7MQuAoTnjO/eIzownqJ89/FnMCsyYFPGUnwvprBKOm64nqnRKLd8ejHHW3XgDjpJjpqzWq5/VbBV2XqbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T14:48:16Z:91770b389eb77b8da301fb29e41cc9243f713b8fa7c5df93f5f3a40f590782e8:HRcuZSS5rPZT8O58tTLhztrZQwbA6hqxmaf/mfei+S6z+TEHiaUXH8TRWQi7ogscAVPkd9e2tvsFmndvZ3luDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -100,7 +100,7 @@ incumbent grant for that source key is being reclassified or rebound, use
 transition:
 
 ```sh
-HOSTED_SCOPES='ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
+HOSTED_SCOPES='ryeos.runtime.dedicated_session.start,ryeos.runtime.dedicated_session.command,ryeos.runtime.dedicated_session.terminate,ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/command-observation,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
@@ -311,6 +311,20 @@ remote authorization cannot create or control the workflow. Classifying the
 source key as a plain `local_client` at the target is incorrect because it
 erases forwarding origin and is rejected by this activation contract.
 
+Placement preflight captures the exact target-signed `remote_operator` grant
+as `AdmittedOperatorAuthority`: principal class, source origin, signed grant
+digest, and sorted scopes. The target proves it covers the retained effective
+and parent-delegation capability ceilings, seals it into the target capsule and
+placement, and rechecks it before placement publication and private-state
+installation or recovery. A revoked or rewritten grant fences progress. If
+the source writer cut is already committed, recovery requires restoration of
+the exact signed grant bytes; merely re-authoring the same visible scopes
+creates a different authority. This restoration rule governs runnable
+recovery and every path that can open the worker or credential-private state.
+An exact target-signed terminal settlement is immutable historical testimony:
+its source-node-authenticated replay is independent of later grant changes and
+cannot launch a worker or reopen credential-private authority.
+
 The coordinate is printed before remote contact; retain it until the accepted
 response echoes the same value. The returned `result.thread_id` is the remote
 RyeOS root/session ID. Drive its projectless status, command, approval,
@@ -341,7 +355,18 @@ parameters and digest fences are declared by their signed service items.
 session freezes its candidate and can then be checkpointed; cancellation is a
 direct terminal disposition and cannot be checkpointed. `resume` consumes the
 exact frozen `manifest_ref` and creates a fresh placement under the stable
-chain root.
+chain root. For cross-site handoff, wait for the completed placement to become
+`frozen`, publish its checkpoint, then run `handoff-preflight` and finally
+`handoff` with that checkpoint manifest. Preflight is bound to the immutable
+post-checkpoint source head; running it while the placement is live cannot
+produce a usable handoff authorization.
+
+Target preparation also uses its credential-generation reservation to fence
+the exact configured-operator project HEAD through the source writer cut.
+Ordinary HEAD publication and compact GC are refused while this fence is
+active. Pre-cut abort releases both credential and project authorities;
+successful or recovered adoption releases the project fence only after the
+authoritative target branch exists.
 
 The remote operator grant must carry only the exact execution and service
 scopes for the Codex worker-execution item, its declared environment config,
@@ -360,6 +385,13 @@ Pushed batches, individual facts, bridge queues, and command/result ledgers are
 bounded. A session accepts at most 1,048,576 worker events across all worker
 epochs; SQLite keeps only one cumulative settled predecessor frontier and any
 ambiguous outbox body. Complete retained observations use the ordinary root
-thread-chain retention contract rather than a second Codex journal. RyeOS records live OpenAI inference using Codex-managed ChatGPT
+thread-chain retention contract rather than a second Codex journal. RyeOS
+records live OpenAI inference using Codex-managed ChatGPT
 authentication; reported plan type is an observation, not proof of a
 subscription tier.
+
+The session item authors a finite RyeOS `spend_usd` execution allowance so
+that the accounting ledger can conserve one exact allowance across placement
+handoff. The Codex worker runtime has no provider financial authority and does
+not report ChatGPT-subscription charges. This ceiling is placement authority,
+not observed usage, a billing limit, or evidence about subscription spend.

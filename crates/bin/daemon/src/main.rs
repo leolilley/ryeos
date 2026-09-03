@@ -260,7 +260,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     // Verify operator-owned node initialization before any local repairs
     // or runtime-state writes. `ryeos init` is authoritative for bundle
     // registrations and operator identity/trust artifacts.
-    bootstrap::verify_initialized(&config)?;
+    ryeos_node::require_initialized(&config.app_root)?;
 
     // Handle subcommands BEFORE acquiring the daemon state lock or
     // initializing tracing. Subcommands (e.g. `run-service`) manage
@@ -283,10 +283,19 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
     let state_lock_path = state_lock::default_lock_path(&config.app_root);
-    let state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
+    let state_lock = state_lock::StateLock::acquire_with_timeout(
+        &state_lock_path,
+        Duration::from_secs(5),
+    )
+    .context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
     *process_state_lock = Some(state_lock);
+
+    // Recheck the signed whole-init fence after acquiring the same lock as
+    // initialization. The pre-lock check provides early guidance; this check
+    // prevents a daemon from crossing an in-flight or failed bundle/policy cut.
+    bootstrap::verify_initialized(&config)?;
 
     // Initialize tracing with file sink only after init-state passes so direct
     // `ryeosd` startup on a fresh system cannot create runtime state.
@@ -423,6 +432,13 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     bundles = ?repaired_bundles,
                     "reconciled interrupted bundle transactions before registry loading"
                 );
+            }
+            // Reconciliation may complete a prepared per-bundle mutation.
+            // The whole-node completion fence must still describe the exact
+            // resulting bundle and policy generation before any registry is
+            // loaded or executable authority is constructed.
+            if !repaired_bundles.is_empty() {
+                bootstrap::verify_initialized(&config)?;
             }
 
             // ── Two-phase node-config bootstrap ──
@@ -2813,7 +2829,7 @@ async fn run_service_standalone(
     use ryeos_executor::executor::{ExecutionContext, ExecutionMode};
 
     // Verify initialization
-    bootstrap::verify_initialized(config)?;
+    ryeos_node::require_initialized(&config.app_root)?;
 
     // Acquire the state lock immediately after init verification, BEFORE
     // any expensive bootstrap work. Otherwise standalone mode would
@@ -2822,13 +2838,17 @@ async fn run_service_standalone(
     let _state_lock =
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
             .context("failed to acquire state lock — is the daemon running?")?;
+    bootstrap::verify_initialized(config)?;
 
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-    ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
+    let repaired_bundles = ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
         &config.app_root,
         identity.signing_key(),
     )
     .context("reconcile interrupted bundle transactions")?;
+    if !repaired_bundles.is_empty() {
+        bootstrap::verify_initialized(config)?;
+    }
 
     // Two-phase node-config bootstrap without daemon callback-socket authority:
     // standalone mode does not bind the configured UDS listener.

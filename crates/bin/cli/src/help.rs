@@ -336,6 +336,10 @@ fn build_top_level_help(
             "node reset authorization",
             "Reset authorized keys for a schema cutover",
         ),
+        crate::tty::Row::key_value(
+            "node reset policy-generation",
+            "Replace an obsolete node-policy generation",
+        ),
     ];
     document.sections.push(lifecycle);
     document.sections.push(
@@ -879,7 +883,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "init" => (
             "ryeos init",
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
-            "ryeos init [--non-interactive | --json] [--node-profile <NAME>] [OPTIONS]",
+            "ryeos init [--non-interactive | --json] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
         ),
         "setup" => (
             "ryeos setup",
@@ -915,6 +919,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos node reset external-content-bindings",
             "Retire predecessor external-content bindings",
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
+        "node reset policy-generation" => (
+            "ryeos node reset policy-generation",
+            "Replace an obsolete node-policy generation",
+            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
         ),
         "start" => (
             "ryeos start",

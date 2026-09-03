@@ -614,18 +614,15 @@ async fn ensure_remote_generation_local(
     let closure = node_client
         .objects_closure_get(
             std::slice::from_ref(&operation.expected_remote_head),
-            ObjectsClosureRequestOptions {
-                max_objects: Some(100_000),
-                max_blobs: Some(100_000),
-                max_object_bytes: Some(32 * 1024 * 1024),
-                max_total_object_bytes: Some(512 * 1024 * 1024),
-                max_blob_bytes: Some(512 * 1024 * 1024),
-                max_total_blob_bytes: Some(1024 * 1024 * 1024),
-                max_response_bytes: Some(1024 * 1024 * 1024),
-                max_links_per_object: Some(100_000),
-                allow_incomplete: false,
-                allow_untransported_large_objects: false,
-            },
+            crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
+                state,
+                ObjectsClosureRequestOptions {
+                    allow_incomplete: false,
+                    allow_untransported_large_objects: false,
+                    ..Default::default()
+                },
+            )
+            .map_err(AttemptFailure::permanent)?,
         )
         .await
         .map_err(AttemptFailure::retryable)?;
@@ -852,19 +849,19 @@ async fn publish_local_head(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire reconciliation write permit: {error}"))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    let publication = state.state_store.with_state_db(|db| {
-        let current = db.read_project_head(principal_key, &project_hash)?;
-        if current.as_deref() == Some(merge_hash) {
-            return Ok(());
-        }
-        if current.as_deref() != Some(operation.expected_local_head.as_str()) {
-            bail!(
-                "local project HEAD changed after remote reconciliation publication: expected {}, current is {:?}",
-                operation.expected_local_head,
-                current
-            );
-        }
-        db.advance_project_head_ref(
+    let current = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+    let publication = if current.as_deref() == Some(merge_hash) {
+        Ok(())
+    } else if current.as_deref() != Some(operation.expected_local_head.as_str()) {
+        Err(anyhow::anyhow!(
+            "local project HEAD changed after remote reconciliation publication: expected {}, current is {:?}",
+            operation.expected_local_head,
+            current
+        ))
+    } else {
+        state.state_store.advance_project_head_ref(
             principal_key,
             &project_hash,
             merge_hash,
@@ -872,7 +869,7 @@ async fn publish_local_head(
             &signer,
             &cas_guard,
         )
-    });
+    };
     if let Err(error) = publication {
         // A signed-ref replace may become visible before a parent-directory
         // durability error is returned. Resolve that ambiguity from the exact

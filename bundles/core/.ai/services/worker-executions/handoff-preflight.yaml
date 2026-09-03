@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T15:16:44Z:30e123984dc93ab06edc927c27440f0f732b648cc122718a6d96ffe3931b109b:aPBflZuRJcIYpxyKypsX9V4BU5Dmqvw/qCV/IT/IzGg3coGuBW4gT+FKLUWUbAZxFDdYgBisUwRzBZJRQRJvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:a441e09bbb8ba6641620edd0752c27f8847f462ff72714a3a7f51dcd9f079e37:6D4V6ez4v4NNej0UlN4fVJgd9Lvcblp10okYU0KUBli8P36CQJ14dAA0jklvxHDo/RT831uBPkFn9s4wJSmUCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.handoff-preflight
 required_caps: ["ryeos.execute.service.worker-executions/handoff-preflight"]
@@ -6,4 +6,4 @@ schema:
   chain_root_id: string
   remote: string
   target_credential_profile_id: string
-description: Obtain and durably retain a target-signed non-final preflight for one live portable worker execution.
+description: Obtain and durably retain a target-signed non-final preflight after the source worker is frozen, reaped, and checkpoint-published.

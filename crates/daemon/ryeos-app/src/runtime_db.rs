@@ -1190,6 +1190,10 @@ CREATE TABLE IF NOT EXISTS credential_profile_reservation (
     subject_digest TEXT NOT NULL,
     checkpoint_manifest_hash TEXT NOT NULL,
     upstream_session_id TEXT NOT NULL,
+    project_principal_key TEXT NOT NULL,
+    project_hash TEXT NOT NULL,
+    target_project_head_hash TEXT NOT NULL,
+    project_fence_state TEXT NOT NULL CHECK (project_fence_state IN ('active', 'released')),
     state TEXT NOT NULL CHECK (state IN ('reserved', 'consumed', 'released')),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
@@ -1200,6 +1204,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credential_profile_reservation_operation
 
 CREATE INDEX IF NOT EXISTS idx_credential_profile_reservation_profile_state
     ON credential_profile_reservation(profile_id, state);
+
+CREATE INDEX IF NOT EXISTS idx_credential_profile_reservation_project_fence
+    ON credential_profile_reservation(project_principal_key, project_hash, project_fence_state);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -1265,7 +1272,16 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 19 admits launch-metadata epoch 21 and sealed-request schema 11, which
 // retain optional ingress-authenticated handler authority without reconstructing
 // it from a principal string during callbacks or recovery.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 19;
+// Epoch 20 admits sealed-request schema 12, thread-snapshot schema 11,
+// admitted-launch-capsule schema 17, and launch-metadata epoch 22. Their
+// captured node-history policy provenance is the flat exact policy-item
+// identity; predecessor tagged signed_config/missing_config wrappers are not
+// decoded as current authority.
+// Epoch 21 admits sealed-request schema 13, admitted-launch-capsule schema 18,
+// and launch-metadata epoch 23. It also makes each handoff credential
+// reservation the durable owner of the exact target project-HEAD fence until
+// authoritative adoption. Predecessor reservations cannot prove that fence.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 21;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2725,6 +2741,30 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "project_principal_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "target_project_head_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_fence_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "state",
                         col_type: "TEXT",
                         pk: false,
@@ -2876,6 +2916,16 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_credential_profile_reservation_profile_state",
                 table: "credential_profile_reservation",
                 columns: &["profile_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_reservation_project_fence",
+                table: "credential_profile_reservation",
+                columns: &[
+                    "project_principal_key",
+                    "project_hash",
+                    "project_fence_state",
+                ],
                 unique: false,
             },
         ],
@@ -3451,6 +3501,9 @@ pub struct NewCredentialProfileReservation<'a> {
     pub subject_digest: &'a str,
     pub checkpoint_manifest_hash: &'a str,
     pub upstream_session_id: &'a str,
+    pub project_principal_key: &'a str,
+    pub project_hash: &'a str,
+    pub target_project_head_hash: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3466,6 +3519,10 @@ pub struct CredentialProfileReservationRecord {
     pub subject_digest: String,
     pub checkpoint_manifest_hash: String,
     pub upstream_session_id: String,
+    pub project_principal_key: String,
+    pub project_hash: String,
+    pub target_project_head_hash: String,
+    pub project_fence_state: String,
     pub state: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -4064,16 +4121,30 @@ fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result
     if let Some(authority) = &intent.child_project_authority {
         authority.validate()?;
     }
-    let sealed = intent.launch_metadata.is_some();
-    let sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
+    if intent.launch_metadata.is_some() && intent.incompatible_launch_metadata.is_some() {
+        bail!(
+            "detached operation `{}` has both current and incompatible launch authority",
+            intent.operation_id
+        );
+    }
+    let current_sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
         && intent.launch_metadata.is_some()
+        && intent.incompatible_launch_metadata.is_none()
+        && intent.initial_events.is_some()
+        && intent.child_project_authority.is_some();
+    let incompatible_sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
+        && intent.launch_metadata.is_none()
+        && intent.incompatible_launch_metadata.is_some()
         && intent.initial_events.is_some()
         && intent.child_project_authority.is_some();
     let unsealed_fields_empty = intent.admitted_launch_capsule_hash.is_none()
         && intent.launch_metadata.is_none()
+        && intent.incompatible_launch_metadata.is_none()
         && intent.initial_events.is_none();
     if matches!(intent.mode, RuntimeActionMode::Detached)
-        && ((sealed && !sealed_fields_complete) || (!sealed && !unsealed_fields_empty))
+        && !current_sealed_fields_complete
+        && !incompatible_sealed_fields_complete
+        && !unsealed_fields_empty
     {
         bail!(
             "detached operation `{}` has an incomplete sealed authority",
@@ -4356,6 +4427,7 @@ impl RuntimeDb {
                         WHERE reservation_id=?5 AND successor_thread_id=?7
                           AND profile_id=?1 AND owner_principal=?2
                           AND credential_generation=?3 AND state='reserved'
+                          AND project_fence_state='released'
                           AND upstream_session_id=?8)",
                 params![
                     session.credential_profile_id,
@@ -4423,6 +4495,7 @@ impl RuntimeDb {
                 "UPDATE credential_profile_reservation
                     SET state='consumed', updated_at_ms=?2
                   WHERE reservation_id=?1 AND state='reserved'
+                    AND project_fence_state='released'
                     AND successor_thread_id=?3 AND upstream_session_id=?4",
                 params![
                     reservation_id,
@@ -5125,6 +5198,10 @@ impl RuntimeDb {
                 "credential reservation upstream session",
                 reservation.upstream_session_id,
             ),
+            (
+                "credential reservation project principal",
+                reservation.project_principal_key,
+            ),
         ] {
             validate_bounded_runtime_text(label, value, 256)?;
         }
@@ -5137,6 +5214,11 @@ impl RuntimeDb {
             (
                 "credential reservation checkpoint",
                 reservation.checkpoint_manifest_hash,
+            ),
+            ("credential reservation project", reservation.project_hash),
+            (
+                "credential reservation project head",
+                reservation.target_project_head_hash,
             ),
         ] {
             if !lillux::valid_hash(digest) {
@@ -5167,6 +5249,10 @@ impl RuntimeDb {
                 subject_digest: reservation.subject_digest.to_owned(),
                 checkpoint_manifest_hash: reservation.checkpoint_manifest_hash.to_owned(),
                 upstream_session_id: reservation.upstream_session_id.to_owned(),
+                project_principal_key: reservation.project_principal_key.to_owned(),
+                project_hash: reservation.project_hash.to_owned(),
+                target_project_head_hash: reservation.target_project_head_hash.to_owned(),
+                project_fence_state: existing.project_fence_state.clone(),
                 state: existing.state.clone(),
                 created_at_ms: existing.created_at_ms,
                 updated_at_ms: existing.updated_at_ms,
@@ -5196,6 +5282,17 @@ impl RuntimeDb {
                 bail!("released credential reservation changed during replacement");
             }
         }
+        let conflicting_project_fence: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM credential_profile_reservation
+                 WHERE project_principal_key=?1 AND project_hash=?2
+                   AND project_fence_state='active')",
+            params![reservation.project_principal_key, reservation.project_hash],
+            |row| row.get(0),
+        )?;
+        if conflicting_project_fence {
+            bail!("target project HEAD is already fenced by another handoff");
+        }
         let acquired = tx.execute(
             "UPDATE credential_profile SET lock_owner=?4, updated_at_ms=?5
               WHERE profile_id=?1 AND owner_principal=?2
@@ -5217,8 +5314,10 @@ impl RuntimeDb {
                 reservation_id, operation_id, successor_thread_id, profile_id,
                 owner_principal, credential_generation, subject_contract_digest,
                 subject_digest, checkpoint_manifest_hash, upstream_session_id,
-                state, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'reserved', ?11, ?11)",
+                project_principal_key, project_hash, target_project_head_hash,
+                project_fence_state, state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                       'active', 'reserved', ?14, ?14)",
             params![
                 reservation.reservation_id,
                 reservation.operation_id,
@@ -5230,6 +5329,9 @@ impl RuntimeDb {
                 reservation.subject_digest,
                 reservation.checkpoint_manifest_hash,
                 reservation.upstream_session_id,
+                reservation.project_principal_key,
+                reservation.project_hash,
+                reservation.target_project_head_hash,
                 now,
             ],
         )?;
@@ -5298,11 +5400,66 @@ impl RuntimeDb {
             bail!("credential reservation release lost its profile-generation CAS");
         }
         tx.execute(
-            "UPDATE credential_profile_reservation SET state='released', updated_at_ms=?2
+            "UPDATE credential_profile_reservation
+                SET state='released', project_fence_state='released', updated_at_ms=?2
               WHERE reservation_id=?1 AND state='reserved'",
             params![reservation_id, now],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn release_project_head_fence(&self, reservation_id: &str) -> Result<()> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile_reservation
+                SET project_fence_state='released', updated_at_ms=?2
+              WHERE reservation_id=?1 AND project_fence_state='active'",
+            params![reservation_id, lillux::time::timestamp_millis() as i64],
+        )?;
+        if changed == 0 {
+            let retained = self
+                .credential_profile_reservation(reservation_id)?
+                .ok_or_else(|| anyhow!("project HEAD fence reservation does not exist"))?;
+            if retained.project_fence_state != "released" {
+                bail!("project HEAD fence has an invalid durable state");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn require_project_head_mutation_unfenced(
+        &self,
+        principal_key: &str,
+        project_hash: &str,
+    ) -> Result<()> {
+        let reservation = self
+            .conn
+            .query_row(
+                "SELECT reservation_id FROM credential_profile_reservation
+                  WHERE project_principal_key=?1 AND project_hash=?2
+                    AND project_fence_state='active'
+                  ORDER BY created_at_ms, reservation_id LIMIT 1",
+                params![principal_key, project_hash],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(reservation_id) = reservation {
+            bail!("project HEAD is fenced by worker handoff reservation {reservation_id}");
+        }
+        Ok(())
+    }
+
+    pub fn require_no_active_project_head_fences(&self) -> Result<()> {
+        let active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM credential_profile_reservation
+              WHERE project_fence_state='active'",
+            [],
+            |row| row.get(0),
+        )?;
+        if active != 0 {
+            bail!("project compaction is fenced by {active} active worker handoff(s)");
+        }
         Ok(())
     }
 
@@ -5320,7 +5477,8 @@ impl RuntimeDb {
             "SELECT reservation_id, operation_id, successor_thread_id, profile_id,
                     owner_principal, credential_generation, subject_contract_digest,
                     subject_digest, checkpoint_manifest_hash, upstream_session_id,
-                    state, created_at_ms, updated_at_ms
+                    project_principal_key, project_hash, target_project_head_hash,
+                    project_fence_state, state, created_at_ms, updated_at_ms
                FROM credential_profile_reservation WHERE {column}=?1"
         );
         conn.query_row(&sql, [value], |row| {
@@ -5336,8 +5494,12 @@ impl RuntimeDb {
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
                 row.get::<_, String>(10)?,
-                row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, i64>(15)?,
+                row.get::<_, i64>(16)?,
             ))
         })
         .optional()?
@@ -5354,9 +5516,13 @@ impl RuntimeDb {
                 subject_digest: row.7,
                 checkpoint_manifest_hash: row.8,
                 upstream_session_id: row.9,
-                state: row.10,
-                created_at_ms: row.11,
-                updated_at_ms: row.12,
+                project_principal_key: row.10,
+                project_hash: row.11,
+                target_project_head_hash: row.12,
+                project_fence_state: row.13,
+                state: row.14,
+                created_at_ms: row.15,
+                updated_at_ms: row.16,
             })
         })
         .transpose()
@@ -5859,6 +6025,35 @@ impl RuntimeDb {
         Ok(matches!(existing.state.as_str(), "completed" | "failed").then_some(existing))
     }
 
+    /// Read one exact placement-local command coordinate. The operational
+    /// row is only a lookup projection; callers must verify it against the
+    /// authoritative placement-thread facts before trusting its contents.
+    pub fn dedicated_session_command(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+    ) -> Result<Option<DedicatedSessionCommandRecord>> {
+        validate_bounded_runtime_text("command placement thread id", placement_thread_id, 256)?;
+        if command_sequence == 0 {
+            bail!("command sequence must be positive");
+        }
+        let idempotency_key = self
+            .conn
+            .query_row(
+                "SELECT idempotency_key FROM dedicated_session_command
+                  WHERE placement_thread_id=?1 AND command_sequence=?2",
+                params![placement_thread_id, i64::try_from(command_sequence)?],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        idempotency_key
+            .map(|idempotency_key| {
+                read_dedicated_command_by_key(&self.conn, placement_thread_id, &idempotency_key)?
+                    .ok_or_else(|| anyhow!("selected dedicated command disappeared"))
+            })
+            .transpose()
+    }
+
     /// Prove every workload-contact outbox owned by one placement is settled
     /// and return a canonical digest of the complete retained frontier. The
     /// caller separately proves process death and provider-attempt settlement.
@@ -6183,6 +6378,63 @@ impl RuntimeDb {
     /// to the authoritative root thread event chain. The exact canonical batch
     /// is retained so startup, after quiescing the old worker epoch, can inspect
     /// root testimony and safely append or rebuild the missing projection.
+    pub fn exact_dedicated_observation_batch_exists(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        through_sequence: u64,
+        previous_digest: Option<&str>,
+        batch_digest: &str,
+        canonical_batch: &serde_json::Value,
+    ) -> Result<bool> {
+        let canonical_batch_json = serde_json::to_string(canonical_batch)?;
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT through_sequence, previous_digest, batch_digest,
+                        canonical_batch_json, state
+                   FROM dedicated_session_observation_batch
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
+                params![
+                    placement_thread_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    i64::try_from(first_sequence)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+        if existing.0 != i64::try_from(through_sequence)?
+            || existing.1.as_deref() != previous_digest
+            || existing.2 != batch_digest
+        {
+            bail!("observation batch sequence identity was reused with different content");
+        }
+        match existing.4.as_str() {
+            "settled" if existing.3.is_none() => Ok(true),
+            "append_contacting" | "append_unknown"
+                if existing.3.as_deref() == Some(canonical_batch_json.as_str()) =>
+            {
+                Ok(true)
+            }
+            "append_contacting" | "append_unknown" => {
+                bail!("observation batch sequence identity was reused with different content")
+            }
+            _ => bail!("observation batch has an invalid durable state"),
+        }
+    }
+
     pub fn reserve_dedicated_observation_batch(
         &self,
         placement_thread_id: &str,
@@ -6745,20 +6997,60 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Revalidate a completion fence against the retained owner-route frontier
+    /// after the session has already terminalized.
+    pub fn require_dedicated_session_route_frontier(
+        &self,
+        placement_thread_id: &str,
+        expected_route_command_sequence: u64,
+    ) -> Result<()> {
+        if expected_route_command_sequence == 0 {
+            bail!("expected completion route-command sequence must be positive");
+        }
+        let found: Option<i64> = self.conn.query_row(
+            "SELECT MAX(command_sequence) FROM dedicated_session_command
+              WHERE placement_thread_id=?1 AND command_kind='route'",
+            params![placement_thread_id],
+            |row| row.get(0),
+        )?;
+        if found
+            .map(u64::try_from)
+            .transpose()
+            .context("retained route-command frontier overflow")?
+            != Some(expected_route_command_sequence)
+        {
+            bail!("completed termination command frontier has advanced");
+        }
+        Ok(())
+    }
+
     /// Atomically closes command and approval admission before retirement.
     /// A retained draining reservation is safe to retry after a crash.
     pub fn reserve_dedicated_session_completion(
         &self,
         placement_thread_id: &str,
         worker_boot_epoch: u64,
+        expected_route_command_sequence: Option<u64>,
     ) -> Result<()> {
         let epoch = i64::try_from(worker_boot_epoch)?;
+        let expected_route_command_sequence = expected_route_command_sequence
+            .map(|sequence| {
+                if sequence == 0 {
+                    bail!("expected completion route-command sequence must be positive");
+                }
+                i64::try_from(sequence)
+                    .context("expected completion route-command sequence overflow")
+            })
+            .transpose()?;
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
-            "UPDATE dedicated_session SET state='draining', updated_at_ms=?3
+            "UPDATE dedicated_session SET state='draining', updated_at_ms=?4
               WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='idle'
                 AND current_turn_id IS NULL
+                AND (?3 IS NULL OR ?3=(SELECT MAX(command_sequence)
+                    FROM dedicated_session_command
+                    WHERE placement_thread_id=?1 AND command_kind='route'))
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session_command
                     WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                       AND state IN ('committed','dispatched','outcome_unknown'))
@@ -6767,16 +7059,30 @@ impl RuntimeDb {
                       AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown'))
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session_observation_batch
                     WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state!='settled')",
-            params![placement_thread_id, epoch, now],
+            params![placement_thread_id, epoch, expected_route_command_sequence, now],
         )?;
         if changed == 0 {
             let retry: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='draining')",
-                params![placement_thread_id, epoch],
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='draining'
+                    AND (?3 IS NULL OR ?3=(SELECT MAX(command_sequence)
+                        FROM dedicated_session_command
+                        WHERE placement_thread_id=?1 AND command_kind='route')))",
+                params![placement_thread_id, epoch, expected_route_command_sequence],
                 |row| row.get(0),
             )?;
             if !retry {
+                if let Some(expected) = expected_route_command_sequence {
+                    let found: Option<i64> = tx.query_row(
+                        "SELECT MAX(command_sequence) FROM dedicated_session_command
+                          WHERE placement_thread_id=?1 AND command_kind='route'",
+                        params![placement_thread_id],
+                        |row| row.get(0),
+                    )?;
+                    if found != Some(expected) {
+                        bail!("completed termination command frontier has advanced");
+                    }
+                }
                 bail!("dedicated completion requires an idle, quiescent worker");
             }
         }
@@ -13212,6 +13518,9 @@ mod tests {
             subject_digest: &"2".repeat(64),
             checkpoint_manifest_hash: &"3".repeat(64),
             upstream_session_id: "upstream-session",
+            project_principal_key: &"5".repeat(64),
+            project_hash: &"6".repeat(64),
+            target_project_head_hash: &"7".repeat(64),
         };
         let reserved = db
             .reserve_credential_profile_generation(reservation.clone())
@@ -13229,6 +13538,9 @@ mod tests {
                 .as_deref(),
             Some("reservation-handoff")
         );
+
+        db.release_project_head_fence("reservation-handoff")
+            .unwrap();
 
         db.admit_dedicated_session_from_reservation(
             NewDedicatedSession {
@@ -13297,6 +13609,9 @@ mod tests {
             subject_digest: &"2".repeat(64),
             checkpoint_manifest_hash: &"3".repeat(64),
             upstream_session_id: "upstream-session",
+            project_principal_key: &"5".repeat(64),
+            project_hash: &"6".repeat(64),
+            target_project_head_hash: &"7".repeat(64),
         };
         db.reserve_credential_profile_generation(first).unwrap();
         db.release_credential_profile_reservation("reservation-first")
@@ -13313,6 +13628,9 @@ mod tests {
             subject_digest: &"2".repeat(64),
             checkpoint_manifest_hash: &"3".repeat(64),
             upstream_session_id: "upstream-session",
+            project_principal_key: &"5".repeat(64),
+            project_hash: &"6".repeat(64),
+            target_project_head_hash: &"7".repeat(64),
         };
         let reserved = db.reserve_credential_profile_generation(second).unwrap();
         assert_eq!(reserved.reservation_id, "reservation-second");
@@ -13675,6 +13993,66 @@ mod tests {
         let recovered = db.dedicated_session("T-recover").unwrap().unwrap();
         assert_eq!(recovered.state, "idle");
         assert_eq!(recovered.send_boundary, "settled");
+        let route_payload = serde_json::json!({"route_id":"turn.start","payload":{}});
+        let completed_route = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "route-one",
+                worker_boot_epoch: 2,
+                command_kind: "route",
+                request_digest: &"1".repeat(64),
+                payload: &route_payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", completed_route.command_sequence, 2)
+            .unwrap();
+        db.settle_dedicated_command(
+            "T-recover",
+            completed_route.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let later_route = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "route-two",
+                worker_boot_epoch: 2,
+                command_kind: "route",
+                request_digest: &"2".repeat(64),
+                payload: &route_payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", later_route.command_sequence, 2)
+            .unwrap();
+        db.settle_dedicated_command(
+            "T-recover",
+            later_route.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        assert!(
+            db.require_dedicated_session_route_frontier(
+                "T-recover",
+                completed_route.command_sequence,
+            )
+            .is_err(),
+            "a delayed completion fence must not match an advanced terminal frontier"
+        );
+        db.require_dedicated_session_route_frontier("T-recover", later_route.command_sequence)
+            .unwrap();
+        assert!(
+            db.reserve_dedicated_session_completion(
+                "T-recover",
+                2,
+                Some(completed_route.command_sequence),
+            )
+            .is_err(),
+            "completed termination must reject a command frontier that moved"
+        );
 
         let terminal_recovered = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
@@ -15058,7 +15436,7 @@ mod tests {
         .unwrap();
         db.complete_worker_binding("worker-candidate", "T-candidate", 1)
             .unwrap();
-        db.reserve_dedicated_session_completion("T-candidate", 1)
+        db.reserve_dedicated_session_completion("T-candidate", 1, None)
             .unwrap();
         db.settle_worker_process("worker-candidate", "T-candidate", 1, "reaped", "completed")
             .unwrap();
@@ -17210,6 +17588,39 @@ mod tests {
             Some(u64::from(
                 ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1
             ))
+        );
+    }
+
+    #[test]
+    fn predecessor_launch_epoch_is_classified_before_nested_policy_decode() {
+        let raw = lillux::canonical_json(&serde_json::json!({
+            "schema_version": LAUNCH_METADATA_SCHEMA_VERSION - 1,
+            "admitted_launch_capsule_schema":
+                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            "sealed_root_request": {
+                "captured_history_policy": {
+                    "resolved_from": {
+                        "item_authored": {
+                            "node_policy": {
+                                "signed_config": {
+                                    "path": ".ai/node/policies/thread_history.yaml",
+                                    "space": "node"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let StoredLaunchMetadata::Incompatible(incompatible) =
+            decode_stored_launch_metadata(&raw).unwrap()
+        else {
+            panic!("predecessor nested policy shape must remain opaque")
+        };
+        assert_eq!(
+            incompatible.schema_version,
+            u64::from(LAUNCH_METADATA_SCHEMA_VERSION - 1)
         );
     }
 

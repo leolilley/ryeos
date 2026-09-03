@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import re
 import stat
@@ -24,6 +25,11 @@ ENVIRONMENT_ACTIVATION_PATH = (
 ENVIRONMENT_PATH = BUNDLE / ".ai/config/codex/environments/default.yaml"
 HOSTED_WORKFLOW_PROFILE_PATH = (
     BUNDLE.parent / ".ai/node/init/profiles/hosted-workflow.yaml"
+)
+README_PATH = BUNDLE / "README.md"
+WORKER_EXECUTION_PATHS = (
+    BUNDLE / ".ai/worker-executions/codex/login.yaml",
+    BUNDLE / ".ai/worker-executions/codex/session.yaml",
 )
 
 
@@ -181,6 +187,56 @@ class CodexContractTests(unittest.TestCase):
             sessions["limits"]["max_real_uid_process_limit"],
             worker["session_resources"]["real_uid_process_limit"],
         )
+
+    def test_runbook_operator_grant_covers_workers_but_excludes_peer_services(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        match = re.search(r"(?m)^HOSTED_SCOPES='([^']+)'$", readme)
+        self.assertIsNotNone(match, "runbook HOSTED_SCOPES declaration is absent")
+        hosted_scopes = set(match.group(1).split(","))
+        declared_runtime_scopes = set()
+        for path in WORKER_EXECUTION_PATHS:
+            body = "\n".join(path.read_text(encoding="utf-8").splitlines()[1:])
+            execution = yaml.safe_load(body)
+            declared_runtime_scopes.update(
+                execution["requires"]["capabilities"]["declared"]
+            )
+
+        self.assertEqual(
+            declared_runtime_scopes,
+            {
+                "ryeos.runtime.dedicated_session.start",
+                "ryeos.runtime.dedicated_session.command",
+                "ryeos.runtime.dedicated_session.terminate",
+            },
+        )
+        self.assertLessEqual(declared_runtime_scopes, hosted_scopes)
+        for internal_scope in (
+            "ryeos.execute.service.objects/get",
+            "ryeos.execute.service.objects/closure/get",
+            "ryeos.execute.service.worker-placements/preflight",
+            "ryeos.execute.service.worker-placements/prepare",
+            "ryeos.execute.service.worker-placements/adopt",
+            "ryeos.execute.service.worker-placements/abort",
+            "ryeos.execute.service.federation/follow-terminal-deliver",
+        ):
+            self.assertNotIn(internal_scope, hosted_scopes)
+
+    def test_portable_session_has_a_finite_conserved_execution_allowance(self) -> None:
+        session_path = BUNDLE / ".ai/worker-executions/codex/session.yaml"
+        body = "\n".join(session_path.read_text(encoding="utf-8").splitlines()[1:])
+        session = yaml.safe_load(body)
+
+        # worker-execution-runtime has no direct provider financial authority:
+        # this is the finite RyeOS execution allowance that can be transferred
+        # exactly across placements, not evidence of ChatGPT subscription spend.
+        allowance = session["limits"]["spend_usd"]
+        self.assertIsInstance(allowance, str)
+        self.assertRegex(allowance, r"^(0|[1-9][0-9]*)(\.[0-9]+)?$")
+        try:
+            parsed = Decimal(allowance)
+        except InvalidOperation as error:
+            self.fail(f"session allowance is not a canonical decimal: {error}")
+        self.assertGreater(parsed, Decimal(0))
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
         activation = ACTIVATION_PATH.read_text(encoding="utf-8")

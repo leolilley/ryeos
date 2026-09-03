@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::hosted_operation::{
@@ -99,6 +99,27 @@ fn projection_signal(placement_thread_id: &str) -> Arc<tokio::sync::Notify> {
     let signal = Arc::new(tokio::sync::Notify::new());
     signals.insert(placement_thread_id.to_owned(), Arc::downgrade(&signal));
     signal
+}
+
+fn transition_gates() -> &'static Mutex<HashMap<String, Weak<Mutex<()>>>> {
+    static GATES: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    GATES.get_or_init(Default::default)
+}
+
+/// Serialize validation, authoritative append, and projection of worker
+/// lifecycle observations for one placement. Full-duplex worker I/O remains
+/// concurrent; only the short state-acceptance commit is serialized.
+fn transition_gate(placement_thread_id: &str) -> Arc<Mutex<()>> {
+    let mut gates = transition_gates()
+        .lock()
+        .expect("dedicated transition gate map poisoned");
+    gates.retain(|_, gate| gate.strong_count() != 0);
+    if let Some(gate) = gates.get(placement_thread_id).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(placement_thread_id.to_owned(), Arc::downgrade(&gate));
+    gate
 }
 
 pub fn notify_projection_change(placement_thread_id: &str) {
@@ -232,6 +253,10 @@ pub fn ingest_observation_batch(
         &initial.credential_profile_id,
         placement_thread_id,
     );
+    let transition_gate = transition_gate(placement_thread_id);
+    let _transition_guard = transition_gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let session = current_session(state, placement_thread_id)?;
     if session.credential_profile_id != initial.credential_profile_id {
         bail!("dedicated session credential profile changed across contact admission");
@@ -255,6 +280,18 @@ pub fn ingest_observation_batch(
         "events": batch.events,
         "session_observations": batch.session_observations,
     });
+    let exact_replay = state.state_store.exact_dedicated_observation_batch_exists(
+        placement_thread_id,
+        worker_boot_epoch,
+        batch.first_sequence,
+        through_sequence,
+        batch.previous_digest.as_deref(),
+        &batch.batch_digest,
+        &result,
+    )?;
+    if !exact_replay {
+        validate_new_state_transition_sequence_for_session(&session, worker_boot_epoch, &result)?;
+    }
     let reservation = state.state_store.reserve_dedicated_observation_batch(
         placement_thread_id,
         worker_boot_epoch,
@@ -337,6 +374,24 @@ pub fn ingest_observation_batch(
     }))
 }
 
+fn hosted_observation_batch_operation_id(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    batch_digest: &str,
+    first_sequence: u64,
+    through_sequence: u64,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_observation_batch_operation.v1",
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "worker_boot_epoch":worker_boot_epoch,
+        "batch_digest":batch_digest,
+        "first_sequence":first_sequence,
+        "through_sequence":through_sequence,
+    }))
+}
+
 fn append_authoritative_observation_batch(
     state: &AppState,
     session: &DedicatedSessionRecord,
@@ -347,16 +402,20 @@ fn append_authoritative_observation_batch(
     result: &Value,
 ) -> Result<()> {
     let observation_limit = pushed_observation_limit(result)?;
-    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
-        "schema":"ryeos.hosted_observation_batch_operation.v1",
-        "chain_root_id":session.chain_root_id,
-        "placement_thread_id":session.placement_thread_id,
-        "worker_boot_epoch":worker_boot_epoch,
-        "batch_digest":batch_digest,
-        "first_sequence":first_sequence,
-        "through_sequence":through_sequence,
-    }))?;
-    let observation_events = result
+    validate_new_state_transition_sequence(
+        state,
+        &session.placement_thread_id,
+        worker_boot_epoch,
+        result,
+    )?;
+    let operation_id = hosted_observation_batch_operation_id(
+        session,
+        worker_boot_epoch,
+        batch_digest,
+        first_sequence,
+        through_sequence,
+    )?;
+    let mut observation_events = result
         .get("events")
         .and_then(Value::as_array)
         .expect("validated observation events")
@@ -381,6 +440,21 @@ fn append_authoritative_observation_batch(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let transition_events = state_transition_fact_events(
+        session,
+        worker_boot_epoch,
+        result,
+        json!({
+            "kind":"pushed_observation_batch",
+            "batch_operation_id":operation_id,
+            "batch_digest":batch_digest,
+            "first_sequence":first_sequence,
+            "through_sequence":through_sequence,
+        }),
+        None,
+    )?;
+    require_new_state_transition_facts(state, session, &transition_events)?;
+    observation_events.extend(transition_events);
     crate::authoritative_root_fact::append_once_with_followups(
         state,
         &session.placement_thread_id,
@@ -427,15 +501,13 @@ fn find_authoritative_batch(
     first_sequence: u64,
     through_sequence: u64,
 ) -> Result<Option<Value>> {
-    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
-        "schema":"ryeos.hosted_observation_batch_operation.v1",
-        "chain_root_id":session.chain_root_id,
-        "placement_thread_id":session.placement_thread_id,
-        "worker_boot_epoch":worker_boot_epoch,
-        "batch_digest":batch_digest,
-        "first_sequence":first_sequence,
-        "through_sequence":through_sequence,
-    }))?;
+    let operation_id = hosted_observation_batch_operation_id(
+        session,
+        worker_boot_epoch,
+        batch_digest,
+        first_sequence,
+        through_sequence,
+    )?;
     let fact = crate::authoritative_root_fact::lookup(
         state,
         &session.placement_thread_id,
@@ -473,6 +545,20 @@ fn find_authoritative_batch(
                 {
                     bail!("authoritative observation batch body is malformed");
                 }
+                validate_authoritative_state_transition_facts(
+                    state,
+                    session,
+                    worker_boot_epoch,
+                    &batch,
+                    json!({
+                        "kind":"pushed_observation_batch",
+                        "batch_operation_id":operation_id,
+                        "batch_digest":batch_digest,
+                        "first_sequence":first_sequence,
+                        "through_sequence":through_sequence,
+                    }),
+                    None,
+                )?;
                 return Ok(batch);
             }
             bail!("authoritative observation batch identity is contradictory")
@@ -582,6 +668,411 @@ enum WorkerObservation {
     ApprovalExpired {
         approval_id: String,
     },
+}
+
+#[derive(Clone, Debug)]
+struct HostedTurnStartAuthority {
+    operation_id: String,
+    chain_seq: i64,
+    command_sequence: Option<u64>,
+    request_digest: Option<String>,
+}
+
+fn validate_hosted_turn_id(label: &str, turn_id: &str) -> Result<()> {
+    if turn_id.is_empty() || turn_id.len() > 256 || turn_id.chars().any(char::is_control) {
+        bail!("{label} is not canonical and bounded");
+    }
+    Ok(())
+}
+
+fn hosted_turn_start_operation_id(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    turn_id: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_turn_start.v1",
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "worker_boot_epoch":worker_boot_epoch,
+        "turn_id":turn_id,
+    }))
+}
+
+fn hosted_turn_completion_operation_id(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    turn_id: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_turn_completion.v1",
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "worker_boot_epoch":worker_boot_epoch,
+        "turn_id":turn_id,
+    }))
+}
+
+fn validate_hosted_transition_source(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    source: &Value,
+) -> Result<Option<(u64, String)>> {
+    let object = source
+        .as_object()
+        .ok_or_else(|| anyhow!("hosted turn fact source is not an object"))?;
+    match object.get("kind").and_then(Value::as_str) {
+        Some("command_response") if object.len() == 4 => {
+            let command_sequence = object
+                .get("command_sequence")
+                .and_then(Value::as_u64)
+                .filter(|sequence| *sequence != 0)
+                .ok_or_else(|| anyhow!("hosted turn command source has no sequence"))?;
+            let request_digest = object
+                .get("request_digest")
+                .and_then(Value::as_str)
+                .filter(|digest| lillux::valid_hash(digest))
+                .ok_or_else(|| anyhow!("hosted turn command source has no request digest"))?;
+            let expected = command_fact_operation_id(
+                session,
+                "hosted_worker_command_observation_batch",
+                command_sequence,
+                request_digest,
+            )?;
+            if object.get("batch_operation_id").and_then(Value::as_str) != Some(expected.as_str()) {
+                bail!("hosted turn command source has a contradictory batch identity");
+            }
+            Ok(Some((command_sequence, request_digest.to_owned())))
+        }
+        Some("pushed_observation_batch") if object.len() == 5 => {
+            let batch_digest = object
+                .get("batch_digest")
+                .and_then(Value::as_str)
+                .filter(|digest| lillux::valid_hash(digest))
+                .ok_or_else(|| anyhow!("hosted turn pushed source has no batch digest"))?;
+            let first_sequence = object
+                .get("first_sequence")
+                .and_then(Value::as_u64)
+                .filter(|sequence| *sequence != 0)
+                .ok_or_else(|| anyhow!("hosted turn pushed source has no first sequence"))?;
+            let through_sequence = object
+                .get("through_sequence")
+                .and_then(Value::as_u64)
+                .filter(|sequence| *sequence >= first_sequence)
+                .ok_or_else(|| anyhow!("hosted turn pushed source has no through sequence"))?;
+            let expected = hosted_observation_batch_operation_id(
+                session,
+                worker_boot_epoch,
+                batch_digest,
+                first_sequence,
+                through_sequence,
+            )?;
+            if object.get("batch_operation_id").and_then(Value::as_str) != Some(expected.as_str()) {
+                bail!("hosted turn pushed source has a contradictory batch identity");
+            }
+            Ok(None)
+        }
+        _ => bail!("hosted turn fact source is not canonical"),
+    }
+}
+
+fn hosted_turn_start_authority(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    turn_id: &str,
+) -> Result<Option<HostedTurnStartAuthority>> {
+    let operation_id = hosted_turn_start_operation_id(session, worker_boot_epoch, turn_id)?;
+    let fact = crate::authoritative_root_fact::lookup(
+        state,
+        &session.placement_thread_id,
+        "hosted_session.turn_started",
+        &operation_id,
+    )?;
+    if fact.count > 1 {
+        bail!("hosted turn start identity is duplicated in the root chain");
+    }
+    let Some(payload) = fact.payload else {
+        return Ok(None);
+    };
+    let command_sequence = payload.get("command_sequence").and_then(Value::as_u64);
+    let request_digest = payload
+        .get("request_digest")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let source_coordinate = validate_hosted_transition_source(
+        session,
+        worker_boot_epoch,
+        payload.get("source").unwrap_or(&Value::Null),
+    )?;
+    let command_coordinate_is_exact = match (
+        command_sequence,
+        request_digest.as_deref(),
+        source_coordinate.as_ref(),
+    ) {
+        (Some(sequence), Some(digest), Some((source_sequence, source_digest))) => {
+            lillux::valid_hash(digest) && sequence == *source_sequence && digest == source_digest
+        }
+        (None, None, None) => true,
+        _ => false,
+    };
+    let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+        && payload.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+        && payload.get("origin").and_then(Value::as_str)
+            == Some("daemon_accepted_worker_observation")
+        && payload.get("chain_root_id").and_then(Value::as_str)
+            == Some(session.chain_root_id.as_str())
+        && payload.get("placement_thread_id").and_then(Value::as_str)
+            == Some(session.placement_thread_id.as_str())
+        && payload.get("worker_boot_epoch").and_then(Value::as_u64) == Some(worker_boot_epoch)
+        && payload.get("turn_id").and_then(Value::as_str) == Some(turn_id)
+        && payload.get("expected").and_then(Value::as_str) == Some("idle")
+        && payload.get("next").and_then(Value::as_str) == Some("turn_running")
+        && command_coordinate_is_exact;
+    if !exact {
+        bail!("hosted turn start identity is bound to contradictory root testimony");
+    }
+    Ok(Some(HostedTurnStartAuthority {
+        operation_id,
+        chain_seq: fact
+            .first_chain_seq
+            .ok_or_else(|| anyhow!("hosted turn start has no root-chain coordinate"))?,
+        command_sequence,
+        request_digest,
+    }))
+}
+
+fn state_transition_fact_events(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    result: &Value,
+    source: Value,
+    command_coordinate: Option<(u64, &str)>,
+) -> Result<Vec<NewEventRecord>> {
+    let values = result
+        .get("session_observations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("worker session observations are not a bounded array"))?;
+    let mut local_starts = std::collections::HashSet::<String>::new();
+    let mut local_completions = std::collections::HashSet::<String>::new();
+    let mut command_started_turn = None::<String>;
+    let mut events = Vec::new();
+    for value in values {
+        let WorkerObservation::State {
+            expected,
+            next,
+            turn_id,
+            completed_turn_id,
+        } = serde_json::from_value(value.clone())?
+        else {
+            continue;
+        };
+        match (expected.as_str(), next.as_str()) {
+            ("idle", "turn_running") if completed_turn_id.is_none() => {
+                let turn_id = turn_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("turn-start transition has no turn id"))?;
+                validate_hosted_turn_id("turn-start id", turn_id)?;
+                if command_coordinate.is_some()
+                    && command_started_turn.replace(turn_id.to_owned()).is_some()
+                {
+                    bail!("one hosted command started more than one turn");
+                }
+                let operation_id =
+                    hosted_turn_start_operation_id(session, worker_boot_epoch, turn_id)?;
+                let (command_sequence, request_digest) = command_coordinate
+                    .map(|(sequence, digest)| {
+                        (
+                            Some(Value::Number(sequence.into())),
+                            Some(Value::String(digest.to_owned())),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                let mut payload = json!({
+                    "schema":1,
+                    "operation_id":operation_id,
+                    "origin":"daemon_accepted_worker_observation",
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":session.placement_thread_id,
+                    "worker_boot_epoch":worker_boot_epoch,
+                    "turn_id":turn_id,
+                    "expected":"idle",
+                    "next":"turn_running",
+                    "source":source,
+                });
+                if let Some(command_sequence) = command_sequence {
+                    payload["command_sequence"] = command_sequence;
+                }
+                if let Some(request_digest) = request_digest {
+                    payload["request_digest"] = request_digest;
+                }
+                if !local_starts.insert(turn_id.to_owned()) {
+                    bail!("worker observation batch duplicated a hosted turn start");
+                }
+                events.push(NewEventRecord {
+                    event_type: "hosted_session.turn_started".to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload,
+                });
+            }
+            ("turn_running", "idle") if turn_id.is_none() => {
+                let completed_turn_id = completed_turn_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("turn-completion transition has no turn id"))?;
+                validate_hosted_turn_id("completed turn id", completed_turn_id)?;
+                if !local_completions.insert(completed_turn_id.to_owned()) {
+                    bail!("worker observation batch duplicated a hosted turn completion");
+                }
+                let operation_id = hosted_turn_completion_operation_id(
+                    session,
+                    worker_boot_epoch,
+                    completed_turn_id,
+                )?;
+                let start_operation_id =
+                    hosted_turn_start_operation_id(session, worker_boot_epoch, completed_turn_id)?;
+                let payload = json!({
+                    "schema":1,
+                    "operation_id":operation_id,
+                    "origin":"daemon_accepted_worker_observation",
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":session.placement_thread_id,
+                    "worker_boot_epoch":worker_boot_epoch,
+                    "turn_id":completed_turn_id,
+                    "start_operation_id":start_operation_id,
+                    "expected":"turn_running",
+                    "next":"idle",
+                    "source":source,
+                });
+                events.push(NewEventRecord {
+                    event_type: "hosted_session.turn_completed".to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload,
+                });
+            }
+            _ => bail!("worker emitted an invalid generic session observation shape"),
+        }
+    }
+    Ok(events)
+}
+
+/// Prove that every lifecycle transition in one newly observed batch is
+/// admissible from the exact current placement projection before any of those
+/// transitions become root testimony. The per-placement transition gate
+/// keeps this read/simulation/append/apply sequence single-writer.
+fn validate_new_state_transition_sequence(
+    state: &AppState,
+    placement_thread_id: &str,
+    worker_boot_epoch: u64,
+    result: &Value,
+) -> Result<()> {
+    let session = current_session(state, placement_thread_id)?;
+    validate_new_state_transition_sequence_for_session(&session, worker_boot_epoch, result)
+}
+
+fn validate_new_state_transition_sequence_for_session(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    result: &Value,
+) -> Result<()> {
+    if session.worker_boot_epoch != Some(worker_boot_epoch) {
+        bail!("worker lifecycle observation belongs to another boot epoch");
+    }
+    let mut projected_state = session.state.clone();
+    let mut projected_turn_id = session.current_turn_id.clone();
+    let values = result
+        .get("session_observations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("worker session observations are not a bounded array"))?;
+    for value in values {
+        let WorkerObservation::State {
+            expected,
+            next,
+            turn_id,
+            completed_turn_id,
+        } = serde_json::from_value(value.clone())?
+        else {
+            continue;
+        };
+        if projected_state != expected {
+            bail!("worker lifecycle observation lost its exact predecessor state");
+        }
+        match (expected.as_str(), next.as_str()) {
+            ("idle", "turn_running")
+                if completed_turn_id.is_none()
+                    && projected_turn_id.is_none()
+                    && turn_id.is_some() =>
+            {
+                projected_state = next;
+                projected_turn_id = turn_id;
+            }
+            ("turn_running", "idle")
+                if turn_id.is_none()
+                    && completed_turn_id.as_deref() == projected_turn_id.as_deref() =>
+            {
+                projected_state = next;
+                projected_turn_id = None;
+            }
+            _ => bail!("worker emitted an invalid generic session observation shape"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_authoritative_state_transition_facts(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    result: &Value,
+    source: Value,
+    command_coordinate: Option<(u64, &str)>,
+) -> Result<()> {
+    for expected in state_transition_fact_events(
+        session,
+        worker_boot_epoch,
+        result,
+        source,
+        command_coordinate,
+    )? {
+        let operation_id = expected
+            .payload
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("accepted hosted transition has no operation id"))?;
+        let fact = crate::authoritative_root_fact::lookup(
+            state,
+            &session.placement_thread_id,
+            &expected.event_type,
+            operation_id,
+        )?;
+        if fact.count != 1 || fact.payload.as_ref() != Some(&expected.payload) {
+            bail!("hosted worker batch has no exact daemon-accepted transition testimony");
+        }
+    }
+    Ok(())
+}
+
+fn require_new_state_transition_facts(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    transitions: &[NewEventRecord],
+) -> Result<()> {
+    for transition in transitions {
+        let operation_id = transition
+            .payload
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("accepted hosted transition has no operation id"))?;
+        let existing = crate::authoritative_root_fact::lookup(
+            state,
+            &session.placement_thread_id,
+            &transition.event_type,
+            operation_id,
+        )?;
+        if existing.count != 0 || existing.payload.is_some() {
+            bail!("worker lifecycle transition reuses prior accepted turn authority");
+        }
+    }
+    Ok(())
 }
 
 fn apply_worker_observations(
@@ -1315,7 +1806,19 @@ pub async fn execute_command(
     .await?;
     match outcome {
         Ok(result) => {
+            let transition_gate = transition_gate(placement_thread_id);
+            let _transition_guard = transition_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Err(error) = validate_session_observation_cardinality(&result, observation_limit)
+                .and_then(|()| {
+                    validate_new_state_transition_sequence(
+                        state,
+                        placement_thread_id,
+                        worker_boot_epoch,
+                        &result,
+                    )
+                })
                 .and_then(|()| {
                     append_command_observation_batch(
                         state,
@@ -1541,16 +2044,46 @@ fn append_command_fact_once(
     event_type: &str,
     command_sequence: u64,
     request_digest: &str,
-    mut payload: Value,
+    payload: Value,
 ) -> Result<()> {
-    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+    append_command_fact_once_with_followups(
+        state,
+        session,
+        event_type,
+        command_sequence,
+        request_digest,
+        payload,
+        &[],
+    )
+}
+
+fn command_fact_operation_id(
+    session: &DedicatedSessionRecord,
+    event_type: &str,
+    command_sequence: u64,
+    request_digest: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_command_fact.v1",
         "chain_root_id":session.chain_root_id,
         "placement_thread_id":session.placement_thread_id,
         "command_sequence":command_sequence,
         "request_digest":request_digest,
         "event_type":event_type,
-    }))?;
+    }))
+}
+
+fn append_command_fact_once_with_followups(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    event_type: &str,
+    command_sequence: u64,
+    request_digest: &str,
+    mut payload: Value,
+    followups: &[NewEventRecord],
+) -> Result<()> {
+    let operation_id =
+        command_fact_operation_id(session, event_type, command_sequence, request_digest)?;
     let object = payload
         .as_object_mut()
         .ok_or_else(|| anyhow!("hosted command fact payload is not an object"))?;
@@ -1570,13 +2103,15 @@ fn append_command_fact_once(
         "request_digest".to_owned(),
         Value::String(request_digest.to_owned()),
     );
-    crate::authoritative_root_fact::append_once(
+    crate::authoritative_root_fact::append_once_with_followups(
         state,
         &session.placement_thread_id,
         event_type,
         &operation_id,
         payload,
+        followups,
     )
+    .map(|_| ())
 }
 
 /// Startup recovery completes a missing fact but never rewrites testimony that
@@ -1820,15 +2355,9 @@ fn committed_command_fact_exists(
         Some(route_id) => payload.get("route_id").and_then(Value::as_str) == Some(route_id),
         None => payload.get("route_id").is_some_and(Value::is_null),
     };
-    let schema_hashes_are_exact = payload
-        .get("protocol_schema_hashes")
-        .and_then(Value::as_object)
-        .is_some_and(|hashes| {
-            !hashes.is_empty()
-                && hashes
-                    .values()
-                    .all(|value| value.as_str().is_some_and(lillux::valid_hash))
-        });
+    let (protocol_profile_hash, protocol_schema_hashes) =
+        structured_protocol_identity(state, &session.admitted_capsule_hash)?;
+    let protocol_schema_hashes = serde_json::to_value(protocol_schema_hashes)?;
     let exact = payload.get("origin").and_then(Value::as_str) == Some("daemon_observed_io")
         && payload.get("worker_boot_epoch").and_then(Value::as_u64)
             == Some(record.worker_boot_epoch)
@@ -1842,11 +2371,9 @@ fn committed_command_fact_exists(
             .get("admitted_session_capsule_hash")
             .and_then(Value::as_str)
             == Some(session.admitted_capsule_hash.as_str())
-        && payload
-            .get("protocol_profile_hash")
-            .and_then(Value::as_str)
-            .is_some_and(lillux::valid_hash)
-        && schema_hashes_are_exact;
+        && payload.get("protocol_profile_hash").and_then(Value::as_str)
+            == Some(protocol_profile_hash.as_str())
+        && payload.get("protocol_schema_hashes") == Some(&protocol_schema_hashes);
     if !exact {
         bail!("authoritative hosted command fact does not retain its exact command contract");
     }
@@ -1870,7 +2397,26 @@ fn append_command_observation_batch(
         bail!("command observation batch fields are not arrays");
     }
     let response_digest = ryeos_state::objects::canonical_value_digest(result)?;
-    append_command_fact_once(
+    let batch_operation_id = command_fact_operation_id(
+        session,
+        "hosted_worker_command_observation_batch",
+        command_sequence,
+        request_digest,
+    )?;
+    let transitions = state_transition_fact_events(
+        session,
+        worker_boot_epoch,
+        result,
+        json!({
+            "kind":"command_response",
+            "batch_operation_id":batch_operation_id,
+            "command_sequence":command_sequence,
+            "request_digest":request_digest,
+        }),
+        Some((command_sequence, request_digest)),
+    )?;
+    require_new_state_transition_facts(state, session, &transitions)?;
+    append_command_fact_once_with_followups(
         state,
         session,
         "hosted_worker_command_observation_batch",
@@ -1886,6 +2432,7 @@ fn append_command_observation_batch(
                 "session_observations":observations,
             },
         }),
+        &transitions,
     )
 }
 
@@ -1947,7 +2494,204 @@ fn find_authoritative_command_observation_batch(
     {
         bail!("authoritative command batch body is malformed");
     }
+    validate_authoritative_state_transition_facts(
+        state,
+        session,
+        worker_boot_epoch,
+        &batch,
+        json!({
+            "kind":"command_response",
+            "batch_operation_id":operation_id,
+            "command_sequence":command_sequence,
+            "request_digest":request_digest,
+        }),
+        Some((command_sequence, request_digest)),
+    )?;
     Ok(Some((batch, response_digest.to_owned())))
+}
+
+fn hosted_turn_completion_payload(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    turn_id: &str,
+) -> Result<Option<(String, Value)>> {
+    let operation_id = hosted_turn_completion_operation_id(session, worker_boot_epoch, turn_id)?;
+    let fact = crate::authoritative_root_fact::lookup(
+        state,
+        &session.placement_thread_id,
+        "hosted_session.turn_completed",
+        &operation_id,
+    )?;
+    if fact.count > 1 {
+        bail!("hosted turn completion identity is duplicated in the root chain");
+    }
+    let Some(payload) = fact.payload else {
+        return Ok(None);
+    };
+    let completion_chain_seq = fact
+        .first_chain_seq
+        .ok_or_else(|| anyhow!("hosted turn completion has no root-chain coordinate"))?;
+    let start = hosted_turn_start_authority(state, session, worker_boot_epoch, turn_id)?
+        .ok_or_else(|| anyhow!("hosted turn completion has no matching accepted start"))?;
+    validate_hosted_transition_source(
+        session,
+        worker_boot_epoch,
+        payload.get("source").unwrap_or(&Value::Null),
+    )?;
+    let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+        && payload.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+        && payload.get("origin").and_then(Value::as_str)
+            == Some("daemon_accepted_worker_observation")
+        && payload.get("chain_root_id").and_then(Value::as_str)
+            == Some(session.chain_root_id.as_str())
+        && payload.get("placement_thread_id").and_then(Value::as_str)
+            == Some(session.placement_thread_id.as_str())
+        && payload.get("worker_boot_epoch").and_then(Value::as_u64) == Some(worker_boot_epoch)
+        && payload.get("turn_id").and_then(Value::as_str) == Some(turn_id)
+        && payload.get("start_operation_id").and_then(Value::as_str)
+            == Some(start.operation_id.as_str())
+        && payload.get("expected").and_then(Value::as_str) == Some("turn_running")
+        && payload.get("next").and_then(Value::as_str) == Some("idle")
+        && start.chain_seq < completion_chain_seq;
+    if !exact {
+        bail!("hosted turn completion identity is bound to contradictory root testimony");
+    }
+    Ok(Some((operation_id, payload)))
+}
+
+/// Project one exact placement-local command and the asynchronous turn, if
+/// any, that its authoritative response started. SQLite selects the bounded
+/// coordinate; immutable placement-thread facts grant all returned authority.
+pub fn command_observation(
+    state: &AppState,
+    placement_thread_id: &str,
+    command_sequence: u64,
+) -> Result<Value> {
+    let session = state
+        .state_store
+        .dedicated_session(placement_thread_id)?
+        .ok_or_else(|| anyhow!("dedicated session is not admitted"))?;
+    let record = state
+        .state_store
+        .dedicated_session_command(placement_thread_id, command_sequence)?
+        .ok_or_else(|| anyhow!("dedicated session command does not exist"))?;
+    if record.placement_thread_id != session.placement_thread_id
+        || record.command_sequence != command_sequence
+    {
+        bail!("dedicated command projection contradicts its requested coordinate");
+    }
+    let committed = command_fact_payload(
+        state,
+        &session,
+        "hosted_command.committed",
+        record.command_sequence,
+        &record.request_digest,
+        record.worker_boot_epoch,
+    )?
+    .ok_or_else(|| anyhow!("dedicated command has no authoritative committed fact"))?;
+    if !committed_command_fact_exists(state, &session, &record)? {
+        bail!("dedicated command committed fact is not authoritative");
+    }
+    if !matches!(record.state.as_str(), "completed" | "failed") {
+        bail!("dedicated command is not authoritatively settled");
+    }
+    if !authoritative_settled_command_replay(state, &session, &record)? {
+        bail!("settled command projection has no exact authoritative root testimony");
+    }
+    let route_id = committed.get("route_id").cloned().unwrap_or(Value::Null);
+    let mut result = json!({
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "admitted_capsule_hash":session.admitted_capsule_hash,
+        "worker_boot_epoch":record.worker_boot_epoch,
+        "command_sequence":record.command_sequence,
+        "command_kind":record.command_kind,
+        "idempotency_key":record.idempotency_key,
+        "route_id":route_id,
+        "request_digest":record.request_digest,
+        "command_state":record.state,
+        "operation":Value::Null,
+    });
+    if record.state != "completed" {
+        return Ok(result);
+    }
+    let Some((batch, response_digest)) = find_authoritative_command_observation_batch(
+        state,
+        &session,
+        record.worker_boot_epoch,
+        record.command_sequence,
+        &record.request_digest,
+    )?
+    else {
+        bail!("completed command has no authoritative observation batch");
+    };
+    result["response_digest"] = Value::String(response_digest);
+    let mut turn_ids = Vec::new();
+    for value in batch
+        .get("session_observations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("authoritative command observation batch is malformed"))?
+    {
+        if let WorkerObservation::State {
+            expected,
+            next,
+            turn_id,
+            completed_turn_id,
+        } = serde_json::from_value(value.clone())?
+        {
+            if expected == "idle" && next == "turn_running" && completed_turn_id.is_none() {
+                let turn_id =
+                    turn_id.ok_or_else(|| anyhow!("authoritative turn start has no turn id"))?;
+                validate_hosted_turn_id("authoritative turn-start id", &turn_id)?;
+                turn_ids.push(turn_id);
+            }
+        }
+    }
+    if turn_ids.len() > 1 {
+        bail!("one hosted command started more than one turn");
+    }
+    let Some(turn_id) = turn_ids.pop() else {
+        return Ok(result);
+    };
+    let start =
+        hosted_turn_start_authority(state, &session, record.worker_boot_epoch, &turn_id)?
+            .ok_or_else(|| anyhow!("command-started turn has no exact authoritative start fact"))?;
+    if start.command_sequence != Some(record.command_sequence)
+        || start.request_digest.as_deref() != Some(record.request_digest.as_str())
+    {
+        bail!("hosted turn start is bound to another command coordinate");
+    }
+    let completion =
+        hosted_turn_completion_payload(state, &session, record.worker_boot_epoch, &turn_id)?;
+    let (state_name, completion_operation_id, completion_source) = match completion {
+        Some((operation_id, payload)) => (
+            "completed",
+            Some(operation_id),
+            payload.get("source").cloned().unwrap_or(Value::Null),
+        ),
+        None => ("running", None, Value::Null),
+    };
+    result["operation"] = json!({
+        "kind":"turn",
+        "id":turn_id,
+        "state":state_name,
+        "start_operation_id":start.operation_id,
+        "completion_operation_id":completion_operation_id.clone(),
+        "completion_source":completion_source,
+    });
+    if let Some(completion_operation_id) = completion_operation_id {
+        result["completion_fence"] = serde_json::to_value(HostedCommandCompletionFence {
+            placement_thread_id: session.placement_thread_id,
+            admitted_capsule_hash: session.admitted_capsule_hash,
+            worker_boot_epoch: record.worker_boot_epoch,
+            command_sequence: record.command_sequence,
+            request_digest: record.request_digest,
+            turn_id,
+            completion_operation_id,
+        })?;
+    }
+    Ok(result)
 }
 
 /// Retire one exact durable worker identity without treating registry absence
@@ -1981,6 +2725,62 @@ pub fn retire_worker_process(
     })
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedCommandCompletionFence {
+    pub placement_thread_id: String,
+    pub admitted_capsule_hash: String,
+    pub worker_boot_epoch: u64,
+    pub command_sequence: u64,
+    pub request_digest: String,
+    pub turn_id: String,
+    pub completion_operation_id: String,
+}
+
+fn validate_hosted_command_completion_fence(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    fence: &HostedCommandCompletionFence,
+) -> Result<()> {
+    if fence.placement_thread_id != session.placement_thread_id
+        || fence.admitted_capsule_hash != session.admitted_capsule_hash
+        || fence.command_sequence == 0
+        || !lillux::valid_hash(&fence.request_digest)
+        || !lillux::valid_hash(&fence.completion_operation_id)
+    {
+        bail!("completed termination fence differs from the current hosted placement");
+    }
+    validate_hosted_turn_id("completed termination turn id", &fence.turn_id)?;
+    let observation =
+        command_observation(state, &fence.placement_thread_id, fence.command_sequence)?;
+    let operation = observation
+        .get("operation")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("completed termination command did not start a turn"))?;
+    let exact = observation.get("chain_root_id").and_then(Value::as_str)
+        == Some(session.chain_root_id.as_str())
+        && observation
+            .get("admitted_capsule_hash")
+            .and_then(Value::as_str)
+            == Some(fence.admitted_capsule_hash.as_str())
+        && observation.get("worker_boot_epoch").and_then(Value::as_u64)
+            == Some(fence.worker_boot_epoch)
+        && observation.get("command_sequence").and_then(Value::as_u64)
+            == Some(fence.command_sequence)
+        && observation.get("request_digest").and_then(Value::as_str)
+            == Some(fence.request_digest.as_str())
+        && operation.get("id").and_then(Value::as_str) == Some(fence.turn_id.as_str())
+        && operation.get("state").and_then(Value::as_str) == Some("completed")
+        && operation
+            .get("completion_operation_id")
+            .and_then(Value::as_str)
+            == Some(fence.completion_operation_id.as_str());
+    if !exact {
+        bail!("completed termination fence has no exact authoritative turn completion");
+    }
+    Ok(())
+}
+
 /// Drain and terminally settle one session after its caller has already
 /// proved owner/root authority. This is shared by authenticated services and
 /// the callback-owned controller so duration expiry cannot orphan a worker.
@@ -1988,9 +2788,13 @@ pub async fn terminate_session(
     state: &AppState,
     placement_thread_id: &str,
     reason: &str,
+    completion_fence: Option<&HostedCommandCompletionFence>,
 ) -> Result<Value> {
     if !matches!(reason, "completed" | "cancelled") {
         bail!("terminal reason must be completed or cancelled");
+    }
+    if reason == "cancelled" && completion_fence.is_some() {
+        bail!("cancelled termination cannot carry a completed-command fence");
     }
     let initial = current_session(state, placement_thread_id)?;
     let root_operation = crate::hosted_operation::begin_hosted_root_operation_if_appendable(
@@ -2003,6 +2807,13 @@ pub async fn terminate_session(
     if session.state == "terminal" {
         if session.terminal_reason.as_deref() != Some(reason) {
             bail!("terminal session reason conflicts with the requested retry");
+        }
+        if let Some(fence) = completion_fence {
+            validate_hosted_command_completion_fence(state, &session, fence)?;
+            state.state_store.require_dedicated_session_route_frontier(
+                placement_thread_id,
+                fence.command_sequence,
+            )?;
         }
         finish_terminal_credential_cleanup(state, &session)?;
         notify_projection_change(placement_thread_id);
@@ -2049,6 +2860,9 @@ pub async fn terminate_session(
     let worker_boot_epoch = session
         .worker_boot_epoch
         .ok_or_else(|| anyhow!("dedicated session has no worker epoch"))?;
+    if let Some(fence) = completion_fence {
+        validate_hosted_command_completion_fence(state, &session, fence)?;
+    }
     if reason == "completed"
         && !matches!(
             session.state.as_str(),
@@ -2061,9 +2875,11 @@ pub async fn terminate_session(
                 | "discarding"
         )
     {
-        state
-            .state_store
-            .reserve_dedicated_session_completion(placement_thread_id, worker_boot_epoch)?;
+        state.state_store.reserve_dedicated_session_completion(
+            placement_thread_id,
+            worker_boot_epoch,
+            completion_fence.map(|fence| fence.command_sequence),
+        )?;
     }
     let worker = state
         .state_store
@@ -2341,6 +3157,31 @@ fn close_session_workspace(state: &AppState, session: &DedicatedSessionRecord) -
 mod tests {
     use super::*;
 
+    fn session_fixture() -> DedicatedSessionRecord {
+        DedicatedSessionRecord {
+            placement_thread_id: "T-placement".to_owned(),
+            chain_root_id: "T-root".to_owned(),
+            owner_principal: "fp:owner".to_owned(),
+            admitted_capsule_hash: "a".repeat(64),
+            worker_instance_id: Some("worker-one".to_owned()),
+            worker_boot_epoch: Some(3),
+            workspace_id: "W-one".to_owned(),
+            candidate_required: false,
+            credential_profile_id: "P-one".to_owned(),
+            credential_generation: 1,
+            remote_thread_id: Some("upstream-thread".to_owned()),
+            current_turn_id: None,
+            state: "idle".to_owned(),
+            send_boundary: "settled".to_owned(),
+            candidate_snapshot_hash: None,
+            candidate_validation_hash: None,
+            publication_result: None,
+            terminal_reason: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
     fn batch_with_observation_count(count: usize) -> WorkerObservationBatch {
         WorkerObservationBatch {
             first_sequence: 1,
@@ -2386,5 +3227,166 @@ mod tests {
             command_observation_limit("reattach").unwrap(),
             MAX_SESSION_OBSERVATIONS_PER_WORKER_EVENT * 2
         );
+    }
+
+    #[test]
+    fn fast_turn_gets_exact_start_and_completion_facts_from_one_command_batch() {
+        let session = session_fixture();
+        let request_digest = "b".repeat(64);
+        let facts = state_transition_fact_events(
+            &session,
+            3,
+            &json!({
+                "events":[{"event_type":"turn.completed","payload":{"turn_id":"turn-one"}}],
+                "session_observations":[
+                    {
+                        "kind":"state",
+                        "expected":"idle",
+                        "next":"turn_running",
+                        "turn_id":"turn-one",
+                    },
+                    {
+                        "kind":"state",
+                        "expected":"turn_running",
+                        "next":"idle",
+                        "completed_turn_id":"turn-one",
+                    },
+                ],
+            }),
+            json!({"kind":"command_response","batch_operation_id":"batch-one"}),
+            Some((2, &request_digest)),
+        )
+        .unwrap();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].event_type, "hosted_session.turn_started");
+        assert_eq!(facts[0].payload["command_sequence"], 2);
+        assert_eq!(facts[0].payload["request_digest"], request_digest);
+        assert_eq!(
+            facts[0].payload["origin"],
+            "daemon_accepted_worker_observation"
+        );
+        assert_eq!(facts[1].event_type, "hosted_session.turn_completed");
+        assert_eq!(facts[1].payload["turn_id"], "turn-one");
+        assert!(facts[1].payload.get("command_sequence").is_none());
+    }
+
+    #[test]
+    fn idle_session_rejects_an_unaccepted_completion_before_root_testimony() {
+        let session = session_fixture();
+        let error = validate_new_state_transition_sequence_for_session(
+            &session,
+            3,
+            &json!({
+                "events":[],
+                "session_observations":[{
+                    "kind":"state",
+                    "expected":"turn_running",
+                    "next":"idle",
+                    "completed_turn_id":"turn-one",
+                }],
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exact predecessor state"));
+
+        validate_new_state_transition_sequence_for_session(
+            &session,
+            3,
+            &json!({
+                "events":[],
+                "session_observations":[
+                    {
+                        "kind":"state",
+                        "expected":"idle",
+                        "next":"turn_running",
+                        "turn_id":"turn-one",
+                    },
+                    {
+                        "kind":"state",
+                        "expected":"turn_running",
+                        "next":"idle",
+                        "completed_turn_id":"turn-one",
+                    },
+                ],
+            }),
+        )
+        .expect("one atomically testified start/completion sequence");
+    }
+
+    #[test]
+    fn one_command_cannot_claim_multiple_started_turns() {
+        let session = session_fixture();
+        let request_digest = "b".repeat(64);
+        let error = state_transition_fact_events(
+            &session,
+            3,
+            &json!({
+                "events":[],
+                "session_observations":[
+                    {
+                        "kind":"state",
+                        "expected":"idle",
+                        "next":"turn_running",
+                        "turn_id":"turn-one",
+                    },
+                    {
+                        "kind":"state",
+                        "expected":"idle",
+                        "next":"turn_running",
+                        "turn_id":"turn-two",
+                    },
+                ],
+            }),
+            json!({"kind":"command_response","batch_operation_id":"batch-one"}),
+            Some((2, &request_digest)),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("more than one turn"));
+    }
+
+    #[test]
+    fn asynchronous_completion_fact_names_its_required_start_identity() {
+        let session = session_fixture();
+        let facts = state_transition_fact_events(
+            &session,
+            3,
+            &json!({
+                "events":[{"event_type":"turn.completed","payload":{"turn_id":"turn-one"}}],
+                "session_observations":[{
+                    "kind":"state",
+                    "expected":"turn_running",
+                    "next":"idle",
+                    "completed_turn_id":"turn-one",
+                }],
+            }),
+            json!({"kind":"pushed_observation_batch","batch_operation_id":"batch-one"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].event_type, "hosted_session.turn_completed");
+        assert_eq!(facts[0].payload["turn_id"], "turn-one");
+        assert_eq!(
+            facts[0].payload["start_operation_id"],
+            hosted_turn_start_operation_id(&session, 3, "turn-one").unwrap()
+        );
+    }
+
+    #[test]
+    fn turn_fact_source_cannot_claim_another_command_batch() {
+        let session = session_fixture();
+        let request_digest = "b".repeat(64);
+        let error = validate_hosted_transition_source(
+            &session,
+            3,
+            &json!({
+                "kind":"command_response",
+                "batch_operation_id":"c".repeat(64),
+                "command_sequence":2,
+                "request_digest":request_digest,
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("contradictory batch identity"));
     }
 }

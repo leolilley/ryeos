@@ -54,7 +54,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 }
 
 /// Version tag for the JSON payload persisted into
-/// `runtime_db.thread_runtime.launch_metadata`. Bump when an
+/// `runtime_db.thread_runtime.launch_metadata`. Bump when a
 /// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
@@ -72,7 +72,11 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // v21 embeds the exact optional ingress-authenticated handler authority. Its
 // absence is durable and may never be normalized into verified callback
 // authority during recovery.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 21;
+// v22 carries the flat captured node-policy provenance contract. v23 binds
+// remote adoption to the exact target-node operator grant generation.
+// Predecessor authority remains opaque history rather than being interpreted
+// as current launch authority.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 23;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -1095,6 +1099,7 @@ impl RuntimeLaunchMetadata {
             source_binding_hash,
             accounting_scope: self.accounting_scope.clone(),
             effective_caps,
+            parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_string(),
             executor_ref: sealed.executor_ref().to_string(),
         };
@@ -1199,6 +1204,7 @@ impl RuntimeLaunchMetadata {
             })?,
             accounting_scope: self.accounting_scope.clone(),
             effective_caps,
+            parent_delegation_caps: resume.parent_delegation_caps.clone(),
             runtime_ref: sealed.runtime_ref().to_owned(),
             executor_ref: sealed.executor_ref().to_owned(),
         };

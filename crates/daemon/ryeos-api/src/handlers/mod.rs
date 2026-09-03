@@ -186,6 +186,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     dedicated_sessions::HANDOFF_PREFLIGHT_DESCRIPTOR,
     dedicated_sessions::HANDOFF_DESCRIPTOR,
     dedicated_sessions::COMMAND_DESCRIPTOR,
+    dedicated_sessions::COMMAND_OBSERVATION_DESCRIPTOR,
     dedicated_sessions::APPROVALS_DESCRIPTOR,
     dedicated_sessions::RESOLVE_APPROVAL_DESCRIPTOR,
     dedicated_sessions::TERMINATE_DESCRIPTOR,

@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-03T11:56:16Z:d59079f121b363c2698d900c2bba5e118b48cdcc614c4dae4c3c25e6b8cafa48:pYtIarK7jq7YoX2CTJQda8mfkugflg/+EB7rwAuoKgzcNXwvzG/xTqGjfj9KpHBZFyBZerou/VhmZWTYDRpEBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, command-observation]
+description: "Read one exact authoritatively settled hosted-worker command and turn observation"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: placement_thread_id
+      - field: command_sequence
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/command-observation
+  availability: daemon

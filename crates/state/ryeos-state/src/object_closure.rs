@@ -13,15 +13,30 @@ use anyhow::Context;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-const DEFAULT_MAX_OBJECTS: usize = 10_000;
+pub const DEFAULT_MAX_OBJECTS: usize = 10_000;
 // One external realization may reference 10,000 blobs. Capsules also carry
 // executable/protocol blobs, so the closure-wide ceiling must leave bounded
 // headroom rather than making a contract-valid realization untransferable.
-const DEFAULT_MAX_BLOBS: usize = 20_000;
-const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
-const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
-const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
-const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
+pub const DEFAULT_MAX_BLOBS: usize = 20_000;
+pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
+pub const DEFAULT_MAX_TOTAL_OBJECT_BYTES: u64 =
+    (DEFAULT_MAX_OBJECTS as u64) * DEFAULT_MAX_OBJECT_BYTES;
+pub const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+pub const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
+
+/// Absolute wire-protocol bounds accepted by the remote closure endpoints.
+/// Node policy must select limits within these bounds; callers may only narrow
+/// that selected policy. These are protocol safety invariants, not defaults.
+pub const REMOTE_CLOSURE_MAX_ROOTS: usize = 1_024;
+pub const REMOTE_CLOSURE_MAX_OBJECTS: usize = 100_000;
+pub const REMOTE_CLOSURE_MAX_BLOBS: usize = 100_000;
+pub const REMOTE_CLOSURE_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT: usize = 100_000;
 
 /// Transitive closure for one or more CAS object roots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -324,6 +339,7 @@ pub struct ObjectClosureLimits {
     pub max_objects: usize,
     pub max_blobs: usize,
     pub max_object_bytes: u64,
+    pub max_total_object_bytes: u64,
     pub max_blob_bytes: u64,
     pub max_total_blob_bytes: u64,
     pub max_links_per_object: usize,
@@ -431,6 +447,7 @@ impl Default for ObjectClosureLimits {
             max_objects: DEFAULT_MAX_OBJECTS,
             max_blobs: DEFAULT_MAX_BLOBS,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_total_object_bytes: DEFAULT_MAX_TOTAL_OBJECT_BYTES,
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             max_total_blob_bytes: DEFAULT_MAX_TOTAL_BLOB_BYTES,
             max_links_per_object: DEFAULT_MAX_LINKS_PER_OBJECT,
@@ -447,6 +464,7 @@ impl ObjectClosureLimits {
             max_objects: 100_000,
             max_blobs: 100_000,
             max_object_bytes: 32 * 1024 * 1024,
+            max_total_object_bytes: 100_000 * 32 * 1024 * 1024,
             max_blob_bytes: 16 * 1024 * 1024 * 1024,
             max_total_blob_bytes: 64 * 1024 * 1024 * 1024,
             max_links_per_object: 100_000,
@@ -458,6 +476,7 @@ impl ObjectClosureLimits {
             max_objects: usize::MAX,
             max_blobs: usize::MAX,
             max_object_bytes: u64::MAX,
+            max_total_object_bytes: u64::MAX,
             max_blob_bytes: u64::MAX,
             max_total_blob_bytes: u64::MAX,
             max_links_per_object: usize::MAX,
@@ -604,6 +623,25 @@ pub fn collect_object_closure_with_cas_and_limits(
     collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check)
 }
 
+/// Collect and validate a closure from untrusted in-memory transport bytes.
+/// This deliberately shares the authoritative typed-edge, expected-child,
+/// cycle, size, and link-count implementation used for pinned CAS traversal,
+/// allowing remote clients to reject a response before any bytes are written.
+pub fn collect_object_closure_from_memory(
+    objects: &BTreeMap<String, Vec<u8>>,
+    blobs: &BTreeMap<String, Vec<u8>>,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+) -> anyhow::Result<ObjectClosureReport> {
+    let mut check = || Ok(());
+    collect_object_closure_from_source(
+        ClosureCas::Memory { objects, blobs },
+        roots,
+        limits,
+        &mut check,
+    )
+}
+
 fn collect_object_closure_with_limits_and_check(
     cas_root: &Path,
     roots: impl IntoIterator<Item = String>,
@@ -617,6 +655,10 @@ fn collect_object_closure_with_limits_and_check(
 enum ClosureCas<'a> {
     Path(&'a Path),
     Pinned(&'a lillux::CasStore),
+    Memory {
+        objects: &'a BTreeMap<String, Vec<u8>>,
+        blobs: &'a BTreeMap<String, Vec<u8>>,
+    },
 }
 
 impl ClosureCas<'_> {
@@ -637,6 +679,15 @@ impl ClosureCas<'_> {
                     anyhow::bail!("CAS object {hash} exceeded byte limit while reading");
                 }
                 Ok(Some(bytes))
+            }
+            Self::Memory { objects, .. } => {
+                let Some(bytes) = objects.get(hash) else {
+                    return Ok(None);
+                };
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+                    anyhow::bail!("transport object {hash} exceeds byte limit {max_bytes}");
+                }
+                Ok(Some(bytes.clone()))
             }
         }
     }
@@ -679,6 +730,16 @@ impl ClosureCas<'_> {
                 };
                 opened
             }
+            Self::Memory { blobs, .. } => {
+                let Some(bytes) = blobs.get(hash) else {
+                    return Ok(None);
+                };
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+                    anyhow::bail!("transport blob {hash} exceeds byte limit {max_bytes}");
+                }
+                let actual = lillux::sha256_hex(bytes);
+                return Ok(Some((u64::try_from(bytes.len())?, actual)));
+            }
         };
         if size > max_bytes {
             anyhow::bail!("CAS blob {hash} exceeds byte limit {max_bytes}");
@@ -714,6 +775,7 @@ fn collect_object_closure_from_source(
     let mut queue: VecDeque<(String, Option<String>, ExpectedObject)> = VecDeque::new();
     let mut loaded_identities = HashMap::<String, LoadedObjectIdentity>::new();
     let mut history_edges = BTreeMap::<HistoryGraph, BTreeMap<String, BTreeSet<String>>>::new();
+    let mut total_object_bytes = 0_u64;
     let mut total_blob_bytes = 0_u64;
 
     for root in roots {
@@ -762,6 +824,14 @@ fn collect_object_closure_from_source(
                 continue;
             }
         };
+        total_object_bytes = total_object_bytes.saturating_add(content.len() as u64);
+        if total_object_bytes > limits.max_total_object_bytes {
+            anyhow::bail!(
+                "object closure exceeds max_total_object_bytes: {} > {}",
+                total_object_bytes,
+                limits.max_total_object_bytes
+            );
+        }
         let actual_hash = lillux::sha256_hex(&content);
         if actual_hash != hash {
             let reason = format!("object bytes hash mismatch: requested {hash}, got {actual_hash}");
@@ -1115,6 +1185,29 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
         large_object_hashes: decoded.large_object_hashes,
         unsupported_kind: None,
     })
+}
+
+/// Return the exact number of schema-defined outgoing links in one current
+/// object. Unlike [`object_links`], this deliberately does not deduplicate
+/// repeated object edges: closure admission charges the authored edge count,
+/// and callers validating a supplemental object must apply the same limit as
+/// the authoritative collector.
+pub fn object_link_count(value: &Value) -> Result<Option<usize>, String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing object kind".to_string())?;
+    let Some(decoded) = contracts::links(value)? else {
+        let _ = kind;
+        return Ok(None);
+    };
+    Ok(Some(
+        decoded
+            .object_edges
+            .len()
+            .saturating_add(decoded.blob_hashes.len())
+            .saturating_add(decoded.large_object_hashes.len()),
+    ))
 }
 /// Manifest hashes for every external realization sealed into one capsule.
 ///
@@ -1544,6 +1637,7 @@ mod tests {
         let executable_blob_hash = h("de");
         let links = object_links(&json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {"kind": "projectless", "environment": {"kind": "none"}},
             "execution_closure": {
                 "driver": "direct_item_executor",
@@ -1565,6 +1659,7 @@ mod tests {
         let operational_snapshot_hash = h("cd");
         let links = object_links(&json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {
                 "kind": "pinned_generation",
                 "base_snapshot_hash": base_snapshot_hash,
@@ -1593,6 +1688,7 @@ mod tests {
         let executor_blob_hash = h("ce");
         let links = object_links(&json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {"kind": "projectless", "environment": {"kind": "none"}},
             "execution_closure": {
                 "driver": "managed_runtime",
@@ -1701,6 +1797,7 @@ mod tests {
                 max_objects: 8,
                 max_blobs: 8,
                 max_object_bytes: 32,
+                max_total_object_bytes: 32,
                 max_blob_bytes: 32,
                 max_total_blob_bytes: 32,
                 max_links_per_object: 8,
@@ -1709,6 +1806,30 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("exceeds byte limit"));
+    }
+
+    #[test]
+    fn traversal_rejects_aggregate_object_bytes_above_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let hash = write_object(&cas_root, &json!({ "kind": "future_kind" }));
+
+        let err = collect_object_closure_with_limits(
+            &cas_root,
+            [hash],
+            ObjectClosureLimits {
+                max_objects: 8,
+                max_blobs: 8,
+                max_object_bytes: 1024,
+                max_total_object_bytes: 1,
+                max_blob_bytes: 1024,
+                max_total_blob_bytes: 1024,
+                max_links_per_object: 8,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("exceeds max_total_object_bytes"));
     }
 
     #[test]
@@ -1733,6 +1854,7 @@ mod tests {
                 max_objects: 8,
                 max_blobs: 8,
                 max_object_bytes: 1024,
+                max_total_object_bytes: 1024,
                 max_blob_bytes: 1024,
                 max_total_blob_bytes: 1024,
                 max_links_per_object: 1,
@@ -1751,6 +1873,7 @@ mod tests {
         // every realization from GC reachability.
         let capsule = json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {"kind": "live_project"},
             "execution_closure": {
                 "driver": "direct_item_executor",

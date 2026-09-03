@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ryeos_api::handler_error::HandlerError;
 use ryeos_api::handlers::{admission_claim, admission_status, admission_submit};
 
-const TEST_POLICY: &str = "local-node-v1";
+const TEST_POLICY: &str = "local-node-v2";
 const PUSH_SCOPES: &[&str] = &[
     "ryeos.execute.service.objects/has",
     "ryeos.execute.service.objects/put",
@@ -38,12 +38,13 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
             subject_hash: subject_hash.clone(),
             policy: TEST_POLICY.to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         state.clone(),
     )
@@ -77,12 +78,13 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
             subject_hash,
             policy: TEST_POLICY.to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         state,
     )
@@ -90,6 +92,31 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
     .unwrap();
     assert_eq!(repeated["reused_existing"], true);
     assert_eq!(repeated["attestation_hash"], attestation_hash);
+}
+
+#[tokio::test]
+async fn admission_submit_cannot_widen_node_object_closure_policy() {
+    let (_tmp, state) = test_state::build_test_state();
+    let subject_hash = store_subject(&state);
+    let error = admission_submit::handle(
+        admission_submit::Request {
+            subject_hash,
+            policy: TEST_POLICY.to_string(),
+            claim: "accepted".to_string(),
+            max_objects: Some(32_769),
+            max_blobs: None,
+            max_object_bytes: None,
+            max_total_object_bytes: None,
+            max_blob_bytes: None,
+            max_total_blob_bytes: None,
+            max_links_per_object: None,
+        },
+        Arc::new(state),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("exceeds node policy"));
 }
 
 #[tokio::test]

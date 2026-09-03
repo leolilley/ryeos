@@ -16,6 +16,14 @@ use ryeos_state::signer::Signer;
 
 use crate::launch_metadata::{OriginalPushedHeadRef, ResumeContext, StableProjectIdentity};
 
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub const WORKER_PLACEMENT_POLICY: &str = "worker-placement-v1";
 pub const WORKER_PLACEMENT_CLAIM: &str = "admitted";
 pub const WORKER_PLACEMENT_PREFLIGHT_POLICY: &str = "worker-placement-preflight-v1";
@@ -50,8 +58,8 @@ pub const WORKER_PLACEMENT_PREPARE_SERVICE: &str = "service:worker-placements/pr
 pub const WORKER_PLACEMENT_ADOPT_SERVICE: &str = "service:worker-placements/adopt";
 pub const WORKER_PLACEMENT_ABORT_SERVICE: &str = "service:worker-placements/abort";
 
-const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v2";
-const PREFLIGHT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_preflight.v2";
+const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v3";
+const PREFLIGHT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_preflight.v3";
 const PREFLIGHT_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_preflight_job.v2";
 const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v3";
 const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1";
@@ -61,10 +69,10 @@ const HANDOFF_TERMINAL_COMPLETION_EVIDENCE_SCHEMA: &str =
     "ryeos.worker_handoff_terminal_completion.v1";
 const HANDOFF_TERMINAL_FAILURE_EVIDENCE_SCHEMA: &str = "ryeos.worker_handoff_terminal_failure.v1";
 
-/// Non-final target check performed while the source placement may still be
-/// live. The launch metadata is transport data, not trusted authority: the
-/// target reproduces its capsule and binds its canonical digest in the signed
-/// receipt before using it for local preparation.
+/// Non-final target check performed only after the source worker is frozen,
+/// reaped, and checkpointed, but before source writer authority is cut. The
+/// chain-reachable admitted capsule is the immutable source program testimony;
+/// full operational launch metadata remains private to its node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerPlacementPreflightRequest {
@@ -79,8 +87,6 @@ pub struct WorkerPlacementPreflightRequest {
     pub source_chain_head_hash: String,
     pub source_last_event_hash: String,
     pub source_launch_capsule_hash: String,
-    pub source_launch_metadata: serde_json::Value,
-    pub source_launch_metadata_blob_hash: String,
     pub target_project_path: String,
     pub project_route_digest: String,
     pub target_credential_profile_id: String,
@@ -117,7 +123,6 @@ pub struct WorkerPlacementPreflightEvidence {
     pub source_chain_head_hash: String,
     pub source_last_event_hash: String,
     pub source_launch_capsule_hash: String,
-    pub source_launch_metadata_blob_hash: String,
     pub outer_exact_program_hash: String,
     pub persistent_dependency_programs: BTreeMap<String, String>,
     pub target_persistent_session_capsules: BTreeMap<String, String>,
@@ -128,6 +133,9 @@ pub struct WorkerPlacementPreflightEvidence {
     pub target_project_head_hash: String,
     pub target_credential_profile_id: String,
     pub target_credential_generation: u64,
+    pub target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_chain_owner_anchor_hash: Option<String>,
     pub upstream_session_id: String,
     pub credential_subject_contract_digest: String,
     pub credential_subject_digest: String,
@@ -153,7 +161,6 @@ pub struct WorkerPlacementPreflightJobOperation {
     pub source_chain_head_hash: String,
     pub source_last_event_hash: String,
     pub source_launch_capsule_hash: String,
-    pub source_launch_metadata_blob_hash: String,
     pub peer_remote_name: String,
     pub target_project_path: String,
     pub project_route_digest: String,
@@ -2459,7 +2466,7 @@ impl WorkerPlacementPrepareRequest {
             bail!("placement preparation is not an exact cross-site project request");
         }
         if let Some(frontier) = &self.source_accounting_frontier {
-            frontier.source_scope.validate()?;
+            frontier.validate()?;
         }
         if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
             hash("follow delivery reservation", digest)?;
@@ -2477,10 +2484,6 @@ impl WorkerPlacementPreflightRequest {
             (
                 "source launch capsule",
                 self.source_launch_capsule_hash.as_str(),
-            ),
-            (
-                "source launch metadata",
-                self.source_launch_metadata_blob_hash.as_str(),
             ),
             ("project route", self.project_route_digest.as_str()),
             (
@@ -2522,13 +2525,6 @@ impl WorkerPlacementPreflightRequest {
         {
             bail!("worker placement preflight is not an exact cross-site project request");
         }
-        let metadata_bytes = lillux::canonical_json(&self.source_launch_metadata)?;
-        if metadata_bytes.len() > 2 * 1024 * 1024
-            || lillux::sha256_hex(metadata_bytes.as_bytes())
-                != self.source_launch_metadata_blob_hash
-        {
-            bail!("preflight launch metadata exceeds its bound or changed digest");
-        }
         Ok(())
     }
 }
@@ -2544,6 +2540,8 @@ impl WorkerPlacementPreflightEvidence {
         target_isolation_digest: String,
         target_project_head_hash: String,
         target_credential_generation: u64,
+        target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+        target_chain_owner_anchor_hash: Option<String>,
     ) -> anyhow::Result<Self> {
         let evidence = Self {
             schema: PREFLIGHT_EVIDENCE_SCHEMA.to_owned(),
@@ -2559,7 +2557,6 @@ impl WorkerPlacementPreflightEvidence {
             source_chain_head_hash: request.source_chain_head_hash.clone(),
             source_last_event_hash: request.source_last_event_hash.clone(),
             source_launch_capsule_hash: request.source_launch_capsule_hash.clone(),
-            source_launch_metadata_blob_hash: request.source_launch_metadata_blob_hash.clone(),
             outer_exact_program_hash,
             persistent_dependency_programs,
             target_persistent_session_capsules,
@@ -2570,6 +2567,8 @@ impl WorkerPlacementPreflightEvidence {
             target_project_head_hash,
             target_credential_profile_id: request.target_credential_profile_id.clone(),
             target_credential_generation,
+            target_operator_authority,
+            target_chain_owner_anchor_hash,
             upstream_session_id: request.upstream_session_id.clone(),
             credential_subject_contract_digest: request.credential_subject_contract_digest.clone(),
             credential_subject_digest: request.credential_subject_digest.clone(),
@@ -2595,10 +2594,6 @@ impl WorkerPlacementPreflightEvidence {
             (
                 "source launch capsule",
                 self.source_launch_capsule_hash.as_str(),
-            ),
-            (
-                "source launch metadata",
-                self.source_launch_metadata_blob_hash.as_str(),
             ),
             (
                 "outer exact program",
@@ -2627,6 +2622,9 @@ impl WorkerPlacementPreflightEvidence {
         }
         if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
             hash("follow delivery reservation", digest)?;
+        }
+        if let Some(digest) = &self.target_chain_owner_anchor_hash {
+            hash("target chain owner anchor", digest)?;
         }
         for (label, value) in [
             ("owner", self.owner_principal.as_str()),
@@ -2673,6 +2671,25 @@ impl WorkerPlacementPreflightEvidence {
                 label_value("persistent dependency name", name)?;
                 hash(label, digest)?;
             }
+        }
+        self.target_operator_authority.validate()?;
+        if self.target_operator_authority.owner_principal != self.owner_principal
+            || self.target_operator_authority.origin_site_id != self.origin_site_id
+        {
+            bail!("preflight target operator authority contradicts its owner or origin");
+        }
+        match self.target_operator_authority.principal_class {
+            crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+                if self.target_chain_owner_anchor_hash.is_none() =>
+            {
+                bail!("local-operator preflight has no target chain owner anchor");
+            }
+            crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+                if self.target_chain_owner_anchor_hash.is_some() =>
+            {
+                bail!("remote-operator preflight carries a local chain owner anchor");
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -2732,7 +2749,6 @@ impl WorkerPlacementPreflightResponse {
             || evidence.source_chain_head_hash != request.source_chain_head_hash
             || evidence.source_last_event_hash != request.source_last_event_hash
             || evidence.source_launch_capsule_hash != request.source_launch_capsule_hash
-            || evidence.source_launch_metadata_blob_hash != request.source_launch_metadata_blob_hash
             || evidence.target_project_path != request.target_project_path
             || evidence.project_route_digest != request.project_route_digest
             || evidence.target_credential_profile_id != request.target_credential_profile_id
@@ -2771,7 +2787,6 @@ impl WorkerPlacementPreflightJobOperation {
             source_chain_head_hash: request.source_chain_head_hash.clone(),
             source_last_event_hash: request.source_last_event_hash.clone(),
             source_launch_capsule_hash: request.source_launch_capsule_hash.clone(),
-            source_launch_metadata_blob_hash: request.source_launch_metadata_blob_hash.clone(),
             peer_remote_name,
             target_project_path: request.target_project_path.clone(),
             project_route_digest: request.project_route_digest.clone(),
@@ -2797,10 +2812,6 @@ impl WorkerPlacementPreflightJobOperation {
             (
                 "source launch capsule",
                 self.source_launch_capsule_hash.as_str(),
-            ),
-            (
-                "source launch metadata",
-                self.source_launch_metadata_blob_hash.as_str(),
             ),
             ("project route", self.project_route_digest.as_str()),
         ] {
@@ -3493,6 +3504,8 @@ pub struct ProjectAuthorityRebind {
 pub struct AccountingConservation {
     pub source_scope: Option<AdmittedAccountingScope>,
     pub target_scope: Option<AdmittedAccountingScope>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub allocation_mode: Option<String>,
     pub source_financial_high_water: u64,
     pub source_charged_usd_nanos: u64,
     pub source_remaining_cap_usd_nanos: Option<u64>,
@@ -3519,6 +3532,7 @@ pub struct RemoteResumeContextRebind {
     pub target_state_root: Option<PathBuf>,
     pub source_credential_profile_id: String,
     pub credential_reservation: CredentialGenerationReservation,
+    pub target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3545,6 +3559,7 @@ pub struct WorkerPlacementAdmissionEvidence {
     pub target_persistent_session_capsules: BTreeMap<String, String>,
     pub target_execution_realization_hash: String,
     pub credential_reservation: CredentialGenerationReservation,
+    pub target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
     pub project_rebind: ProjectAuthorityRebind,
     pub accounting: AccountingConservation,
     pub target_launch_capsule_hash: String,
@@ -3575,6 +3590,7 @@ impl WorkerPlacementAdmissionEvidence {
         target_persistent_session_capsules: BTreeMap<String, String>,
         target_execution_realization_hash: String,
         credential_reservation: CredentialGenerationReservation,
+        target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
         project_rebind: ProjectAuthorityRebind,
         accounting: AccountingConservation,
         target_launch_capsule_hash: String,
@@ -3602,6 +3618,7 @@ impl WorkerPlacementAdmissionEvidence {
             target_persistent_session_capsules,
             target_execution_realization_hash,
             credential_reservation,
+            target_operator_authority,
             project_rebind,
             accounting,
             target_launch_capsule_hash,
@@ -3651,6 +3668,12 @@ impl WorkerPlacementAdmissionEvidence {
             &self.target_persistent_session_capsules,
         )?;
         self.credential_reservation.validate()?;
+        self.target_operator_authority.validate()?;
+        if self.target_operator_authority.owner_principal != self.owner_principal
+            || self.target_operator_authority.origin_site_id != self.origin_site_id
+        {
+            bail!("worker placement target operator authority contradicts its owner or origin");
+        }
         self.project_rebind.validate()?;
         self.accounting.validate()?;
         Ok(())
@@ -3698,7 +3721,6 @@ pub struct PreparedPlacementRuntimeSeed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedPlacementTransferManifest {
     pub object: ryeos_state::objects::PlacementTransferManifest,
-    pub source_launch_metadata_bytes: Vec<u8>,
 }
 
 impl PreparedPlacementTransferManifest {
@@ -3722,21 +3744,7 @@ pub fn prepare_placement_transfer_manifest(
     checkpoint_manifest_hash: &str,
     project_candidate_snapshot_hash: &str,
     source_launch_capsule_hash: &str,
-    source_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
 ) -> anyhow::Result<PreparedPlacementTransferManifest> {
-    source_launch_metadata.validate()?;
-    let value = serde_json::to_value(source_launch_metadata)
-        .context("serialize source placement launch metadata")?;
-    let canonical = lillux::canonical_json(&value)
-        .context("canonicalize source placement launch metadata")?
-        .into_bytes();
-    let size = u64::try_from(canonical.len()).context("source launch metadata size overflow")?;
-    if size == 0 || size > ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES {
-        bail!(
-            "source placement launch metadata is {size} bytes; maximum is {}",
-            ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES
-        );
-    }
     let object = ryeos_state::objects::PlacementTransferManifest::new(
         operation_id.to_owned(),
         owner_principal.to_owned(),
@@ -3751,13 +3759,8 @@ pub fn prepare_placement_transfer_manifest(
         checkpoint_manifest_hash.to_owned(),
         project_candidate_snapshot_hash.to_owned(),
         source_launch_capsule_hash.to_owned(),
-        lillux::sha256_hex(&canonical),
-        size,
     )?;
-    Ok(PreparedPlacementTransferManifest {
-        object,
-        source_launch_metadata_bytes: canonical,
-    })
+    Ok(PreparedPlacementTransferManifest { object })
 }
 
 impl PreparedPlacementRuntimeSeed {
@@ -3807,90 +3810,8 @@ pub fn prepare_placement_runtime_seed(
     })
 }
 
-impl ResumeContext {
-    /// Derive the complete target-node resume ledger for one cross-site worker
-    /// adoption. Every field starts as an exact source copy and only the
-    /// substitutions represented by `RemoteResumeContextRebind` are applied.
-    /// The ordinary continuation validator remains unchanged and therefore
-    /// continues to reject every site or project-endpoint change.
-    pub fn for_remote_worker_adoption(
-        &self,
-        rebind: &RemoteResumeContextRebind,
-    ) -> anyhow::Result<Self> {
-        rebind.validate_against_source(self)?;
-        let mut target = self.clone();
-        target.parameters = rebind_credential_profile_parameter(
-            &self.parameters,
-            &rebind.source_credential_profile_id,
-            &rebind.credential_reservation.profile_id,
-        )?;
-        target.project_context = rebind.target_project_context.clone();
-        target.project_authority = rebind.target_project_authority.clone();
-        target.stable_project_identity = rebind.target_stable_project_identity.clone();
-        target.local_overlay_root = rebind.target_local_overlay_root.clone();
-        target.original_snapshot_hash = rebind.target_original_snapshot_hash.clone();
-        target.original_pushed_head_ref = rebind.target_original_pushed_head_ref.clone();
-        target.state_root = rebind.target_state_root.clone();
-        target.current_site_id = rebind.target_site_id.clone();
-        target.validate_remote_worker_adoption_from(self, rebind)?;
-        Ok(target)
-    }
-
-    pub fn validate_remote_worker_adoption_from(
-        &self,
-        source: &Self,
-        rebind: &RemoteResumeContextRebind,
-    ) -> anyhow::Result<()> {
-        rebind.validate_against_source(source)?;
-        let mut expected = source.clone();
-        expected.parameters = rebind_credential_profile_parameter(
-            &source.parameters,
-            &rebind.source_credential_profile_id,
-            &rebind.credential_reservation.profile_id,
-        )?;
-        expected.project_context = rebind.target_project_context.clone();
-        expected.project_authority = rebind.target_project_authority.clone();
-        expected.stable_project_identity = rebind.target_stable_project_identity.clone();
-        expected.local_overlay_root = rebind.target_local_overlay_root.clone();
-        expected.original_snapshot_hash = rebind.target_original_snapshot_hash.clone();
-        expected.original_pushed_head_ref = rebind.target_original_pushed_head_ref.clone();
-        expected.state_root = rebind.target_state_root.clone();
-        expected.current_site_id = rebind.target_site_id.clone();
-        if self != &expected {
-            bail!(
-                "remote worker resume authority changed outside its typed site, project, and credential rebind"
-            );
-        }
-        if self.principal_identifier() != rebind.credential_reservation.owner_principal {
-            bail!("target credential reservation is not owned by the session principal");
-        }
-        self.authoritative_project_identity()?;
-        Ok(())
-    }
-}
-
 impl RemoteResumeContextRebind {
-    fn validate_against_source(&self, source: &ResumeContext) -> anyhow::Result<()> {
-        for (label, site) in [
-            ("source site", self.source_site_id.as_str()),
-            ("target site", self.target_site_id.as_str()),
-        ] {
-            label_value(label, site)?;
-        }
-        if self.source_site_id == self.target_site_id
-            || source.current_site_id != self.source_site_id
-            || source.origin_site_id.is_empty()
-        {
-            bail!("remote resume rebind does not describe the exact source-to-target site change");
-        }
-        label_value(
-            "source credential profile",
-            &self.source_credential_profile_id,
-        )?;
-        self.credential_reservation.validate()?;
-        if source.principal_identifier() != self.credential_reservation.owner_principal {
-            bail!("credential reservation owner differs from the source session owner");
-        }
+    pub(crate) fn validate_target_project_authority(&self) -> anyhow::Result<()> {
         self.target_project_authority.validate()?;
         match (&self.target_project_authority, &self.target_project_context) {
             (
@@ -3915,7 +3836,7 @@ impl RemoteResumeContextRebind {
     }
 }
 
-fn rebind_credential_profile_parameter(
+pub(crate) fn rebind_credential_profile_parameter(
     source: &serde_json::Value,
     expected_source_profile: &str,
     target_profile: &str,
@@ -3944,6 +3865,7 @@ fn rebind_credential_profile_parameter(
 pub fn chain_writer_transition_from_placement(
     placement: &WorkerPlacementAdmissionEvidence,
     placement_attestation_hash: String,
+    source_accounting_transfer_hash: Option<String>,
     source_node_signer_fingerprint: String,
     target_node_signer_fingerprint: String,
 ) -> ryeos_state::objects::ChainWriterTransitionEvidence {
@@ -3961,6 +3883,7 @@ pub fn chain_writer_transition_from_placement(
         source_last_event_hash: placement.source_last_event_hash.clone(),
         successor_placement_thread_id: placement.successor_placement_thread_id.clone(),
         placement_attestation_hash,
+        source_accounting_transfer_hash,
         transition_subject_hash: placement.target_launch_capsule_hash.clone(),
         target_node_signer_fingerprint,
     }
@@ -3971,21 +3894,43 @@ pub fn chain_writer_transition_from_placement(
 /// the execution closure remain exact except for named, independently
 /// re-admitted persistent-session capsules. Node-local project, credential,
 /// realization, and accounting changes must agree with the typed placement
-/// evidence and the exact target resume ledger.
-#[allow(clippy::too_many_arguments)]
+/// evidence and the target-authored runtime seed's exact resume ledger.
 pub fn validate_cross_site_capsule_transition(
     source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
-    source_resume: &ResumeContext,
     target_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
     target_resume: &ResumeContext,
-    resume_rebind: &RemoteResumeContextRebind,
     placement: &WorkerPlacementAdmissionEvidence,
     cas: &lillux::CasStore,
 ) -> anyhow::Result<()> {
-    source_capsule.validate()?;
-    target_capsule.validate()?;
+    source_capsule.validate_durable_handoff_eligibility()?;
+    target_capsule.validate_durable_handoff_eligibility()?;
     placement.validate()?;
-    target_resume.validate_remote_worker_adoption_from(source_resume, resume_rebind)?;
+    let source_request =
+        crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+            source_capsule,
+        )?;
+    let resume_rebind = RemoteResumeContextRebind {
+        source_site_id: placement.source_site_id.clone(),
+        target_site_id: placement.target_site_id.clone(),
+        target_project_context: target_resume.project_context.clone(),
+        target_project_authority: target_resume.project_authority.clone(),
+        target_stable_project_identity: target_resume.stable_project_identity.clone(),
+        target_local_overlay_root: target_resume.local_overlay_root.clone(),
+        target_original_snapshot_hash: target_resume.original_snapshot_hash.clone(),
+        target_original_pushed_head_ref: target_resume.original_pushed_head_ref.clone(),
+        target_state_root: target_resume.state_root.clone(),
+        source_credential_profile_id: source_request.worker_credential_profile_id()?.to_owned(),
+        credential_reservation: placement.credential_reservation.clone(),
+        target_operator_authority: placement.target_operator_authority.clone(),
+    };
+    let (expected_target_resume, expected_target_request) =
+        crate::thread_lifecycle::SealedRootExecutionRequest::for_remote_worker_adoption_from_capsule(
+            source_capsule,
+            &resume_rebind,
+        )?;
+    if target_resume != &expected_target_resume {
+        bail!("target resume authority differs from the capsule-derived remote rebind");
+    }
     if !source_capsule.same_cross_site_continuation_program_admission(target_capsule)? {
         bail!("target capsule changed immutable portable worker admission");
     }
@@ -3993,7 +3938,6 @@ pub fn validate_cross_site_capsule_transition(
         || target_capsule.exact_program_hash != placement.outer_exact_program_hash
         || target_capsule.execution_realization_hash != placement.target_execution_realization_hash
         || target_capsule.content_hash()? != placement.target_launch_capsule_hash
-        || source_capsule.project_authority != source_resume.project_authority
         || target_capsule.project_authority != target_resume.project_authority
         || target_capsule.project_authority != placement.project_rebind.target_authority
         || target_capsule.accounting_scope != placement.accounting.target_scope
@@ -4001,26 +3945,17 @@ pub fn validate_cross_site_capsule_transition(
     {
         bail!("placement evidence contradicts its source or target launch capsule");
     }
-    if placement.owner_principal != source_resume.principal_identifier()
-        || placement.owner_principal != target_resume.principal_identifier()
-        || placement.origin_site_id != source_resume.origin_site_id
+    if placement.owner_principal != target_resume.principal_identifier()
         || placement.origin_site_id != target_resume.origin_site_id
-        || placement.source_site_id != source_resume.current_site_id
+        || placement.source_site_id != resume_rebind.source_site_id
         || placement.target_site_id != target_resume.current_site_id
         || placement.credential_reservation != resume_rebind.credential_reservation
+        || placement.target_operator_authority != resume_rebind.target_operator_authority
     {
         bail!("placement evidence contradicts the exact owner/site resume transition");
     }
 
-    let source_request: crate::thread_lifecycle::SealedRootExecutionRequest =
-        serde_json::from_value(source_capsule.sealed_invocation.clone())
-            .context("decode source sealed invocation for remote transition")?;
-    let expected_target = source_request.for_remote_worker_adoption_invocation(
-        source_resume,
-        target_resume,
-        resume_rebind,
-    )?;
-    if serde_json::to_value(expected_target)? != target_capsule.sealed_invocation {
+    if serde_json::to_value(expected_target_request)? != target_capsule.sealed_invocation {
         bail!("target capsule invocation differs outside its typed remote rebind");
     }
 
@@ -4307,6 +4242,7 @@ pub fn build_target_accounting_conservation(
         return Ok(AccountingConservation {
             source_scope: None,
             target_scope: None,
+            allocation_mode: None,
             source_financial_high_water: 0,
             source_charged_usd_nanos: 0,
             source_remaining_cap_usd_nanos: None,
@@ -4332,12 +4268,13 @@ pub fn build_target_accounting_conservation(
     let conservation = AccountingConservation {
         source_scope: Some(source.source_scope.clone()),
         target_scope: Some(target_scope),
+        allocation_mode: Some(source.allocation_mode.clone()),
         source_financial_high_water: source.financial_high_water,
         source_charged_usd_nanos: source.charged_usd_nanos,
         source_remaining_cap_usd_nanos: source.remaining_cap_usd_nanos,
-        target_cap_usd_nanos: source.remaining_cap_usd_nanos,
+        target_cap_usd_nanos: source.target_cap_usd_nanos,
         source_remaining_directive_cap_usd_nanos: source.remaining_directive_cap_usd_nanos,
-        target_directive_cap_usd_nanos: source.remaining_directive_cap_usd_nanos,
+        target_directive_cap_usd_nanos: source.target_directive_cap_usd_nanos,
     };
     conservation.validate()?;
     Ok(conservation)
@@ -4388,7 +4325,8 @@ impl AccountingConservation {
             scope.validate()?;
         }
         if self.source_scope.is_none()
-            && (self.source_financial_high_water != 0
+            && (self.allocation_mode.is_some()
+                || self.source_financial_high_water != 0
                 || self.source_charged_usd_nanos != 0
                 || self.source_remaining_cap_usd_nanos.is_some()
                 || self.target_cap_usd_nanos.is_some()
@@ -4397,13 +4335,17 @@ impl AccountingConservation {
         {
             bail!("accounting-free handoff carries financial authority");
         }
-        match (
-            self.source_remaining_cap_usd_nanos,
-            self.target_cap_usd_nanos,
-        ) {
-            (Some(source), Some(target)) if target <= source => {}
-            (None, None) => {}
-            _ => bail!("target accounting cap must be present and no larger than source remainder"),
+        if self.source_scope.is_none() {
+            return Ok(());
+        }
+        let target_execution = self
+            .target_cap_usd_nanos
+            .ok_or_else(|| anyhow::anyhow!("target accounting cap is not finite"))?;
+        if self
+            .source_remaining_cap_usd_nanos
+            .is_some_and(|source_execution| target_execution > source_execution)
+        {
+            bail!("target accounting cap exceeds source remainder");
         }
         let has_directive_scope = self
             .source_scope
@@ -4419,17 +4361,41 @@ impl AccountingConservation {
         {
             bail!("accounting handoff cannot create or discard a directive budget scope");
         }
-        match (
-            has_directive_scope,
-            self.source_remaining_directive_cap_usd_nanos,
-            self.target_directive_cap_usd_nanos,
-        ) {
-            (true, Some(source), Some(target)) if target <= source => {}
-            (true, None, None) => {}
-            (false, None, None) => {}
-            _ => bail!(
-                "target directive cap must be present and no larger than the source directive remainder"
-            ),
+        match self.allocation_mode.as_deref() {
+            Some("exclusive_execution") => {
+                if has_directive_scope
+                    || self.source_remaining_directive_cap_usd_nanos.is_some()
+                    || self.target_directive_cap_usd_nanos.is_some()
+                {
+                    bail!("exclusive accounting handoff carries directive authority");
+                }
+                let source_execution = self
+                    .source_remaining_cap_usd_nanos
+                    .ok_or_else(|| anyhow::anyhow!("source accounting remainder is not finite"))?;
+                if target_execution != source_execution {
+                    bail!("exclusive accounting handoff does not move the complete remainder");
+                }
+            }
+            Some("directive_slice") => {
+                let source_directive = self
+                    .source_remaining_directive_cap_usd_nanos
+                    .ok_or_else(|| anyhow::anyhow!("source directive remainder is not finite"))?;
+                let target_directive = self
+                    .target_directive_cap_usd_nanos
+                    .ok_or_else(|| anyhow::anyhow!("target directive cap is not finite"))?;
+                let expected = self
+                    .source_remaining_cap_usd_nanos
+                    .map_or(source_directive, |execution| {
+                        execution.min(source_directive)
+                    });
+                if !has_directive_scope
+                    || target_execution != target_directive
+                    || target_directive != expected
+                {
+                    bail!("directive accounting handoff does not conserve its finite allowance");
+                }
+            }
+            _ => bail!("accounted handoff has no canonical allocation mode"),
         }
         Ok(())
     }
@@ -4549,8 +4515,9 @@ mod tests {
         AccountingConservation {
             source_scope: None,
             target_scope: None,
-            source_financial_high_water: 4,
-            source_charged_usd_nanos: 5,
+            allocation_mode: None,
+            source_financial_high_water: 0,
+            source_charged_usd_nanos: 0,
             source_remaining_cap_usd_nanos: None,
             target_cap_usd_nanos: None,
             source_remaining_directive_cap_usd_nanos: None,
@@ -4629,11 +4596,48 @@ mod tests {
             execution_budget_id: "budget:b".into(),
             directive_budget_id: None,
         });
+        value.allocation_mode = Some("exclusive_execution".into());
         value.source_remaining_cap_usd_nanos = Some(10);
         value.target_cap_usd_nanos = Some(11);
         assert!(value.validate().is_err());
         value.target_cap_usd_nanos = Some(10);
         assert!(value.validate().is_ok());
+
+        value.source_remaining_cap_usd_nanos = None;
+        value.target_cap_usd_nanos = None;
+        assert!(
+            value.validate().is_err(),
+            "accounted handoff must be finite"
+        );
+
+        value.source_remaining_cap_usd_nanos = Some(10);
+        value.target_cap_usd_nanos = Some(10);
+        value.allocation_mode = Some("directive_slice".into());
+        assert!(
+            value.validate().is_err(),
+            "allocation mode must match scopes"
+        );
+
+        value.allocation_mode = Some("exclusive_execution".into());
+        value.source_scope.as_mut().unwrap().directive_budget_id = Some("directive:a".into());
+        value.target_scope.as_mut().unwrap().directive_budget_id = Some("directive:b".into());
+        value.source_remaining_directive_cap_usd_nanos = Some(5);
+        value.target_directive_cap_usd_nanos = Some(5);
+        assert!(
+            value.validate().is_err(),
+            "exclusive transfer cannot carry a directive"
+        );
+    }
+
+    #[test]
+    fn accounting_requires_explicit_nullable_allocation_mode() {
+        let mut value = serde_json::to_value(accounting()).unwrap();
+        value.as_object_mut().unwrap().remove("allocation_mode");
+        let error = serde_json::from_value::<AccountingConservation>(value).unwrap_err();
+        assert!(
+            error.to_string().contains("allocation_mode"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -4645,10 +4649,13 @@ mod tests {
                 execution_budget_id: "budget:source".into(),
                 directive_budget_id: Some("directive:source".into()),
             },
+            allocation_mode: "directive_slice".into(),
             financial_high_water: 9,
             charged_usd_nanos: 3,
             remaining_cap_usd_nanos: Some(17),
             remaining_directive_cap_usd_nanos: Some(11),
+            target_cap_usd_nanos: Some(11),
+            target_directive_cap_usd_nanos: Some(11),
         };
         let conservation = build_target_accounting_conservation(
             Some(&frontier),
@@ -4972,10 +4979,9 @@ mod tests {
     }
 
     fn preflight_request() -> WorkerPlacementPreflightRequest {
-        let source_launch_metadata = serde_json::json!({"schema":1});
         WorkerPlacementPreflightRequest {
             preflight_id: "1".repeat(64),
-            owner_principal: "fp:owner".into(),
+            owner_principal: format!("fp:{}", "e".repeat(64)),
             chain_root_id: "T-root".into(),
             origin_site_id: "site:a".into(),
             source_site_id: "site:a".into(),
@@ -4985,12 +4991,6 @@ mod tests {
             source_chain_head_hash: "2".repeat(64),
             source_last_event_hash: "3".repeat(64),
             source_launch_capsule_hash: "4".repeat(64),
-            source_launch_metadata_blob_hash: lillux::sha256_hex(
-                lillux::canonical_json(&source_launch_metadata)
-                    .unwrap()
-                    .as_bytes(),
-            ),
-            source_launch_metadata,
             target_project_path: "/target/project".into(),
             project_route_digest: "5".repeat(64),
             target_credential_profile_id: "profile-target".into(),
@@ -5013,6 +5013,14 @@ mod tests {
             "c".repeat(64),
             "d".repeat(64),
             3,
+            crate::operator_authority::AdmittedOperatorAuthority {
+                owner_principal: request.owner_principal.clone(),
+                origin_site_id: request.origin_site_id.clone(),
+                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                grant_digest: "e".repeat(64),
+                scopes: vec!["*".to_owned()],
+            },
+            None,
         )
         .unwrap()
     }
@@ -5021,7 +5029,25 @@ mod tests {
     fn preflight_receipt_is_target_key_and_request_bound() {
         let request = preflight_request();
         request.validate().unwrap();
+        let mut predecessor = serde_json::to_value(&request).unwrap();
+        predecessor
+            .as_object_mut()
+            .unwrap()
+            .insert("source_launch_metadata".into(), serde_json::json!({}));
+        assert!(serde_json::from_value::<WorkerPlacementPreflightRequest>(predecessor).is_err());
         let evidence = preflight_evidence(&request);
+        let mut missing_owner_anchor = serde_json::to_value(&evidence).unwrap();
+        missing_owner_anchor
+            .as_object_mut()
+            .unwrap()
+            .remove("target_chain_owner_anchor_hash");
+        let error =
+            serde_json::from_value::<WorkerPlacementPreflightEvidence>(missing_owner_anchor)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("target_chain_owner_anchor_hash"),
+            "unexpected error: {error}"
+        );
         let target = PreflightTestSigner::new();
         let attestation = evidence.sign_attestation(&target).unwrap();
         let mut response = WorkerPlacementPreflightResponse {
@@ -5164,38 +5190,29 @@ mod tests {
                 subject_contract_digest: "3".repeat(64),
                 subject_digest: "4".repeat(64),
             },
+            target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
+                owner_principal: format!("fp:{}", "e".repeat(64)),
+                origin_site_id: "site:a".into(),
+                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                grant_digest: "5".repeat(64),
+                scopes: vec!["*".into()],
+            },
         }
     }
 
     #[test]
-    fn remote_resume_rebind_changes_only_typed_local_authorities() {
+    fn remote_resume_rebind_requires_exact_target_project_authority() {
         let source = source_resume();
         let rebind = remote_rebind();
-        let target = source.for_remote_worker_adoption(&rebind).unwrap();
-        assert_eq!(target.current_site_id, "site:b");
-        assert_eq!(
-            target.parameters["credential_profile_id"],
-            serde_json::json!("target-profile")
-        );
-        target
-            .validate_remote_worker_adoption_from(&source, &rebind)
-            .unwrap();
-
-        let mut drifted = target;
-        drifted.effective_caps.push("node.admin".into());
-        assert!(
-            drifted
-                .validate_remote_worker_adoption_from(&source, &rebind)
-                .is_err()
-        );
+        rebind.validate_target_project_authority().unwrap();
 
         let mut snapshot_only = remote_rebind();
         snapshot_only.target_project_context = ProjectContext::SnapshotHash {
             hash: "2".repeat(64),
         };
         assert!(
-            source
-                .for_remote_worker_adoption(&snapshot_only)
+            snapshot_only
+                .validate_target_project_authority()
                 .unwrap_err()
                 .to_string()
                 .contains("exact admitted target workspace path")

@@ -13,6 +13,7 @@
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
+//!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
@@ -101,6 +102,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "reset", "policy-generation"],
+        summary: "Replace an obsolete node-policy generation",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "policy-apply"],
         summary: "Validate and install a node-owned policy",
         category: "maintenance",
@@ -184,6 +190,10 @@ pub async fn try_dispatch(
             run_node_external_content_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
+            run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("node", Some("policy-apply")) => {
             run_node_policy_apply_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
@@ -202,6 +212,91 @@ pub async fn try_dispatch(
         }
         _ => Ok(false),
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset policy-generation",
+    about = "Replace an obsolete node-policy generation from a trusted init profile",
+    long_about = "Explicitly replace one complete stopped-node policy generation that the current registry can no longer decode. The trusted publisher-signed init profile selects the prospective exact bundle inventory; bundle installation and policy publication occur in the same locked init transaction. Node identity, credentials, execution history, project heads, and other state are preserved.",
+    no_binary_name = true
+)]
+struct NodePolicyGenerationResetArgs {
+    /// Publisher-signed source root containing `.ai/node/init/profiles/`.
+    #[arg(long, default_value = "/usr/share/ryeos")]
+    source: PathBuf,
+
+    /// Exact publisher-signed profile to install (for example `full`).
+    #[arg(long)]
+    node_profile: String,
+
+    /// Additional publisher trust doc(s) needed to verify the replacement
+    /// profile and selected source bundles.
+    #[arg(long = "trust-file", action = clap::ArgAction::Append)]
+    trust_files: Vec<PathBuf>,
+
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that current custom node policy is retired.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+impl NodePolicyGenerationResetArgs {
+    fn validate(&self) -> Result<()> {
+        if !self.confirm {
+            anyhow::bail!("replacing the complete node-policy generation requires --confirm");
+        }
+        ryeos_app::node_policy::generation::validate_init_profile_name(&self.node_profile)
+            .context("validate node init profile name")
+    }
+}
+
+fn run_node_policy_generation_reset_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodePolicyGenerationResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    args.validate()?;
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node location for policy-generation reset")?;
+    let report = ryeos_node::run_init(&ryeos_node::InitOptions {
+        app_root: config.app_root,
+        source_dir: args.source,
+        trust_files: args.trust_files,
+        node_profile: Some(args.node_profile.clone()),
+        replace_node_policy_generation: true,
+        skip_preflight: false,
+    })
+    .context("replace node policy generation in locked initialization")?;
+
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": "replaced",
+            "node_profile": args.node_profile,
+            "app_root": report.app_root,
+            "node_fingerprint": report.node_key_fingerprint,
+            "bundles": report.bundles_installed,
+        }))?;
+    } else {
+        console.text(&format!(
+            "Node policy generation and exact bundle inventory replaced from trusted profile `{}`: {}\n",
+            args.node_profile,
+            report.app_root.display()
+        ))?;
+    }
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -279,6 +374,12 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         &_state_lock,
     )
     .context("atomically publish signed node policy generation")?;
+    ryeos_node::seal_init_completion_after_policy_update(
+        &config.app_root,
+        update.generation().digest(),
+        &_state_lock,
+    )
+    .context("commit updated node policy generation into initialized state")?;
     let installed = policy_dir.join(format!("{}.yaml", args.section));
 
     if args.json {
@@ -768,6 +869,18 @@ struct InitArgs {
     #[arg(long)]
     node_profile: Option<String>,
 
+    /// Replace an existing complete policy generation from --node-profile in
+    /// this same stopped-node init transaction.
+    #[arg(
+        long,
+        requires_all = ["node_profile", "confirm_node_policy_generation_replacement"]
+    )]
+    replace_node_policy_generation: bool,
+
+    /// Required acknowledgement for --replace-node-policy-generation.
+    #[arg(long, requires = "replace_node_policy_generation")]
+    confirm_node_policy_generation_replacement: bool,
+
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
@@ -790,6 +903,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: args.node_profile,
+        replace_node_policy_generation: args.replace_node_policy_generation,
         skip_preflight: false,
     };
 
@@ -1918,6 +2032,27 @@ mod tests {
             dry_run,
             json: false,
         }
+    }
+
+    fn policy_generation_reset_args(confirm: bool) -> NodePolicyGenerationResetArgs {
+        NodePolicyGenerationResetArgs {
+            source: PathBuf::from("/usr/share/ryeos"),
+            node_profile: "full".to_string(),
+            trust_files: Vec::new(),
+            app_root: None,
+            confirm,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn policy_generation_schema_cut_requires_explicit_confirmation() {
+        assert!(policy_generation_reset_args(false).validate().is_err());
+        assert!(policy_generation_reset_args(true).validate().is_ok());
+
+        let mut invalid = policy_generation_reset_args(true);
+        invalid.node_profile = "../full".to_string();
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

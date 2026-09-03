@@ -479,6 +479,7 @@ pub(super) async fn terminate(
         state,
         &request.thread_id,
         &request.reason,
+        None,
     )
     .await
 }

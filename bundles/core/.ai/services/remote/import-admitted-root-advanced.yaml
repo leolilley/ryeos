@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:17Z:bbe107dfccb9ed6d36dedb8193038321e647cbcadd0e7340a6046e0420012592:G2z4+HSDozwoUDWQvjMbOiJqZrjTB6sZSGpPiQjpB/0bRsM9JoB1zuZzbkwQJxXMWeuUvKGSj04cXDTi65/XBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:19ebe0f769aac09dddf06e0dfb312b678011814dbfc86218dab8895ad76addce:fhjw9Cu+88OdZngJWSyFixYx+o0dXzPqzZFBX5dw3Ous7KIp2Px80CEGYCUSGj7kFtOgCXWLx2V/zkoGyIA7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.import-admitted-root-advanced
 required_caps: ["ryeos.execute.service.remote/admin"]
@@ -17,4 +17,4 @@ schema:
   max_total_blob_bytes: number?
   max_response_bytes: number?
   max_links_per_object: number?
-description: "Advanced escape hatch: import a remotely admitted CAS root by hash using pinned trust; prefer remote.import-admitted-head"
+description: "Advanced escape hatch: import a remotely admitted CAS root by hash within node object_closure policy using pinned trust; prefer remote.import-admitted-head"

@@ -433,6 +433,8 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
 /// installed. Any registered bundle contributes its kinds and items.
 pub fn verify_initialized(config: &Config) -> Result<()> {
     ryeos_node::require_initialized(&config.app_root)?;
+    ryeos_node::verify_init_completion(&config.app_root)?
+        .context("node has no complete signed initialization transaction")?;
 
     if !config.node_signing_key_path.exists() {
         tracing::warn!("no node signing key found — signed items will fail to verify");

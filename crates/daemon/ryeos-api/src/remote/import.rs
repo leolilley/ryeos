@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
+use serde_json::Value;
 
 use crate::remote::client::{
-    AdmissionAttestationRemoteRecord, ObjectsClosureRequestOptions, RemoteClient,
+    AdmissionAttestationRemoteRecord, NodeAdmittedObjectsClosureRequestOptions, RemoteClient,
 };
 use ryeos_app::state::AppState;
 use ryeos_state::object_closure::ObjectClosureLimits;
@@ -31,7 +32,7 @@ pub struct VerifiedRemoteImportRequest {
     pub expected_attestation_hash: Option<String>,
     pub source_peer: Option<String>,
     pub job_id: Option<String>,
-    pub closure_options: ObjectsClosureRequestOptions,
+    pub closure_options: NodeAdmittedObjectsClosureRequestOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -267,8 +268,10 @@ pub async fn import_admitted_root(
     )?;
 
     let closure_options = req.closure_options.clone();
+    let attestation_entry = attestation_sync_entry(attestation)?;
+    let fetch_options = closure_options.reserving_supplemental_entry(&attestation_entry)?;
     let closure = client
-        .objects_closure_get(std::slice::from_ref(&req.subject_hash), req.closure_options)
+        .objects_closure_get(std::slice::from_ref(&req.subject_hash), fetch_options)
         .await?;
     let mut payload = closure_response_to_export_payload(
         &format!("remote-admission:{}", req.subject_hash),
@@ -285,7 +288,7 @@ pub async fn import_admitted_root(
             req.subject_hash
         );
     }
-    append_attestation_entry(&mut payload, attestation)?;
+    append_admitted_supplemental_entry(&mut payload, attestation_entry, closure_options.limits())?;
 
     let attribution = ImportAttribution {
         source_principal: Some(req.expected_issuer.clone()),
@@ -349,22 +352,17 @@ pub async fn import_admitted_root(
 fn verify_local_imported_closure(
     cas: &lillux::CasStore,
     subject_hash: &str,
-    options: &ObjectsClosureRequestOptions,
+    options: &NodeAdmittedObjectsClosureRequestOptions,
 ) -> Result<()> {
-    let defaults = ObjectClosureLimits::default();
+    let admitted = options.limits();
     let limits = ObjectClosureLimits {
-        max_objects: options.max_objects.unwrap_or(defaults.max_objects),
-        max_blobs: options.max_blobs.unwrap_or(defaults.max_blobs),
-        max_object_bytes: options
-            .max_object_bytes
-            .unwrap_or(defaults.max_object_bytes),
-        max_blob_bytes: options.max_blob_bytes.unwrap_or(defaults.max_blob_bytes),
-        max_total_blob_bytes: options
-            .max_total_blob_bytes
-            .unwrap_or(defaults.max_total_blob_bytes),
-        max_links_per_object: options
-            .max_links_per_object
-            .unwrap_or(defaults.max_links_per_object),
+        max_objects: admitted.max_objects,
+        max_blobs: admitted.max_blobs,
+        max_object_bytes: admitted.max_object_bytes,
+        max_total_object_bytes: admitted.max_total_object_bytes,
+        max_blob_bytes: admitted.max_blob_bytes,
+        max_total_blob_bytes: admitted.max_total_blob_bytes,
+        max_links_per_object: admitted.max_links_per_object,
     };
     let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         cas,
@@ -380,11 +378,11 @@ fn verify_local_imported_closure(
             report.unsupported_objects.len(),
         );
     }
-    if report.blob_hashes.len() > options.max_blobs.unwrap_or(defaults.max_blobs) {
+    if report.blob_hashes.len() > admitted.max_blobs {
         anyhow::bail!(
             "imported remote closure exceeds max_blobs after local verification: {} > {}",
             report.blob_hashes.len(),
-            options.max_blobs.unwrap_or(defaults.max_blobs),
+            admitted.max_blobs,
         );
     }
     Ok(())
@@ -512,17 +510,7 @@ pub fn closure_response_to_export_payload(
     })
 }
 
-fn append_attestation_entry(
-    payload: &mut ExportPayload,
-    attestation: &AdmissionAttestationRemoteRecord,
-) -> Result<()> {
-    if payload
-        .entries
-        .iter()
-        .any(|entry| !entry.is_blob && entry.hash == attestation.attestation_hash)
-    {
-        return Ok(());
-    }
+fn attestation_sync_entry(attestation: &AdmissionAttestationRemoteRecord) -> Result<SyncEntry> {
     let data = lillux::canonical_json(&attestation.attestation)?.into_bytes();
     let actual = lillux::sha256_hex(&data);
     if actual != attestation.attestation_hash {
@@ -532,12 +520,97 @@ fn append_attestation_entry(
             actual
         );
     }
-    payload.total_bytes = payload.total_bytes.saturating_add(data.len());
-    payload.entries.push(SyncEntry {
+    Ok(SyncEntry {
         hash: attestation.attestation_hash.clone(),
         is_blob: false,
         data,
-    });
+    })
+}
+
+/// Add one already semantically verified supplemental object/blob to a staged
+/// remote payload without stepping outside the same node-admitted resource
+/// contract as the fetched closure.
+pub(crate) fn append_admitted_supplemental_entry(
+    payload: &mut ExportPayload,
+    entry: SyncEntry,
+    limits: &ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
+) -> Result<()> {
+    if let Some(existing) = payload
+        .entries
+        .iter()
+        .find(|candidate| candidate.hash == entry.hash)
+    {
+        if existing.is_blob != entry.is_blob || existing.data != entry.data {
+            anyhow::bail!("supplemental entry contradicts an existing staged hash");
+        }
+        return Ok(());
+    }
+    if !is_canonical_hash(&entry.hash) || lillux::sha256_hex(&entry.data) != entry.hash {
+        anyhow::bail!("supplemental entry has an invalid content identity");
+    }
+    let entry_bytes = u64::try_from(entry.data.len()).context("supplemental size exceeds u64")?;
+    let same_kind_count = payload
+        .entries
+        .iter()
+        .filter(|candidate| candidate.is_blob == entry.is_blob)
+        .count();
+    let (max_count, max_entry_bytes, max_total_bytes, label) = if entry.is_blob {
+        (
+            limits.max_blobs,
+            limits.max_blob_bytes,
+            limits.max_total_blob_bytes,
+            "blob",
+        )
+    } else {
+        let value: Value =
+            serde_json::from_slice(&entry.data).context("supplemental object is not JSON")?;
+        if lillux::canonical_json(&value)?.as_bytes() != entry.data.as_slice() {
+            anyhow::bail!("supplemental object is not canonical JSON");
+        }
+        let link_count = ryeos_state::object_closure::object_link_count(&value)
+            .map_err(|error| anyhow::anyhow!("invalid supplemental object: {error}"))?;
+        let Some(link_count) = link_count else {
+            anyhow::bail!("unsupported supplemental object kind");
+        };
+        if link_count > limits.max_links_per_object {
+            anyhow::bail!("supplemental object exceeds admitted link count");
+        }
+        (
+            limits.max_objects,
+            limits.max_object_bytes,
+            limits.max_total_object_bytes,
+            "object",
+        )
+    };
+    if same_kind_count >= max_count {
+        anyhow::bail!("supplemental {label} exceeds admitted count");
+    }
+    if entry_bytes > max_entry_bytes {
+        anyhow::bail!("supplemental {label} exceeds admitted per-entry bytes");
+    }
+    let existing_kind_bytes = payload
+        .entries
+        .iter()
+        .filter(|candidate| candidate.is_blob == entry.is_blob)
+        .try_fold(0_u64, |total, candidate| {
+            total
+                .checked_add(
+                    u64::try_from(candidate.data.len()).context("staged size exceeds u64")?,
+                )
+                .context("staged supplemental byte count overflow")
+        })?;
+    if existing_kind_bytes
+        .checked_add(entry_bytes)
+        .context("staged supplemental byte count overflow")?
+        > max_total_bytes
+    {
+        anyhow::bail!("supplemental {label} exceeds admitted aggregate bytes");
+    }
+    payload.total_bytes = payload
+        .total_bytes
+        .checked_add(entry.data.len())
+        .context("staged payload byte count overflow")?;
+    payload.entries.push(entry);
     Ok(())
 }
 

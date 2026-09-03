@@ -56,14 +56,14 @@ use crate::accounting_anchor::{AccountingAnchor, AnchorAgreement, genesis_chain_
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
-const ACCOUNTING_SCHEMA_VERSION: i32 = 1;
+const ACCOUNTING_SCHEMA_VERSION: i32 = 2;
 pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
 const CREDENTIAL_BINDING_KEY_FILENAME: &str = "accounting.credential-binding-key";
 const CREDENTIAL_BINDING_KEY_LEN: usize = 32;
 
-const SCHEMA_SQL: &str = r#"
+const SCHEMA_V1_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA user_version=1;
@@ -226,6 +226,70 @@ CREATE TABLE launch_accounting_gate (
     PRIMARY KEY (thread_id, launch_generation)
 );
 "#;
+
+const SCHEMA_V2_SQL: &str = r#"
+CREATE TABLE launch_accounting_scope_binding (
+    thread_id TEXT NOT NULL,
+    launch_generation TEXT NOT NULL,
+    directive_budget_id TEXT,
+    PRIMARY KEY (thread_id, launch_generation),
+    FOREIGN KEY (thread_id, launch_generation)
+        REFERENCES launch_accounting_gate(thread_id, launch_generation)
+);
+
+CREATE INDEX idx_gate_directive_owner
+    ON launch_accounting_scope_binding(directive_budget_id, thread_id)
+    WHERE directive_budget_id IS NOT NULL;
+
+CREATE TABLE accounting_handoff_transfer (
+    operation_id TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    source_budget_authority_site_id TEXT NOT NULL,
+    source_ledger_epoch INTEGER NOT NULL,
+    source_chain_root_id TEXT NOT NULL,
+    source_placement_thread_id TEXT NOT NULL UNIQUE,
+    source_execution_budget_id TEXT NOT NULL,
+    source_directive_budget_id TEXT UNIQUE,
+    financial_sequence INTEGER NOT NULL UNIQUE,
+    financial_chain_digest TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE accounting_handoff_debit (
+    operation_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    account_kind TEXT NOT NULL CHECK (account_kind IN ('execution', 'directive_item')),
+    scope_id TEXT NOT NULL,
+    amount_usd_nanos INTEGER CHECK (amount_usd_nanos IS NULL OR amount_usd_nanos >= 0),
+    PRIMARY KEY (operation_id, account_id),
+    FOREIGN KEY (operation_id) REFERENCES accounting_handoff_transfer(operation_id),
+    FOREIGN KEY (account_id) REFERENCES budget_account(account_id)
+);
+
+CREATE INDEX idx_handoff_debit_account ON accounting_handoff_debit(account_id);
+
+CREATE TABLE accounting_handoff_import (
+    operation_id TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    source_scope_json TEXT NOT NULL,
+    target_scope_json TEXT NOT NULL,
+    target_execution_budget_id TEXT NOT NULL UNIQUE,
+    target_directive_budget_id TEXT UNIQUE,
+    target_cap_usd_nanos INTEGER CHECK (target_cap_usd_nanos IS NULL OR target_cap_usd_nanos >= 0),
+    target_directive_cap_usd_nanos INTEGER CHECK (target_directive_cap_usd_nanos IS NULL OR target_directive_cap_usd_nanos >= 0),
+    source_transfer_hash TEXT,
+    state TEXT NOT NULL CHECK (state IN ('prepared', 'active', 'aborted', 'closed')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+PRAGMA user_version=2;
+"#;
+
+fn current_schema_sql() -> String {
+    format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}")
+}
 
 const fn col(
     name: &'static str,
@@ -408,6 +472,58 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("updated_at_ms", "INTEGER", false, true),
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "launch_accounting_scope_binding",
+                columns: &[
+                    col("thread_id", "TEXT", true, true),
+                    col("launch_generation", "TEXT", true, true),
+                    col("directive_budget_id", "TEXT", false, false),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "accounting_handoff_transfer",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("request_digest", "TEXT", false, true),
+                    col("source_budget_authority_site_id", "TEXT", false, true),
+                    col("source_ledger_epoch", "INTEGER", false, true),
+                    col("source_chain_root_id", "TEXT", false, true),
+                    col("source_placement_thread_id", "TEXT", false, true),
+                    col("source_execution_budget_id", "TEXT", false, true),
+                    col("source_directive_budget_id", "TEXT", false, false),
+                    col("financial_sequence", "INTEGER", false, true),
+                    col("financial_chain_digest", "TEXT", false, true),
+                    col("response_json", "TEXT", false, true),
+                    col("created_at_ms", "INTEGER", false, true),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "accounting_handoff_debit",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("account_id", "TEXT", true, true),
+                    col("account_kind", "TEXT", false, true),
+                    col("scope_id", "TEXT", false, true),
+                    col("amount_usd_nanos", "INTEGER", false, false),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "accounting_handoff_import",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("request_digest", "TEXT", false, true),
+                    col("source_scope_json", "TEXT", false, true),
+                    col("target_scope_json", "TEXT", false, true),
+                    col("target_execution_budget_id", "TEXT", false, true),
+                    col("target_directive_budget_id", "TEXT", false, false),
+                    col("target_cap_usd_nanos", "INTEGER", false, false),
+                    col("target_directive_cap_usd_nanos", "INTEGER", false, false),
+                    col("source_transfer_hash", "TEXT", false, false),
+                    col("state", "TEXT", false, true),
+                    col("created_at_ms", "INTEGER", false, true),
+                    col("updated_at_ms", "INTEGER", false, true),
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -444,6 +560,18 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_outbox_attempt",
                 table: "accounting_audit_outbox",
                 columns: &["attempt_id", "transition_sequence"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_gate_directive_owner",
+                table: "launch_accounting_scope_binding",
+                columns: &["directive_budget_id", "thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_handoff_debit_account",
+                table: "accounting_handoff_debit",
+                columns: &["account_id"],
                 unique: false,
             },
         ],
@@ -583,10 +711,70 @@ pub struct ActiveReservationStats {
 #[serde(deny_unknown_fields)]
 pub struct AccountingHandoffFrontier {
     pub source_scope: ryeos_state::objects::AdmittedAccountingScope,
+    pub allocation_mode: String,
     pub financial_high_water: u64,
     pub charged_usd_nanos: u64,
     pub remaining_cap_usd_nanos: Option<u64>,
     pub remaining_directive_cap_usd_nanos: Option<u64>,
+    pub target_cap_usd_nanos: Option<u64>,
+    pub target_directive_cap_usd_nanos: Option<u64>,
+}
+
+impl AccountingHandoffFrontier {
+    /// Validate the complete peer-supplied accounting frontier. Source-ledger
+    /// construction performs the same checks, but target admission must not
+    /// rely on a peer having used that constructor.
+    pub fn validate(&self) -> Result<()> {
+        self.source_scope.validate()?;
+        let target_cap = self
+            .target_cap_usd_nanos
+            .ok_or_else(|| anyhow::anyhow!("accounting handoff target cap is not finite"))?;
+        if self
+            .remaining_cap_usd_nanos
+            .is_some_and(|execution_available| target_cap > execution_available)
+        {
+            bail!("accounting handoff target cap exceeds source execution availability");
+        }
+        match self.allocation_mode.as_str() {
+            "exclusive_execution" => {
+                if self.source_scope.directive_budget_id.is_some()
+                    || self.remaining_directive_cap_usd_nanos.is_some()
+                    || self.target_directive_cap_usd_nanos.is_some()
+                {
+                    bail!("exclusive accounting handoff carries directive authority");
+                }
+                let execution_available = self.remaining_cap_usd_nanos.ok_or_else(|| {
+                    anyhow::anyhow!("exclusive accounting handoff allowance is not finite")
+                })?;
+                if target_cap != execution_available {
+                    bail!("exclusive accounting handoff does not move the complete remainder");
+                }
+            }
+            "directive_slice" => {
+                if self.source_scope.directive_budget_id.is_none() {
+                    bail!("directive accounting handoff has no directive scope");
+                }
+                let directive_available =
+                    self.remaining_directive_cap_usd_nanos.ok_or_else(|| {
+                        anyhow::anyhow!("accounting handoff directive allowance is not finite")
+                    })?;
+                let target_directive_cap =
+                    self.target_directive_cap_usd_nanos.ok_or_else(|| {
+                        anyhow::anyhow!("accounting handoff target directive cap is not finite")
+                    })?;
+                let expected = self
+                    .remaining_cap_usd_nanos
+                    .map_or(directive_available, |execution| {
+                        execution.min(directive_available)
+                    });
+                if target_cap != target_directive_cap || target_directive_cap != expected {
+                    bail!("directive accounting handoff does not conserve its finite allowance");
+                }
+            }
+            _ => bail!("accounting handoff has an unknown allocation mode"),
+        }
+        Ok(())
+    }
 }
 
 /// Account health as stored (`healthy` / `violated`).
@@ -742,11 +930,13 @@ fn reservation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reservation
 #[derive(Debug, Clone)]
 struct AccountRecord {
     account_id: String,
+    execution_budget_id: String,
     root_chain_id: String,
     state: String,
     limit_nanos: Option<i64>,
     committed_nanos: i64,
     held_nanos: i64,
+    transferred_out_nanos: i64,
     health: String,
 }
 
@@ -812,6 +1002,39 @@ fn canonical_fingerprint(value: &serde_json::Value) -> Result<String> {
     Ok(lillux::cas::sha256_hex(
         canonical_json_string(value)?.as_bytes(),
     ))
+}
+
+fn optional_usd_nanos(value: Option<u64>) -> Result<Option<UsdNanos>> {
+    value
+        .map(|value| {
+            i64::try_from(value)
+                .context("accounting allowance exceeds fixed-point range")
+                .and_then(|value| UsdNanos::from_nanos(value).map_err(Into::into))
+        })
+        .transpose()
+}
+
+fn min_optional_allowance(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn frontier_from_transfer(
+    transfer: &ryeos_state::objects::AccountingAllowanceTransfer,
+) -> AccountingHandoffFrontier {
+    AccountingHandoffFrontier {
+        source_scope: transfer.source_scope.clone(),
+        allocation_mode: transfer.allocation_mode.clone(),
+        financial_high_water: transfer.source_financial_high_water_before,
+        charged_usd_nanos: transfer.source_charged_usd_nanos,
+        remaining_cap_usd_nanos: transfer.source_execution_available_before_usd_nanos,
+        remaining_directive_cap_usd_nanos: transfer.source_directive_available_before_usd_nanos,
+        target_cap_usd_nanos: transfer.target_cap_usd_nanos,
+        target_directive_cap_usd_nanos: transfer.target_directive_cap_usd_nanos,
+    }
 }
 
 /// `H(previous_digest, financial_sequence, transition_fingerprint)`.
@@ -1126,20 +1349,68 @@ impl AccountingDb {
                 Ok(())
             }
             AnchorAction::Cover { sequence } => {
-                let record = self
-                    .anchor
-                    .read_valid()
-                    .context("financial anchor unreadable while confirming replay coverage")?;
-                if record.financial_high_water < sequence {
+                let verified = (|| -> Result<()> {
+                    if !self.hard_admission_enabled() {
+                        bail!(
+                            "hard-budget admission is disabled; recorded financial operations \
+                             cannot be acknowledged"
+                        );
+                    }
+                    let record = self
+                        .anchor
+                        .read_valid()
+                        .context("financial anchor unreadable while confirming replay coverage")?;
+                    if record.budget_authority_site_id != self.site_id
+                        || record.ledger_epoch != self.epoch
+                        || record.financial_high_water < sequence
+                    {
+                        bail!(
+                            "financial anchor does not cover recorded sequence {sequence} in the current ledger epoch"
+                        );
+                    }
+                    let expected_anchor_digest = if record.financial_high_water == 0 {
+                        genesis_chain_digest(&self.site_id, self.epoch)
+                    } else {
+                        conn.query_row(
+                            "SELECT chain_digest FROM financial_transition_commitment
+                             WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                               AND financial_sequence = ?3",
+                            rusqlite::params![
+                                self.site_id,
+                                self.epoch_i64(),
+                                i64::try_from(record.financial_high_water)?,
+                            ],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "financial anchor names a sequence absent from the ledger chain"
+                            )
+                        })?
+                    };
+                    if expected_anchor_digest != record.financial_chain_digest {
+                        bail!("financial anchor digest diverges from the retained ledger chain");
+                    }
+                    conn.execute(
+                        "UPDATE ledger_financial_sequence
+                         SET anchored_financial_sequence = ?1,
+                             anchored_financial_chain_digest = ?2
+                         WHERE budget_authority_site_id = ?3 AND ledger_epoch = ?4
+                           AND anchored_financial_sequence < ?1",
+                        rusqlite::params![
+                            i64::try_from(record.financial_high_water)?,
+                            record.financial_chain_digest,
+                            self.site_id,
+                            self.epoch_i64(),
+                        ],
+                    )?;
+                    Ok(())
+                })();
+                if verified.is_err() {
                     self.disable_hard_admission();
-                    bail!(
-                        "financial anchor covers sequence {} but the recorded operation \
-                         requires {}; hard admission is disabled",
-                        record.financial_high_water,
-                        sequence
-                    );
                 }
-                Ok(())
+                verified
             }
         }
     }
@@ -1326,6 +1597,7 @@ impl AccountingDb {
             thread_id,
             launch_generation,
             execution_budget_id,
+            None,
             audit_chain_root_id,
             None,
         )
@@ -1336,6 +1608,7 @@ impl AccountingDb {
         thread_id: &str,
         launch_generation: &str,
         execution_budget_id: &str,
+        directive_budget_id: Option<&str>,
         audit_chain_root_id: &str,
         credential_binding_digest: Option<&str>,
     ) -> Result<()> {
@@ -1352,6 +1625,8 @@ impl AccountingDb {
                 if gate.execution_budget_id != execution_budget_id
                     || gate.audit_chain_root_id != audit_chain_root_id
                     || gate.credential_binding_digest.as_deref() != credential_binding_digest
+                    || self.load_gate_scope_binding(&conn, thread_id, launch_generation)?
+                        != Some(directive_budget_id.map(str::to_owned))
                 {
                     bail!(
                         "launch accounting gate {thread_id}/{launch_generation} is already open \
@@ -1417,6 +1692,38 @@ impl AccountingDb {
                     account.state
                 );
             }
+            if let Some(directive_budget_id) = directive_budget_id {
+                let conflicting_owner: Option<String> = conn
+                    .query_row(
+                        "SELECT thread_id FROM launch_accounting_scope_binding
+                         WHERE directive_budget_id = ?1 AND thread_id != ?2
+                         LIMIT 1",
+                        rusqlite::params![directive_budget_id, thread_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(owner) = conflicting_owner {
+                    bail!(
+                        "directive budget account {directive_budget_id} is already bound to thread {owner}"
+                    );
+                }
+                let directive = self
+                    .load_account(&conn, "directive_item", directive_budget_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "directive budget account {directive_budget_id} is absent; the launch gate fails closed"
+                        )
+                    })?;
+                if directive.execution_budget_id != execution_budget_id
+                    || directive.root_chain_id != account.root_chain_id
+                    || directive.state != "active"
+                    || directive.health != "healthy"
+                {
+                    bail!(
+                        "directive budget account {directive_budget_id} is not active, healthy, and owned by execution {execution_budget_id}"
+                    );
+                }
+            }
             conn.execute(
                 "INSERT INTO launch_accounting_gate (
                     thread_id, launch_generation, budget_authority_site_id, ledger_epoch,
@@ -1435,6 +1742,13 @@ impl AccountingDb {
                 ],
             )
             .context("insert open launch accounting gate")?;
+            conn.execute(
+                "INSERT INTO launch_accounting_scope_binding (
+                    thread_id, launch_generation, directive_budget_id
+                ) VALUES (?1, ?2, ?3)",
+                rusqlite::params![thread_id, launch_generation, directive_budget_id],
+            )
+            .context("bind launch accounting gate to its directive scope")?;
             Ok(())
         })
     }
@@ -1840,6 +2154,11 @@ impl AccountingDb {
                 args.execution_budget_id
             );
         }
+        if self.load_gate_scope_binding(conn, args.thread_id, args.launch_generation)?
+            != Some(args.directive_budget_id.map(str::to_owned))
+        {
+            bail!("launch gate directive scope differs from the reservation authority");
+        }
         if gate.audit_chain_root_id != args.audit_chain_root_id {
             bail!(
                 "launch gate binds audit chain {} but reserve names {}",
@@ -2204,7 +2523,8 @@ impl AccountingDb {
             account.limit_nanos.is_some_and(|limit| {
                 (i128::from(limit)
                     - i128::from(account.committed_nanos)
-                    - i128::from(account.held_nanos))
+                    - i128::from(account.held_nanos)
+                    - i128::from(account.transferred_out_nanos))
                     < i128::from(maximum_nanos)
             })
         });
@@ -3870,112 +4190,618 @@ impl AccountingDb {
             .collect()
     }
 
-    /// Prove that one placement has no unsettled or unpublished provider
-    /// attempt and return the exact remaining execution/directive allowances
-    /// at the currently fsynced financial anchor.
+    /// Return the exact, non-authorizing allowance proposal for a target
+    /// placement. If this operation was already exported, return its retained
+    /// pre-export proposal so recovery can resume without reopening source
+    /// allowance.
     pub fn handoff_frontier(
         &self,
+        operation_id: &str,
         placement_thread_id: &str,
+        chain_root_id: &str,
         scope: &ryeos_state::objects::AdmittedAccountingScope,
     ) -> Result<AccountingHandoffFrontier> {
         scope.validate()?;
+        let conn = self.lock_conn()?;
+        if let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? {
+            if transfer.source_placement_thread_id != placement_thread_id
+                || transfer.source_chain_root_id != chain_root_id
+                || transfer.source_scope != *scope
+            {
+                bail!("retained accounting export belongs to another handoff source");
+            }
+            self.resolve_anchor_action(
+                &conn,
+                AnchorAction::Cover {
+                    sequence: transfer.source_financial_sequence,
+                },
+            )?;
+            return Ok(frontier_from_transfer(&transfer));
+        }
+        immediate_transaction(&conn, "source handoff admission fence", || {
+            let open_generations = {
+                let mut stmt = conn.prepare(
+                    "SELECT launch_generation FROM launch_accounting_gate
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND thread_id = ?3 AND state = 'open'
+                     ORDER BY launch_generation",
+                )?;
+                let generations = stmt
+                    .query_map(
+                        rusqlite::params![self.site_id, self.epoch_i64(), placement_thread_id],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                generations
+            };
+            let now_ms = wall_clock_ms();
+            for generation in open_generations {
+                self.fence_generation_in_tx(
+                    &conn,
+                    placement_thread_id,
+                    &generation,
+                    ReconciliationReason::OwnerGenerationFenced,
+                    now_ms,
+                )?;
+            }
+            self.handoff_frontier_in_tx(&conn, placement_thread_id, chain_root_id, scope)
+        })
+    }
+
+    /// Confirm that the source thread's durable terminal/continuation fact now
+    /// covers every launch-generation fence created while measuring its
+    /// handoff frontier. A crash before this acknowledgement is repaired by
+    /// startup reconciliation from the already-terminal source thread.
+    pub fn confirm_handoff_source_publication(&self, placement_thread_id: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let now_ms = wall_clock_ms();
+        immediate_transaction(&conn, "source handoff publication confirmation", || {
+            conn.execute(
+                "UPDATE launch_accounting_gate
+                 SET terminal_publication_due = 0, updated_at_ms = ?1
+                 WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3
+                   AND thread_id = ?4 AND state = 'fenced'
+                   AND terminal_publication_due = 1",
+                rusqlite::params![now_ms, self.site_id, self.epoch_i64(), placement_thread_id,],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn handoff_frontier_in_tx(
+        &self,
+        conn: &Connection,
+        placement_thread_id: &str,
+        chain_root_id: &str,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+    ) -> Result<AccountingHandoffFrontier> {
+        if !self.hard_admission_enabled() {
+            bail!("hard-budget admission is disabled; refusing a fresh allowance transfer");
+        }
         let (site_id, ledger_epoch) = self.site_identity();
         if scope.budget_authority_site_id != site_id || scope.ledger_epoch != ledger_epoch {
             bail!("handoff accounting scope is not owned by this ledger epoch");
         }
-        if self
-            .nonterminal_reservations()?
-            .iter()
-            .any(|(_, thread_id, _, _)| thread_id == placement_thread_id)
-        {
-            bail!("handoff placement has an unsettled provider attempt");
-        }
-        if self.unpublished_outbox_for_thread(placement_thread_id)? != 0 {
-            bail!("handoff placement has unpublished provider-attempt testimony");
-        }
-        let accounts = self.account_snapshot(&scope.execution_budget_id)?;
-        let execution = accounts
-            .iter()
-            .find(|account| {
-                account.account_kind == "execution" && account.scope_id == scope.execution_budget_id
-            })
+        let execution = self
+            .load_account(conn, "execution", &scope.execution_budget_id)?
             .ok_or_else(|| anyhow::anyhow!("handoff execution accounting scope is absent"))?;
-        if execution.state != "active"
-            || execution.health != AuthorityAccountHealth::Healthy
-            || execution.held.as_nanos() != 0
+        let directive = scope
+            .directive_budget_id
+            .as_deref()
+            .map(|id| self.load_account(conn, "directive_item", id))
+            .transpose()?
+            .flatten();
+        if execution.state != "active" || execution.health != "healthy" || execution.held_nanos != 0
         {
             bail!("handoff execution accounting scope is not settled and healthy");
         }
-        let charged = u64::try_from(execution.committed.as_nanos())
-            .context("handoff execution charge is negative")?;
-        let remaining = execution
-            .limit
-            .map(|limit| {
-                let limit = u64::try_from(limit.as_nanos())
-                    .context("handoff execution limit is negative")?;
-                limit.checked_sub(charged).ok_or_else(|| {
-                    anyhow::anyhow!("handoff execution charge exceeds its admitted limit")
+        if scope.directive_budget_id.is_some() && directive.is_none() {
+            bail!("handoff directive accounting scope is absent");
+        }
+        if directive.as_ref().is_some_and(|account| {
+            account.execution_budget_id != scope.execution_budget_id
+                || account.root_chain_id != execution.root_chain_id
+        }) {
+            bail!("handoff directive accounting scope belongs to another execution");
+        }
+        if directive.as_ref().is_some_and(|account| {
+            account.state != "active" || account.health != "healthy" || account.held_nanos != 0
+        }) {
+            bail!("handoff directive accounting scope is not settled and healthy");
+        }
+
+        let mut gates = conn.prepare(
+            "SELECT g.launch_generation, g.execution_budget_id, g.state,
+                    b.directive_budget_id, b.thread_id IS NOT NULL
+             FROM launch_accounting_gate g
+             LEFT JOIN launch_accounting_scope_binding b
+               ON b.thread_id = g.thread_id AND b.launch_generation = g.launch_generation
+             WHERE g.budget_authority_site_id = ?1 AND g.ledger_epoch = ?2
+               AND g.thread_id = ?3
+             ORDER BY g.launch_generation",
+        )?;
+        let gates = gates
+            .query_map(
+                rusqlite::params![self.site_id, self.epoch_i64(), placement_thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)? != 0,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if gates.is_empty()
+            || gates
+                .iter()
+                .any(|(_, execution_id, state, directive_id, bound)| {
+                    execution_id != &scope.execution_budget_id
+                        || state != "fenced"
+                        || !bound
+                        || directive_id.as_deref() != scope.directive_budget_id.as_deref()
                 })
-            })
-            .transpose()?;
-        let remaining_directive = match scope.directive_budget_id.as_deref() {
-            Some(directive_budget_id) => {
-                let directive = accounts
-                    .iter()
-                    .find(|account| {
-                        account.account_kind == "directive_item"
-                            && account.scope_id == directive_budget_id
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("handoff directive accounting scope is absent")
-                    })?;
-                if directive.state != "active"
-                    || directive.health != AuthorityAccountHealth::Healthy
-                    || directive.held.as_nanos() != 0
-                {
-                    bail!("handoff directive accounting scope is not settled and healthy");
-                }
-                let directive_charged = u64::try_from(directive.committed.as_nanos())
-                    .context("handoff directive charge is negative")?;
-                directive
-                    .limit
-                    .map(|limit| {
-                        let limit = u64::try_from(limit.as_nanos())
-                            .context("handoff directive limit is negative")?;
-                        limit.checked_sub(directive_charged).ok_or_else(|| {
-                            anyhow::anyhow!("handoff directive charge exceeds its admitted limit")
-                        })
-                    })
-                    .transpose()?
+        {
+            bail!("handoff source gates are not exact, scope-bound, and fenced");
+        }
+
+        let directive_account_id = directive
+            .as_ref()
+            .map(|account| account.account_id.as_str());
+        let mut liabilities = conn.prepare(
+            "SELECT r.state, r.attempt_id, r.charge_unrepresentable,
+                    EXISTS(SELECT 1 FROM accounting_operation o
+                           WHERE o.attempt_id = r.attempt_id
+                             AND o.operation_kind = 'settle'
+                             AND o.transition_sequence = 4),
+                    EXISTS(SELECT 1 FROM provider_accounting_authority_health h
+                           WHERE h.authority_digest = r.authority_digest
+                             AND h.state != 'healthy')
+             FROM provider_attempt_reservation r
+             WHERE EXISTS(
+                 SELECT 1 FROM provider_attempt_debit d
+                 WHERE d.attempt_id = r.attempt_id
+                   AND (d.account_id = ?1 OR d.account_id = ?2))",
+        )?;
+        let liabilities = liabilities
+            .query_map(
+                rusqlite::params![execution.account_id, directive_account_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                        row.get::<_, i64>(3)? != 0,
+                        row.get::<_, i64>(4)? != 0,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if liabilities.iter().any(
+            |(state, _, unrepresentable, late_settled, unhealthy_authority)| {
+                matches!(state.as_str(), "reserved" | "issued")
+                    || (state == "charged_reserved_maximum" && !late_settled)
+                    || *unrepresentable
+                    || *unhealthy_authority
+            },
+        ) {
+            bail!(
+                "handoff allowance has an unsettled, unrepresentable, or quarantined provider liability"
+            );
+        }
+        let unpublished: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM accounting_audit_outbox o
+             WHERE o.published_chain_seq IS NULL AND EXISTS(
+                 SELECT 1 FROM provider_attempt_debit d
+                 WHERE d.attempt_id = o.attempt_id
+                   AND (d.account_id = ?1 OR d.account_id = ?2))",
+            rusqlite::params![execution.account_id, directive_account_id],
+            |row| row.get(0),
+        )?;
+        if unpublished != 0 {
+            bail!("handoff allowance has unpublished provider-attempt testimony");
+        }
+
+        let execution_available = self.account_available(conn, &execution)?;
+        let directive_available = directive
+            .as_ref()
+            .map(|account| self.account_available(conn, account))
+            .transpose()?
+            .flatten();
+        let allocation_mode;
+        let (target_cap, target_directive_cap) = if directive.is_some() {
+            allocation_mode = "directive_slice";
+            let slice = min_optional_allowance(execution_available, directive_available);
+            if slice.is_none() {
+                bail!("shared unbounded accounting authority has no transferable placement slice");
             }
-            None => None,
+            (slice, slice)
+        } else {
+            let other_open: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM launch_accounting_gate
+                 WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                   AND execution_budget_id = ?3 AND thread_id != ?4 AND state = 'open'",
+                rusqlite::params![
+                    self.site_id,
+                    self.epoch_i64(),
+                    scope.execution_budget_id,
+                    placement_thread_id
+                ],
+                |row| row.get(0),
+            )?;
+            if execution.root_chain_id != chain_root_id || other_open != 0 {
+                bail!("shared accounting authority without a directive allocation cannot move");
+            }
+            if execution_available.is_none() {
+                bail!("unbounded execution allowance cannot be conserved across a handoff");
+            }
+            allocation_mode = "exclusive_execution";
+            (execution_available, None)
         };
-        let anchor = self
-            .anchor
-            .read_valid()
-            .context("read financial anchor for worker handoff")?;
+        let anchor = self.anchor.read_valid()?;
         if anchor.budget_authority_site_id != site_id || anchor.ledger_epoch != ledger_epoch {
             bail!("handoff financial anchor belongs to another ledger epoch");
         }
-        Ok(AccountingHandoffFrontier {
+        let frontier = AccountingHandoffFrontier {
             source_scope: scope.clone(),
+            allocation_mode: allocation_mode.to_owned(),
             financial_high_water: anchor.financial_high_water,
-            charged_usd_nanos: charged,
-            remaining_cap_usd_nanos: remaining,
-            remaining_directive_cap_usd_nanos: remaining_directive,
-        })
+            charged_usd_nanos: u64::try_from(execution.committed_nanos)?,
+            remaining_cap_usd_nanos: execution_available,
+            remaining_directive_cap_usd_nanos: directive_available,
+            target_cap_usd_nanos: target_cap,
+            target_directive_cap_usd_nanos: target_directive_cap,
+        };
+        frontier.validate()?;
+        Ok(frontier)
     }
 
-    /// Idempotently create and activate the zero-usage target scope admitted by
-    /// a cross-site placement. The target receives only the non-increasing
-    /// remaining allowance, never the source node's mutable ledger rows.
-    pub fn admit_handoff_target_scope(
+    fn account_available(&self, conn: &Connection, account: &AccountRecord) -> Result<Option<u64>> {
+        let _ = conn;
+        account
+            .limit_nanos
+            .map(|limit| {
+                let available = i128::from(limit)
+                    - i128::from(account.committed_nanos)
+                    - i128::from(account.held_nanos)
+                    - i128::from(account.transferred_out_nanos);
+                u64::try_from(available).context("accounting allowance is overcommitted")
+            })
+            .transpose()
+    }
+
+    fn load_handoff_transfer(
         &self,
+        conn: &Connection,
+        operation_id: &str,
+    ) -> Result<Option<ryeos_state::objects::AccountingAllowanceTransfer>> {
+        let transfer = conn
+            .query_row(
+                "SELECT request_digest, source_budget_authority_site_id, source_ledger_epoch,
+                    source_chain_root_id, source_placement_thread_id,
+                    source_execution_budget_id, source_directive_budget_id,
+                    financial_sequence, financial_chain_digest, response_json
+             FROM accounting_handoff_transfer WHERE operation_id = ?1",
+                rusqlite::params![operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(
+                    request_digest,
+                    source_site,
+                    epoch,
+                    chain,
+                    placement,
+                    execution,
+                    directive,
+                    sequence,
+                    chain_digest,
+                    response,
+                )| {
+                    let transfer: ryeos_state::objects::AccountingAllowanceTransfer =
+                        serde_json::from_str(&response)?;
+                    transfer.validate()?;
+                    if transfer.operation_id != operation_id
+                        || transfer.request_digest != request_digest
+                        || transfer.source_budget_authority_site_id != source_site
+                        || transfer.source_ledger_epoch != u64::try_from(epoch)?
+                        || transfer.source_chain_root_id != chain
+                        || transfer.source_placement_thread_id != placement
+                        || transfer.source_scope.execution_budget_id != execution
+                        || transfer.source_scope.directive_budget_id != directive
+                        || transfer.source_financial_sequence != u64::try_from(sequence)?
+                        || transfer.source_financial_chain_digest != chain_digest
+                    {
+                        bail!("retained accounting handoff transfer contradicts its ledger row");
+                    }
+                    Ok(transfer)
+                },
+            )
+            .transpose()?;
+        if let Some(transfer) = &transfer {
+            let commitment = conn
+                .query_row(
+                    "SELECT transition_kind, transition_fingerprint, chain_digest
+                     FROM financial_transition_commitment
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND financial_sequence = ?3",
+                    rusqlite::params![
+                        self.site_id,
+                        self.epoch_i64(),
+                        i64::try_from(transfer.source_financial_sequence)?,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("accounting handoff transfer has no financial commitment")
+                })?;
+            if commitment.0 != "handoff_allowance_export"
+                || commitment.1 != transfer.request_digest
+                || commitment.2 != transfer.source_financial_chain_digest
+            {
+                bail!("accounting handoff transfer contradicts its financial commitment");
+            }
+        }
+        Ok(transfer)
+    }
+
+    pub fn handoff_allowance_exported(&self, operation_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? else {
+            return Ok(false);
+        };
+        self.resolve_anchor_action(
+            &conn,
+            AnchorAction::Cover {
+                sequence: transfer.source_financial_sequence,
+            },
+        )?;
+        Ok(true)
+    }
+
+    pub fn handoff_allowance_transfer(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<ryeos_state::objects::AccountingAllowanceTransfer>> {
+        let conn = self.lock_conn()?;
+        let transfer = self.load_handoff_transfer(&conn, operation_id)?;
+        if let Some(transfer) = &transfer {
+            self.resolve_anchor_action(
+                &conn,
+                AnchorAction::Cover {
+                    sequence: transfer.source_financial_sequence,
+                },
+            )?;
+        }
+        Ok(transfer)
+    }
+
+    /// Irreversibly debit and anchor the exact target-attested allowance.
+    /// This is the distributed handoff commit point: after success the source
+    /// operation may only finish its writer cut, never abort or refund.
+    pub fn export_handoff_allowance(
+        &self,
+        operation_id: &str,
+        placement_thread_id: &str,
+        chain_root_id: &str,
+        expected: &AccountingHandoffFrontier,
+        target_scope: &ryeos_state::objects::AdmittedAccountingScope,
+    ) -> Result<ryeos_state::objects::AccountingAllowanceTransfer> {
+        expected.validate()?;
+        target_scope.validate()?;
+        let request_digest = canonical_fingerprint(&serde_json::json!({
+            "schema":"ryeos.accounting_handoff_export.v1",
+            "operation_id":operation_id,
+            "source_placement_thread_id":placement_thread_id,
+            "source_chain_root_id":chain_root_id,
+            "source_frontier":expected,
+            "target_scope":target_scope,
+        }))?;
+        let conn = self.lock_conn()?;
+        let (transfer, action) = immediate_transaction(
+            &conn,
+            "source handoff allowance export",
+            || -> Result<_> {
+                if let Some(transfer) = self.load_handoff_transfer(&conn, operation_id)? {
+                    if transfer.request_digest != request_digest {
+                        bail!("accounting handoff operation was replayed with another request");
+                    }
+                    return Ok((
+                        transfer.clone(),
+                        AnchorAction::Cover {
+                            sequence: transfer.source_financial_sequence,
+                        },
+                    ));
+                }
+                if conn
+                    .query_row(
+                        "SELECT operation_id FROM accounting_handoff_transfer
+                         WHERE source_placement_thread_id = ?1",
+                        rusqlite::params![placement_thread_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .is_some()
+                {
+                    bail!("source placement allowance was already exported by another operation");
+                }
+                let current = self.handoff_frontier_in_tx(
+                    &conn,
+                    placement_thread_id,
+                    chain_root_id,
+                    &expected.source_scope,
+                )?;
+                if &current != expected {
+                    bail!("source accounting frontier changed during target preparation");
+                }
+                let execution = self
+                    .load_account(
+                        &conn,
+                        "execution",
+                        &expected.source_scope.execution_budget_id,
+                    )?
+                    .ok_or_else(|| anyhow::anyhow!("source execution account disappeared"))?;
+                let directive = expected
+                    .source_scope
+                    .directive_budget_id
+                    .as_deref()
+                    .map(|id| self.load_account(&conn, "directive_item", id))
+                    .transpose()?
+                    .flatten();
+                let now_ms = wall_clock_ms();
+                let (sequence, chain_digest) = self.commit_financial_transition(
+                    &conn,
+                    "handoff_allowance_export",
+                    None,
+                    None,
+                    &request_digest,
+                    now_ms,
+                )?;
+                let execution_state_after = if expected.allocation_mode == "exclusive_execution" {
+                    "closed"
+                } else {
+                    "active"
+                };
+                let transfer = ryeos_state::objects::AccountingAllowanceTransfer {
+                    kind: ryeos_state::objects::ACCOUNTING_ALLOWANCE_TRANSFER_KIND.to_owned(),
+                    schema: ryeos_state::objects::ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA,
+                    operation_id: operation_id.to_owned(),
+                    request_digest: request_digest.clone(),
+                    source_budget_authority_site_id: self.site_id.clone(),
+                    source_ledger_epoch: self.epoch,
+                    source_chain_root_id: chain_root_id.to_owned(),
+                    source_placement_thread_id: placement_thread_id.to_owned(),
+                    source_scope: expected.source_scope.clone(),
+                    allocation_mode: expected.allocation_mode.clone(),
+                    source_financial_high_water_before: expected.financial_high_water,
+                    source_financial_sequence: sequence,
+                    source_financial_chain_digest: chain_digest.clone(),
+                    source_charged_usd_nanos: expected.charged_usd_nanos,
+                    source_execution_available_before_usd_nanos: expected.remaining_cap_usd_nanos,
+                    source_directive_available_before_usd_nanos: expected
+                        .remaining_directive_cap_usd_nanos,
+                    source_execution_debit_usd_nanos: expected.target_cap_usd_nanos,
+                    source_directive_debit_usd_nanos: expected.target_directive_cap_usd_nanos,
+                    source_execution_state_after: execution_state_after.to_owned(),
+                    source_directive_state_after: directive.as_ref().map(|_| "closed".to_owned()),
+                    target_scope: target_scope.clone(),
+                    target_cap_usd_nanos: expected.target_cap_usd_nanos,
+                    target_directive_cap_usd_nanos: expected.target_directive_cap_usd_nanos,
+                };
+                transfer.validate()?;
+                let response = canonical_json_string(&serde_json::to_value(&transfer)?)?;
+                conn.execute(
+                    "INSERT INTO accounting_handoff_transfer (
+                        operation_id, request_digest, source_budget_authority_site_id, source_ledger_epoch,
+                        source_chain_root_id, source_placement_thread_id,
+                        source_execution_budget_id, source_directive_budget_id,
+                        financial_sequence, financial_chain_digest, response_json, created_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    rusqlite::params![
+                        operation_id,
+                        request_digest,
+                        self.site_id,
+                        self.epoch_i64(),
+                        chain_root_id,
+                        placement_thread_id,
+                        expected.source_scope.execution_budget_id,
+                        expected.source_scope.directive_budget_id,
+                        i64::try_from(sequence)?,
+                        chain_digest,
+                        response,
+                        now_ms,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO accounting_handoff_debit (
+                        operation_id, account_id, account_kind, scope_id, amount_usd_nanos
+                     ) VALUES (?1, ?2, 'execution', ?3, ?4)",
+                    rusqlite::params![
+                        operation_id,
+                        execution.account_id,
+                        expected.source_scope.execution_budget_id,
+                        expected
+                            .target_cap_usd_nanos
+                            .map(i64::try_from)
+                            .transpose()?,
+                    ],
+                )?;
+                if let Some(directive) = directive {
+                    conn.execute(
+                        "INSERT INTO accounting_handoff_debit (
+                            operation_id, account_id, account_kind, scope_id, amount_usd_nanos
+                         ) VALUES (?1, ?2, 'directive_item', ?3, ?4)",
+                        rusqlite::params![
+                            operation_id,
+                            directive.account_id,
+                            expected.source_scope.directive_budget_id,
+                            expected
+                                .target_directive_cap_usd_nanos
+                                .map(i64::try_from)
+                                .transpose()?,
+                        ],
+                    )?;
+                    conn.execute(
+                        "UPDATE budget_account SET state = 'closed', updated_at_ms = ?1
+                         WHERE account_id = ?2 AND state = 'active'",
+                        rusqlite::params![now_ms, directive.account_id],
+                    )?;
+                }
+                if execution_state_after == "closed" {
+                    conn.execute(
+                        "UPDATE budget_account SET state = 'closed', updated_at_ms = ?1
+                         WHERE account_id = ?2 AND state = 'active'",
+                        rusqlite::params![now_ms, execution.account_id],
+                    )?;
+                }
+                Ok((
+                    transfer,
+                    AnchorAction::Advance {
+                        sequence,
+                        digest: chain_digest,
+                    },
+                ))
+            },
+        )?;
+        self.resolve_anchor_action(&conn, action)?;
+        Ok(transfer)
+    }
+
+    /// Journal the target allowance as prepared but not spendable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_handoff_target_scope(
+        &self,
+        operation_id: &str,
+        source_scope: &ryeos_state::objects::AdmittedAccountingScope,
         scope: &ryeos_state::objects::AdmittedAccountingScope,
         root_chain_id: &str,
         execution_cap_usd_nanos: Option<u64>,
         directive_cap_usd_nanos: Option<u64>,
     ) -> Result<()> {
+        source_scope.validate()?;
         scope.validate()?;
         let (site_id, epoch) = self.site_identity();
         if scope.budget_authority_site_id != site_id || scope.ledger_epoch != epoch {
@@ -3984,45 +4810,247 @@ impl AccountingDb {
         if scope.directive_budget_id.is_none() && directive_cap_usd_nanos.is_some() {
             bail!("target handoff directive cap does not match its admitted scope");
         }
-        let execution_cap = execution_cap_usd_nanos
-            .map(|value| {
-                i64::try_from(value)
-                    .context("target execution cap exceeds accounting range")
-                    .and_then(|value| UsdNanos::from_nanos(value).map_err(Into::into))
-            })
-            .transpose()?;
-        self.create_execution_account_prepared(
-            &scope.execution_budget_id,
-            root_chain_id,
-            execution_cap,
-        )?;
-        if let Some(directive_budget_id) = scope.directive_budget_id.as_deref() {
-            let directive_cap = directive_cap_usd_nanos
-                .map(|value| {
-                    i64::try_from(value)
-                        .context("target directive cap exceeds accounting range")
-                        .and_then(|value| UsdNanos::from_nanos(value).map_err(Into::into))
-                })
-                .transpose()?;
-            self.create_directive_account_prepared(
-                &scope.execution_budget_id,
-                directive_budget_id,
-                directive_cap,
-            )?;
+        let execution_cap_usd_nanos = execution_cap_usd_nanos
+            .ok_or_else(|| anyhow::anyhow!("target handoff execution cap is not finite"))?;
+        if scope.directive_budget_id.is_some() != directive_cap_usd_nanos.is_some() {
+            bail!("target handoff directive cap does not match its admitted scope");
         }
-        self.activate_account(
-            &scope.execution_budget_id,
-            "execution",
-            &scope.execution_budget_id,
-        )?;
-        if let Some(directive_budget_id) = scope.directive_budget_id.as_deref() {
-            self.activate_account(
+        let request_digest = canonical_fingerprint(&serde_json::json!({
+            "schema":"ryeos.accounting_handoff_import_prepare.v1",
+            "operation_id":operation_id,
+            "source_scope":source_scope,
+            "target_scope":scope,
+            "root_chain_id":root_chain_id,
+            "target_cap_usd_nanos":execution_cap_usd_nanos,
+            "target_directive_cap_usd_nanos":directive_cap_usd_nanos,
+        }))?;
+        let execution_cap = optional_usd_nanos(Some(execution_cap_usd_nanos))?;
+        let directive_cap = optional_usd_nanos(directive_cap_usd_nanos)?;
+        let source_scope_json = canonical_json_string(&serde_json::to_value(source_scope)?)?;
+        let target_scope_json = canonical_json_string(&serde_json::to_value(scope)?)?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "target handoff allowance preparation", || {
+            if let Some((digest, state)) = conn
+                .query_row(
+                    "SELECT request_digest, state FROM accounting_handoff_import WHERE operation_id = ?1",
+                    rusqlite::params![operation_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+            {
+                if digest != request_digest || !matches!(state.as_str(), "prepared" | "active") {
+                    bail!("target handoff allowance preparation contradicts retained authority");
+                }
+                let execution = self
+                    .load_account(&conn, "execution", &scope.execution_budget_id)?
+                    .ok_or_else(|| anyhow::anyhow!("retained target execution account is absent"))?;
+                if execution.root_chain_id != root_chain_id
+                    || execution.state != state
+                    || execution.limit_nanos != execution_cap.map(UsdNanos::as_nanos)
+                    || execution.committed_nanos != 0
+                    || execution.held_nanos != 0
+                    || execution.transferred_out_nanos != 0
+                    || execution.health != "healthy"
+                {
+                    bail!("retained target execution account changed after preparation");
+                }
+                if let Some(id) = scope.directive_budget_id.as_deref() {
+                    let directive = self
+                        .load_account(&conn, "directive_item", id)?
+                        .ok_or_else(|| anyhow::anyhow!("retained target directive account is absent"))?;
+                    if directive.root_chain_id != root_chain_id
+                        || directive.state != state
+                        || directive.limit_nanos != directive_cap.map(UsdNanos::as_nanos)
+                        || directive.committed_nanos != 0
+                        || directive.held_nanos != 0
+                        || directive.transferred_out_nanos != 0
+                        || directive.health != "healthy"
+                    {
+                        bail!("retained target directive account changed after preparation");
+                    }
+                }
+                return Ok(());
+            }
+            let now_ms = wall_clock_ms();
+            self.create_account_prepared_in_tx(
+                &conn,
                 &scope.execution_budget_id,
-                "directive_item",
-                directive_budget_id,
+                "execution",
+                &scope.execution_budget_id,
+                root_chain_id,
+                execution_cap,
+                now_ms,
             )?;
+            if let Some(directive_budget_id) = scope.directive_budget_id.as_deref() {
+                self.create_account_prepared_in_tx(
+                    &conn,
+                    &scope.execution_budget_id,
+                    "directive_item",
+                    directive_budget_id,
+                    root_chain_id,
+                    directive_cap,
+                    now_ms,
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO accounting_handoff_import (
+                    operation_id, request_digest, source_scope_json, target_scope_json,
+                    target_execution_budget_id, target_directive_budget_id,
+                    target_cap_usd_nanos, target_directive_cap_usd_nanos,
+                    source_transfer_hash, state, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 'prepared', ?9, ?9)",
+                rusqlite::params![
+                    operation_id,
+                    request_digest,
+                    source_scope_json,
+                    target_scope_json,
+                    scope.execution_budget_id,
+                    scope.directive_budget_id,
+                    execution_cap.map(UsdNanos::as_nanos),
+                    directive_cap.map(UsdNanos::as_nanos),
+                    now_ms,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Activate a prepared target scope only after the imported signed
+    /// continuation has supplied the exact anchored source transfer.
+    pub fn accept_handoff_allowance(
+        &self,
+        transfer_hash: &str,
+        transfer: &ryeos_state::objects::AccountingAllowanceTransfer,
+    ) -> Result<()> {
+        transfer.validate()?;
+        if transfer.content_hash()? != transfer_hash {
+            bail!("accounting handoff transfer hash changed");
         }
-        self.validate_handoff_target_scope(scope, execution_cap_usd_nanos, directive_cap_usd_nanos)
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "target handoff allowance activation", || {
+            let retained = conn
+                .query_row(
+                    "SELECT source_scope_json, target_scope_json,
+                            target_cap_usd_nanos, target_directive_cap_usd_nanos,
+                            source_transfer_hash, state
+                     FROM accounting_handoff_import WHERE operation_id = ?1",
+                    rusqlite::params![transfer.operation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| anyhow::anyhow!("target handoff allowance was not prepared"))?;
+            let source_scope: ryeos_state::objects::AdmittedAccountingScope =
+                serde_json::from_str(&retained.0)?;
+            let target_scope: ryeos_state::objects::AdmittedAccountingScope =
+                serde_json::from_str(&retained.1)?;
+            if source_scope != transfer.source_scope
+                || target_scope != transfer.target_scope
+                || retained.2.map(u64::try_from).transpose()? != transfer.target_cap_usd_nanos
+                || retained.3.map(u64::try_from).transpose()?
+                    != transfer.target_directive_cap_usd_nanos
+            {
+                bail!("source accounting transfer differs from target preparation");
+            }
+            match retained.5.as_str() {
+                "active" if retained.4.as_deref() == Some(transfer_hash) => return Ok(()),
+                "active" => bail!("active target allowance names another source transfer"),
+                "prepared" if retained.4.is_none() => {}
+                "prepared" => bail!("prepared target allowance already names a transfer"),
+                "aborted" => bail!("aborted target allowance cannot be activated"),
+                other => bail!("target handoff allowance is {other}; activation refused"),
+            }
+            let now_ms = wall_clock_ms();
+            for (kind, scope_id) in
+                std::iter::once(("execution", target_scope.execution_budget_id.as_str())).chain(
+                    target_scope
+                        .directive_budget_id
+                        .as_deref()
+                        .map(|id| ("directive_item", id)),
+                )
+            {
+                let changed = conn.execute(
+                    "UPDATE budget_account SET state = 'active', updated_at_ms = ?1
+                     WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3
+                       AND execution_budget_id = ?4 AND account_kind = ?5
+                       AND scope_id = ?6 AND state = 'prepared'
+                       AND committed_usd_nanos = 0 AND held_usd_nanos = 0
+                       AND health = 'healthy'",
+                    rusqlite::params![
+                        now_ms,
+                        self.site_id,
+                        self.epoch_i64(),
+                        target_scope.execution_budget_id,
+                        kind,
+                        scope_id,
+                    ],
+                )?;
+                if changed != 1 {
+                    bail!("target accounting account is not exact, prepared, and unused");
+                }
+            }
+            conn.execute(
+                "UPDATE accounting_handoff_import
+                 SET source_transfer_hash = ?1, state = 'active', updated_at_ms = ?2
+                 WHERE operation_id = ?3 AND state = 'prepared'",
+                rusqlite::params![transfer_hash, now_ms, transfer.operation_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Close an unactivated target preparation after signed pre-export abort.
+    pub fn abort_handoff_target_scope(&self, operation_id: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "target handoff allowance abort", || {
+            let Some((execution_id, directive_id, state)) = conn
+                .query_row(
+                    "SELECT target_execution_budget_id, target_directive_budget_id, state
+                     FROM accounting_handoff_import WHERE operation_id = ?1",
+                    rusqlite::params![operation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(());
+            };
+            match state.as_str() {
+                "aborted" => return Ok(()),
+                "prepared" => {}
+                _ => bail!("source allowance was already committed; target abort is forbidden"),
+            }
+            let now_ms = wall_clock_ms();
+            let changed = conn.execute(
+                "UPDATE budget_account SET state = 'closed', updated_at_ms = ?1
+                 WHERE execution_budget_id = ?2 AND state = 'prepared'
+                   AND committed_usd_nanos = 0 AND held_usd_nanos = 0",
+                rusqlite::params![now_ms, execution_id],
+            )?;
+            let expected = usize::from(directive_id.is_some()) + 1;
+            if changed != expected {
+                bail!("target prepared allowance accounts are not exact and unused");
+            }
+            conn.execute(
+                "UPDATE accounting_handoff_import SET state = 'aborted', updated_at_ms = ?1
+                 WHERE operation_id = ?2 AND state = 'prepared'",
+                rusqlite::params![now_ms, operation_id],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn validate_handoff_target_scope(
@@ -4064,6 +5092,119 @@ impl AccountingDb {
         }
     }
 
+    /// Verify the durable target-side import after it has become spendable.
+    /// Unlike preparation validation, this deliberately permits committed or
+    /// held usage accumulated by the attached successor worker. The immutable
+    /// operation, source-transfer, scope, root, and cap bindings remain exact.
+    pub fn validate_accepted_handoff_target_scope(
+        &self,
+        operation_id: &str,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+        root_chain_id: &str,
+        execution_cap_usd_nanos: Option<u64>,
+        directive_cap_usd_nanos: Option<u64>,
+    ) -> Result<()> {
+        self.validate_handoff_target_import(
+            operation_id,
+            scope,
+            root_chain_id,
+            execution_cap_usd_nanos,
+            directive_cap_usd_nanos,
+            false,
+        )
+    }
+
+    /// Verify that an accepted import is still the spendable authority for a
+    /// runnable successor. Historical terminal-receipt replay uses the
+    /// non-runnable validator above because a later handoff may legitimately
+    /// have closed and debited these accounts.
+    pub fn validate_runnable_handoff_target_scope(
+        &self,
+        operation_id: &str,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+        root_chain_id: &str,
+        execution_cap_usd_nanos: Option<u64>,
+        directive_cap_usd_nanos: Option<u64>,
+    ) -> Result<()> {
+        self.validate_handoff_target_import(
+            operation_id,
+            scope,
+            root_chain_id,
+            execution_cap_usd_nanos,
+            directive_cap_usd_nanos,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_handoff_target_import(
+        &self,
+        operation_id: &str,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+        root_chain_id: &str,
+        execution_cap_usd_nanos: Option<u64>,
+        directive_cap_usd_nanos: Option<u64>,
+        require_spendable: bool,
+    ) -> Result<()> {
+        scope.validate()?;
+        let execution_cap = optional_usd_nanos(execution_cap_usd_nanos)?;
+        let directive_cap = optional_usd_nanos(directive_cap_usd_nanos)?;
+        let conn = self.lock_conn()?;
+        let retained = conn
+            .query_row(
+                "SELECT target_scope_json, target_cap_usd_nanos,
+                        target_directive_cap_usd_nanos, source_transfer_hash, state
+                 FROM accounting_handoff_import WHERE operation_id = ?1",
+                rusqlite::params![operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("accepted target handoff allowance is absent"))?;
+        let retained_scope: ryeos_state::objects::AdmittedAccountingScope =
+            serde_json::from_str(&retained.0)?;
+        if retained_scope != *scope
+            || retained.1 != execution_cap.map(UsdNanos::as_nanos)
+            || retained.2 != directive_cap.map(UsdNanos::as_nanos)
+            || retained.3.is_none()
+            || retained.4 != "active"
+        {
+            bail!("accepted target handoff allowance differs from retained import authority");
+        }
+        let expected_account = |kind: &str, id: &str, cap: Option<UsdNanos>| -> Result<()> {
+            let account = self
+                .load_account(&conn, kind, id)?
+                .ok_or_else(|| anyhow::anyhow!("accepted target accounting account is absent"))?;
+            let valid_state = if require_spendable {
+                account.state == "active" && account.transferred_out_nanos == 0
+            } else {
+                matches!(account.state.as_str(), "active" | "closed")
+            };
+            if account.execution_budget_id != scope.execution_budget_id
+                || account.root_chain_id != root_chain_id
+                || account.limit_nanos != cap.map(UsdNanos::as_nanos)
+                || account.health != "healthy"
+                || !valid_state
+            {
+                bail!("accepted target accounting account differs from imported authority");
+            }
+            Ok(())
+        };
+        expected_account("execution", &scope.execution_budget_id, execution_cap)?;
+        match scope.directive_budget_id.as_deref() {
+            Some(id) => expected_account("directive_item", id, directive_cap),
+            None if directive_cap.is_none() => Ok(()),
+            None => bail!("accepted target scope omits its admitted directive account"),
+        }
+    }
+
     /// Verify SQLite integrity, per-account debit aggregates, the financial
     /// transition hash chain, and external-anchor agreement, then set the
     /// in-memory hard-admission flag accordingly. `DbAhead` recovers by
@@ -4078,6 +5219,19 @@ impl AccountingDb {
             .context("run accounting integrity check")?;
         if integrity != "ok" {
             reasons.push(format!("sqlite integrity check failed: {integrity}"));
+        }
+        let unbound_open_gates: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM launch_accounting_gate g
+             LEFT JOIN launch_accounting_scope_binding b
+               ON b.thread_id = g.thread_id AND b.launch_generation = g.launch_generation
+             WHERE g.state = 'open' AND b.thread_id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if unbound_open_gates != 0 {
+            reasons.push(format!(
+                "{unbound_open_gates} predecessor launch gate(s) lack current directive-scope authority"
+            ));
         }
 
         // Per-account invariants: sum of debit holds == held and sum of
@@ -4107,11 +5261,107 @@ impl AccountingDb {
                 debit_sums.insert(account_id, (held, committed));
             }
         }
+        let handoff_integrity = (|| -> Result<()> {
+            let mut stmt = conn.prepare(
+                "SELECT operation_id, request_digest, financial_sequence,
+                        financial_chain_digest, response_json
+                 FROM accounting_handoff_transfer ORDER BY operation_id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (operation_id, request_digest, sequence, chain_digest, response) in rows {
+                let transfer: ryeos_state::objects::AccountingAllowanceTransfer =
+                    serde_json::from_str(&response)?;
+                transfer.validate()?;
+                if transfer.operation_id != operation_id
+                    || transfer.request_digest != request_digest
+                    || transfer.source_financial_sequence != u64::try_from(sequence)?
+                    || transfer.source_financial_chain_digest != chain_digest
+                {
+                    bail!("accounting handoff transfer row contradicts its receipt");
+                }
+                let committed: (String, String, String) = conn.query_row(
+                    "SELECT transition_kind, transition_fingerprint, chain_digest
+                     FROM financial_transition_commitment
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND financial_sequence = ?3",
+                    rusqlite::params![self.site_id, self.epoch_i64(), sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                if committed
+                    != (
+                        "handoff_allowance_export".to_owned(),
+                        request_digest,
+                        chain_digest,
+                    )
+                {
+                    bail!("accounting handoff transfer is not its anchored financial transition");
+                }
+                let mut debit_stmt = conn.prepare(
+                    "SELECT account_kind, scope_id, amount_usd_nanos
+                     FROM accounting_handoff_debit WHERE operation_id = ?1
+                     ORDER BY account_kind, scope_id",
+                )?;
+                let debits = debit_stmt
+                    .query_map(rusqlite::params![operation_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let expected_execution = transfer
+                    .source_execution_debit_usd_nanos
+                    .map(i64::try_from)
+                    .transpose()?;
+                if !debits.iter().any(|(kind, scope, amount)| {
+                    kind == "execution"
+                        && scope == &transfer.source_scope.execution_budget_id
+                        && *amount == expected_execution
+                }) {
+                    bail!("accounting handoff execution debit is absent or changed");
+                }
+                match transfer.source_scope.directive_budget_id.as_deref() {
+                    Some(scope_id)
+                        if debits.iter().any(|(kind, scope, amount)| {
+                            kind == "directive_item"
+                                && scope == scope_id
+                                && *amount
+                                    == transfer
+                                        .source_directive_debit_usd_nanos
+                                        .map(i64::try_from)
+                                        .transpose()
+                                        .ok()
+                                        .flatten()
+                        }) => {}
+                    None if debits.len() == 1 => {}
+                    _ => bail!("accounting handoff directive debit is absent or changed"),
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = handoff_integrity {
+            reasons.push(format!("handoff transfer integrity failed: {error:#}"));
+        }
         let mut prepared_accounts = Vec::new();
         {
             let mut stmt = conn
                 .prepare(
-                    "SELECT account_id, scope_id, state, committed_usd_nanos, held_usd_nanos
+                    "SELECT account_id, scope_id, state, limit_usd_nanos,
+                            committed_usd_nanos, held_usd_nanos,
+                            COALESCE((SELECT SUM(amount_usd_nanos)
+                                      FROM accounting_handoff_debit d
+                                      WHERE d.account_id = budget_account.account_id), 0)
                      FROM budget_account
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                      ORDER BY account_id",
@@ -4123,14 +5373,16 @@ impl AccountingDb {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<i64>>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 })
                 .context("scan account invariants")?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context("collect account invariants")?;
-            for (account_id, scope_id, state, committed, held) in rows {
+            for (account_id, scope_id, state, limit, committed, held, transferred) in rows {
                 if state == "prepared" {
                     prepared_accounts.push(scope_id.clone());
                 }
@@ -4145,6 +5397,19 @@ impl AccountingDb {
                     reasons.push(format!(
                         "account {scope_id}: debit commitments sum {debit_committed} != \
                          committed {committed}"
+                    ));
+                }
+                if state == "prepared" && transferred != 0 {
+                    reasons.push(format!(
+                        "prepared account {scope_id} carries exported allowance"
+                    ));
+                }
+                if limit.is_some_and(|limit| {
+                    i128::from(committed) + i128::from(held) + i128::from(transferred)
+                        > i128::from(limit)
+                }) {
+                    reasons.push(format!(
+                        "account {scope_id}: committed + held + transferred exceeds limit"
                     ));
                 }
             }
@@ -4378,6 +5643,22 @@ fn certificate_expiry_ms(authority: &ProviderAccountingAuthority) -> Option<i64>
 }
 
 impl AccountingDb {
+    fn load_gate_scope_binding(
+        &self,
+        conn: &Connection,
+        thread_id: &str,
+        launch_generation: &str,
+    ) -> Result<Option<Option<String>>> {
+        conn.query_row(
+            "SELECT directive_budget_id FROM launch_accounting_scope_binding
+             WHERE thread_id = ?1 AND launch_generation = ?2",
+            rusqlite::params![thread_id, launch_generation],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("load launch accounting directive binding")
+    }
+
     fn load_gate(
         &self,
         conn: &Connection,
@@ -4410,8 +5691,12 @@ impl AccountingDb {
         scope_id: &str,
     ) -> Result<Option<AccountRecord>> {
         conn.query_row(
-            "SELECT account_id, root_chain_id, state, limit_usd_nanos, committed_usd_nanos,
-                    held_usd_nanos, health
+            "SELECT account_id, execution_budget_id, root_chain_id, state,
+                    limit_usd_nanos, committed_usd_nanos,
+                    held_usd_nanos,
+                    COALESCE((SELECT SUM(amount_usd_nanos) FROM accounting_handoff_debit d
+                              WHERE d.account_id = budget_account.account_id), 0),
+                    health
              FROM budget_account
              WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                AND account_kind = ?3 AND scope_id = ?4",
@@ -4419,12 +5704,14 @@ impl AccountingDb {
             |row| {
                 Ok(AccountRecord {
                     account_id: row.get(0)?,
-                    root_chain_id: row.get(1)?,
-                    state: row.get(2)?,
-                    limit_nanos: row.get(3)?,
-                    committed_nanos: row.get(4)?,
-                    held_nanos: row.get(5)?,
-                    health: row.get(6)?,
+                    execution_budget_id: row.get(1)?,
+                    root_chain_id: row.get(2)?,
+                    state: row.get(3)?,
+                    limit_nanos: row.get(4)?,
+                    committed_nanos: row.get(5)?,
+                    held_nanos: row.get(6)?,
+                    transferred_out_nanos: row.get(7)?,
+                    health: row.get(8)?,
                 })
             },
         )
@@ -5349,7 +6636,10 @@ fn open_raw_in_pinned_directory(
     configure_connection(&conn)?;
     let spec = accounting_schema_spec();
     if may_create && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-        sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, &path)?;
+        let schema_sql = current_schema_sql();
+        sqlite_schema::init_owned(&conn, &spec, &schema_sql, &path)?;
+    } else {
+        migrate_accounting_schema(&conn, &path)?;
     }
     assert_current(&conn, &path)?;
     let journal_mode: String = conn
@@ -5746,7 +7036,7 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
 
 fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
     sqlite_schema::assert_owned(conn, &accounting_schema_spec(), path)?;
-    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?;
+    sqlite_schema::assert_complete_schema_sql(conn, &current_schema_sql(), path)?;
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read accounting schema version")?;
@@ -5758,6 +7048,53 @@ fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Exact one-step forward migration for the non-disposable financial ledger.
+/// Unknown, foreign, or already-divergent predecessor schemas are never
+/// normalized by the migration.
+fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
+    let application_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read accounting application id before migration")?;
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("read accounting schema version before migration")?;
+    if application_id != ACCOUNTING_APP_ID || version != 1 {
+        return Ok(());
+    }
+    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_V1_SQL, path)
+        .context("accounting v1 predecessor is not exact; refusing migration")?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("begin accounting v2 migration")?;
+    let result = (|| -> Result<()> {
+        conn.execute_batch(SCHEMA_V2_SQL)
+            .context("apply accounting v2 handoff-ledger schema")?;
+        // A v1 gate committed execution-budget authority only; it had no
+        // field capable of granting one directive budget to the launch.
+        // Preserve that exact meaning as an explicit null v2 binding for
+        // every retained gate. Never infer a broader launch scope from later
+        // per-attempt directive rows.
+        conn.execute(
+            "INSERT INTO launch_accounting_scope_binding (
+                thread_id, launch_generation, directive_budget_id
+             ) SELECT thread_id, launch_generation, NULL
+               FROM launch_accounting_gate",
+            [],
+        )
+        .context("materialize exact v1 execution-only launch-gate bindings")?;
+        assert_current(conn, path).context("validate accounting v2 schema before commit")?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .context("commit accounting v2 migration"),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 /// Read-or-mint the persisted `(site, epoch)` identity. A fresh ledger mints
@@ -6071,8 +7408,21 @@ mod tests {
     }
 
     fn open_gate(db: &AccountingDb, thread: &str, generation: &str, exec: &str) {
-        db.open_launch_gate(thread, generation, exec, "audit-chain")
-            .unwrap();
+        let directive = db
+            .account_snapshot(exec)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.account_kind == "directive_item")
+            .map(|row| row.scope_id);
+        db.open_launch_gate_with_credential_binding(
+            thread,
+            generation,
+            exec,
+            directive.as_deref(),
+            "audit-chain",
+            None,
+        )
+        .unwrap();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6254,9 +7604,19 @@ mod tests {
             execution_budget_id: EXEC.to_string(),
             directive_budget_id: None,
         };
-        let frontier = source.handoff_frontier(THREAD, &source_scope).unwrap();
+        source
+            .open_launch_gate(THREAD, GENERATION, EXEC, "audit-chain")
+            .unwrap();
+        let operation_id = "a".repeat(64);
+        let frontier = source
+            .handoff_frontier(&operation_id, THREAD, "T-root", &source_scope)
+            .unwrap();
         assert_eq!(frontier.charged_usd_nanos, 0);
         assert_eq!(frontier.remaining_cap_usd_nanos, Some(100));
+        assert_eq!(
+            source.gates_with_publication_due().unwrap(),
+            vec![(THREAD.to_owned(), GENERATION.to_owned())]
+        );
 
         let (_target_dir, target) = setup();
         let (target_site, target_epoch) = target.site_identity();
@@ -6267,16 +7627,631 @@ mod tests {
             directive_budget_id: None,
         };
         target
-            .admit_handoff_target_scope(&target_scope, "T-root", Some(80), None)
+            .prepare_handoff_target_scope(
+                &operation_id,
+                &source_scope,
+                &target_scope,
+                "T-root",
+                Some(100),
+                None,
+            )
+            .unwrap();
+        let transfer = source
+            .export_handoff_allowance(&operation_id, THREAD, "T-root", &frontier, &target_scope)
+            .unwrap();
+        source.confirm_handoff_source_publication(THREAD).unwrap();
+        assert!(source.gates_with_publication_due().unwrap().is_empty());
+        target
+            .accept_handoff_allowance(&transfer.content_hash().unwrap(), &transfer)
             .unwrap();
         target
-            .validate_handoff_target_scope(&target_scope, Some(80), None)
+            .validate_handoff_target_scope(&target_scope, Some(100), None)
+            .unwrap();
+        target
+            .validate_accepted_handoff_target_scope(
+                &operation_id,
+                &target_scope,
+                "T-root",
+                Some(100),
+                None,
+            )
+            .unwrap();
+        {
+            let conn = target.lock_conn().unwrap();
+            conn.execute(
+                "UPDATE budget_account SET committed_usd_nanos = 19
+                 WHERE account_kind = 'execution' AND scope_id = ?1",
+                rusqlite::params![target_scope.execution_budget_id],
+            )
+            .unwrap();
+        }
+        assert!(
+            target
+                .validate_handoff_target_scope(&target_scope, Some(100), None)
+                .is_err()
+        );
+        target
+            .validate_accepted_handoff_target_scope(
+                &operation_id,
+                &target_scope,
+                "T-root",
+                Some(100),
+                None,
+            )
+            .unwrap();
+        target
+            .validate_runnable_handoff_target_scope(
+                &operation_id,
+                &target_scope,
+                "T-root",
+                Some(100),
+                None,
+            )
             .unwrap();
         assert!(
             target
-                .validate_handoff_target_scope(&target_scope, Some(81), None)
+                .validate_accepted_handoff_target_scope(
+                    &operation_id,
+                    &target_scope,
+                    "T-root",
+                    Some(81),
+                    None,
+                )
                 .is_err()
         );
+        {
+            let conn = target.lock_conn().unwrap();
+            conn.execute(
+                "UPDATE budget_account
+                 SET state = 'closed'
+                 WHERE account_kind = 'execution' AND scope_id = ?1",
+                rusqlite::params![target_scope.execution_budget_id],
+            )
+            .unwrap();
+        }
+        target
+            .validate_accepted_handoff_target_scope(
+                &operation_id,
+                &target_scope,
+                "T-root",
+                Some(100),
+                None,
+            )
+            .unwrap();
+        assert!(
+            target
+                .validate_runnable_handoff_target_scope(
+                    &operation_id,
+                    &target_scope,
+                    "T-root",
+                    Some(100),
+                    None,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn handoff_refuses_an_unbounded_execution_allowance() {
+        let (_source_dir, source) = setup();
+        source
+            .create_execution_account_prepared(EXEC, "T-root", None)
+            .unwrap();
+        source.activate_account(EXEC, "execution", EXEC).unwrap();
+        source
+            .open_launch_gate(THREAD, GENERATION, EXEC, "audit-chain")
+            .unwrap();
+        source
+            .fence_launch_gate_and_close_attempts(
+                THREAD,
+                GENERATION,
+                ReconciliationReason::OwnerGenerationFenced,
+                NOW,
+            )
+            .unwrap();
+        let (source_site, source_epoch) = source.site_identity();
+        let source_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: source_site,
+            ledger_epoch: source_epoch,
+            execution_budget_id: EXEC.to_owned(),
+            directive_budget_id: None,
+        };
+        assert!(
+            source
+                .handoff_frontier(&"c".repeat(64), THREAD, "T-root", &source_scope)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fresh_handoff_refuses_a_disabled_hard_admission_ledger() {
+        let (_source_dir, source) = setup();
+        source
+            .create_execution_account_prepared(
+                EXEC,
+                "T-root",
+                Some(UsdNanos::from_nanos(100).unwrap()),
+            )
+            .unwrap();
+        source.activate_account(EXEC, "execution", EXEC).unwrap();
+        source
+            .open_launch_gate(THREAD, GENERATION, EXEC, "audit-chain")
+            .unwrap();
+        source
+            .fence_launch_gate_and_close_attempts(
+                THREAD,
+                GENERATION,
+                ReconciliationReason::OwnerGenerationFenced,
+                NOW,
+            )
+            .unwrap();
+        let (source_site, source_epoch) = source.site_identity();
+        let source_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: source_site,
+            ledger_epoch: source_epoch,
+            execution_budget_id: EXEC.to_owned(),
+            directive_budget_id: None,
+        };
+        source.disable_hard_admission();
+        assert!(
+            source
+                .handoff_frontier(&"d".repeat(64), THREAD, "T-root", &source_scope)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn handoff_recovery_refuses_an_anchor_digest_conflict() {
+        let (_source_dir, source) = setup();
+        let (source_site, source_epoch) = source.site_identity();
+        let operation_id = "e".repeat(64);
+        let source_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: source_site.clone(),
+            ledger_epoch: source_epoch,
+            execution_budget_id: EXEC.to_owned(),
+            directive_budget_id: None,
+        };
+        let transfer = ryeos_state::objects::AccountingAllowanceTransfer {
+            kind: ryeos_state::objects::ACCOUNTING_ALLOWANCE_TRANSFER_KIND.to_owned(),
+            schema: ryeos_state::objects::ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA,
+            operation_id: operation_id.clone(),
+            request_digest: "f".repeat(64),
+            source_budget_authority_site_id: source_site.clone(),
+            source_ledger_epoch: source_epoch,
+            source_chain_root_id: "T-root".to_owned(),
+            source_placement_thread_id: THREAD.to_owned(),
+            source_scope,
+            allocation_mode: "exclusive_execution".to_owned(),
+            source_financial_high_water_before: 0,
+            source_financial_sequence: 1,
+            source_financial_chain_digest: "1".repeat(64),
+            source_charged_usd_nanos: 0,
+            source_execution_available_before_usd_nanos: Some(100),
+            source_directive_available_before_usd_nanos: None,
+            source_execution_debit_usd_nanos: Some(100),
+            source_directive_debit_usd_nanos: None,
+            source_execution_state_after: "closed".to_owned(),
+            source_directive_state_after: None,
+            target_scope: ryeos_state::objects::AdmittedAccountingScope {
+                budget_authority_site_id: "S-target".to_owned(),
+                ledger_epoch: 1,
+                execution_budget_id: "B-target".to_owned(),
+                directive_budget_id: None,
+            },
+            target_cap_usd_nanos: Some(100),
+            target_directive_cap_usd_nanos: None,
+        };
+        transfer.validate().unwrap();
+        let transfer_json = serde_json::to_string(&transfer).unwrap();
+        let conn = source.lock_conn().unwrap();
+        conn.execute(
+            "INSERT INTO accounting_handoff_transfer (
+                operation_id, request_digest, source_budget_authority_site_id, source_ledger_epoch,
+                source_chain_root_id, source_placement_thread_id,
+                source_execution_budget_id, source_directive_budget_id,
+                financial_sequence, financial_chain_digest, response_json, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                operation_id,
+                &transfer.request_digest,
+                &transfer.source_budget_authority_site_id,
+                i64::try_from(transfer.source_ledger_epoch).unwrap(),
+                &transfer.source_chain_root_id,
+                &transfer.source_placement_thread_id,
+                &transfer.source_scope.execution_budget_id,
+                i64::try_from(transfer.source_financial_sequence).unwrap(),
+                &transfer.source_financial_chain_digest,
+                transfer_json,
+                NOW,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO financial_transition_commitment (
+                budget_authority_site_id, ledger_epoch, financial_sequence,
+                transition_kind, attempt_id, authority_digest,
+                transition_fingerprint, chain_digest, created_at_ms
+             ) VALUES (?1, ?2, 1, 'handoff_allowance_export', NULL, NULL, ?3, ?4, ?5)",
+            rusqlite::params![
+                source_site,
+                i64::try_from(source_epoch).unwrap(),
+                &transfer.request_digest,
+                &transfer.source_financial_chain_digest,
+                NOW,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE ledger_financial_sequence
+             SET next_financial_sequence = 2, financial_high_water = 1,
+                 financial_chain_digest = ?1
+             WHERE budget_authority_site_id = ?2 AND ledger_epoch = ?3",
+            rusqlite::params![
+                &transfer.source_financial_chain_digest,
+                &source_site,
+                i64::try_from(source_epoch).unwrap(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        source
+            .anchor()
+            .compare_and_advance(&source_site, source_epoch, 1, &"2".repeat(64))
+            .unwrap();
+        assert!(source.handoff_allowance_exported(&operation_id).is_err());
+        assert!(source.handoff_allowance_transfer(&operation_id).is_err());
+        assert!(!source.hard_admission_enabled());
+    }
+
+    #[test]
+    fn launch_gate_refuses_a_directive_owned_by_another_execution() {
+        let (_dir, db) = setup();
+        db.create_execution_account_prepared(
+            EXEC,
+            "T-root",
+            Some(UsdNanos::from_nanos(100).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(EXEC, "execution", EXEC).unwrap();
+        let other_execution = "B-other";
+        let other_directive = "D-other";
+        db.create_execution_account_prepared(
+            other_execution,
+            "T-other",
+            Some(UsdNanos::from_nanos(100).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(other_execution, "execution", other_execution)
+            .unwrap();
+        db.create_directive_account_prepared(
+            other_execution,
+            other_directive,
+            Some(UsdNanos::from_nanos(50).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(other_execution, "directive_item", other_directive)
+            .unwrap();
+        assert!(
+            db.open_launch_gate_with_credential_binding(
+                THREAD,
+                GENERATION,
+                EXEC,
+                Some(other_directive),
+                "audit-chain",
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn directive_launch_gate_restarts_only_for_its_existing_thread_owner() {
+        let (_dir, db) = setup();
+        db.create_execution_account_prepared(
+            EXEC,
+            "T-root",
+            Some(UsdNanos::from_nanos(100).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(EXEC, "execution", EXEC).unwrap();
+        db.create_directive_account_prepared(
+            EXEC,
+            DIRECTIVE,
+            Some(UsdNanos::from_nanos(50).unwrap()),
+        )
+        .unwrap();
+        db.activate_account(EXEC, "directive_item", DIRECTIVE)
+            .unwrap();
+        db.open_launch_gate_with_credential_binding(
+            THREAD,
+            "G-first",
+            EXEC,
+            Some(DIRECTIVE),
+            "audit-chain",
+            None,
+        )
+        .unwrap();
+        db.open_launch_gate_with_credential_binding(
+            THREAD,
+            "G-restarted",
+            EXEC,
+            Some(DIRECTIVE),
+            "audit-chain",
+            None,
+        )
+        .unwrap();
+        let conn = db.lock_conn().unwrap();
+        assert_eq!(
+            db.load_gate(&conn, THREAD, "G-first")
+                .unwrap()
+                .unwrap()
+                .state,
+            "fenced"
+        );
+        assert_eq!(
+            db.load_gate(&conn, THREAD, "G-restarted")
+                .unwrap()
+                .unwrap()
+                .state,
+            "open"
+        );
+        drop(conn);
+        assert!(
+            db.open_launch_gate_with_credential_binding(
+                "T-other",
+                "G-other",
+                EXEC,
+                Some(DIRECTIVE),
+                "audit-other",
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn graph_worker_handoff_moves_only_its_directive_slice() {
+        let (_source_dir, source) = setup();
+        source
+            .create_execution_account_prepared(
+                EXEC,
+                "T-graph-root",
+                Some(UsdNanos::from_nanos(100).unwrap()),
+            )
+            .unwrap();
+        source.activate_account(EXEC, "execution", EXEC).unwrap();
+        source
+            .create_directive_account_prepared(
+                EXEC,
+                DIRECTIVE,
+                Some(UsdNanos::from_nanos(40).unwrap()),
+            )
+            .unwrap();
+        source
+            .activate_account(EXEC, "directive_item", DIRECTIVE)
+            .unwrap();
+        source
+            .open_launch_gate_with_credential_binding(
+                THREAD,
+                GENERATION,
+                EXEC,
+                Some(DIRECTIVE),
+                "audit-chain",
+                None,
+            )
+            .unwrap();
+        source
+            .fence_launch_gate_and_close_attempts(
+                THREAD,
+                GENERATION,
+                ReconciliationReason::OwnerGenerationFenced,
+                NOW,
+            )
+            .unwrap();
+        let (source_site, source_epoch) = source.site_identity();
+        let source_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: source_site,
+            ledger_epoch: source_epoch,
+            execution_budget_id: EXEC.to_owned(),
+            directive_budget_id: Some(DIRECTIVE.to_owned()),
+        };
+        let operation_id = "b".repeat(64);
+        let frontier = source
+            .handoff_frontier(&operation_id, THREAD, "T-child", &source_scope)
+            .unwrap();
+        assert_eq!(frontier.allocation_mode, "directive_slice");
+        assert_eq!(frontier.remaining_cap_usd_nanos, Some(100));
+        assert_eq!(frontier.remaining_directive_cap_usd_nanos, Some(40));
+        assert_eq!(frontier.target_cap_usd_nanos, Some(40));
+        assert_eq!(frontier.target_directive_cap_usd_nanos, Some(40));
+
+        let (_target_dir, target) = setup();
+        let (target_site, target_epoch) = target.site_identity();
+        let target_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: target_site,
+            ledger_epoch: target_epoch,
+            execution_budget_id: "B-target-slice".to_owned(),
+            directive_budget_id: Some("D-target-slice".to_owned()),
+        };
+        target
+            .prepare_handoff_target_scope(
+                &operation_id,
+                &source_scope,
+                &target_scope,
+                "T-child",
+                Some(40),
+                Some(40),
+            )
+            .unwrap();
+        assert!(
+            target
+                .open_launch_gate(
+                    "T-target",
+                    "launch-target",
+                    &target_scope.execution_budget_id,
+                    "audit-target"
+                )
+                .is_err()
+        );
+        let transfer = source
+            .export_handoff_allowance(&operation_id, THREAD, "T-child", &frontier, &target_scope)
+            .unwrap();
+        assert_eq!(
+            source
+                .export_handoff_allowance(
+                    &operation_id,
+                    THREAD,
+                    "T-child",
+                    &frontier,
+                    &target_scope,
+                )
+                .unwrap(),
+            transfer
+        );
+        let source_accounts = source.account_snapshot(EXEC).unwrap();
+        assert_eq!(
+            source_accounts
+                .iter()
+                .find(|row| row.account_kind == "execution")
+                .unwrap()
+                .state,
+            "active"
+        );
+        assert_eq!(
+            source_accounts
+                .iter()
+                .find(|row| row.account_kind == "directive_item")
+                .unwrap()
+                .state,
+            "closed"
+        );
+        let conn = source.lock_conn().unwrap();
+        let execution = source
+            .load_account(&conn, "execution", EXEC)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.account_available(&conn, &execution).unwrap(),
+            Some(60)
+        );
+        drop(conn);
+
+        target
+            .accept_handoff_allowance(&transfer.content_hash().unwrap(), &transfer)
+            .unwrap();
+        target
+            .open_launch_gate_with_credential_binding(
+                "T-target",
+                "launch-target",
+                &target_scope.execution_budget_id,
+                target_scope.directive_budget_id.as_deref(),
+                "audit-target",
+                None,
+            )
+            .unwrap();
+        assert!(
+            source
+                .handoff_frontier(&"c".repeat(64), THREAD, "T-child", &source_scope)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn target_handoff_abort_closes_prepared_allowance_permanently() {
+        let (_dir, target) = setup();
+        let (site, epoch) = target.site_identity();
+        let source_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: "S-source".to_owned(),
+            ledger_epoch: 7,
+            execution_budget_id: "B-source".to_owned(),
+            directive_budget_id: None,
+        };
+        let target_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: site,
+            ledger_epoch: epoch,
+            execution_budget_id: "B-abort".to_owned(),
+            directive_budget_id: None,
+        };
+        let operation_id = "d".repeat(64);
+        target
+            .prepare_handoff_target_scope(
+                &operation_id,
+                &source_scope,
+                &target_scope,
+                "T-root",
+                Some(5),
+                None,
+            )
+            .unwrap();
+        target.abort_handoff_target_scope(&operation_id).unwrap();
+        target.abort_handoff_target_scope(&operation_id).unwrap();
+        assert_eq!(
+            target.account_snapshot("B-abort").unwrap()[0].state,
+            "closed"
+        );
+        assert!(
+            target
+                .prepare_handoff_target_scope(
+                    &operation_id,
+                    &source_scope,
+                    &target_scope,
+                    "T-root",
+                    Some(5),
+                    None,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_v1_accounting_schema_migrates_populated_gates_as_execution_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounting-v1.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA_V1_SQL).unwrap();
+        conn.pragma_update(None, "application_id", ACCOUNTING_APP_ID)
+            .unwrap();
+        for (thread, generation, state) in [
+            ("T-open", "G-open", "open"),
+            ("T-fenced", "G-fenced", "fenced"),
+        ] {
+            conn.execute(
+                "INSERT INTO launch_accounting_gate (
+                    thread_id, launch_generation, budget_authority_site_id,
+                    ledger_epoch, execution_budget_id, audit_chain_root_id,
+                    credential_binding_digest, state, fenced_reason,
+                    terminal_publication_due, updated_at_ms
+                 ) VALUES (?1, ?2, 'site:v1', 1, 'B-v1', 'T-audit', NULL,
+                           ?3, NULL, 0, 1)",
+                rusqlite::params![thread, generation, state],
+            )
+            .unwrap();
+        }
+        migrate_accounting_schema(&conn, &path).unwrap();
+        assert_current(&conn, &path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, ACCOUNTING_SCHEMA_VERSION);
+        let bindings: Vec<(String, Option<String>)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT thread_id, directive_budget_id
+                     FROM launch_accounting_scope_binding ORDER BY thread_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            bindings,
+            vec![("T-fenced".to_owned(), None), ("T-open".to_owned(), None)]
+        );
+        migrate_accounting_schema(&conn, &path).unwrap();
+        assert_current(&conn, &path).unwrap();
     }
 
     #[test]
@@ -6595,6 +8570,7 @@ mod tests {
             THREAD,
             GENERATION,
             EXEC,
+            None,
             "audit-chain",
             Some("launch-credential-binding"),
         )
@@ -6655,6 +8631,7 @@ mod tests {
             THREAD,
             GENERATION,
             EXEC,
+            None,
             "audit-chain",
             Some("launch-credential-binding"),
         )

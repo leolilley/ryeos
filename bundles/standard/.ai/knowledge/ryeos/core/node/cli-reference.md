@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T08:05:36Z:c6514b63351ee30f43c672651385c68090f8003de7e4bdf9f6c259c2a99594bc:fqs6+YuC0HPIDViCjjCYQtlO2/mHdrYJlgKG7qcpZjCQSqPNKjbVg93Dt/qqAeLVUEqsxmcgl71kTn+/9N2IBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:2eff75cf9344fc6f04aa3d127acca4b00a44ab126a331a67e6b77e995795ec27:TJbmSjxGcMh5Gb0SNCMbs+VOS7qA0oeoFnjj2emwi3Fm8yDRiQhuQ7J1gx4c3LwnKiQWsyc1mBrnv2VtAVVpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -26,7 +26,7 @@ Daemon-backed dispatch is preflighted with local lifecycle status unless
 ### `ryeos init`
 
 ```bash
-ryeos init [--node-profile <name>] [--source <dir>] [--app-root <dir>] [--trust-file <file>...]
+ryeos init [--node-profile <name>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
 ```
 
 Packaged installs use `/usr/share/ryeos` by default. The full package selects
@@ -111,10 +111,25 @@ daemon to be stopped:
 ryeos node reset authorization --confirm
 ryeos node reset replay-indexes --confirm
 ryeos node reset external-content-bindings [--dry-run | --confirm]
+ryeos node reset policy-generation --node-profile <name> --confirm [--source <dir>] [--trust-file <file>]...
 ```
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
 shortcut, and none broadens into another reset scope implicitly.
+
+`policy-generation` is the clean-cut path for a node whose complete signed
+policy generation predates the current registered section set. It verifies a
+publisher-signed init profile from the selected source root, treats that
+profile's `exact_bundles` as the prospective complete bundle inventory, and
+runs with the built-in trust roots plus every explicitly repeated
+`--trust-file`; it then
+runs the corresponding installs/removals and complete node-signed policy cut
+inside the same locked init. The preceding completion record is durably
+invalidated before the first mutation; a new signed fence is written only
+after the operation completes, and startup refuses an absent or contradictory
+fence. The cut preserves node identity, vault credentials, projects, and
+execution history while deliberately retiring predecessor policy
+customization.
 
 ## Other local operator verbs
 

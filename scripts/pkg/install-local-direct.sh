@@ -37,12 +37,16 @@ Options:
                         targeted --crates package list or explicit --all.
   --no-init             Install files but do not run ryeos init
   --no-daemon-restart   Do not stop/restart an already-running daemon
-  --keep-shadows        Do not move /usr/local/bin, ~/.local/bin, or ~/.cargo/bin
-                        shadows of installed RyeOS user-facing binaries
+  --keep-shadows        Do not move /usr/local/bin, ~/.local/bin, or the invoking
+                        user's Cargo-home bin shadows of installed RyeOS binaries
   --trust-source-publishers
                         Explicitly trust the publisher documents copied from
                         this checkout. Required to initialize dev/custom-signed
                         bundles; never enabled automatically.
+  --reset-node-policy-generation
+                        Explicitly replace an obsolete complete node-policy
+                        generation from this bundle set's signed init profile.
+                        Requires init and preserves all non-policy node state.
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
@@ -108,6 +112,33 @@ invoking_user="${SUDO_USER:-$(id -un)}"
 # sudo and would silently point app-root fallbacks at root's data dir.
 invoking_user_home="$(getent passwd "$invoking_user" | cut -d: -f6)"
 
+# Resolve Cargo's user-owned bin directory from the same login environment used
+# for bundle population. Cargo home is configurable and on RyeOS development
+# hosts is commonly XDG-aligned rather than ~/.cargo. Hard-coding ~/.cargo would
+# leave the actual stale binary ahead of /usr/bin and make an otherwise complete
+# install fail only at the final PATH check.
+invoking_user_shell="$(getent passwd "$invoking_user" | cut -d: -f7)"
+[[ -x "$invoking_user_shell" ]] || invoking_user_shell="/bin/sh"
+if [[ "$invoking_user" != "$(id -un)" ]]; then
+    # Ask the login environment to execute only the external `env` command.
+    # Parameter expansion syntax is shell-specific (fish/nushell are valid
+    # passwd shells), so the installer parses the exported value itself.
+    invoking_user_environment="$(
+        sudo -H -u "$invoking_user" "$invoking_user_shell" -lc env
+    )"
+    invoking_user_cargo_home="$(
+        printf '%s\n' "$invoking_user_environment" |
+            sed -n 's/^CARGO_HOME=//p' |
+            tail -n 1
+    )"
+    [[ -n "$invoking_user_cargo_home" ]] || \
+        invoking_user_cargo_home="$invoking_user_home/.cargo"
+else
+    invoking_user_cargo_home="${CARGO_HOME:-$invoking_user_home/.cargo}"
+fi
+[[ "$invoking_user_cargo_home" == /* ]] || \
+    die "invoking user's Cargo home is not absolute: $invoking_user_cargo_home"
+
 # Run `ryeos <args>` with a timeout, as the invoking user when under sudo so it
 # targets that user's app-root. `timeout` wraps the external command (sudo or
 # ryeos), never a shell function.
@@ -137,11 +168,18 @@ ryeos_status_quick() {
 build_install_init_profile_args() {
     local policy_generation_path="$1"
     local mapped_profile="$2"
+    local replace_generation="$3"
 
     [[ -n "$mapped_profile" ]] || return 1
     INSTALL_INIT_PROFILE_ARGS=()
     INSTALL_PUBLISH_INITIAL_POLICY=0
-    if [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
+    if [[ "$replace_generation" == "1" ]]; then
+        INSTALL_INIT_PROFILE_ARGS=(
+            --node-profile "$mapped_profile"
+            --replace-node-policy-generation
+            --confirm-node-policy-generation-replacement
+        )
+    elif [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
         INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile")
         INSTALL_PUBLISH_INITIAL_POLICY=1
     fi
@@ -402,6 +440,7 @@ run_init=1
 restart_daemon=1
 cleanup_shadows=1
 trust_source_publishers=0
+reset_node_policy_generation=0
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
 bundle_set="full"
@@ -429,6 +468,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --trust-source-publishers)
             trust_source_publishers=1
+            shift
+            ;;
+        --reset-node-policy-generation)
+            reset_node_policy_generation=1
             shift
             ;;
         --key)
@@ -477,6 +520,9 @@ if [[ -n "$crates" && $populate_all -eq 1 ]]; then
 fi
 if [[ $run_populate -eq 0 && ( -n "$crates" || $populate_all -eq 1 ) ]]; then
     die "--crates and --all require --populate"
+fi
+if [[ $reset_node_policy_generation -eq 1 && $run_init -eq 0 ]]; then
+    die "--reset-node-policy-generation cannot be combined with --no-init"
 fi
 
 bundle_names=()
@@ -741,14 +787,14 @@ if [[ $cleanup_shadows -eq 1 ]]; then
             sudo -H -u "$invoking_user" mv \
                 "$invoking_user_home/.local/bin/$b" "$user_backup_dir/local-bin/$b"
         fi
-        if [[ -e "$invoking_user_home/.cargo/bin/$b" || -L "$invoking_user_home/.cargo/bin/$b" ]]; then
+        if [[ -e "$invoking_user_cargo_home/bin/$b" || -L "$invoking_user_cargo_home/bin/$b" ]]; then
             if [[ $made_user_backup -eq 0 ]]; then
                 sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir"
                 made_user_backup=1
             fi
             sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir/cargo-bin"
             sudo -H -u "$invoking_user" mv \
-                "$invoking_user_home/.cargo/bin/$b" "$user_backup_dir/cargo-bin/$b"
+                "$invoking_user_cargo_home/bin/$b" "$user_backup_dir/cargo-bin/$b"
         fi
     done
 fi
@@ -771,44 +817,22 @@ if [[ $run_init -eq 1 ]]; then
     init_as=()
     [[ "$invoking_user" != "$(id -un)" ]] && init_as=(sudo -H -u "$invoking_user")
     ryeos_term_update "initializing node state" "user $invoking_user"
-    ryeos_term_suspend
     state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     policy_generation_path="$state_root/.ai/node/policies"
-    build_install_init_profile_args "$policy_generation_path" "$node_init_profile" || \
+    if [[ $reset_node_policy_generation -eq 1 ]]; then
+        [[ -e "$policy_generation_path" && ! -L "$policy_generation_path" ]] || \
+            die "--reset-node-policy-generation requires an existing safe policy generation"
+    fi
+    build_install_init_profile_args \
+        "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" || \
         die "could not resolve init-profile arguments"
-    if [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 0 ]]; then
+    if [[ $reset_node_policy_generation -eq 1 ]]; then
+        ryeos_term_note "replacing obsolete signed node policy generation during initialization"
+    elif [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 1 ]]; then
+        ryeos_term_note "publishing initial signed node policy generation"
+    else
         ryeos_term_note "preserving existing signed node policy generation"
     fi
-    for path in "$state_root/.ai/bundles"/*; do
-        [[ -d "$path/.ai" ]] || continue
-        name="$(basename "$path")"
-        keep=0
-        for bundle_name in "${bundle_names[@]}"; do
-            if [[ "$name" == "$bundle_name" ]]; then
-                keep=1
-                break
-            fi
-        done
-        if [[ $keep -eq 0 ]]; then
-            ryeos_term_note "removing stale initialized bundle: $path"
-            rm -rf "$path"
-        fi
-    done
-    for path in "$state_root/.ai/node/bundles"/*.yaml; do
-        [[ -f "$path" ]] || continue
-        name="$(basename "$path" .yaml)"
-        keep=0
-        for bundle_name in "${bundle_names[@]}"; do
-            if [[ "$name" == "$bundle_name" ]]; then
-                keep=1
-                break
-            fi
-        done
-        if [[ $keep -eq 0 ]]; then
-            ryeos_term_note "removing stale initialized bundle registration: $path"
-            rm -f "$path"
-        fi
-    done
     trust_args=()
     if [[ $trust_source_publishers -eq 1 ]]; then
         # Pin only the source-root and selected bundle documents validated
@@ -824,6 +848,7 @@ if [[ $run_init -eq 1 ]]; then
     fi
     init_args+=("${INSTALL_INIT_PROFILE_ARGS[@]}")
     init_status=0
+    ryeos_term_suspend
     "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}" || init_status=$?
     if (( init_status != 0 )); then
         ryeos_term_end failure "INSTALL FAILED" "initializing node state · exit status $init_status"

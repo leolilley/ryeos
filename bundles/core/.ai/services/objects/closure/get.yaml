@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T23:06:47Z:1b15ee42102f6908cfe199a694876dcc29b5283465ea019af1448f40765d209a:wdKZCb+YxGwDSEW9/628AH7NoUfMuGfXBvcFygC2YKRVPV98HjHZgFG/9QBRvbmkKDIjxJyfRJBn/yckvqguAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:c70ce3772e9e4e8e938ec685005723d16e99b366b0c9db5462896c843318ee8a:piwrcLNsWfHP16ZVOV67OGwG77eMSW+5xBIvARSZghoeTByNtLon58r8IXdzTxBRPiLooSf+mmGgrjTV90nQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.closure.get
 required_caps: ["ryeos.execute.service.objects/closure/get"]
@@ -15,4 +15,4 @@ schema:
   max_links_per_object: number?
   allow_incomplete: boolean?
   allow_untransported_large_objects: boolean?
-description: "Retrieve every present object and blob in a schema-defined CAS closure"
+description: "Retrieve every present object and blob in a schema-defined CAS closure within node object_closure policy"

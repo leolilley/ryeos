@@ -774,7 +774,9 @@ pub(crate) fn fold_back_outputs(
 pub(crate) fn advance_after_foldback(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
-    state_db: &ryeos_state::StateDb,
+    state_store: &ryeos_app::state_store::StateStore,
+    thread_id: &str,
+    launch_owner: &str,
     signer: &dyn Signer,
     principal_key: &str,
     project_path_hash: &str,
@@ -784,9 +786,6 @@ pub(crate) fn advance_after_foldback(
     publication: &mut PendingCasPublication,
 ) -> Result<String> {
     authority.ensure_guard(cas_mutation_guard)?;
-    state_db
-        .pinned_authority()?
-        .ensure_guard(cas_mutation_guard)?;
     let new_snapshot_hash = store_foldback_snapshot(
         authority,
         cas_mutation_guard,
@@ -795,7 +794,9 @@ pub(crate) fn advance_after_foldback(
         publication,
     )?;
 
-    state_db.advance_project_head_ref(
+    state_store.advance_project_head_ref_owned(
+        thread_id,
+        launch_owner,
         principal_key,
         project_path_hash,
         &new_snapshot_hash,
@@ -1155,29 +1156,16 @@ fn advance_head_to_frozen_runtime_result(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    state
-        .state_store
-        .with_state_db_owned(thread_id, launch_owner, |db| {
-            let current = db
-                .read_project_head(principal_key, project_hash)?
-                .ok_or_else(|| anyhow::anyhow!("managed runtime project HEAD is absent"))?;
-            if current == result_snapshot_hash {
-                return Ok(());
-            }
-            if current != expected_hash {
-                anyhow::bail!(
-                    "managed runtime project HEAD conflict: expected {expected_hash}, got {current}"
-                );
-            }
-            db.advance_project_head_ref(
-                principal_key,
-                project_hash,
-                result_snapshot_hash,
-                expected_hash,
-                &signer,
-                &cas_guard,
-            )
-        })
+    state.state_store.advance_project_head_ref_owned(
+        thread_id,
+        launch_owner,
+        principal_key,
+        project_hash,
+        result_snapshot_hash,
+        expected_hash,
+        &signer,
+        &cas_guard,
+    )
 }
 
 /// Complete a write-ahead callback freeze whose runtime owner died after the

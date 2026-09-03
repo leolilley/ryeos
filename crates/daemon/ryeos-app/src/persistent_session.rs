@@ -3143,10 +3143,10 @@ mod tests {
         };
 
         let app_root = tempfile::tempdir()?;
-        let node_dir = app_root.path().join(".ai/node");
-        std::fs::create_dir_all(&node_dir)?;
+        let policy_dir = app_root.path().join(".ai/test-fixtures");
+        std::fs::create_dir_all(&policy_dir)?;
         std::fs::write(
-            node_dir.join("isolation.yaml"),
+            policy_dir.join("isolation-policy.yaml"),
             "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 1048576\n  stderr_bytes: 1048576\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )?;
         let isolation = Arc::new(ryeos_engine::isolation::IsolationRuntime::load(

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T10:47:12Z:715e3e023ed47b2c06f256ad13381f7c0d9a63e14ec2c0eafd41f8e102e7638d:7XjK7hIxRNaye6GmJGCPThq3QF+wwE+fDZ1vtc15pws26fiaeFhx2mU1iJ0TYInKsmVHCg53g+whKIIR5ZNcAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:c1eea05ce7744baf8051ffa5b2280551c687ecd5890b0c8c982de6b9ec626119:lIH050NQeGegwi4YEQZeX9ainsbI/TcWw2Hh54Yv7fpHQkahLbdGqVrE9mHkR7s1pLOdEW8hIGfvhILcjyRdBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
@@ -64,6 +64,13 @@ Deep runtime cleanup (opt-in, --deep flag)
 Compact runs before sweep because compaction orphans snapshots by
 removing them from the DAG. Sweep then collects those newly-unreachable
 objects.
+
+Mutating compact GC is refused while any worker handoff retains an active
+target project-HEAD fence. The daemon holds the CAS mutation guard, quiesced
+write barrier, state-store reservation mutex, and then each project-HEAD lock,
+so no handoff reservation can appear between the fence check and a compacted
+HEAD rewrite. Dry-run and sweep-only GC do not take this project-compaction
+gate because they do not mutate project HEADs.
 
 ## Operational History Retention
 

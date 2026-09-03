@@ -18,35 +18,7 @@
 /// 4. everything else is not covered (conservative: a parent `?` never covers
 ///    a child `*`, and interior parent wildcards never cover child patterns).
 pub fn capability_pattern_covers(parent: &str, child: &str) -> bool {
-    if parent == child {
-        return true;
-    }
-    let child_is_pattern = child.contains('*') || child.contains('?');
-    if !child_is_pattern {
-        return glob_match(parent, child);
-    }
-    if let Some(prefix) = parent.strip_suffix('*')
-        && !prefix.contains('*')
-        && !prefix.contains('?')
-    {
-        return child.starts_with(prefix);
-    }
-    false
-}
-
-fn glob_match(pattern: &str, value: &str) -> bool {
-    let mut regex = String::from("^");
-    for character in pattern.chars() {
-        match character {
-            '*' => regex.push_str(".*"),
-            '?' => regex.push('.'),
-            other => regex.push_str(&regex::escape(&other.to_string())),
-        }
-    }
-    regex.push('$');
-    regex::Regex::new(&regex)
-        .map(|regex| regex.is_match(value))
-        .unwrap_or(false)
+    ryeos_state::capability::pattern_covers(parent, child)
 }
 
 #[cfg(test)]

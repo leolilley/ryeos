@@ -7280,11 +7280,11 @@ mod tests {
             json!("trusted_project")
         );
         assert_eq!(
-            wire["resolved_from"]["item_authored"]["node_policy"]["signed_config"]["space"],
+            wire["resolved_from"]["item_authored"]["node_policy"]["space"],
             json!("project")
         );
         assert_eq!(
-            wire["resolved_from"]["item_authored"]["node_policy"]["signed_config"]["path"],
+            wire["resolved_from"]["item_authored"]["node_policy"]["path"],
             json!(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG)
         );
     }

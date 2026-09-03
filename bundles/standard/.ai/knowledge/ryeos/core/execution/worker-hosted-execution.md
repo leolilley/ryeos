@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T20:55:25Z:01b7184e197335bd434bae8195fc6bf44f4936eb9bc3bd5787ccd80d7e77a737:+0tpVvoYvj5FBCYEj+pvTDQn+u0wvrQIzdar1zKXP53w+iQECIYVAipA2yCrdDca1n1SqUwZ8kWFmz/VjWW2DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T13:38:40Z:144f1497b41169e0390ca4286b9f3780077c3e512a59e837b5a16f8938c0bc43:6PdPIo7gtO4tQgdHOXVn3pZTNxNPlgJWFXOPXs+Xun8AMAk+nYWVI+/uG4+ceLjT7aZQLe5Nynf++fLfqnneAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -229,16 +229,71 @@ credential profile and exact generation; only the domain-tagged, signed
 credential-subject digest crosses sites.
 
 Cross-site handoff is a cold continuation, not filesystem or process migration.
-The source resolves one directional configured full-project route and obtains a
-target-signed preflight for the exact proposed successor. After quiescence and
-checkpoint capture, typed sync jobs retain staged closures and every recovery
-coordinate. The target verifies the complete outer/dependency programs,
+The source first completes and freezes the placement, proves its exact worker
+reaped, and publishes the authoritative portable checkpoint. It then resolves
+one directional configured full-project route and obtains a target-signed
+preflight bound to that frozen source head and exact proposed successor. A
+preflight issued before checkpoint publication cannot authorize handoff because
+checkpoint publication advances the source chain head. Typed sync jobs retain
+staged closures and every recovery coordinate. The target verifies the complete outer/dependency programs,
 checkpoint, project base/HEAD, local credential subject/generation, accounting
 ceiling, and node policy, then signs the final placement admission without
-releasing a process. The source atomically terminalizes its placement and
-creates one remote continuation under the same `chain_root_id`; only then may
-the target adopt that chain head, conditionally install state, attach its held
-process identities, and release the new placement.
+releasing a process. Target accounting accounts remain non-spendable while
+prepared. After target admission, the source rechecks the settled ledger and
+commits an externally anchored debit for the exact target caps. Its immutable
+allowance-transfer receipt is rooted by the source-signed writer grant and
+continuation. The source then atomically terminalizes its placement and creates
+one remote continuation under the same `chain_root_id`; only then may the
+target adopt that chain head, activate the exact prepared allowance inside the
+adoption/runtime-install critical section, conditionally install state, attach
+its held process identities, and release the new placement.
+
+The target also resolves an exact `AdmittedOperatorAuthority` from its current
+node-signed `remote_operator` grant for the owner and immutable origin site.
+That authority binds the principal class, owner principal, configured origin,
+grant digest, and sorted canonical scopes. It must cover both the target
+capsule's retained effective capabilities and its required-nullable parent
+delegation ceiling. The target seals it into the target launch capsule and
+placement evidence, then revalidates the identical current grant during
+preflight replay, preparation, immediately before placement publication, and
+again before private-state installation or runnable recovery. Revocation or
+any changed grant bytes therefore fences every path that can launch a worker
+or open credential-private state; equivalent re-authoring is not a replay of
+the sealed grant. Once a target-signed terminal receipt exists, replay of that
+exact historical settlement instead uses immutable placement, request,
+accounting, and receipt testimony. It still authenticates the source node, but
+cannot launch a worker or access credential-private state and therefore does
+not depend on a later mutable operator grant or placement lease. This owner
+authority is distinct from the peer `remote_node` grant used for closure
+transfer and autonomous placement calls.
+
+The source allowance export is the distributed financial commit point. Before
+it, an aborted handoff closes unused target preparations and leaves source
+allowance intact. After it, recovery must complete the exact writer cut and may
+never refund, abort, or reactivate exported source allowance. Graph-followed
+placements move only their finite directive slice and leave the source
+execution account active with a durable transfer debit. A directive-free
+execution root may move its whole remainder only with no other open launch
+gate, and the source account then closes. Unbounded-to-unbounded transfer is
+refused. Both reservations and exports subtract prior transfer debits, which
+prevents source/target double spending under concurrent admission.
+
+The historical source `AdmittedLaunchCapsule` remains an immutable object in
+the transferred chain closure; it is not erased or rewritten when current
+placement ownership moves. Its complete sealed invocation is the sole source
+launch input at the target. The target decodes that typed capsule, preserves
+its exact program, lifecycle, effective capabilities, and required-nullable
+parent-delegation ceiling, and applies only the attested project, site, and
+credential-profile rebind before minting a new target capsule. Source
+`RuntimeLaunchMetadata`, source checkpoint directories, source isolation
+attempts, handler authentication, cancellation policy, and other node-local
+runtime fields never cross the site boundary. Handoff v1 refuses a source with
+a non-null cancellation policy because no portable contract roots it.
+
+Every closure fetch and staged handoff payload is bounded by the consuming
+node's mandatory `object_closure` policy. The serving node independently
+enforces its own policy. Handoff code carries no Codex-specific or fixed
+transfer allowance, and a caller-supplied limit may only narrow node policy.
 
 Every possible target must independently activate the exact non-secret worker
 realization before preflight; equal program identity does not make source-local
@@ -253,9 +308,21 @@ overwrites or silently rebases a divergent target HEAD. Each target also
 selects an independently authenticated node-local credential profile. Only the
 signed subject digest crosses sites.
 
+Target preparation atomically couples its credential-generation reservation
+to a durable fence over the exact owner-principal/project/target-HEAD tuple.
+Every online HEAD writer, including snapshot creation, push/reconciliation,
+managed fold-back, and compact GC, serializes with that reservation. A changed
+HEAD is refused before placement publication; no other writer can change it
+between that recheck and the source's irreversible writer cut. Pre-cut abort
+releases the credential reservation and fence together. Successful or
+recovered target adoption releases the project fence only after the
+authoritative target branch is published; a crash before that point leaves it
+active.
+
 The continuation event binds `origin_site_id`, source and target sites, source
 and successor placement threads, both signed chain heads, checkpoint and
-placement attestations, project rebind, accounting settlement, and any retained
+placement attestations, project rebind, the exact rooted accounting transfer,
+and any retained
 follow-delivery reservation. Source and target durable jobs recover their own
 side of every crash gap. A failed pre-commit transfer leaves the source current;
 after the continuation commit the source cannot reactivate and target recovery
@@ -295,10 +362,14 @@ site/node identities and signed chain placement are the cross-node boundary.
 
 ## Generic session client
 
-`ryeos worker session status|command|approvals|approval|terminate|validate-candidate|publish|discard`
+`ryeos worker session status|command|command-observation|approvals|approval|terminate|checkpoint|resume|handoff-preflight|handoff|validate-candidate|publish|discard`
 are signed Core command descriptors over the existing generic worker-execution
 services. Every operation begins with `chain_root_id`, resolves the authoritative
 current placement, and then fences placement thread and boot epoch internally.
+The historical command-observation read additionally requires the exact
+`placement_thread_id` because command sequence is placement-local and may recur
+after handoff. It verifies that placement's retained command and turn facts
+without redirecting the query to the current chain head.
 Historical catch-up uses chain replay and live attachment uses the existing
 cursor-based chain event stream. Attach and detach are client behavior: opening
 or closing that stream creates no session row and mutates no worker authority.
@@ -382,6 +453,14 @@ active identities fail closed. The controller waits on a dedicated bounded UDS
 long-poll, so pushed projection changes neither poll SQLite nor monopolize the
 shared callback connection.
 
+Operational state locks are exact parent-process authorities. Lillux registers
+each held lock before opening it and closes that descriptor in a forked
+attachment child before the pre-exec hold, so a worker cannot retain the
+daemon's lock across a crash. Normal daemon startup may wait for at most five
+seconds for kernel teardown of the predecessor generation; it never steals or
+replaces a live lock. Offline and standalone access retains immediate
+fail-closed acquisition.
+
 Command contact is root-testified-before-write. The root receives the exact
 `daemon_reserved_io` possible-contact fact before SQLite advances to dispatched
 and before the socket write. A committed command in a dead epoch
@@ -395,7 +474,8 @@ Restart can therefore rebuild a dispatched command from that batch instead of
 incorrectly downgrading authoritative success to outcome-unknown. A terminal
 root is classified from its closed chain without attempting an impossible
 append: no contact fact is uncontacted, contact without a response batch is
-unknown, and a response batch proves completion. An exact retry of an already
+unknown, and a response batch proves command completion, not completion of an
+asynchronous turn it may have started. An exact retry of an already
 settled command is a read of that retained authority only after RyeOS verifies
 the projection against the exact committed-command testimony and its settlement,
 verified-uncontacted failure, or admitted response-batch fact. RyeOS resolves
@@ -405,6 +485,25 @@ reopening history or contacting the retired worker. A new or unsettled command
 still follows the ordinary appendability gate and fails closed on a terminal
 root. Reuse of the idempotency key for different authority is rejected before
 that gate.
+
+A successful command response and a later asynchronous turn terminal are two
+different settlements. Every admitted `idle -> turn_running` and
+`turn_running -> idle` observation therefore emits a deterministic
+`hosted_session.turn_started` or `hosted_session.turn_completed` fact in the
+same authoritative append as its command or pushed-observation batch. Start
+testimony binds the exact placement-local command sequence and request digest.
+Completion testimony is independently keyed by placement, worker epoch, and
+turn. The projection joins the two exact unique facts and rejects duplicate or
+reused turn identities rather than relying on mutable status. The owner-authorized
+`command-observation` service joins those immutable facts by exact chain,
+placement, and command sequence after live status has returned to idle, after
+restart, and after command replay. Mutable session status never retains a
+`last_completed_turn_id` and cannot grant historical completion authority.
+Completed termination may carry the returned completion fence. Under the
+existing root-operation lock RyeOS revalidates the exact capsule, command,
+request, turn, completion fact, and that turn's originating worker epoch. A
+recovered worker may have a new boot epoch, but termination is refused when the
+placement's owner-route command frontier has advanced.
 
 Approval consent covers one exact action inside the admitted ceiling. It never
 expands authority. The outbox reserves the decision, writes its root

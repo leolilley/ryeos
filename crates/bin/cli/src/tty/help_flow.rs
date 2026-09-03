@@ -869,6 +869,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--app-root <DIR>]",
             "--dry-run         report without mutation\n--confirm         confirm binding retirement\n--app-root <DIR>  application root",
         ),
+        "node reset policy-generation" => (
+            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
+            "--node-profile <NAME> trusted publisher profile\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
+        ),
         "help" => (
             "ryeos help [<tokens>...] [--plain]",
             "--plain  deterministic non-interactive output",

@@ -6,10 +6,83 @@
 //! node-signed public-key grants and source-node forwarding proof.
 
 use anyhow::{Context as _, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
 use crate::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use crate::state::AppState;
+
+/// Exact target-node operator grant retained by a remotely adopted execution.
+/// The node-signed grant remains revocable; this value binds admission and the
+/// launch capsule to the exact grant generation and target-derived scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedOperatorAuthority {
+    pub owner_principal: String,
+    pub origin_site_id: String,
+    pub principal_class: AuthorizedKeyPrincipalClass,
+    pub grant_digest: String,
+    pub scopes: Vec<String>,
+}
+
+impl AdmittedOperatorAuthority {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let fingerprint = self
+            .owner_principal
+            .strip_prefix("fp:")
+            .ok_or_else(|| anyhow::anyhow!("admitted operator principal is not canonical"))?;
+        if !lillux::valid_hash(fingerprint)
+            || !lillux::valid_hash(&self.grant_digest)
+            || self.origin_site_id.is_empty()
+            || self.principal_class == AuthorizedKeyPrincipalClass::RemoteNode
+        {
+            bail!("admitted operator authority is not canonical");
+        }
+        crate::identity::validate_canonical_site_id(&self.origin_site_id)?;
+        let mut scopes = self.scopes.clone();
+        for scope in &scopes {
+            ryeos_runtime::authorizer::validate_scope_pattern(scope)
+                .map_err(|error| anyhow::anyhow!("admitted operator scope is invalid: {error}"))?;
+        }
+        scopes.sort();
+        scopes.dedup();
+        if scopes != self.scopes {
+            bail!("admitted operator scopes are not canonical");
+        }
+        Ok(())
+    }
+
+    pub fn handler_context(&self) -> HandlerContext {
+        HandlerContext::new_with_authority(
+            self.owner_principal.clone(),
+            self.scopes.clone(),
+            true,
+            Some(self.principal_class),
+            (self.principal_class == AuthorizedKeyPrincipalClass::RemoteOperator)
+                .then(|| self.origin_site_id.clone()),
+        )
+    }
+
+    /// Require the retained launch capability ceiling to be a subset of this
+    /// target grant. Pattern-to-pattern comparison is intentionally
+    /// conservative: each retained grant must itself be covered by one
+    /// current target grant pattern.
+    pub fn require_covers(&self, retained: &[String]) -> anyhow::Result<()> {
+        self.validate()?;
+        for scope in retained {
+            ryeos_runtime::authorizer::validate_scope_pattern(scope)
+                .map_err(|error| anyhow::anyhow!("retained execution scope is invalid: {error}"))?;
+            if !self
+                .scopes
+                .iter()
+                .any(|granted| ryeos_state::capability::pattern_covers(granted, scope))
+            {
+                bail!("target operator grant does not cover retained execution scope `{scope}`");
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Require the app root's exact local configured operator.
 pub fn require_local_configured_operator(
@@ -113,6 +186,19 @@ pub fn retained_admitted_operator_authority_digest(
     operator_principal: &str,
     origin_site_id: &str,
 ) -> anyhow::Result<String> {
+    Ok(
+        retained_admitted_operator_authority(state, operator_principal, origin_site_id)?
+            .grant_digest,
+    )
+}
+
+/// Resolve the complete exact current target grant for a retained execution
+/// owner. This is the sole constructor for placement/capsule grant authority.
+pub fn retained_admitted_operator_authority(
+    state: &AppState,
+    operator_principal: &str,
+    origin_site_id: &str,
+) -> anyhow::Result<AdmittedOperatorAuthority> {
     let operator_fingerprint = operator_principal
         .strip_prefix("fp:")
         .ok_or_else(|| anyhow::anyhow!("retained operator principal is not canonical"))?;
@@ -145,7 +231,18 @@ pub fn retained_admitted_operator_authority_digest(
             bail!("retained operator grant changed to remote_node")
         }
     }
-    Ok(grant.source_file_hash)
+    let mut scopes = grant.scopes;
+    scopes.sort();
+    scopes.dedup();
+    let authority = AdmittedOperatorAuthority {
+        owner_principal: operator_principal.to_owned(),
+        origin_site_id: origin_site_id.to_owned(),
+        principal_class: grant.principal_class,
+        grant_digest: grant.source_file_hash,
+        scopes,
+    };
+    authority.validate()?;
+    Ok(authority)
 }
 
 #[cfg(test)]
@@ -179,5 +276,48 @@ mod tests {
             Some("site:source".to_owned()),
         );
         assert!(remote_operator_fingerprint(&invalid).is_err());
+    }
+
+    #[test]
+    fn target_grant_covers_only_retained_capability_subsets() {
+        let authority = AdmittedOperatorAuthority {
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            principal_class: AuthorizedKeyPrincipalClass::RemoteOperator,
+            grant_digest: "b".repeat(64),
+            scopes: vec![
+                "ryeos.execute.service.worker-executions/*".to_owned(),
+                "ryeos.fetch.tool.ryeos/file-system/read".to_owned(),
+            ],
+        };
+        authority.validate().unwrap();
+        authority
+            .require_covers(&[
+                "ryeos.execute.service.worker-executions/command".to_owned(),
+                "ryeos.fetch.tool.ryeos/file-system/read".to_owned(),
+            ])
+            .unwrap();
+        assert!(
+            authority
+                .require_covers(&["ryeos.execute.service.vault/read".to_owned()])
+                .is_err()
+        );
+        assert!(
+            authority
+                .require_covers(&["ryeos.execute.*".to_owned()])
+                .is_err(),
+            "a narrower target grant cannot inherit a broader wildcard"
+        );
+
+        let narrow_pattern = AdmittedOperatorAuthority {
+            scopes: vec!["ryeos.get.vault.?".to_owned()],
+            ..authority
+        };
+        assert!(
+            narrow_pattern
+                .require_covers(&["ryeos.get.vault.*".to_owned()])
+                .is_err(),
+            "value matching must not substitute for pattern-language containment"
+        );
     }
 }

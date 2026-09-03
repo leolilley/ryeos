@@ -377,15 +377,20 @@ pub fn workspace_core_dir() -> PathBuf {
     workspace_root().join("bundles/core")
 }
 
-/// Copy the core bundle to an isolated temp dir and return `(tempdir, path)`.
-/// The daemon can safely write into the copy without polluting the workspace.
+/// Create an isolated app root, install Core at its ordinary bundle path, and
+/// return `(tempdir, app_root)`.
+///
+/// A bundle root is never also a node app root: doing so would put node-owned
+/// state below the registered bundle and make that state appear to be
+/// publisher-authored bundle content.
 pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
     ensure_bundles_fresh();
-    let tmp = tempfile::tempdir().expect("tempdir for core bundle copy");
+    let tmp = tempfile::tempdir().expect("tempdir for isolated app root");
+    let app_root = tmp.path().join("app-root");
     let src = workspace_core_dir();
-    let dst = tmp.path().join("core");
+    let dst = app_root.join(".ai/bundles/core");
     copy_dir_recursive(&src, &dst).expect("copy core bundle to temp");
-    (tmp, dst)
+    (tmp, app_root)
 }
 
 /// Ensure published bundle artifacts under `bundles/{core,standard}/`
@@ -624,9 +629,11 @@ impl DaemonHarness {
         // `repair_daemon_local` invariants pass. The fixture is
         // intentionally pre-applied rather than relying on (now-gone)
         // daemon auto-init for operator artifacts.
-        let _ = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
+        let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
+        fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
 
         pre_init(&app_root, user_space.path())?;
+        fast_fixture::seal_initialized_state(&app_root)?;
 
         // Bind `:0` and let the kernel assign an ephemeral port. The
         // daemon writes the real address back to daemon.json — no
@@ -731,7 +738,7 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_node_key(None, plant, tweak).await
+        Self::start_fast_with_optional_identities(None, None, plant, tweak).await
     }
 
     /// Like [`start_fast_with`], but initializes the daemon with an explicit
@@ -746,11 +753,29 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_node_key(Some(node_key), plant, tweak).await
+        Self::start_fast_with_optional_identities(Some(node_key), None, plant, tweak).await
     }
 
-    async fn start_fast_with_optional_node_key<S, F>(
+    /// Cross-site fixture with distinct node and operator identities. This is
+    /// the faithful shape for forwarding tests: the source operator must be an
+    /// origin-bound remote authority on the target, never its local operator.
+    pub async fn start_fast_with_node_and_user_keys<S, F>(
+        node_key: SigningKey,
+        user_key: SigningKey,
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
+        Self::start_fast_with_optional_identities(Some(node_key), Some(user_key), plant, tweak)
+            .await
+    }
+
+    async fn start_fast_with_optional_identities<S, F>(
         node_key: Option<SigningKey>,
+        user_key: Option<SigningKey>,
         plant: S,
         tweak: F,
     ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
@@ -764,13 +789,24 @@ impl DaemonHarness {
         // Copy core bundle to temp so fast fixture writes don't pollute workspace.
         let (core_bundle_tmp, state_path) = copy_core_to_temp();
 
-        let fixture = match node_key {
-            Some(node_key) => fast_fixture::populate_initialized_state_with_node_key(
+        let fixture = match (node_key, user_key) {
+            (Some(node_key), Some(user_key)) => {
+                fast_fixture::populate_initialized_state_with_identities(
+                    &state_path,
+                    user_space.path(),
+                    node_key,
+                    user_key,
+                )?
+            }
+            (Some(node_key), None) => fast_fixture::populate_initialized_state_with_node_key(
                 &state_path,
                 user_space.path(),
                 node_key,
             )?,
-            None => fast_fixture::populate_initialized_state(&state_path, user_space.path())?,
+            (None, None) => {
+                fast_fixture::populate_initialized_state(&state_path, user_space.path())?
+            }
+            (None, Some(_)) => unreachable!("explicit operator identity requires a node identity"),
         };
         // The harness copies `bundles/core` to `state_path`. Register it
         // so `bootstrap::verify_initialized` sees at least one bundle. Tests
@@ -778,6 +814,7 @@ impl DaemonHarness {
         // their `plant` hook.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
         plant(&state_path, user_space.path(), &fixture)?;
+        fast_fixture::seal_initialized_state(&state_path)?;
 
         // Authorize the user key (wildcard scope) so `post_execute` can sign
         // requests — unless the `plant` closure already wrote an authorized
@@ -1364,16 +1401,7 @@ impl StandaloneHarness {
         let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
         fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
         fast_fixture::register_standard_bundle(&app_root, &fixture)?;
-
-        // Install core under .ai/bundles/core/ so preflight's
-        // discover_installed_bundle_roots finds it. Copy from the
-        // workspace source (not app_root itself — that would
-        // recurse into the .ai/bundles/ subtree we're creating).
-        let bundles_root = app_root.join(".ai/bundles");
-        let core_install = bundles_root.join("core");
-        let core_src = workspace_core_dir();
-        copy_dir_recursive(&core_src, &core_install)
-            .with_context(|| format!("install core into {}", core_install.display()))?;
+        fast_fixture::seal_initialized_state(&app_root)?;
 
         let uds_path = app_root.join("ryeosd.sock");
         Ok(Self {
@@ -1442,6 +1470,7 @@ pub async fn run_service_standalone(
     let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
     fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
     fast_fixture::register_standard_bundle(&state_path, &fixture)?;
+    fast_fixture::seal_initialized_state(&state_path)?;
     drop(ryeos_app::runtime_db::RuntimeDb::open(
         &state_path.join(".ai/state/runtime.sqlite3"),
     )?);

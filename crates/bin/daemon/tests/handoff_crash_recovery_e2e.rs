@@ -13,7 +13,7 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -70,13 +70,20 @@ fn target_node_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[61_u8; 32])
 }
 
+fn target_operator_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[62_u8; 32])
+}
+
 const PORTABLE_WORKER_REF: &str = "worker:handoff-fixture/portable";
 const PORTABLE_EXECUTION_REF: &str = "worker_execution:handoff-fixture/session";
 const PORTABLE_CREDENTIAL_PROFILE_ID: &str = "credential:handoff-portable";
-const PORTABLE_SOURCE_SITE_ID: &str = "site:handoff-source";
-const PORTABLE_TARGET_SITE_ID: &str = "site:handoff-target";
 const PORTABLE_TARGET_REMOTE: &str = "handoff-target";
 const PORTABLE_SOURCE_REMOTE: &str = "handoff-source";
+const PORTABLE_OPERATOR_HANDOFF_SCOPES: &[&str] = &[
+    "ryeos.runtime.dedicated_session.start",
+    "ryeos.runtime.dedicated_session.command",
+    "ryeos.runtime.dedicated_session.terminate",
+];
 
 struct PortableCheckpoint {
     chain_root_id: String,
@@ -154,6 +161,64 @@ fn authorize_remote_node(
         &local.node,
     )?;
     Ok(())
+}
+
+fn authorize_remote_operator(
+    state_path: &Path,
+    local: &common::fast_fixture::FastFixture,
+    remote_operator: &SigningKey,
+    remote_site_id: &str,
+    scopes: &[&str],
+) -> Result<()> {
+    let public_key = base64::engine::general_purpose::STANDARD
+        .encode(remote_operator.verifying_key().as_bytes());
+    let fingerprint = lillux::signature::compute_fingerprint(&remote_operator.verifying_key());
+    let identity = daemon_identity(state_path)?;
+    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        &state_path
+            .join(ryeos_engine::AI_DIR)
+            .join("node/auth/authorized_keys"),
+        &fingerprint,
+        &public_key,
+        &scopes
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect::<Vec<_>>(),
+        "portable-handoff-operator",
+        &local.node_fp(),
+        &lillux::time::iso8601_now(),
+        &identity,
+        ryeos_app::identity::WildcardPolicy::Reject,
+        false,
+        Some(remote_site_id),
+        false,
+    )?;
+    Ok(())
+}
+
+fn target_remote_operator_grant_path(handoff: &RealPortableHandoff) -> PathBuf {
+    let fingerprint = lillux::signature::compute_fingerprint(
+        &common::fast_fixture::user_signing_key().verifying_key(),
+    );
+    handoff
+        .target
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node/auth/authorized_keys")
+        .join(format!("{fingerprint}.toml"))
+}
+
+fn replace_target_remote_operator_grant(
+    handoff: &RealPortableHandoff,
+    scopes: &[&str],
+) -> Result<()> {
+    authorize_remote_operator(
+        &handoff.target.state_path,
+        &handoff.target_fixture,
+        &common::fast_fixture::user_signing_key(),
+        &handoff.source_site_id,
+        scopes,
+    )
 }
 
 fn source_directory_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String> {
@@ -351,6 +416,14 @@ fn plant_portable_worker(
     state_path: &Path,
     fixture: &common::fast_fixture::FastFixture,
 ) -> Result<()> {
+    plant_portable_worker_for_owner(state_path, fixture, &format!("fp:{}", fixture.user_fp()))
+}
+
+fn plant_portable_worker_for_owner(
+    state_path: &Path,
+    fixture: &common::fast_fixture::FastFixture,
+    owner_principal: &str,
+) -> Result<()> {
     common::fast_fixture::register_standard_bundle(state_path, fixture)?;
     let bundle_root = state_path.join(".ai/bundles/handoff-portable-fixture");
     common::fast_fixture::install_signed_bundle_binary(
@@ -421,6 +494,7 @@ config:
   recover_upstream_session: true
 limits:
   duration_seconds: 3660
+  spend_usd: "1"
 requires:
   capabilities:
     declared:
@@ -460,15 +534,11 @@ requires:
     )?;
     store.create_credential_profile(NewCredentialProfile {
         profile_id: PORTABLE_CREDENTIAL_PROFILE_ID,
-        owner_principal: &format!("fp:{}", fixture.user_fp()),
+        owner_principal,
         home_id: "handoff-portable-fixture",
     })?;
     let lock_id = "credential-enrollment:handoff-portable-fixture";
-    store.acquire_credential_profile(
-        PORTABLE_CREDENTIAL_PROFILE_ID,
-        &format!("fp:{}", fixture.user_fp()),
-        lock_id,
-    )?;
+    store.acquire_credential_profile(PORTABLE_CREDENTIAL_PROFILE_ID, owner_principal, lock_id)?;
     let login_id = "credential-login:handoff-portable-fixture";
     let epoch = store.begin_credential_enrollment(
         PORTABLE_CREDENTIAL_PROFILE_ID,
@@ -979,6 +1049,50 @@ struct CredentialReservationCoordinate {
     subject_digest: String,
     checkpoint_manifest_hash: String,
     upstream_session_id: String,
+}
+
+fn revoked_terminal_replay_private_projection(
+    state_path: &Path,
+    successor_id: &str,
+) -> Result<serde_json::Value> {
+    let store = open_daemon_state(state_path)?;
+    let session = store
+        .dedicated_session(successor_id)?
+        .context("revoked terminal placement lost its dedicated-session projection")?;
+    let reservation = store
+        .credential_profile_reservation_for_successor(successor_id)?
+        .context("revoked terminal placement lost its consumed credential reservation")?;
+    let credential = store
+        .credential_profile(&session.credential_profile_id)?
+        .context("revoked terminal placement lost its credential profile")?;
+    let workers = store
+        .live_worker_processes()?
+        .into_iter()
+        .filter(|worker| worker.placement_thread_id == successor_id)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        session.worker_instance_id.is_none()
+            && session.worker_boot_epoch.is_none()
+            && workers.is_empty(),
+        "revoked operator grant recovered worker authority: session={session:?} workers={workers:?}"
+    );
+    anyhow::ensure!(
+        credential.lock_owner.is_none() && reservation.state == "consumed",
+        "revoked operator grant reopened credential-private authority: credential={credential:?} reservation={reservation:?}"
+    );
+    Ok(serde_json::json!({
+        "session": session,
+        "credential": credential,
+        "reservation": {
+            "reservation_id": reservation.reservation_id,
+            "operation_id": reservation.operation_id,
+            "profile_id": reservation.profile_id,
+            "credential_generation": reservation.credential_generation,
+            "state": reservation.state,
+            "project_fence_state": reservation.project_fence_state,
+        },
+        "live_workers": workers,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2108,9 +2222,9 @@ fn assert_retry_disposition(
             && cut_evidence.operation_digest == cut_operation_digest
             && final_source.operation.preflight_id == expected_preflight_id
             && final_source.operation.chain_root_id == handoff.checkpoint.chain_root_id
-            && final_source.operation.origin_site_id == PORTABLE_SOURCE_SITE_ID
-            && final_source.operation.source_site_id == PORTABLE_SOURCE_SITE_ID
-            && final_source.operation.target_site_id == PORTABLE_TARGET_SITE_ID
+            && final_source.operation.origin_site_id == handoff.source_site_id
+            && final_source.operation.source_site_id == handoff.source_site_id
+            && final_source.operation.target_site_id == handoff.target_site_id
             && final_source.operation.successor_placement_thread_id == expected_successor_id
             && final_source.operation.target_credential_profile_id
                 == PORTABLE_CREDENTIAL_PROFILE_ID
@@ -2841,6 +2955,21 @@ fn plant_target_abort_state(
     store.release_credential_profile(TARGET_CREDENTIAL_PROFILE_ID, enrollment_lock)?;
     let subject_contract_digest = fixture_hash("credential-subject-contract");
     let subject_digest = fixture_hash("credential-subject");
+    let project_principal_key =
+        ryeos_state::refs::principal_storage_key(&source.operation.owner_principal)?;
+    let target_project_hash = fixture_hash("target-abort-project");
+    let target_project_head_hash = fixture_hash("target-abort-project-head");
+    let target_authority = store.pinned_state_authority()?;
+    let target_guard = target_authority.acquire_shared_guard()?;
+    target_authority.ensure_guard(&target_guard)?;
+    let target_signer = NodeIdentitySigner::from_identity(&daemon_identity(state_path)?);
+    store.write_project_head_ref(
+        &project_principal_key,
+        &target_project_hash,
+        &target_project_head_hash,
+        &target_signer,
+        &target_guard,
+    )?;
     store.reserve_credential_profile_generation(NewCredentialProfileReservation {
         reservation_id: TARGET_CREDENTIAL_RESERVATION_ID,
         operation_id: &source.operation.operation_id,
@@ -2852,6 +2981,9 @@ fn plant_target_abort_state(
         subject_digest: &subject_digest,
         checkpoint_manifest_hash: &source.operation.checkpoint_manifest_hash,
         upstream_session_id: "upstream-session:handoff-fixture",
+        project_principal_key: &project_principal_key,
+        project_hash: &target_project_hash,
+        target_project_head_hash: &target_project_head_hash,
     })?;
 
     let authority = store.pinned_state_authority()?;
@@ -3610,6 +3742,8 @@ struct RealPortableHandoff {
     source_fixture: common::fast_fixture::FastFixture,
     target: DaemonHarness,
     target_fixture: common::fast_fixture::FastFixture,
+    source_site_id: String,
+    target_site_id: String,
     checkpoint: PortableCheckpoint,
 }
 
@@ -3621,7 +3755,7 @@ impl RealPortableHandoff {
                 PORTABLE_SOURCE_REMOTE,
                 format!("http://{}", self.source.bind),
                 &self.source_fixture,
-                PORTABLE_SOURCE_SITE_ID,
+                &self.source_site_id,
                 None,
             )?,
         )?;
@@ -3631,7 +3765,7 @@ impl RealPortableHandoff {
                 PORTABLE_TARGET_REMOTE,
                 format!("http://{}", self.target.bind),
                 &self.target_fixture,
-                PORTABLE_TARGET_SITE_ID,
+                &self.target_site_id,
                 Some((self._project.path(), self._project.path())),
             )?,
         )
@@ -3696,14 +3830,24 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         b"portable handoff fixture\n",
     )?;
 
-    let (mut target, target_fixture) = DaemonHarness::start_fast_with_node_key(
+    let source_operator_key = common::fast_fixture::user_signing_key();
+    let source_operator_principal = format!(
+        "fp:{}",
+        lillux::signature::compute_fingerprint(&source_operator_key.verifying_key())
+    );
+    let target_profile_owner = source_operator_principal.clone();
+    let (mut target, target_fixture) = DaemonHarness::start_fast_with_node_and_user_keys(
         target_node_signing_key(),
-        |state_path, _user_space, fixture| plant_portable_worker(state_path, fixture),
+        target_operator_signing_key(),
+        move |state_path, _user_space, fixture| {
+            plant_portable_worker_for_owner(state_path, fixture, &target_profile_owner)
+        },
         |command| {
             command.env("HOSTNAME", "handoff-target");
         },
     )
     .await?;
+    let target_site_id = target_fixture.site_id();
     let initial_target_url = format!("http://{}", target.bind);
     let target_project = project.path().to_path_buf();
     let (mut source, source_fixture) = DaemonHarness::start_fast_with(
@@ -3713,7 +3857,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
                 state_path,
                 fixture,
                 &target_fixture,
-                PORTABLE_TARGET_SITE_ID,
+                &target_site_id,
                 &["ryeos.execute.service.objects/closure/get"],
             )?;
             install_single_remote(
@@ -3722,7 +3866,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
                     PORTABLE_TARGET_REMOTE,
                     initial_target_url.clone(),
                     &target_fixture,
-                    PORTABLE_TARGET_SITE_ID,
+                    &target_site_id,
                     Some((target_project.as_path(), target_project.as_path())),
                 )?,
             )
@@ -3732,6 +3876,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         },
     )
     .await?;
+    let source_site_id = source_fixture.site_id();
     let checkpoint = launch_and_checkpoint_portable_worker(
         &mut source,
         project.path(),
@@ -3761,7 +3906,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         &target.state_path,
         &target_fixture,
         &source_fixture,
-        PORTABLE_SOURCE_SITE_ID,
+        &source_site_id,
         &[
             "ryeos.execute.service.objects/get",
             "ryeos.execute.service.objects/closure/get",
@@ -3770,6 +3915,13 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
             "ryeos.execute.service.worker-placements/adopt",
             "ryeos.execute.service.worker-placements/abort",
         ],
+    )?;
+    authorize_remote_operator(
+        &target.state_path,
+        &target_fixture,
+        &source_operator_key,
+        &source_site_id,
+        PORTABLE_OPERATOR_HANDOFF_SCOPES,
     )?;
     install_target_project_head(
         &source.state_path,
@@ -3789,7 +3941,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
             PORTABLE_SOURCE_REMOTE,
             format!("http://{}", source.bind),
             &source_fixture,
-            PORTABLE_SOURCE_SITE_ID,
+            &source_site_id,
             None,
         )?,
     )?;
@@ -3804,7 +3956,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
             PORTABLE_TARGET_REMOTE,
             format!("http://{}", target.bind),
             &target_fixture,
-            PORTABLE_TARGET_SITE_ID,
+            &target_site_id,
             Some((project.path(), project.path())),
         )?,
     )?;
@@ -3815,6 +3967,8 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         source_fixture,
         target,
         target_fixture,
+        source_site_id,
+        target_site_id,
         checkpoint,
     })
 }
@@ -3835,7 +3989,7 @@ async fn assert_real_handoff_completed(
         .get_thread(&handoff.checkpoint.chain_root_id)?
         .context("source lost its original placement")?;
     anyhow::ensure!(
-        source_thread.origin_site_id == PORTABLE_SOURCE_SITE_ID
+        source_thread.origin_site_id == handoff.source_site_id
             && source_thread.status == "continued",
         "source placement was not durably fenced: {source_thread:?}"
     );
@@ -3876,8 +4030,8 @@ async fn assert_real_handoff_completed(
         .context("target lost its adopted successor")?;
     anyhow::ensure!(
         adopted.chain_root_id == handoff.checkpoint.chain_root_id
-            && adopted.origin_site_id == PORTABLE_SOURCE_SITE_ID
-            && adopted.current_site_id == PORTABLE_TARGET_SITE_ID,
+            && adopted.origin_site_id == handoff.source_site_id
+            && adopted.current_site_id == handoff.target_site_id,
         "adopted placement changed stable or provenance identity: {adopted:?}"
     );
     let reservation = target_store
@@ -4043,6 +4197,28 @@ async fn wait_for_handoff_terminal_state(
     }
     anyhow::bail!(
         "handoff recovery never reached terminal state `{expected_state}`: {last_status:?}"
+    )
+}
+
+async fn wait_for_state_lock_release(state_path: &Path) -> Result<()> {
+    let lock_path = ryeos_app::state_lock::default_lock_path(state_path);
+    let timer = MonotonicTimer::start();
+    let mut last_error = None;
+    while timer.elapsed() < Duration::from_secs(5) {
+        match ryeos_app::state_lock::StateLock::acquire_existing_read_only(&lock_path) {
+            Ok(lock) => {
+                drop(lock);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!(
+        "state lock remained held after daemon and attachment teardown: {}",
+        last_error
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_else(|| "no lock observation".to_owned())
     )
 }
 
@@ -4278,8 +4454,8 @@ fn build_handoff_measurement_record(
         schema: "ryeos.worker_handoff_qualification_record.v1".to_owned(),
         case_id: case_id.to_owned(),
         workload_profile_id: PORTABLE_WORKER_REF.to_owned(),
-        source_site_id: PORTABLE_SOURCE_SITE_ID.to_owned(),
-        target_site_id: PORTABLE_TARGET_SITE_ID.to_owned(),
+        source_site_id: operation.source_site_id.clone(),
+        target_site_id: operation.target_site_id.clone(),
         object_schema_versions,
         failure_cut,
         cache_state: "measured_before_transfer".to_owned(),
@@ -4471,12 +4647,80 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
             command.env("HOSTNAME", "handoff-target");
         })
         .await?;
+    handoff
+        .source
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-source");
+        })
+        .await?;
     handoff.refresh_routes()?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
-    anyhow::ensure!(
-        status == reqwest::StatusCode::OK,
-        "real handoff returned {status}: {response}"
-    );
+    if status != reqwest::StatusCode::OK {
+        let source_stderr = stderr_tail(&handoff.source.drain_stderr_nonblocking().await, 200);
+        let target_stderr = stderr_tail(&handoff.target.drain_stderr_nonblocking().await, 200);
+        handoff.source.kill_daemon().await?;
+        handoff.target.kill_daemon().await?;
+        let target_store = open_daemon_state(&handoff.target.state_path)?;
+        let session = target_store.dedicated_session(&successor_id)?;
+        let thread = target_store.get_thread(&successor_id)?;
+        let launch_claim = target_store.get_launch_claim(&successor_id)?;
+        let credential = target_store.credential_profile(PORTABLE_CREDENTIAL_PROFILE_ID)?;
+        let workers = target_store
+            .live_worker_processes()?
+            .into_iter()
+            .filter(|worker| worker.placement_thread_id == successor_id)
+            .collect::<Vec<_>>();
+        let target_job = find_handoff_job(
+            &target_store,
+            &handoff.checkpoint.chain_root_id,
+            WorkerHandoffJobRole::Target,
+        )?;
+        let events = target_store
+            .latest_thread_events(&successor_id, 16)?
+            .into_iter()
+            .map(|event| {
+                serde_json::json!({
+                    "type": event.event_type,
+                    "payload": event.payload,
+                })
+            })
+            .collect::<Vec<_>>();
+        let thread_summary = thread.map(|thread| {
+            serde_json::json!({
+                "status":thread.status,
+                "started_at":thread.started_at,
+                "finished_at":thread.finished_at,
+                "pid":thread.runtime.pid,
+                "process_identity":thread.runtime.process_identity,
+            })
+        });
+        let claim_summary = launch_claim.map(|claim| {
+            serde_json::json!({
+                "claim_id":claim.claim_id,
+                "claimed_by":claim.claimed_by,
+                "owner":format!("{:?}", claim.owner),
+                "lease_expires_at_ms":claim.lease_expires_at_ms,
+            })
+        });
+        let credential_summary = credential.map(|credential| {
+            serde_json::json!({
+                "state":credential.state,
+                "generation":credential.credential_generation,
+                "lock_owner":credential.lock_owner,
+            })
+        });
+        let job_summary = target_job.map(|job| {
+            serde_json::json!({
+                "state":format!("{:?}", job.state),
+                "phase":job.phase,
+                "last_error":job.last_error,
+                "attempt_count":job.attempt_count,
+            })
+        });
+        anyhow::bail!(
+            "real handoff returned {status}: {response}\ntarget session: {session:?}\ntarget thread: {thread_summary:?}\ntarget launch claim: {claim_summary:?}\ntarget credential: {credential_summary:?}\ntarget workers: {workers:?}\ntarget job: {job_summary:?}\ntarget events: {events:?}\nsource daemon stderr:\n{source_stderr}\ntarget daemon stderr:\n{target_stderr}"
+        );
+    }
     anyhow::ensure!(
         response
             .pointer("/result/placement_thread_id")
@@ -4503,8 +4747,12 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
                 .is_some(),
         "qualified handoff returned malformed stage measurements: {measurements}"
     );
-    let (target_status_code, target_status) = handoff
-        .target
+    // The chain remains owned by the source operator. Query its originating
+    // node, whose durable handoff job is the operator-facing status authority;
+    // a target-local operator must not gain visibility into another
+    // principal's adopted session merely because it administers that node.
+    let (source_status_code, source_status) = handoff
+        .source
         .post_execute(
             "service:worker-executions/status",
             ".",
@@ -4512,24 +4760,24 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
         )
         .await?;
     anyhow::ensure!(
-        target_status_code == reqwest::StatusCode::OK
-            && target_status
+        source_status_code == reqwest::StatusCode::OK
+            && source_status
                 .pointer("/result/handoff/state")
                 .and_then(serde_json::Value::as_str)
                 == Some("completed")
-            && target_status
+            && source_status
                 .pointer("/result/handoff/phase")
                 .and_then(serde_json::Value::as_str)
                 == Some("completed")
-            && target_status
+            && source_status
                 .pointer("/result/handoff/terminal_disposition")
                 .and_then(serde_json::Value::as_str)
                 == Some("completed")
-            && target_status
+            && source_status
                 .pointer("/result/handoff/recovery_required")
                 .and_then(serde_json::Value::as_bool)
                 == Some(false),
-        "target status did not explain the terminal handoff: {target_status_code} {target_status}"
+        "source status did not explain the terminal handoff: {source_status_code} {source_status}"
     );
     let (retry_status, retry) = handoff.handoff(&preflight_id).await?;
     anyhow::ensure!(
@@ -4541,6 +4789,7 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
         "completed handoff retry minted or returned another successor: {retry_status} {retry}"
     );
     assert_real_handoff_completed(&mut handoff, &successor_id).await?;
+    wait_for_state_lock_release(&handoff.target.state_path).await?;
     let record = build_handoff_measurement_record(
         &handoff.source.state_path,
         &operation_id,
@@ -4563,7 +4812,9 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
 
     // Operational sync jobs have an ordinary retention horizon. The
     // permanent node-signed receipt must replay the exact target response
-    // without contacting the now-offline source or retaining that job.
+    // without contacting the now-offline source or retaining that job. A
+    // later operator-grant revocation fences runnable recovery and private
+    // credential state; it cannot erase historical terminal testimony.
     let target_store = open_daemon_state(&handoff.target.state_path)?;
     let receipt = target_store
         .worker_handoff_adoption_receipt(&operation_id)?
@@ -4585,6 +4836,20 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
         "adoption receipt did not survive terminal-job retention"
     );
     drop(target_store);
+    replace_target_remote_operator_grant(
+        &handoff,
+        &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
+    )?;
+    handoff
+        .target
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-target");
+        })
+        .await?;
+    handoff.target.kill_daemon().await?;
+    wait_for_state_lock_release(&handoff.target.state_path).await?;
+    let private_projection_before_replay =
+        revoked_terminal_replay_private_projection(&handoff.target.state_path, &successor_id)?;
     handoff
         .target
         .respawn_with(|command| {
@@ -4621,6 +4886,20 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
                 == Some(successor_id.as_str()),
         "retention-independent adoption replay failed: {retained_status} {retained_response}"
     );
+    handoff.target.kill_daemon().await?;
+    wait_for_state_lock_release(&handoff.target.state_path).await?;
+    let private_projection_after_replay =
+        revoked_terminal_replay_private_projection(&handoff.target.state_path, &successor_id)?;
+    anyhow::ensure!(
+        private_projection_after_replay == private_projection_before_replay,
+        "terminal receipt replay mutated worker or credential-private projections: before={private_projection_before_replay} after={private_projection_after_replay}"
+    );
+    handoff
+        .target
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-target");
+        })
+        .await?;
     let mut opposite_operation = receipt.target_operation.clone();
     opposite_operation.role = WorkerHandoffJobRole::Source;
     opposite_operation.peer_remote_name = PORTABLE_TARGET_REMOTE.to_owned();
@@ -4639,6 +4918,206 @@ async fn real_portable_worker_completes_cross_site_handoff() -> Result<()> {
     );
     handoff.target.kill_daemon().await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn target_operator_grant_change_after_preflight_refuses_pre_cut_handoff() -> Result<()> {
+    let mut handoff = start_real_portable_handoff().await?;
+    let (preflight_id, successor_id) = handoff.preflight().await?;
+    handoff.target.kill_daemon().await?;
+    replace_target_remote_operator_grant(
+        &handoff,
+        &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
+    )?;
+    handoff
+        .target
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-target");
+        })
+        .await?;
+    handoff.refresh_routes()?;
+
+    let (status, response) = handoff.handoff(&preflight_id).await?;
+    anyhow::ensure!(
+        !status.is_success(),
+        "changed target operator grant admitted a pre-cut handoff: {response}"
+    );
+    handoff.source.kill_daemon().await?;
+    handoff.target.kill_daemon().await?;
+    let source_store = open_daemon_state(&handoff.source.state_path)?;
+    let source_placement = source_store
+        .current_chain_placement_thread_id(&handoff.checkpoint.chain_root_id)?
+        .context("source chain lost its current placement")?;
+    anyhow::ensure!(
+        source_placement != successor_id,
+        "pre-cut grant mutation transferred source writer authority"
+    );
+    let source_session = source_store
+        .dedicated_session(&source_placement)?
+        .context("pre-cut source session disappeared")?;
+    anyhow::ensure!(
+        source_session.state == "frozen",
+        "pre-cut grant refusal did not preserve the frozen source session: {source_session:?}"
+    );
+    let target_store = open_daemon_state(&handoff.target.state_path)?;
+    anyhow::ensure!(
+        target_store.get_thread(&successor_id)?.is_none()
+            && !target_store
+                .live_worker_processes()?
+                .iter()
+                .any(|worker| worker.placement_thread_id == successor_id)
+            && !portable_fixture_state_is_installed(&handoff.target.state_path)?,
+        "pre-cut grant refusal installed target-private successor state"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn target_operator_grant_change_after_source_cut_fences_then_exact_restore_recovers()
+-> Result<()> {
+    let (mut handoff, preflight_id, successor_id, _, cut) =
+        crash_real_source_handoff_at(HandoffCrashBoundary::SourceWriterCutPublished).await?;
+    let grant_path = target_remote_operator_grant_path(&handoff);
+    let exact_grant = std::fs::read(&grant_path)
+        .with_context(|| format!("read exact target operator grant {}", grant_path.display()))?;
+    handoff.target.kill_daemon().await?;
+    replace_target_remote_operator_grant(
+        &handoff,
+        &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
+    )?;
+    handoff
+        .target
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-target");
+        })
+        .await?;
+    handoff
+        .source
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-source");
+        })
+        .await?;
+    handoff.refresh_routes()?;
+    let (changed_status, changed_response) = handoff.handoff(&preflight_id).await?;
+    anyhow::ensure!(
+        !changed_status.is_success(),
+        "changed target operator grant admitted post-cut private-state installation: {changed_response}"
+    );
+
+    handoff.source.kill_daemon().await?;
+    handoff.target.kill_daemon().await?;
+    let source_store = open_daemon_state_with_trusted_nodes(
+        &handoff.source.state_path,
+        &[&handoff.source_fixture.node, &handoff.target_fixture.node],
+    )?;
+    anyhow::ensure!(
+        source_store.current_chain_placement_thread_id(&handoff.checkpoint.chain_root_id)?
+            == Some(successor_id.clone()),
+        "post-cut grant refusal illegally restored source placement authority"
+    );
+    let source_thread = source_store
+        .get_thread(&handoff.checkpoint.chain_root_id)?
+        .context("post-cut grant refusal lost the source placement")?;
+    anyhow::ensure!(
+        source_thread.status == "continued",
+        "post-cut grant refusal reactivated or terminalized source authority: {source_thread:?}"
+    );
+    drop(source_store);
+    let target_store = open_daemon_state(&handoff.target.state_path)?;
+    anyhow::ensure!(
+        target_store.get_thread(&successor_id)?.is_none()
+            && target_store.dedicated_session(&successor_id)?.is_none()
+            && !target_store
+                .live_worker_processes()?
+                .iter()
+                .any(|worker| worker.placement_thread_id == successor_id)
+            && !portable_fixture_state_is_installed(&handoff.target.state_path)?,
+        "post-cut grant refusal installed successor thread/process/private state"
+    );
+    let reservation = target_store
+        .credential_profile_reservation_for_successor(&successor_id)?
+        .context("post-cut grant refusal lost its recoverable credential reservation")?;
+    anyhow::ensure!(
+        reservation.state == "reserved" && reservation.project_fence_state == "active",
+        "post-cut grant refusal released recovery authority: {reservation:?}"
+    );
+    drop(target_store);
+
+    // The digest-fenced placement requires the exact original signed bytes.
+    // Re-authoring equivalent scopes would produce a different grant and must
+    // not silently substitute for the authority sealed before source cut.
+    std::fs::write(&grant_path, &exact_grant).with_context(|| {
+        format!(
+            "restore exact target operator grant {}",
+            grant_path.display()
+        )
+    })?;
+    handoff
+        .target
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-target");
+        })
+        .await?;
+    handoff
+        .source
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-source");
+        })
+        .await?;
+    handoff.refresh_routes()?;
+    // Trigger recovery without making the outer HTTP wait timeout another
+    // authority for durable handoff completion. Observe the source job through
+    // the existing pushed/status projection, then replay the now-terminal
+    // operation for its exact response.
+    let request = serde_json::json!({
+        "chain_root_id":handoff.checkpoint.chain_root_id,
+        "manifest_ref":handoff.checkpoint.manifest_ref,
+        "remote":PORTABLE_TARGET_REMOTE,
+        "target_credential_profile_id":PORTABLE_CREDENTIAL_PROFILE_ID,
+        "preflight_id":preflight_id,
+    });
+    let source_bind = handoff.source.bind;
+    let source_user_key = handoff
+        .source
+        .user_key
+        .as_ref()
+        .context("source user key missing")?
+        .clone();
+    let source_node_key = handoff
+        .source
+        .node_key
+        .as_ref()
+        .context("source node key missing")?
+        .clone();
+    let recovery_request = tokio::spawn(async move {
+        post_handoff_request(source_bind, &source_user_key, &source_node_key, request).await
+    });
+    if let Err(error) = wait_for_handoff_terminal_state(
+        &handoff.source,
+        &handoff.checkpoint.chain_root_id,
+        "completed",
+    )
+    .await
+    {
+        recovery_request.abort();
+        let source_stderr = stderr_tail(&handoff.source.drain_stderr_nonblocking().await, 200);
+        let target_stderr = stderr_tail(&handoff.target.drain_stderr_nonblocking().await, 200);
+        anyhow::bail!(
+            "exact target grant restoration did not settle the durable operation: {error:#}\nsource daemon stderr:\n{source_stderr}\ntarget daemon stderr:\n{target_stderr}"
+        );
+    }
+    recovery_request.abort();
+    let (status, response) = handoff.handoff(&preflight_id).await?;
+    anyhow::ensure!(
+        status == reqwest::StatusCode::OK
+            && response
+                .pointer("/result/placement_thread_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(successor_id.as_str()),
+        "exact target grant restoration did not resume operation {}: {status} {response}",
+        cut.operation_id
+    );
+    assert_real_handoff_completed(&mut handoff, &successor_id).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -5376,6 +5855,12 @@ async fn projected_target_attachment_survives_worker_reap_before_receipt_recover
             command.env("HOSTNAME", "handoff-target");
         })
         .await?;
+    handoff
+        .source
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-source");
+        })
+        .await?;
     handoff.refresh_routes()?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
     anyhow::ensure!(
@@ -5390,6 +5875,10 @@ async fn projected_target_attachment_survives_worker_reap_before_receipt_recover
         .pointer("/result/operation_id")
         .and_then(serde_json::Value::as_str)
         .context("reaped attachment recovery returned no operation id")?;
+    // Mutable runtime state has one owner. Stop both disposable daemons before
+    // opening the target StateStore for offline receipt inspection.
+    handoff.source.kill_daemon().await?;
+    handoff.target.kill_daemon().await?;
     let target_store = open_daemon_state(&handoff.target.state_path)?;
     anyhow::ensure!(
         target_store
@@ -5401,8 +5890,6 @@ async fn projected_target_attachment_survives_worker_reap_before_receipt_recover
         "reaped attachment recovery did not retain receipt and terminal job"
     );
     drop(target_store);
-    handoff.source.kill_daemon().await?;
-    handoff.target.kill_daemon().await?;
     Ok(())
 }
 
@@ -5826,6 +6313,12 @@ async fn permanent_adoption_receipt_folds_after_many_failed_contact_attempts() -
         .target
         .respawn_with(|command| {
             command.env("HOSTNAME", "handoff-target");
+        })
+        .await?;
+    handoff
+        .source
+        .respawn_with(|command| {
+            command.env("HOSTNAME", "handoff-source");
         })
         .await?;
     handoff.refresh_routes()?;

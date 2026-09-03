@@ -14,11 +14,15 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
+    let transfer = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+    )?;
     Ok(serde_json::json!({
         "protocol": {
             "name": "ryeos-distributed-substrate",
-            "versions": [1],
-            "preferred_version": 1,
+            "versions": [crate::remote::client::DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION],
+            "preferred_version": crate::remote::client::DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION,
         },
         "identity": {
             "principal_id": state.identity.principal_id(),
@@ -45,7 +49,7 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
                 "submit": true,
                 "status": true,
                 "attestations_for_subject": true,
-                "policies": ["local-node-v1"],
+                "policies": [super::admission_submit::LOCAL_ADMISSION_POLICY],
             },
             "sync_jobs": {
                 "list": true,
@@ -67,15 +71,15 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
             },
         },
         "limits": {
-            "max_roots_per_closure_request": 1024,
-            "default_max_objects_per_closure": 10000,
-            "default_max_blobs_per_closure": 10000,
-            "default_max_object_bytes": 1024 * 1024,
-            "default_max_total_object_bytes": 32 * 1024 * 1024,
-            "default_max_blob_bytes": 32 * 1024 * 1024,
-            "default_max_total_blob_bytes": 512 * 1024 * 1024,
-            "default_max_response_bytes": 64 * 1024 * 1024,
-            "default_max_links_per_object": 10000,
+            "max_roots_per_closure_request": transfer.max_roots,
+            "max_objects_per_closure": transfer.max_objects,
+            "max_blobs_per_closure": transfer.max_blobs,
+            "max_object_bytes": transfer.max_object_bytes,
+            "max_total_object_bytes": transfer.max_total_object_bytes,
+            "max_blob_bytes": transfer.max_blob_bytes,
+            "max_total_blob_bytes": transfer.max_total_blob_bytes,
+            "max_response_bytes": transfer.max_response_bytes,
+            "max_links_per_object": transfer.max_links_per_object,
         },
     }))
 }

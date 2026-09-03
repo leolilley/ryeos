@@ -46,6 +46,8 @@ struct CachedFact {
     count: u8,
     payload_digest: String,
     payload: Option<Value>,
+    first_chain_seq: i64,
+    last_chain_seq: i64,
     /// True only after a complete replay, or cache-proven absence followed by
     /// replay of the entire unseen tail, counted this exact key.
     complete: bool,
@@ -114,7 +116,7 @@ impl ReplayIndex {
         self.recent.insert(key, fact);
     }
 
-    fn observe(&mut self, event_type: &str, payload: &Value) -> Result<()> {
+    fn observe(&mut self, event_type: &str, payload: &Value, chain_seq: i64) -> Result<()> {
         let Some(operation_id) = payload.get("operation_id").and_then(Value::as_str) else {
             return Ok(());
         };
@@ -128,6 +130,8 @@ impl ReplayIndex {
         let cached_payload = (canonical.len() <= CACHED_PAYLOAD_BYTES).then(|| payload.clone());
         if let Some(existing) = self.recent.get_mut(&key) {
             existing.count = existing.count.saturating_add(1);
+            existing.first_chain_seq = existing.first_chain_seq.min(chain_seq);
+            existing.last_chain_seq = existing.last_chain_seq.max(chain_seq);
             if existing.payload_digest != payload_digest {
                 existing.payload = None;
             }
@@ -139,6 +143,8 @@ impl ReplayIndex {
                 count: 1,
                 payload_digest,
                 payload: cached_payload,
+                first_chain_seq: chain_seq,
+                last_chain_seq: chain_seq,
                 complete: false,
             },
         );
@@ -158,6 +164,8 @@ pub struct RootFactLookup {
     pub count: u8,
     pub payload_digest: Option<String>,
     pub payload: Option<Value>,
+    pub first_chain_seq: Option<i64>,
+    pub last_chain_seq: Option<i64>,
 }
 
 fn replay_cache() -> &'static std::sync::Mutex<ReplayCache> {
@@ -205,6 +213,8 @@ fn scan_tail(
     let mut matching_count = 0_u8;
     let mut matching_digest = None;
     let mut matching_payload = None;
+    let mut first_chain_seq = None;
+    let mut last_chain_seq = None;
     loop {
         let page = state.state_store.replay_events(
             chain_root_id,
@@ -225,8 +235,10 @@ fn scan_tail(
                 matching_count = matching_count.saturating_add(1);
                 matching_digest = Some(lillux::sha256_hex(canonical.as_bytes()));
                 matching_payload = Some(event.payload.clone());
+                first_chain_seq.get_or_insert(event.chain_seq);
+                last_chain_seq = Some(event.chain_seq);
             }
-            index.observe(&event.event_type, &event.payload)?;
+            index.observe(&event.event_type, &event.payload, event.chain_seq)?;
         }
         if let Some(last) = page.events.last() {
             after = Some(last.chain_seq);
@@ -241,6 +253,8 @@ fn scan_tail(
         count: matching_count,
         payload_digest: matching_digest,
         payload: matching_payload,
+        first_chain_seq,
+        last_chain_seq,
     })
 }
 
@@ -255,6 +269,8 @@ fn replay_exact(
         count: 0,
         payload_digest: None,
         payload: None,
+        first_chain_seq: None,
+        last_chain_seq: None,
     };
     loop {
         let page = state.state_store.replay_events(
@@ -278,6 +294,8 @@ fn replay_exact(
             lookup.count = lookup.count.saturating_add(1);
             lookup.payload_digest = Some(lillux::sha256_hex(canonical.as_bytes()));
             lookup.payload = Some(event.payload.clone());
+            lookup.first_chain_seq.get_or_insert(event.chain_seq);
+            lookup.last_chain_seq = Some(event.chain_seq);
         }
         after = page.events.last().map(|event| event.chain_seq);
         if !page.has_more {
@@ -315,11 +333,21 @@ fn lookup_under_lock(
                         .payload_digest
                         .expect("matching replay has a payload digest");
                     exact.payload = tail.payload;
+                    exact.first_chain_seq = exact.first_chain_seq.min(
+                        tail.first_chain_seq
+                            .expect("matching replay has a chain sequence"),
+                    );
+                    exact.last_chain_seq = exact.last_chain_seq.max(
+                        tail.last_chain_seq
+                            .expect("matching replay has a chain sequence"),
+                    );
                 }
                 RootFactLookup {
                     count: exact.count,
                     payload_digest: Some(exact.payload_digest),
                     payload: exact.payload,
+                    first_chain_seq: Some(exact.first_chain_seq),
+                    last_chain_seq: Some(exact.last_chain_seq),
                 }
             }
             None if !may_contain_before => tail,
@@ -345,6 +373,12 @@ fn lookup_under_lock(
                     .clone()
                     .expect("present fact has a payload digest"),
                 payload: cached_payload,
+                first_chain_seq: lookup
+                    .first_chain_seq
+                    .expect("present fact has a first chain sequence"),
+                last_chain_seq: lookup
+                    .last_chain_seq
+                    .expect("present fact has a last chain sequence"),
                 complete: true,
             },
         );
@@ -548,7 +582,7 @@ mod tests {
         assert!(!index.bloom_may_contain(&key));
 
         let payload = json!({"operation_id":key.operation_id,"value":"observed"});
-        index.observe(&key.event_type, &payload).unwrap();
+        index.observe(&key.event_type, &payload, 7).unwrap();
         assert!(index.bloom_may_contain(&key));
         assert!(!index.recent.get(&key).unwrap().complete);
 
@@ -559,6 +593,8 @@ mod tests {
                 count: 1,
                 payload_digest: lillux::sha256_hex(canonical.as_bytes()),
                 payload: Some(payload),
+                first_chain_seq: 7,
+                last_chain_seq: 7,
                 complete: true,
             },
         );
@@ -566,6 +602,7 @@ mod tests {
             .observe(
                 &key.event_type,
                 &json!({"operation_id":key.operation_id,"value":"duplicate"}),
+                9,
             )
             .unwrap();
         let duplicate = index.recent.get(&key).unwrap();
@@ -578,6 +615,7 @@ mod tests {
                 .observe(
                     "hosted.bounded",
                     &json!({"operation_id":format!("{ordinal:064x}"),"ordinal":ordinal}),
+                    i64::try_from(ordinal).unwrap() + 10,
                 )
                 .unwrap();
         }

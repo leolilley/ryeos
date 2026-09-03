@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T02:25:04Z:f9b4ecdd92c867ff8ecab8e417d0624eed9a0957f7cee6f933ee07db32a3885b:YMw9SbWrLFFG7R78rBxhJAf3Aoeutjn8kuHo9+UtjPNeA3bQAiMvpkEq90LAvJEGXZugVs/6a7JENcNAV9WvCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:22019d43cbad0a661427f383eedd6c7d361748275da92e5ceed7487eadf200a9:tagbFaG3vzAAZx6tJNUNvldtVGB+5fmUl+BrGXQrV21Q6qnWUdOdOXo6+JPNYk7wZ/vjtNHNlB+C9UVHuwE8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -397,6 +397,19 @@ Default behavior:
 ./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
+For an existing stopped development node when the release deliberately changes
+the complete node-policy schema or selected bundle-set profile, perform the
+explicit one-time cut in the same install:
+
+```bash
+./scripts/pkg/install-local-direct.sh \
+  --trust-source-publishers --reset-node-policy-generation
+```
+
+Do not pass that flag for a fresh node. It replaces only the signed policy
+generation; the following init aligns the trusted profile's prospective exact
+bundle inventory and preserves all non-policy state.
+
 The script will:
 
 1. reuse already-built binaries and populated bundle sources by default;
@@ -405,8 +418,9 @@ The script will:
 4. optionally install `lillux` if it was built;
 5. install the selected bundle sources under `/usr/share/ryeos`;
 6. move stale PATH shadows of installed user-facing binaries from
-   `/usr/local/bin`, `~/.local/bin`, and `~/.cargo/bin`, preserving the
-   user-local entries in timestamped backups;
+   `/usr/local/bin`, `~/.local/bin`, and the invoking user's configured Cargo
+   home `bin` directory, preserving the user-local entries in timestamped
+   backups;
 7. run `ryeos init --source /usr/share/ryeos ...`;
 8. restart the daemon only if it was running before the install.
 
@@ -593,7 +607,9 @@ Before tagging:
 
 After local install validation:
 
-- [ ] `./scripts/pkg/install-local-direct.sh --trust-source-publishers` completes.
+- [ ] The applicable local install completes: a fresh/current-policy node uses
+      `./scripts/pkg/install-local-direct.sh --trust-source-publishers`; an
+      existing predecessor-policy node adds `--reset-node-policy-generation`.
 - [ ] `ryeos node status` checked explicitly.
 - [ ] If daemon was not running before install, `ryeos start` run manually if
   startup validation is needed.

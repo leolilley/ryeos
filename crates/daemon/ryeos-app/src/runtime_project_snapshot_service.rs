@@ -471,29 +471,29 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     };
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
     let signer = NodeIdentitySigner::from_identity(&state.identity);
-    state.state_store.with_state_db(|db| {
-        let locked_head = db.read_project_head(&ctx.principal_key, &ctx.project_hash)?;
-        if locked_head != initial_head {
-            bail!("project head changed while creating snapshot; rerun snapshot create");
-        }
-        match initial_head.as_deref() {
-            Some(current) => db.advance_project_head_ref(
-                &ctx.principal_key,
-                &ctx.project_hash,
-                &snapshot_hash,
-                current,
-                &signer,
-                &guard,
-            ),
-            None => db.write_project_head_ref(
-                &ctx.principal_key,
-                &ctx.project_hash,
-                &snapshot_hash,
-                &signer,
-                &guard,
-            ),
-        }
-    })?;
+    let locked_head = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(&ctx.principal_key, &ctx.project_hash))?;
+    if locked_head != initial_head {
+        bail!("project head changed while creating snapshot; rerun snapshot create");
+    }
+    match initial_head.as_deref() {
+        Some(current) => state.state_store.advance_project_head_ref(
+            &ctx.principal_key,
+            &ctx.project_hash,
+            &snapshot_hash,
+            current,
+            &signer,
+            &guard,
+        ),
+        None => state.state_store.write_project_head_ref(
+            &ctx.principal_key,
+            &ctx.project_hash,
+            &snapshot_hash,
+            &signer,
+            &guard,
+        ),
+    }?;
     Ok(json!({
         "kind": "snapshot_create",
         "project_path": ctx.project_path,

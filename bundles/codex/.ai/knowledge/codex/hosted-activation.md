@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T12:50:48Z:2e935eee0aa21ab304bc5129e06111c9efe4f77f44dac11d2a496a119f87b34d:P4l73cZCUGdoSJRZP3isA6DUK9dbNnXS589lTfx83Tos7x0yd/UR1REdJt6f1WIKQYVnSdJJ7AYCDDD12ZaxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T14:48:16Z:bfc715239fbf3130446eeeac9b85a4903ec2be06abb15c73bd69a8bfb95c61de:hdS0gTwGBkq0fqHloRXmR4AEqksTvEST4XWoHxtFonOHuySiOZa43ZTV6uYJaqyOZOa4zJyT5ZhEiW0GgFjUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -15,6 +15,13 @@ authentication managed by Codex. It does not route Codex through RyeOS local
 inference. The executable, its same-version code-mode host, its packaged
 model-command runtime resources, and App Server schemas are pinned by
 activation and source closure.
+
+The signed session item carries a finite RyeOS `spend_usd` execution allowance
+so the accounting ledger can conserve one exact allowance across placement
+handoff. The worker-execution runtime has no provider financial authority and
+Codex does not expose ChatGPT-subscription charges to this contract. The
+allowance is therefore placement authority only: it is not observed usage, a
+billing limit, or evidence of subscription spend.
 
 This is installed operator knowledge shipped by the Codex bundle. It documents
 how to activate and accept that optional integration; it is not a RyeOS
@@ -129,6 +136,18 @@ knowledge bundle.
    source-node co-signature. A plain `local_client` grant is not acceptable,
    and ordinary remote-node grants remain node principals that cannot own this
    workflow.
+   Handoff preflight captures that exact grant's class, origin, signed body
+   digest, and canonical scopes as `AdmittedOperatorAuthority`. Preparation
+   proves it covers the target capsule's effective and parent-delegation
+   capability ceilings and seals it into the target capsule and placement.
+   The target revalidates the same grant before publication and private-state
+   installation, including recovery. Revocation, scope change, or equivalent
+   re-authoring after preflight fences the handoff; only the exact original
+   signed grant can resume runnable recovery after an already committed source
+   cut. Once a target-signed terminal settlement exists, replay of that exact
+   immutable receipt remains source-node-authenticated but is independent of
+   later grant changes; it cannot launch a worker or reopen credential-private
+   authority.
    Portable placement is a separate internal transport boundary: admit each
    configured peer node key with only the generic closure-read,
    worker-placement preflight/prepare/adopt/abort, and follow-terminal scopes
@@ -171,6 +190,13 @@ knowledge bundle.
    provider-neutral operation creates one two-parent generation and publishes
    remote-first under durable recovery. Handoff deliberately refuses a missing
    or divergent destination HEAD instead of overwriting it.
+   Once target preparation reserves the credential generation, the same
+   durable reservation fences the exact configured-operator project HEAD.
+   Snapshot, push, reconciliation, fold-back, and compact-GC writers cannot
+   change it before adoption. Abort releases both reservation authorities;
+   adoption releases the HEAD fence only after the target branch is
+   authoritative, so restart cannot expose private state against a substituted
+   project generation.
 7. Resolve digest-fenced pending approvals. This release exposes bounded
    command/cwd for review but makes command-execution, file, and permission
    requests deny-only. Accepting an upstream sandbox-escalation request could
@@ -179,9 +205,11 @@ knowledge bundle.
    `terminate` accepts only `reason: completed` or `reason: cancelled`.
    `completed` freezes a project session and exposes its candidate;
    `cancelled` terminalizes without a checkpointable placement. A portable
-   checkpoint is therefore captured only after `completed`, and `resume`
-   conditionally restores that manifest into a fresh placement before its
-   worker is released.
+   checkpoint is therefore captured only after `completed`. For a cross-site
+   move, wait for `frozen`, publish that checkpoint, and only then run
+   `handoff-preflight` and `handoff`; the preflight is bound to the resulting
+   immutable source chain head. `resume` conditionally restores that manifest
+   into a fresh placement before its worker is released.
 
 External-content maintenance after activation uses the hosted node's own local
 operator, not the forwarded source operator. Finish or terminate hosted
@@ -210,6 +238,15 @@ closed, waits for validate/publish/discard, then finalizes the RyeOS root.
 The route IDs above are canonical. Inspect a complete leaf such as
 `ryeos help codex session command` for its current CLI presentation; every
 command must still match the signed command and service contracts.
+After `turn.start`, retain the returned placement-local `command_sequence` and
+`placement_thread_id`. `ryeos codex session command-observation` resolves that
+exact coordinate after the transient session status has returned to idle and
+returns the immutable turn-completion fence. Passing that fence as
+`completion` to the generic terminate service prevents a later command from
+being mistaken for the turn the caller intended to complete. A daemon-owned
+reattach may advance the worker boot epoch after restart, but it does not
+replace the owner-route frontier proved by that fence; placement and admitted
+capsule must still match exactly.
 
 ## Mechanical policy boundary
 

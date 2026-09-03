@@ -17,6 +17,7 @@ use ryeos_app::state::AppState;
 use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
+pub const DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION: u64 = 2;
 
 /// HTTP error from a remote-node call, carrying the status code and the **full
 /// request URL** so callers can react to a specific failure — and so an operator
@@ -83,7 +84,6 @@ pub fn map_remote_call_error(
 /// keep enough to diagnose without bloating logs and error chains.
 const ERROR_BODY_EXCERPT_MAX: usize = 16 * 1024;
 const DEFAULT_JSON_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
-const MAX_CLOSURE_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 
 fn truncate_error_body(body: &str) -> String {
     if body.len() <= ERROR_BODY_EXCERPT_MAX {
@@ -772,7 +772,7 @@ impl RemoteClient {
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
-        total_timeout: Option<std::time::Duration>,
+        total_timeout: Option<lillux::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({
             "object_hashes": object_hashes,
@@ -819,10 +819,14 @@ impl RemoteClient {
     pub async fn objects_closure_describe(
         &self,
         roots: &[String],
-        options: ObjectsClosureRequestOptions,
+        options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureDescribeResponse> {
+        options.validate_roots(roots)?;
+        let response_limit = closure_response_limit(&options)?;
         let body = closure_request_body(roots, &options);
-        let resp = self.signed_post("/objects/closure/describe", &body).await?;
+        let resp = self
+            .signed_post_with_response_limit("/objects/closure/describe", &body, response_limit)
+            .await?;
         let response: ObjectsClosureDescribeResponse = serde_json::from_value(resp)
             .context("failed to parse objects/closure/describe response")?;
         response.validate_against_request(roots)?;
@@ -833,8 +837,9 @@ impl RemoteClient {
     pub async fn objects_closure_get(
         &self,
         roots: &[String],
-        options: ObjectsClosureRequestOptions,
+        options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureGetResponse> {
+        options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
         let body = closure_request_body(roots, &options);
         let resp = self
@@ -842,7 +847,7 @@ impl RemoteClient {
             .await?;
         let response: ObjectsClosureGetResponse =
             serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
-        response.validate_against_request(roots, options.allow_untransported_large_objects)?;
+        response.validate_against_request(roots, &options)?;
         Ok(response)
     }
 
@@ -851,9 +856,10 @@ impl RemoteClient {
     pub async fn objects_closure_get_with_total_timeout(
         &self,
         roots: &[String],
-        options: ObjectsClosureRequestOptions,
+        options: NodeAdmittedObjectsClosureRequestOptions,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsClosureGetResponse> {
+        options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
         let body = closure_request_body(roots, &options);
         let resp = self
@@ -866,7 +872,7 @@ impl RemoteClient {
             .await?;
         let response: ObjectsClosureGetResponse =
             serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
-        response.validate_against_request(roots, options.allow_untransported_large_objects)?;
+        response.validate_against_request(roots, &options)?;
         Ok(response)
     }
 
@@ -892,6 +898,9 @@ impl RemoteClient {
         }
         if let Some(limit) = options.max_object_bytes {
             body["max_object_bytes"] = serde_json::json!(limit);
+        }
+        if let Some(limit) = options.max_total_object_bytes {
+            body["max_total_object_bytes"] = serde_json::json!(limit);
         }
         if let Some(limit) = options.max_blob_bytes {
             body["max_blob_bytes"] = serde_json::json!(limit);
@@ -2105,9 +2114,7 @@ impl ObjectsClosureDescribeResponse {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ObjectsClosureGetResponse {
     pub closure: ObjectsClosureSummary,
-    #[serde(default)]
     pub object_bytes: u64,
-    #[serde(default)]
     pub blob_bytes: u64,
     pub entries: Vec<CasEntry>,
 }
@@ -2116,9 +2123,10 @@ impl ObjectsClosureGetResponse {
     pub fn validate_against_request(
         &self,
         requested_roots: &[String],
-        allow_untransported_large_objects: bool,
+        options: &NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<()> {
         validate_closure_summary_against_request(&self.closure, requested_roots)?;
+        let limits = options.limits();
         if !self.closure.complete {
             anyhow::bail!("remote returned incomplete object closure");
         }
@@ -2131,23 +2139,22 @@ impl ObjectsClosureGetResponse {
                 "remote returned complete closure with missing/malformed/unsupported entries"
             );
         }
-        if !self.closure.large_object_hashes.is_empty() && !allow_untransported_large_objects {
+        if !self.closure.large_object_hashes.is_empty()
+            && !options.allow_untransported_large_objects()
+        {
             anyhow::bail!(
                 "remote CAS closure contains large-object edges that this transport cannot fetch"
             );
         }
-        let object_hashes: std::collections::BTreeSet<&str> = self
-            .closure
-            .object_hashes
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let blob_hashes: std::collections::BTreeSet<&str> = self
-            .closure
-            .blob_hashes
-            .iter()
-            .map(String::as_str)
-            .collect();
+        if self.closure.object_hashes.len() > limits.max_objects {
+            anyhow::bail!("remote object closure exceeds admitted object count");
+        }
+        if self.closure.blob_hashes.len() > limits.max_blobs {
+            anyhow::bail!("remote object closure exceeds admitted blob count");
+        }
+        let object_hashes = unique_hashes(&self.closure.object_hashes, "object closure")?;
+        let blob_hashes = unique_hashes(&self.closure.blob_hashes, "blob closure")?;
+        unique_hashes(&self.closure.large_object_hashes, "large-object closure")?;
         for hash in self
             .closure
             .object_hashes
@@ -2158,6 +2165,12 @@ impl ObjectsClosureGetResponse {
                 anyhow::bail!("invalid closure hash {hash}");
             }
         }
+        let mut returned_objects = BTreeSet::new();
+        let mut returned_blobs = BTreeSet::new();
+        let mut transport_objects = BTreeMap::new();
+        let mut transport_blobs = BTreeMap::new();
+        let mut object_bytes = 0_u64;
+        let mut blob_bytes = 0_u64;
         for entry in &self.entries {
             if !is_canonical_hash(&entry.hash) {
                 anyhow::bail!("invalid closure entry hash {}", entry.hash);
@@ -2167,8 +2180,22 @@ impl ObjectsClosureGetResponse {
                     if !object_hashes.contains(entry.hash.as_str()) {
                         anyhow::bail!("object entry {} is not in advertised closure", entry.hash);
                     }
+                    if !returned_objects.insert(entry.hash.as_str()) {
+                        anyhow::bail!("duplicate object entry for closure hash {}", entry.hash);
+                    }
                     let canonical =
                         lillux::canonical_json(entry.value.as_ref().expect("value checked above"))?;
+                    let canonical_bytes = u64::try_from(canonical.len())
+                        .context("canonical object byte count exceeds u64")?;
+                    if canonical_bytes > limits.max_object_bytes {
+                        anyhow::bail!("remote closure object exceeds admitted per-object bytes");
+                    }
+                    object_bytes = object_bytes
+                        .checked_add(canonical_bytes)
+                        .context("remote closure object byte count overflow")?;
+                    if object_bytes > limits.max_total_object_bytes {
+                        anyhow::bail!("remote closure exceeds admitted total object bytes");
+                    }
                     let actual = lillux::sha256_hex(canonical.as_bytes());
                     if actual != entry.hash {
                         anyhow::bail!(
@@ -2177,14 +2204,29 @@ impl ObjectsClosureGetResponse {
                             actual
                         );
                     }
+                    transport_objects.insert(entry.hash.clone(), canonical.into_bytes());
                 }
                 "blob" if entry.data.is_some() && entry.value.is_none() => {
                     if !blob_hashes.contains(entry.hash.as_str()) {
                         anyhow::bail!("blob entry {} is not in advertised closure", entry.hash);
                     }
+                    if !returned_blobs.insert(entry.hash.as_str()) {
+                        anyhow::bail!("duplicate blob entry for closure hash {}", entry.hash);
+                    }
                     let decoded = base64::engine::general_purpose::STANDARD
                         .decode(entry.data.as_ref().expect("data checked above"))
                         .context("invalid base64 in closure blob entry")?;
+                    let decoded_bytes = u64::try_from(decoded.len())
+                        .context("decoded closure blob byte count exceeds u64")?;
+                    if decoded_bytes > limits.max_blob_bytes {
+                        anyhow::bail!("remote closure blob exceeds admitted per-blob bytes");
+                    }
+                    blob_bytes = blob_bytes
+                        .checked_add(decoded_bytes)
+                        .context("remote closure blob byte count overflow")?;
+                    if blob_bytes > limits.max_total_blob_bytes {
+                        anyhow::bail!("remote closure exceeds admitted total blob bytes");
+                    }
                     let actual = lillux::sha256_hex(&decoded);
                     if actual != entry.hash {
                         anyhow::bail!(
@@ -2193,31 +2235,81 @@ impl ObjectsClosureGetResponse {
                             actual
                         );
                     }
+                    transport_blobs.insert(entry.hash.clone(), decoded);
                 }
-                "missing" if entry.value.is_none() && entry.data.is_none() => {}
+                "missing" if entry.value.is_none() && entry.data.is_none() => {
+                    anyhow::bail!("complete remote closure returned a missing entry")
+                }
                 other => anyhow::bail!("invalid closure entry kind/shape: {other}"),
             }
         }
-        for hash in object_hashes {
-            if !self
-                .entries
-                .iter()
-                .any(|entry| entry.kind == "object" && entry.hash == hash)
-            {
+        for hash in &object_hashes {
+            if !returned_objects.contains(hash) {
                 anyhow::bail!("missing object entry for advertised closure hash {hash}");
             }
         }
-        for hash in blob_hashes {
-            if !self
-                .entries
-                .iter()
-                .any(|entry| entry.kind == "blob" && entry.hash == hash)
-            {
+        for hash in &blob_hashes {
+            if !returned_blobs.contains(hash) {
                 anyhow::bail!("missing blob entry for advertised closure hash {hash}");
             }
         }
+        if object_bytes != self.object_bytes {
+            anyhow::bail!(
+                "remote closure object byte testimony mismatch: reported {}, computed {object_bytes}",
+                self.object_bytes
+            );
+        }
+        if blob_bytes != self.blob_bytes {
+            anyhow::bail!(
+                "remote closure blob byte testimony mismatch: reported {}, computed {blob_bytes}",
+                self.blob_bytes
+            );
+        }
+        let report = ryeos_state::object_closure::collect_object_closure_from_memory(
+            &transport_objects,
+            &transport_blobs,
+            requested_roots.iter().cloned(),
+            ryeos_state::object_closure::ObjectClosureLimits {
+                max_objects: limits.max_objects,
+                max_blobs: limits.max_blobs,
+                max_object_bytes: limits.max_object_bytes,
+                max_total_object_bytes: limits.max_total_object_bytes,
+                max_blob_bytes: limits.max_blob_bytes,
+                max_total_blob_bytes: limits.max_total_blob_bytes,
+                max_links_per_object: limits.max_links_per_object,
+            },
+        )
+        .context("validate remote response as exact typed object closure")?;
+        if !report.is_complete() {
+            anyhow::bail!("remote response does not contain a complete typed object closure");
+        }
+        let advertised_objects = self.closure.object_hashes.iter().cloned().collect();
+        let advertised_blobs = self.closure.blob_hashes.iter().cloned().collect();
+        let advertised_large_objects = self.closure.large_object_hashes.iter().cloned().collect();
+        if report.object_hashes != advertised_objects {
+            anyhow::bail!("advertised object set is not the exact reachable closure");
+        }
+        if report.blob_hashes != advertised_blobs {
+            anyhow::bail!("advertised blob set is not the exact reachable closure");
+        }
+        if report.large_object_hashes != advertised_large_objects {
+            anyhow::bail!("advertised large-object set is not the exact reachable closure");
+        }
+        if !report.large_object_hashes.is_empty() && !options.allow_untransported_large_objects() {
+            anyhow::bail!(
+                "remote CAS closure contains large-object edges that this transport cannot fetch"
+            );
+        }
         Ok(())
     }
+}
+
+fn unique_hashes<'a>(hashes: &'a [String], label: &str) -> Result<BTreeSet<&'a str>> {
+    let unique = hashes.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if unique.len() != hashes.len() {
+        anyhow::bail!("{label} contains duplicate hashes");
+    }
+    Ok(unique)
 }
 
 fn validate_closure_summary_against_request(
@@ -2314,45 +2406,177 @@ pub struct ObjectsClosureRequestOptions {
     pub allow_untransported_large_objects: bool,
 }
 
-fn closure_response_limit(options: &ObjectsClosureRequestOptions) -> Result<usize> {
-    let requested = options
-        .max_response_bytes
-        .unwrap_or(u64::try_from(DEFAULT_JSON_RESPONSE_MAX_BYTES)?);
-    if requested == 0 || requested > MAX_CLOSURE_RESPONSE_BYTES {
+/// A remote closure request proven not to exceed this node's receive policy.
+/// Remote closure clients accept only this type so a new workflow cannot
+/// accidentally bypass node admission by constructing raw limits directly.
+#[derive(Debug, Clone)]
+pub struct NodeAdmittedObjectsClosureRequestOptions {
+    limits: ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
+    allow_incomplete: bool,
+    allow_untransported_large_objects: bool,
+}
+
+impl NodeAdmittedObjectsClosureRequestOptions {
+    pub fn for_node(
+        state: &ryeos_app::state::AppState,
+        requested: ObjectsClosureRequestOptions,
+    ) -> Result<Self> {
+        use ryeos_app::node_policy::TypedNodePolicy as _;
+
+        let policy = state
+            .node_policy
+            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+        )?;
+        Self::admit(requested, policy).with_context(|| {
+            format!(
+                "admit remote closure operation against `{}` node policy",
+                ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy::SECTION_NAME
+            )
+        })
+    }
+
+    pub fn admit(
+        requested: ObjectsClosureRequestOptions,
+        policy: &ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy,
+    ) -> Result<Self> {
+        let limits = policy.admit(
+            ryeos_app::node_policy::sections::object_closure::RequestedObjectTransferLimits {
+                max_objects: requested.max_objects,
+                max_blobs: requested.max_blobs,
+                max_object_bytes: requested.max_object_bytes,
+                max_total_object_bytes: requested.max_total_object_bytes,
+                max_blob_bytes: requested.max_blob_bytes,
+                max_total_blob_bytes: requested.max_total_blob_bytes,
+                max_response_bytes: requested.max_response_bytes,
+                max_links_per_object: requested.max_links_per_object,
+            },
+        )?;
+        Ok(Self {
+            limits,
+            allow_incomplete: requested.allow_incomplete,
+            allow_untransported_large_objects: requested.allow_untransported_large_objects,
+        })
+    }
+
+    pub fn limits(
+        &self,
+    ) -> &ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits {
+        &self.limits
+    }
+
+    pub fn allow_untransported_large_objects(&self) -> bool {
+        self.allow_untransported_large_objects
+    }
+
+    /// Narrow the remote fetch so a caller can append one locally held entry
+    /// while the complete staged payload remains inside this operation's one
+    /// node-admitted budget. The original options remain the authority used to
+    /// validate the final combined payload.
+    pub fn reserving_supplemental_entry(
+        &self,
+        entry: &ryeos_state::sync::SyncEntry,
+    ) -> Result<Self> {
+        if !lillux::valid_hash(&entry.hash)
+            || entry.hash.bytes().any(|byte| byte.is_ascii_uppercase())
+            || lillux::sha256_hex(&entry.data) != entry.hash
+        {
+            bail!("supplemental closure entry has an invalid content identity");
+        }
+        let entry_bytes =
+            u64::try_from(entry.data.len()).context("supplemental entry size exceeds u64")?;
+        let mut limits = self.limits;
+        if entry.is_blob {
+            if entry_bytes > limits.max_blob_bytes {
+                bail!("supplemental blob exceeds admitted per-entry bytes");
+            }
+            limits.max_blobs = limits
+                .max_blobs
+                .checked_sub(1)
+                .context("node policy leaves no closure blob slot for supplemental entry")?;
+            limits.max_total_blob_bytes = limits
+                .max_total_blob_bytes
+                .checked_sub(entry_bytes)
+                .context("node policy leaves no closure blob bytes for supplemental entry")?;
+            if limits.max_blobs == 0 || limits.max_total_blob_bytes == 0 {
+                bail!("supplemental blob consumes the complete remote closure blob budget");
+            }
+        } else {
+            if entry_bytes > limits.max_object_bytes {
+                bail!("supplemental object exceeds admitted per-entry bytes");
+            }
+            let value: Value = serde_json::from_slice(&entry.data)
+                .context("supplemental closure object is not JSON")?;
+            if lillux::canonical_json(&value)?.as_bytes() != entry.data.as_slice() {
+                bail!("supplemental closure object is not canonical JSON");
+            }
+            let Some(link_count) = ryeos_state::object_closure::object_link_count(&value)
+                .map_err(|error| anyhow::anyhow!("invalid supplemental object: {error}"))?
+            else {
+                bail!("supplemental closure object has an unsupported kind");
+            };
+            if link_count > limits.max_links_per_object {
+                bail!("supplemental object exceeds admitted link count");
+            }
+            limits.max_objects = limits
+                .max_objects
+                .checked_sub(1)
+                .context("node policy leaves no closure object slot for supplemental entry")?;
+            limits.max_total_object_bytes = limits
+                .max_total_object_bytes
+                .checked_sub(entry_bytes)
+                .context("node policy leaves no closure object bytes for supplemental entry")?;
+            if limits.max_objects == 0 || limits.max_total_object_bytes == 0 {
+                bail!("supplemental object consumes the complete remote closure object budget");
+            }
+        }
+        Ok(Self {
+            limits,
+            allow_incomplete: self.allow_incomplete,
+            allow_untransported_large_objects: self.allow_untransported_large_objects,
+        })
+    }
+
+    fn validate_roots(&self, roots: &[String]) -> Result<()> {
+        if roots.len() > self.limits.max_roots {
+            anyhow::bail!(
+                "object-closure root count exceeds node policy: {} > {}",
+                roots.len(),
+                self.limits.max_roots
+            );
+        }
+        Ok(())
+    }
+}
+
+fn closure_response_limit(options: &NodeAdmittedObjectsClosureRequestOptions) -> Result<usize> {
+    let requested = options.limits.max_response_bytes;
+    if requested == 0 || requested > ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES
+    {
         anyhow::bail!(
-            "objects/closure/get response limit must be between 1 and {MAX_CLOSURE_RESPONSE_BYTES} bytes"
+            "objects/closure/get response limit must be between 1 and {} bytes",
+            ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES
         );
     }
     usize::try_from(requested)
         .context("objects/closure/get response limit does not fit this platform")
 }
 
-fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions) -> Value {
-    let mut body = serde_json::json!({ "roots": roots });
-    if let Some(limit) = options.max_objects {
-        body["max_objects"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_blobs {
-        body["max_blobs"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_object_bytes {
-        body["max_object_bytes"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_total_object_bytes {
-        body["max_total_object_bytes"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_blob_bytes {
-        body["max_blob_bytes"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_total_blob_bytes {
-        body["max_total_blob_bytes"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_response_bytes {
-        body["max_response_bytes"] = serde_json::json!(limit);
-    }
-    if let Some(limit) = options.max_links_per_object {
-        body["max_links_per_object"] = serde_json::json!(limit);
-    }
+fn closure_request_body(
+    roots: &[String],
+    options: &NodeAdmittedObjectsClosureRequestOptions,
+) -> Value {
+    let limits = options.limits();
+    let mut body = serde_json::json!({
+        "roots": roots,
+        "max_objects": limits.max_objects,
+        "max_blobs": limits.max_blobs,
+        "max_object_bytes": limits.max_object_bytes,
+        "max_total_object_bytes": limits.max_total_object_bytes,
+        "max_blob_bytes": limits.max_blob_bytes,
+        "max_total_blob_bytes": limits.max_total_blob_bytes,
+        "max_response_bytes": limits.max_response_bytes,
+        "max_links_per_object": limits.max_links_per_object,
+    });
     if options.allow_incomplete {
         body["allow_incomplete"] = serde_json::json!(true);
     }
@@ -2368,6 +2592,7 @@ pub struct AdmissionSubmitOptions {
     pub max_objects: Option<usize>,
     pub max_blobs: Option<usize>,
     pub max_object_bytes: Option<u64>,
+    pub max_total_object_bytes: Option<u64>,
     pub max_blob_bytes: Option<u64>,
     pub max_total_blob_bytes: Option<u64>,
     pub max_links_per_object: Option<usize>,
@@ -2475,8 +2700,25 @@ impl FederationCapabilitiesResponse {
             .get("versions")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow::anyhow!("federation capabilities missing protocol.versions"))?;
-        if !versions.iter().any(|version| version.as_u64() == Some(1)) {
-            anyhow::bail!("federation capabilities missing supported protocol version 1");
+        if !versions
+            .iter()
+            .any(|version| version.as_u64() == Some(DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION))
+        {
+            anyhow::bail!(
+                "federation capabilities missing supported protocol version {}",
+                DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION
+            );
+        }
+        if self
+            .protocol
+            .get("preferred_version")
+            .and_then(Value::as_u64)
+            != Some(DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION)
+        {
+            anyhow::bail!(
+                "federation capabilities preferred protocol version is not {}",
+                DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION
+            );
         }
         for field in ["principal_id", "fingerprint", "site_id"] {
             if self.identity.get(field).and_then(Value::as_str).is_none() {
@@ -2489,7 +2731,7 @@ impl FederationCapabilitiesResponse {
         if self.services.get("objects").is_none() || self.services.get("admission").is_none() {
             anyhow::bail!("federation capabilities missing core services");
         }
-        if self.limits.get("default_max_objects_per_closure").is_none() {
+        if self.limits.get("max_objects_per_closure").is_none() {
             anyhow::bail!("federation capabilities missing closure limits");
         }
         Ok(())
@@ -3163,10 +3405,11 @@ mod tests {
         let closure_error = client
             .objects_closure_get_with_total_timeout(
                 &["a".repeat(64)],
-                ObjectsClosureRequestOptions {
-                    max_response_bytes: Some(4096),
-                    ..ObjectsClosureRequestOptions::default()
-                },
+                NodeAdmittedObjectsClosureRequestOptions::admit(
+                    ObjectsClosureRequestOptions::default(),
+                    &test_object_closure_policy(),
+                )
+                .unwrap(),
                 timeout,
             )
             .await
@@ -3562,8 +3805,8 @@ mod tests {
         let response: FederationCapabilitiesResponse = serde_json::from_value(serde_json::json!({
             "protocol": {
                 "name": "ryeos-distributed-substrate",
-                "versions": [1],
-                "preferred_version": 1
+                "versions": [2],
+                "preferred_version": 2
             },
             "identity": {
                 "principal_id": "principal:node",
@@ -3576,7 +3819,7 @@ mod tests {
                 "admission": {"submit": true}
             },
             "limits": {
-                "default_max_objects_per_closure": 4096
+                "max_objects_per_closure": 4096
             }
         }))
         .unwrap();
@@ -3585,8 +3828,8 @@ mod tests {
         let response: FederationCapabilitiesResponse = serde_json::from_value(serde_json::json!({
             "protocol": {
                 "name": "ryeos-distributed-substrate",
-                "versions": [2],
-                "preferred_version": 2
+                "versions": [1],
+                "preferred_version": 1
             },
             "identity": {
                 "principal_id": "principal:node",
@@ -3595,7 +3838,7 @@ mod tests {
             },
             "object_kinds": ["attestation"],
             "services": {"objects": {}, "admission": {}},
-            "limits": {"default_max_objects_per_closure": 4096}
+            "limits": {"max_objects_per_closure": 4096}
         }))
         .unwrap();
         assert!(response.validate().is_err());
@@ -3903,25 +4146,228 @@ mod tests {
 
     #[test]
     fn closure_transport_enforces_the_exact_signed_response_budget() {
-        let default = ObjectsClosureRequestOptions::default();
+        let policy = test_object_closure_policy();
+        let default = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &policy,
+        )
+        .unwrap();
         assert_eq!(
             closure_response_limit(&default).unwrap(),
-            DEFAULT_JSON_RESPONSE_MAX_BYTES
+            usize::try_from(policy.max_response_bytes).unwrap()
         );
 
-        let explicit = ObjectsClosureRequestOptions {
-            max_response_bytes: Some(1024 * 1024 * 1024),
-            ..ObjectsClosureRequestOptions::default()
-        };
+        let explicit = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions {
+                max_response_bytes: Some(192 * 1024 * 1024),
+                ..ObjectsClosureRequestOptions::default()
+            },
+            &policy,
+        )
+        .unwrap();
         assert_eq!(
             closure_response_limit(&explicit).unwrap(),
-            1024 * 1024 * 1024
+            192 * 1024 * 1024
         );
 
         let excessive = ObjectsClosureRequestOptions {
-            max_response_bytes: Some(MAX_CLOSURE_RESPONSE_BYTES + 1),
+            max_response_bytes: Some(
+                ryeos_state::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES + 1,
+            ),
             ..ObjectsClosureRequestOptions::default()
         };
-        assert!(closure_response_limit(&excessive).is_err());
+        assert!(NodeAdmittedObjectsClosureRequestOptions::admit(excessive, &policy).is_err());
+    }
+
+    fn test_object_closure_policy()
+    -> ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+        ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+            schema: 1,
+            max_roots: 256,
+            max_objects: 32_768,
+            max_blobs: 32_768,
+            max_object_bytes: 32 * 1024 * 1024,
+            max_total_object_bytes: 64 * 1024 * 1024,
+            max_blob_bytes: 128 * 1024 * 1024,
+            max_total_blob_bytes: 128 * 1024 * 1024,
+            max_response_bytes: 256 * 1024 * 1024,
+            max_links_per_object: 100_000,
+        }
+    }
+
+    fn closure_test_object(payload: Value) -> (String, Value, String) {
+        let value = serde_json::json!({
+            "schema": 1,
+            "kind": "thread_event",
+            "chain_root_id": "T-closure-test",
+            "chain_seq": 1,
+            "thread_id": "T-closure-test",
+            "thread_seq": 1,
+            "event_type": "test",
+            "durability": "durable",
+            "ts": "2026-09-03T00:00:00Z",
+            "prev_chain_event_hash": null,
+            "prev_thread_event_hash": null,
+            "payload": payload,
+        });
+        let canonical = lillux::canonical_json(&value).unwrap();
+        let hash = lillux::sha256_hex(canonical.as_bytes());
+        (hash, value, canonical)
+    }
+
+    #[test]
+    fn supplemental_object_reservation_is_exact_and_preserves_original_limits() {
+        let (_, _, canonical) = closure_test_object(serde_json::json!({}));
+        let entry = ryeos_state::sync::SyncEntry {
+            hash: lillux::sha256_hex(canonical.as_bytes()),
+            is_blob: false,
+            data: canonical.into_bytes(),
+        };
+        let mut policy = test_object_closure_policy();
+        policy.max_objects = 2;
+        policy.max_object_bytes = u64::try_from(entry.data.len()).unwrap();
+        policy.max_total_object_bytes = u64::try_from(entry.data.len()).unwrap() + 7;
+        let admitted = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &policy,
+        )
+        .unwrap();
+        let reserved = admitted.reserving_supplemental_entry(&entry).unwrap();
+        assert_eq!(reserved.limits.max_objects, 1);
+        assert_eq!(reserved.limits.max_total_object_bytes, 7);
+        assert_eq!(admitted.limits.max_objects, 2);
+        assert_eq!(
+            admitted.limits.max_total_object_bytes,
+            u64::try_from(entry.data.len()).unwrap() + 7
+        );
+    }
+
+    #[test]
+    fn supplemental_reservation_refuses_invalid_or_exhausting_entries() {
+        let (_, _, canonical) = closure_test_object(serde_json::json!({}));
+        let valid = ryeos_state::sync::SyncEntry {
+            hash: lillux::sha256_hex(canonical.as_bytes()),
+            is_blob: false,
+            data: canonical.into_bytes(),
+        };
+        let mut policy = test_object_closure_policy();
+        policy.max_objects = 1;
+        policy.max_object_bytes = u64::try_from(valid.data.len()).unwrap();
+        policy.max_total_object_bytes = u64::try_from(valid.data.len()).unwrap();
+        let admitted = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &policy,
+        )
+        .unwrap();
+        assert!(admitted.reserving_supplemental_entry(&valid).is_err());
+
+        let unsupported = lillux::canonical_json(&serde_json::json!({
+            "kind": "not_a_registered_object",
+        }))
+        .unwrap();
+        let unsupported = ryeos_state::sync::SyncEntry {
+            hash: lillux::sha256_hex(unsupported.as_bytes()),
+            is_blob: false,
+            data: unsupported.into_bytes(),
+        };
+        assert!(admitted.reserving_supplemental_entry(&unsupported).is_err());
+
+        let mut invalid_identity = valid;
+        invalid_identity.hash.make_ascii_uppercase();
+        assert!(
+            NodeAdmittedObjectsClosureRequestOptions::admit(
+                ObjectsClosureRequestOptions::default(),
+                &test_object_closure_policy(),
+            )
+            .unwrap()
+            .reserving_supplemental_entry(&invalid_identity)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn closure_response_rejects_duplicate_entries_before_import() {
+        let options = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &test_object_closure_policy(),
+        )
+        .unwrap();
+        let (hash, value, canonical) = closure_test_object(serde_json::json!({}));
+        let entry = CasEntry {
+            hash: hash.clone(),
+            kind: "object".to_string(),
+            data: None,
+            value: Some(value),
+        };
+        let response = ObjectsClosureGetResponse {
+            closure: ObjectsClosureSummary {
+                roots: vec![hash.clone()],
+                complete: true,
+                object_hashes: vec![hash.clone()],
+                ..ObjectsClosureSummary::default()
+            },
+            object_bytes: u64::try_from(canonical.len() * 2).unwrap(),
+            blob_bytes: 0,
+            entries: vec![entry.clone(), entry],
+        };
+        assert!(
+            response
+                .validate_against_request(&[hash], &options)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn closure_response_requires_current_byte_testimony() {
+        let response = serde_json::json!({
+            "closure": {
+                "roots": [],
+                "complete": true,
+                "object_hashes": [],
+                "blob_hashes": [],
+                "large_object_hashes": [],
+                "missing_objects": [],
+                "missing_blobs": [],
+                "malformed_objects": [],
+                "unsupported_objects": []
+            },
+            "entries": []
+        });
+        assert!(serde_json::from_value::<ObjectsClosureGetResponse>(response).is_err());
+    }
+
+    #[test]
+    fn closure_response_rejects_valid_hash_above_admitted_object_size() {
+        let mut policy = test_object_closure_policy();
+        policy.max_object_bytes = 1024;
+        policy.max_total_object_bytes = 4096;
+        let options = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &policy,
+        )
+        .unwrap();
+        let (hash, value, canonical) =
+            closure_test_object(serde_json::json!({"padding": "x".repeat(2048)}));
+        let response = ObjectsClosureGetResponse {
+            closure: ObjectsClosureSummary {
+                roots: vec![hash.clone()],
+                complete: true,
+                object_hashes: vec![hash.clone()],
+                ..ObjectsClosureSummary::default()
+            },
+            object_bytes: u64::try_from(canonical.len()).unwrap(),
+            blob_bytes: 0,
+            entries: vec![CasEntry {
+                hash: hash.clone(),
+                kind: "object".to_string(),
+                data: None,
+                value: Some(value),
+            }],
+        };
+        assert!(
+            response
+                .validate_against_request(&[hash], &options)
+                .is_err()
+        );
     }
 }

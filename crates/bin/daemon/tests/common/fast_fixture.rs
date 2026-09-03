@@ -117,6 +117,9 @@ impl FastFixture {
     pub fn user_fp(&self) -> String {
         lillux::signature::compute_fingerprint(&self.user.verifying_key())
     }
+    pub fn site_id(&self) -> String {
+        format!("site:{}", self.node_fp())
+    }
 }
 
 /// Install one executable into a synthetic test bundle with the same complete
@@ -278,8 +281,19 @@ pub fn populate_initialized_state_with_node_key(
     _home_dir: &Path,
     node: SigningKey,
 ) -> Result<FastFixture> {
+    populate_initialized_state_with_identities(state_path, _home_dir, node, user_signing_key())
+}
+
+/// Populate the fast fixture with independently selected node and operator
+/// identities. Cross-site tests use this form so a source operator is never
+/// accidentally interpreted as the target node's local operator.
+pub fn populate_initialized_state_with_identities(
+    state_path: &Path,
+    _home_dir: &Path,
+    node: SigningKey,
+    user: SigningKey,
+) -> Result<FastFixture> {
     let publisher = publisher_signing_key();
-    let user = user_signing_key();
     let vault = vault_secret_key();
 
     // ── Layout dirs (mirrors bootstrap::create_directory_layout) ──
@@ -385,6 +399,13 @@ pub fn populate_initialized_state_with_node_key(
     })
 }
 
+/// Seal the fixture's final policy and bundle-registration set using the same
+/// signed init-completion contract as the real node initializer.
+pub fn seal_initialized_state(state_path: &Path) -> Result<()> {
+    ryeos_node::init::seal_test_fixture_init_completion(state_path)
+        .context("seal fast-fixture initialization transaction")
+}
+
 /// Write a `kind: node` bundle record registering the core
 /// bundle that lives at `state_path` itself (the daemon harness copies
 /// `bundles/core` into the test tempdir and uses that as
@@ -393,8 +414,11 @@ pub fn populate_initialized_state_with_node_key(
 /// spawning the daemon.
 pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -> Result<()> {
     let abs = state_path
+        .join(AI_DIR)
+        .join("bundles")
+        .join("core")
         .canonicalize()
-        .with_context(|| format!("canonicalize {}", state_path.display()))?;
+        .with_context(|| format!("canonicalize installed Core under {}", state_path.display()))?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body("core", &abs)?;

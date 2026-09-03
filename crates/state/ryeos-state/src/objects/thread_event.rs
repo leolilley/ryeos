@@ -24,7 +24,201 @@ pub const MAX_STRUCTURED_OBSERVATION_BATCH_BYTES: usize = 384 * 1024;
 /// across all of its worker epochs. This bounds root-chain and projection
 /// growth independently of the seven-day lifetime ceiling.
 pub const MAX_HOSTED_SESSION_OBSERVATION_EVENTS: u64 = 1_048_576;
-pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 3;
+pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 4;
+pub const ACCOUNTING_ALLOWANCE_TRANSFER_KIND: &str = "accounting_allowance_transfer";
+pub const ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA: u32 = 2;
+
+/// Irreversible source-ledger debit that conserves one placement's remaining
+/// allowance across a writer handoff. The source ledger commits and anchors
+/// this object before the source node publishes the continuation edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountingAllowanceTransfer {
+    pub kind: String,
+    pub schema: u32,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub source_budget_authority_site_id: String,
+    pub source_ledger_epoch: u64,
+    pub source_chain_root_id: String,
+    pub source_placement_thread_id: String,
+    pub source_scope: super::AdmittedAccountingScope,
+    pub allocation_mode: String,
+    pub source_financial_high_water_before: u64,
+    pub source_financial_sequence: u64,
+    pub source_financial_chain_digest: String,
+    pub source_charged_usd_nanos: u64,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_execution_available_before_usd_nanos: Option<u64>,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_directive_available_before_usd_nanos: Option<u64>,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_execution_debit_usd_nanos: Option<u64>,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_directive_debit_usd_nanos: Option<u64>,
+    pub source_execution_state_after: String,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_directive_state_after: Option<String>,
+    pub target_scope: super::AdmittedAccountingScope,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub target_cap_usd_nanos: Option<u64>,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub target_directive_cap_usd_nanos: Option<u64>,
+}
+
+impl AccountingAllowanceTransfer {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_object_kind(&self.kind, ACCOUNTING_ALLOWANCE_TRANSFER_KIND)?;
+        if self.schema != ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA {
+            anyhow::bail!("accounting allowance transfer is not the current schema");
+        }
+        for (label, value) in [
+            ("accounting transfer operation", self.operation_id.as_str()),
+            ("accounting transfer request", self.request_digest.as_str()),
+            (
+                "accounting transfer financial chain",
+                self.source_financial_chain_digest.as_str(),
+            ),
+        ] {
+            validate_canonical_hash(label, value)?;
+        }
+        for (label, value) in [
+            (
+                "accounting transfer source site",
+                self.source_budget_authority_site_id.as_str(),
+            ),
+            (
+                "accounting transfer source chain",
+                self.source_chain_root_id.as_str(),
+            ),
+            (
+                "accounting transfer source placement",
+                self.source_placement_thread_id.as_str(),
+            ),
+        ] {
+            if value.is_empty()
+                || value.len() > 4096
+                || value.trim() != value
+                || value.bytes().any(|byte| byte.is_ascii_control())
+            {
+                anyhow::bail!("{label} is not a bounded canonical label");
+            }
+        }
+        if self.source_ledger_epoch == 0
+            || self.source_financial_sequence
+                != self
+                    .source_financial_high_water_before
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("accounting transfer sequence overflow"))?
+        {
+            anyhow::bail!("accounting transfer carries an invalid ledger coordinate");
+        }
+        self.source_scope.validate()?;
+        self.target_scope.validate()?;
+        if self.source_scope.budget_authority_site_id != self.source_budget_authority_site_id
+            || self.source_scope.ledger_epoch != self.source_ledger_epoch
+            || self.target_scope.budget_authority_site_id == self.source_budget_authority_site_id
+        {
+            anyhow::bail!("accounting transfer scope contradicts its source and target sites");
+        }
+        match self.allocation_mode.as_str() {
+            "exclusive_execution" => {
+                if self.source_scope.directive_budget_id.is_some()
+                    || self.target_scope.directive_budget_id.is_some()
+                    || self.source_execution_state_after != "closed"
+                    || self.source_directive_state_after.is_some()
+                    || self.source_directive_available_before_usd_nanos.is_some()
+                    || self.source_directive_debit_usd_nanos.is_some()
+                    || self.target_directive_cap_usd_nanos.is_some()
+                {
+                    anyhow::bail!("exclusive accounting transfer did not close its source");
+                }
+                let execution_available = self
+                    .source_execution_available_before_usd_nanos
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "exclusive accounting transfer source allowance is not finite"
+                        )
+                    })?;
+                if self.source_execution_debit_usd_nanos != Some(execution_available) {
+                    anyhow::bail!(
+                        "exclusive accounting transfer did not move the complete source remainder"
+                    );
+                }
+            }
+            "directive_slice" => {
+                if self.source_scope.directive_budget_id.is_none()
+                    || self.target_scope.directive_budget_id.is_none()
+                    || self.source_execution_state_after != "active"
+                    || self.source_directive_state_after.as_deref() != Some("closed")
+                    || self.target_cap_usd_nanos != self.target_directive_cap_usd_nanos
+                    || self.source_execution_debit_usd_nanos
+                        != self.source_directive_debit_usd_nanos
+                {
+                    anyhow::bail!("directive-slice accounting transfer is not conserved");
+                }
+                let directive_available = self
+                    .source_directive_available_before_usd_nanos
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "directive accounting transfer source allowance is not finite"
+                        )
+                    })?;
+                let expected_debit = self
+                    .source_execution_available_before_usd_nanos
+                    .map_or(directive_available, |execution| {
+                        execution.min(directive_available)
+                    });
+                if self.source_execution_debit_usd_nanos != Some(expected_debit) {
+                    anyhow::bail!(
+                        "directive accounting transfer did not move the exact finite slice"
+                    );
+                }
+            }
+            _ => anyhow::bail!("accounting transfer has an unknown allocation mode"),
+        }
+        if self.source_scope.directive_budget_id.is_some()
+            != self.source_directive_state_after.is_some()
+            || self.source_scope.directive_budget_id.is_some()
+                != self.target_scope.directive_budget_id.is_some()
+        {
+            anyhow::bail!("accounting transfer directive scope is incomplete");
+        }
+        if self.source_execution_debit_usd_nanos != self.target_cap_usd_nanos
+            || self.source_directive_debit_usd_nanos != self.target_directive_cap_usd_nanos
+        {
+            anyhow::bail!("accounting transfer target caps differ from source debits");
+        }
+        let execution_debit = self
+            .source_execution_debit_usd_nanos
+            .ok_or_else(|| anyhow::anyhow!("accounting transfer execution debit is not finite"))?;
+        if self
+            .source_execution_available_before_usd_nanos
+            .is_some_and(|execution_available| execution_debit > execution_available)
+        {
+            anyhow::bail!("accounting transfer execution debit exceeds source availability");
+        }
+        if self.allocation_mode == "directive_slice" {
+            let directive_available = self
+                .source_directive_available_before_usd_nanos
+                .ok_or_else(|| {
+                    anyhow::anyhow!("accounting transfer source directive allowance is not finite")
+                })?;
+            let directive_debit = self.source_directive_debit_usd_nanos.ok_or_else(|| {
+                anyhow::anyhow!("accounting transfer directive debit is not finite")
+            })?;
+            if directive_debit > directive_available {
+                anyhow::bail!("accounting transfer directive debit exceeds source availability");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn content_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        super::canonical_value_digest(&serde_json::to_value(self)?)
+    }
+}
 
 /// Typed authority retained on a cross-site `thread_continued` edge.
 ///
@@ -46,6 +240,8 @@ pub struct RemoteContinuationAuthority {
     pub chain_writer_grant_hash: String,
     pub target_launch_capsule_hash: String,
     pub target_runtime_seed_hash: String,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_accounting_transfer_hash: Option<String>,
     pub source_site_id: String,
     pub target_site_id: String,
     pub target_node_signer_fingerprint: String,
@@ -97,6 +293,9 @@ impl RemoteContinuationAuthority {
         }
         if let Some(value) = &self.follow_delivery_reservation_attestation_hash {
             validate_canonical_hash("remote follow delivery reservation", value)?;
+        }
+        if let Some(value) = &self.source_accounting_transfer_hash {
+            validate_canonical_hash("remote accounting allowance transfer", value)?;
         }
         for (label, value) in [
             (
@@ -419,6 +618,7 @@ mod remote_continuation_tests {
             chain_writer_grant_hash: "6".repeat(64),
             target_launch_capsule_hash: "7".repeat(64),
             target_runtime_seed_hash: "9".repeat(64),
+            source_accounting_transfer_hash: None,
             source_site_id: "site:a".into(),
             target_site_id: "site:b".into(),
             target_node_signer_fingerprint: "8".repeat(64),
@@ -440,6 +640,22 @@ mod remote_continuation_tests {
         event.validate().unwrap();
         event.payload["successor_thread_id"] = serde_json::json!("T-other");
         assert!(event.validate().is_err());
+    }
+
+    #[test]
+    fn remote_continuation_requires_explicit_nullable_accounting_transfer() {
+        let mut value = serde_json::to_value(authority()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("source_accounting_transfer_hash");
+        let error = serde_json::from_value::<RemoteContinuationAuthority>(value).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source_accounting_transfer_hash"),
+            "unexpected error: {error}"
+        );
     }
 }
 
@@ -637,5 +853,95 @@ mod tests {
         assert!(value.is_object());
         assert_eq!(value["schema"], SCHEMA_VERSION);
         assert_eq!(value["kind"], "thread_event");
+    }
+
+    fn exclusive_accounting_transfer() -> AccountingAllowanceTransfer {
+        AccountingAllowanceTransfer {
+            kind: ACCOUNTING_ALLOWANCE_TRANSFER_KIND.to_owned(),
+            schema: ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA,
+            operation_id: "1".repeat(64),
+            request_digest: "2".repeat(64),
+            source_budget_authority_site_id: "site:source".into(),
+            source_ledger_epoch: 1,
+            source_chain_root_id: "T-root".into(),
+            source_placement_thread_id: "T-source".into(),
+            source_scope: crate::objects::AdmittedAccountingScope {
+                budget_authority_site_id: "site:source".into(),
+                ledger_epoch: 1,
+                execution_budget_id: "budget:source".into(),
+                directive_budget_id: None,
+            },
+            allocation_mode: "exclusive_execution".into(),
+            source_financial_high_water_before: 3,
+            source_financial_sequence: 4,
+            source_financial_chain_digest: "3".repeat(64),
+            source_charged_usd_nanos: 7,
+            source_execution_available_before_usd_nanos: Some(100),
+            source_directive_available_before_usd_nanos: None,
+            source_execution_debit_usd_nanos: Some(100),
+            source_directive_debit_usd_nanos: None,
+            source_execution_state_after: "closed".into(),
+            source_directive_state_after: None,
+            target_scope: crate::objects::AdmittedAccountingScope {
+                budget_authority_site_id: "site:target".into(),
+                ledger_epoch: 2,
+                execution_budget_id: "budget:target".into(),
+                directive_budget_id: None,
+            },
+            target_cap_usd_nanos: Some(100),
+            target_directive_cap_usd_nanos: None,
+        }
+    }
+
+    #[test]
+    fn accounting_transfer_rejects_unbounded_inflated_and_mode_crossed_authority() {
+        let transfer = exclusive_accounting_transfer();
+        transfer.validate().unwrap();
+
+        let mut unbounded = transfer.clone();
+        unbounded.source_execution_available_before_usd_nanos = None;
+        unbounded.source_execution_debit_usd_nanos = None;
+        unbounded.target_cap_usd_nanos = None;
+        assert!(unbounded.validate().is_err());
+
+        let mut inflated = transfer.clone();
+        inflated.source_execution_debit_usd_nanos = Some(101);
+        inflated.target_cap_usd_nanos = Some(101);
+        assert!(inflated.validate().is_err());
+
+        let mut shrunken = transfer.clone();
+        shrunken.source_execution_debit_usd_nanos = Some(80);
+        shrunken.target_cap_usd_nanos = Some(80);
+        assert!(shrunken.validate().is_err());
+
+        let mut crossed = transfer;
+        crossed.source_scope.directive_budget_id = Some("directive:source".into());
+        crossed.target_scope.directive_budget_id = Some("directive:target".into());
+        crossed.source_directive_state_after = Some("closed".into());
+        crossed.source_directive_available_before_usd_nanos = Some(50);
+        crossed.source_directive_debit_usd_nanos = Some(50);
+        crossed.target_directive_cap_usd_nanos = Some(50);
+        assert!(crossed.validate().is_err());
+    }
+
+    #[test]
+    fn accounting_transfer_requires_every_nullable_current_wire_field() {
+        for field in [
+            "source_execution_available_before_usd_nanos",
+            "source_directive_available_before_usd_nanos",
+            "source_execution_debit_usd_nanos",
+            "source_directive_debit_usd_nanos",
+            "source_directive_state_after",
+            "target_cap_usd_nanos",
+            "target_directive_cap_usd_nanos",
+        ] {
+            let mut value = serde_json::to_value(exclusive_accounting_transfer()).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            let error = serde_json::from_value::<AccountingAllowanceTransfer>(value).unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "missing {field} produced unexpected error: {error}"
+            );
+        }
     }
 }

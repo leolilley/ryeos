@@ -52,6 +52,11 @@ fn build_test_state_with_engine(
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    // Admission classifies the configured operator separately from remote
+    // node claimants. Keep that authority real in the shared fixture so tests
+    // exercise the production identity check instead of failing before the
+    // claim contract is reached.
+    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -157,6 +162,7 @@ fn build_test_state_with_hosted_policy_choices(
     state.node_policy = Arc::new(
         ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
+            Arc::new(test_object_closure_policy()),
             Arc::new(ryeos_app::node_policy::sections::hosted::HostedNodePolicy {
                 schema: 1,
                 admission_enabled,
@@ -223,9 +229,12 @@ fn build_app_state(
         service_descriptors: ryeos_api::handlers::ALL,
         node_config: Arc::new(snapshot),
         node_policy: Arc::new(
-            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
-            )]),
+            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+                Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                ),
+                Arc::new(test_object_closure_policy()),
+            ]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: test_command_registry,
@@ -240,4 +249,20 @@ fn build_app_state(
     };
 
     (tmpdir, state)
+}
+
+fn test_object_closure_policy()
+-> ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+    ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+        schema: 1,
+        max_roots: 256,
+        max_objects: 32_768,
+        max_blobs: 32_768,
+        max_object_bytes: 32 * 1024 * 1024,
+        max_total_object_bytes: 64 * 1024 * 1024,
+        max_blob_bytes: 128 * 1024 * 1024,
+        max_total_blob_bytes: 128 * 1024 * 1024,
+        max_response_bytes: 256 * 1024 * 1024,
+        max_links_per_object: 100_000,
+    }
 }

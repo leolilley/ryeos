@@ -10,7 +10,7 @@ use crate::signer::Signer;
 
 pub const CHAIN_WRITER_TRANSITION_POLICY: &str = "chain-writer-transition-v1";
 pub const CHAIN_WRITER_TRANSITION_CLAIM: &str = "granted";
-pub const CHAIN_WRITER_TRANSITION_SCHEMA: u32 = 1;
+pub const CHAIN_WRITER_TRANSITION_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,8 @@ pub struct ChainWriterTransitionEvidence {
     pub source_last_event_hash: String,
     pub successor_placement_thread_id: String,
     pub placement_attestation_hash: String,
+    #[serde(deserialize_with = "super::deserialize_required_nullable")]
+    pub source_accounting_transfer_hash: Option<String>,
     pub transition_subject_hash: String,
     pub target_node_signer_fingerprint: String,
 }
@@ -57,6 +59,12 @@ impl ChainWriterTransitionEvidence {
             ),
         ] {
             super::thread_snapshot::validate_canonical_hash(label, value)?;
+        }
+        if let Some(value) = &self.source_accounting_transfer_hash {
+            super::thread_snapshot::validate_canonical_hash(
+                "chain writer accounting allowance transfer",
+                value,
+            )?;
         }
         for (label, value) in [
             ("chain writer owner", self.owner_principal.as_str()),
@@ -168,6 +176,7 @@ mod tests {
             source_last_event_hash: "3".repeat(64),
             successor_placement_thread_id: "T-target".into(),
             placement_attestation_hash: "4".repeat(64),
+            source_accounting_transfer_hash: None,
             transition_subject_hash: "5".repeat(64),
             target_node_signer_fingerprint: target.fingerprint().into(),
         }
@@ -188,5 +197,23 @@ mod tests {
         let mut changed = evidence;
         changed.target_node_signer_fingerprint = source.fingerprint().into();
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn transition_requires_explicit_nullable_accounting_transfer() {
+        let source = TestSigner::new();
+        let target = TestSigner::with_fingerprint("9".repeat(64));
+        let mut value = serde_json::to_value(evidence(&source, &target)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("source_accounting_transfer_hash");
+        let error = serde_json::from_value::<ChainWriterTransitionEvidence>(value).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source_accounting_transfer_hash"),
+            "unexpected error: {error}"
+        );
     }
 }
