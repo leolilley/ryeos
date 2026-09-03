@@ -170,16 +170,7 @@ jobs:
                 continue
               fi
               [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
-              curl --proto '=https' --tlsv1.2 \
-                --fail-with-body --silent --show-error \
-                --request POST \
-                --header "Accept: application/vnd.github+json" \
-                --header "Authorization: Bearer $GH_TOKEN" \
-                --header "Content-Type: application/octet-stream" \
-                --header "X-GitHub-Api-Version: 2022-11-28" \
-                --data-binary "@$ARTIFACT_DIR/$name" \
-                "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
-                >/dev/null
+              gh release upload "$RELEASE_TAG" "$ARTIFACT_DIR/$name"
             done < <(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 \
               -type f -printf '%f\n' | LC_ALL=C sort)
             gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RELEASE_JSON"
