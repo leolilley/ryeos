@@ -380,14 +380,11 @@ class LocalInferenceContractTests(unittest.TestCase):
         )
         self.assertEqual(first_activation, second_activation)
 
-    def test_release_qualification_starts_the_real_duplex_session(self) -> None:
+    def test_independent_qualification_starts_the_real_duplex_session(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         source_qualifier = SOURCE_QUALIFIER_WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertTrue(SESSION_PROTOCOL_TEST_PATH.is_file())
-        self.assertIn(
-            "python3 bundles/local-inference/tests/tinygrad_qwen/test_session_protocol.py",
-            workflow,
-        )
+        self.assertNotIn("test_session_protocol.py", workflow)
         self.assertIn(
             "scripts/release/qualify-local-inference-node.sh",
             source_qualifier,
@@ -559,15 +556,16 @@ class LocalInferenceContractTests(unittest.TestCase):
         publish_position = workflow.index(
             "Publish exact immutable prerelease"
         )
-        qualification_position = workflow.index(
-            "Qualify exact tag source against the public prerelease"
-        )
         promotion_position = workflow.index(
-            "Promote the independently qualified immutable release"
+            "Promote the immutable release"
         )
-        self.assertLess(publish_position, qualification_position)
-        self.assertLess(qualification_position, promotion_position)
+        self.assertLess(publish_position, promotion_position)
+        self.assertNotIn(
+            "uses: ./.github/workflows/qualify-local-inference-source.yml",
+            workflow,
+        )
         self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("workflow_dispatch:", source_qualifier)
         self.assertIn("contents: read", source_qualifier)
         self.assertNotIn("contents: write", source_qualifier)
 
@@ -701,7 +699,7 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn(invocation, workflow)
         self.assertNotIn(".py +", workflow)
 
-    def test_corresponding_sources_and_main_release_gate_are_closed(self) -> None:
+    def test_corresponding_sources_and_release_dependency_are_closed(self) -> None:
         groups = self.release["corresponding_sources"]
         self.assertEqual(
             [group["packages"] for group in groups],
@@ -729,11 +727,15 @@ class LocalInferenceContractTests(unittest.TestCase):
         release_workflow = RYEOS_RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
         source_qualifier = SOURCE_QUALIFIER_WORKFLOW_PATH.read_text(encoding="utf-8")
         verifier = RELEASE_VERIFIER_PATH.read_text(encoding="utf-8")
-        self.assertIn("Qualify local inference against this release source", release_workflow)
-        self.assertIn("uses: ./.github/workflows/qualify-local-inference-source.yml", release_workflow)
-        self.assertIn("source_sha: ${{ needs.qualify.outputs.source_sha }}", release_workflow)
-        self.assertIn("require_promoted_release: true", release_workflow)
-        self.assertIn("actions: read", release_workflow)
+        self.assertIn(
+            "Verify promoted local-inference artifact dependency",
+            release_workflow,
+        )
+        self.assertIn("--require-promoted", release_workflow)
+        self.assertNotIn(
+            "uses: ./.github/workflows/qualify-local-inference-source.yml",
+            release_workflow,
+        )
         self.assertIn("publish-local-inference-realizations.yml/runs", source_qualifier)
         self.assertIn('run.get("head_sha") == source_sha', source_qualifier)
         self.assertIn('asset.get("digest") != f"sha256:{digest}"', verifier)

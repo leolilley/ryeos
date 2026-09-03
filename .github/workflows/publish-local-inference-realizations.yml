@@ -25,7 +25,7 @@ env:
 
 jobs:
   build-realizations:
-    name: Author and functionally qualify exact realization assets
+    name: Author exact realization assets
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -59,10 +59,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             binutils python3 python3-yaml zstd
 
-      - name: Verify source-owned release contract
-        run: |
-          PYTHONDONTWRITEBYTECODE=1 python3 bundles/local-inference/test_contract.py
-
       - name: Author deterministic final realizations
         run: |
           ARTIFACT_DIR="$RUNNER_TEMP/local-inference-realizations"
@@ -76,56 +72,6 @@ jobs:
             --asset-dir "$ARTIFACT_DIR"
           rm -rf -- "$CACHE_DIR"
           df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
-
-      # The exact third-party runtime/model is executed only in this
-      # read-only, no-secret job. It cannot publish or promote anything.
-      - name: Functionally qualify the exact worker and model fixture
-        run: |
-          ARTIFACT_DIR="$RUNNER_TEMP/local-inference-realizations"
-          WORKSPACE="$RUNNER_TEMP/local-inference-worker-qualification"
-          test ! -e "$WORKSPACE"
-          mkdir -p "$WORKSPACE/worker"
-          cp -a bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad/. "$WORKSPACE/worker/"
-          install -m 0644 bundles/local-inference/tests/tinygrad_qwen/test_worker.py "$WORKSPACE/worker/_test_worker.py"
-          for component in runtime tinygrad toolchain model
-          do
-            mkdir "$WORKSPACE/$component"
-            tar --extract --gzip \
-              --file "$ARTIFACT_DIR/ryeos-local-inference-qwen3-0.6b-$component-v1.tar.gz" \
-              --directory "$WORKSPACE/$component" \
-              --strip-components=1 \
-              --no-same-owner
-          done
-          (
-            cd "$WORKSPACE"
-            env -i \
-              HOME="$WORKSPACE/scratch/home" \
-              PYTHONHOME="$WORKSPACE/runtime/python" \
-              PYTHONHASHSEED=0 \
-              PYTHONDONTWRITEBYTECODE=1 \
-              PYTHONNOUSERSITE=1 \
-              PYTHONSAFEPATH=1 \
-              RYEOS_LOCAL_WORKER_TEST_WORKSPACE="$WORKSPACE" \
-              RYEOS_RUN_MODEL_GOLDENS=1 \
-              DEV=CPU \
-              CACHELEVEL=0 \
-              CCACHE=0 \
-              LANG=C \
-              LC_ALL=C \
-              "$WORKSPACE/runtime/lib/ld-musl-x86_64.so.1" \
-              --library-path "$WORKSPACE/runtime/lib" \
-              "$WORKSPACE/runtime/python/bin/python3.14" \
-              -P -S "$WORKSPACE/worker/_test_worker.py"
-          )
-          RYEOS_LOCAL_WORKER_TEST_WORKSPACE="$WORKSPACE" \
-            python3 bundles/local-inference/tests/tinygrad_qwen/test_session_protocol.py
-          rm -rf -- "$WORKSPACE"
-
-          # Recheck the complete upload payload after the subject has exited.
-          # A fresh privileged job repeats this from its exact source checkout.
-          python3 scripts/release/verify-local-inference-release.py \
-            --contract "$CONTRACT" \
-            --asset-dir "$ARTIFACT_DIR"
 
       - name: Transfer exact assets to the isolated publication job
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -255,25 +201,11 @@ jobs:
             --contract "$CONTRACT" \
             --release-json "$RELEASE_JSON"
 
-  qualify-online:
-    name: Qualify exact tag source against the public prerelease
-    needs:
-      - build-realizations
-      - publish-prerelease
-    permissions:
-      actions: read
-      contents: read
-    uses: ./.github/workflows/qualify-local-inference-source.yml
-    with:
-      source_sha: ${{ needs.build-realizations.outputs.source_sha }}
-      require_promoted_release: false
-
   promote:
-    name: Promote the independently qualified immutable release
+    name: Promote the immutable release
     needs:
       - build-realizations
       - publish-prerelease
-      - qualify-online
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

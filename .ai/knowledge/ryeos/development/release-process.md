@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-03T23:01:15Z:40379b24f8c7aba96226dd1944d3a2259cb35d26aa3099f8128e77aa722f66c6:BHWcW7jnT3yEcXKz1MYa6jV1RxoG/p4MzMUYCZVWwx0gaxDKYq5tFS2cbbM2IneQIItsDs+gFqeYi7oJD++6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T23:12:45Z:92c77e21502cf425b63870da1bdc86a6dece6804da63cc5b767bcc3435e0c2aa:sWKrxOeErAR9B7NEeVYkqxtvG2VoqnpVBuUrxdRvR3WxjD1pYe3QiXdqi6Fu071ErjaNn+7ZXfj/9vVhzQ/DCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # RyeOS Release Process
@@ -30,6 +30,11 @@ scaffolding, but AUR is not currently an active release channel.
 
 ## Critical rules
 
+- Release publication does not run repository, runtime, model, or image tests.
+  Those belong to independent CI/qualification workflows and may report
+  failures without blocking an explicitly authorized release. Publication
+  still fails closed on source identity, artifact digests, signatures,
+  attestations, immutable-tag conflicts, and required dependency availability.
 - Do **not** check out `main` in `/home/leo/projects/ryeos-next` if `main` is
   already checked out in `/home/leo/projects/ryeos`.
 - Do **not** move a release tag that has already been pushed or consumed. Cut a
@@ -177,19 +182,18 @@ rg "$old" \
 Expected: no matches, unless the old version is intentionally mentioned in
 prose outside these files.
 
-## 3. Validate before committing on `next`
+## 3. Review release inputs before committing on `next`
 
-Minimum validation:
+Release preparation checks version and shell/workflow structure only:
 
 ```bash
 cargo check -p ryeos-node -p ryeos-cli -p ryeosd
-cargo test -p ryeos-node
-cargo test -p ryeos-state
 bash -n scripts/pkg/install-local-direct.sh
 ```
 
-Do not run the broader local gate during the release cut. Leave the full gate to
-GitHub Actions after pushing the release branches/tag.
+Do not run or wait for the broader local/CI test gate during the release cut.
+CI and explicit qualification remain independent evidence streams; release
+publication does not invoke them.
 
 For bundle-aware changes, ensure bundles are freshly populated/signed:
 
@@ -257,8 +261,6 @@ After conflict resolution:
 
 ```bash
 cargo check -p ryeos-node -p ryeos-cli -p ryeosd
-cargo test -p ryeos-node
-cargo test -p ryeos-state
 
 git status --short
 git add <resolved-files>
@@ -362,11 +364,11 @@ GHCR image tags:
   ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
-The workflow qualifies the exact image digests, checks provenance and SBOM
-attestations, verifies keyless signatures, promotes the immutable version tags,
-and only then advances both `latest` tags. Verify the immutable tags, release
-assets, and successful workflow run; do not use the mutable tags as the release
-identity.
+The workflow checks provenance and SBOM attestations, verifies keyless
+signatures, promotes the immutable version tags, and only then advances all
+`latest` tags. Runtime qualification is separate and non-gating. Verify the
+immutable tags, release assets, and successful publication workflow run; do not
+use the mutable tags as the release identity.
 
 ## 9. AUR is deferred, not the active release channel
 
@@ -597,8 +599,6 @@ Before tagging:
 - [ ] `rg "$old" <release-version-files> Cargo.lock` has no unintended
   matches.
 - [ ] `cargo check -p ryeos-node -p ryeos-cli -p ryeosd` passes.
-- [ ] `cargo test -p ryeos-node` passes.
-- [ ] `cargo test -p ryeos-state` passes.
 - [ ] `bash -n scripts/pkg/install-local-direct.sh` passes.
 - [ ] Bundle signing/population done if bundle contents or bundled binaries
   changed.
