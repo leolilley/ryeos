@@ -622,9 +622,9 @@ jobs:
       # Re-resolve immediately before each create. GHCR does not expose a
       # conditional create-tag API, so registry-level tag immutability remains
       # the strict cross-workflow guarantee; this closes the long
-      # build/qualification check-use window and fails rather than overwriting
+      # build/verification check-use window and fails rather than overwriting
       # any version tag observed here.
-      - name: Promote qualified digests to immutable versions
+      - name: Promote verified digests to immutable versions
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
@@ -643,7 +643,7 @@ jobs:
             [[ "$existed" != true ]] || return 0
             error_file="$(mktemp)"
             if docker buildx imagetools inspect "$tag" >/dev/null 2>"$error_file"; then
-              echo "::error::Refusing to overwrite immutable tag created during qualification: $tag"
+              echo "::error::Refusing to overwrite immutable tag created during verification: $tag"
               exit 1
             fi
             if ! grep -Eqi 'manifest unknown|not found|no such manifest|404' "$error_file"; then
@@ -677,7 +677,7 @@ jobs:
               "ghcr.io/leolilley/${image}:${VERSION}")"
             bound_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
             [[ "$bound_digest" == "$digest" ]] || {
-              echo "::error::Immutable tag does not bind the qualified digest: $image:$VERSION"
+              echo "::error::Immutable tag does not bind the verified digest: $image:$VERSION"
               exit 1
             }
           done
@@ -771,7 +771,7 @@ jobs:
               "ghcr.io/leolilley/${image}:latest")"
             bound_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
             [[ "$bound_digest" == "$digest" ]] || {
-              echo "::error::Latest channel does not bind the qualified digest: $image"
+              echo "::error::Latest channel does not bind the published digest: $image"
               exit 1
             }
           done
