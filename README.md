@@ -201,6 +201,16 @@ The release workflow publishes a composed daemon image:
 docker pull ghcr.io/leolilley/ryeos-standard:latest
 ```
 
+Remote nodes that own hosted Codex plus graph/directive workflow execution use
+the separately qualified composition:
+
+```bash
+docker pull ghcr.io/leolilley/ryeos-hosted-workflow:X.Y.Z
+```
+
+Production deployment should pin the resolved digest of the immutable version
+tag rather than the mutable `latest` channel.
+
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init --non-interactive --node-profile standard` for
 first policy publication. On later boots it omits the init profile and asks

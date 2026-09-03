@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-03T11:56:15Z:22019d43cbad0a661427f383eedd6c7d361748275da92e5ceed7487eadf200a9:tagbFaG3vzAAZx6tJNUNvldtVGB+5fmUl+BrGXQrV21Q6qnWUdOdOXo6+JPNYk7wZ/vjtNHNlB+C9UVHuwE8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T23:01:15Z:40379b24f8c7aba96226dd1944d3a2259cb35d26aa3099f8128e77aa722f66c6:BHWcW7jnT3yEcXKz1MYa6jV1RxoG/p4MzMUYCZVWwx0gaxDKYq5tFS2cbbM2IneQIItsDs+gFqeYi7oJD++6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -126,6 +126,7 @@ crates/kernel/lillux/Cargo.toml
 crates/kernel/lillux/pyproject.toml
 crates/engine/ryeos-runtime/Cargo.toml
 crates/tools/core-tools/Cargo.toml
+crates/tools/session-exec/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
@@ -144,6 +145,7 @@ files=(
   crates/kernel/lillux/pyproject.toml
   crates/engine/ryeos-runtime/Cargo.toml
   crates/tools/core-tools/Cargo.toml
+  crates/tools/session-exec/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -166,6 +168,7 @@ rg "$old" \
   crates/kernel/lillux/pyproject.toml \
   crates/engine/ryeos-runtime/Cargo.toml \
   crates/tools/core-tools/Cargo.toml \
+  crates/tools/session-exec/Cargo.toml \
   crates/bin/cli/Cargo.toml \
   crates/bin/daemon/Cargo.toml \
   Cargo.lock
@@ -356,6 +359,7 @@ GitHub release assets:
 GHCR image tags:
   ghcr.io/leolilley/ryeos-standard:$new
   ghcr.io/leolilley/ryeos-central-host:$new
+  ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
 The workflow qualifies the exact image digests, checks provenance and SBOM
@@ -586,6 +590,7 @@ Before tagging:
   - [ ] `crates/kernel/lillux/pyproject.toml`
   - [ ] `crates/engine/ryeos-runtime/Cargo.toml`
   - [ ] `crates/tools/core-tools/Cargo.toml`
+  - [ ] `crates/tools/session-exec/Cargo.toml`
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`

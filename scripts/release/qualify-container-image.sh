@@ -4,7 +4,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <repository@sha256:digest> <standard|central-host> [--pid1-smoke]" >&2
+  echo "usage: $0 <repository@sha256:digest> <standard|central-host|hosted-workflow> [--pid1-smoke]" >&2
 }
 
 [[ $# -ge 2 && $# -le 3 ]] || { usage; exit 2; }
@@ -25,7 +25,7 @@ if [[ ! "$IMAGE_REF" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
     exit 2
   }
 fi
-[[ "$VARIANT" == standard || "$VARIANT" == central-host ]] || {
+[[ "$VARIANT" == standard || "$VARIANT" == central-host || "$VARIANT" == hosted-workflow ]] || {
   echo "unsupported image variant: $VARIANT" >&2
   exit 2
 }
