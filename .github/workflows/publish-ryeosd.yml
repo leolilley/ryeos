@@ -763,6 +763,10 @@ jobs:
             ROLLBACK_FAILED=false
             restore_latest ryeos-standard "$PREVIOUS_STANDARD" || ROLLBACK_FAILED=true
             restore_latest ryeos-central-host "$PREVIOUS_CENTRAL" || ROLLBACK_FAILED=true
+            if [[ -n "$PREVIOUS_HOSTED_WORKFLOW" ]]; then
+              restore_latest ryeos-hosted-workflow "$PREVIOUS_HOSTED_WORKFLOW" || \
+                ROLLBACK_FAILED=true
+            fi
             if [[ "$ROLLBACK_FAILED" == true ]]; then
               echo "::error::Hosted-workflow latest promotion failed and prior latest rollback was incomplete"
             else
