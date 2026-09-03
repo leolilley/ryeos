@@ -2,8 +2,9 @@ name: Publish RyeOS release artifacts
 
 # Triggered by project release tags. Publishes signed GHCR images plus the
 # officially signed bundle archive consumed by native packages.
-# Workspace qualification belongs to CI and deliberately does not gate this
-# workflow. Release-specific integrity and artifact checks remain fail-closed.
+# Qualification belongs to CI and deliberately does not gate this workflow.
+# Artifact identity, integrity, attestation, and publication checks remain
+# fail-closed.
 
 on:
   push:
@@ -101,22 +102,9 @@ jobs:
           echo "Tag commit: $TAG_COMMIT"
           echo "Build date: $BUILD_DATE"
 
-  qualify-local-inference:
-    name: Qualify local inference against this release source
-    needs: qualify
-    permissions:
-      actions: read
-      contents: read
-    uses: ./.github/workflows/qualify-local-inference-source.yml
-    with:
-      source_sha: ${{ needs.qualify.outputs.source_sha }}
-      require_promoted_release: true
-
   publish:
     name: Publish release artifacts
-    needs:
-      - qualify
-      - qualify-local-inference
+    needs: qualify
     runs-on: ubuntu-latest
     permissions:
       contents: write # immutable bundle assets on the GitHub release
@@ -138,6 +126,19 @@ jobs:
             echo "::error::Publish source $SOURCE_SHA differs from release source $EXPECTED_SHA"
             exit 1
           fi
+
+      - name: Verify promoted local-inference artifact dependency
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONTRACT="scripts/release/local-inference-qwen3-0.6b-v1.json"
+          RELEASE_TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_tag"])' "$CONTRACT")"
+          RELEASE_JSON="$RUNNER_TEMP/local-inference-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RELEASE_JSON"
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --release-json "$RELEASE_JSON" \
+            --require-promoted
 
       - name: Resolve immutable bundle assets
         id: bundle-assets
@@ -617,21 +618,6 @@ jobs:
             read -r image digest <<<"$spec"
             verify_release_signature "ghcr.io/leolilley/${image}@${digest}"
           done
-
-      - name: Qualify exact standard image digest
-        env:
-          DIGEST: ${{ steps.release-digests.outputs.standard }}
-        run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-standard@${DIGEST}" standard --pid1-smoke
-
-      - name: Qualify exact central-host image digest
-        env:
-          DIGEST: ${{ steps.release-digests.outputs.central }}
-        run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-central-host@${DIGEST}" central-host
-
-      - name: Qualify exact hosted-workflow image digest
-        env:
-          DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
-        run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-hosted-workflow@${DIGEST}" hosted-workflow
 
       # Re-resolve immediately before each create. GHCR does not expose a
       # conditional create-tag API, so registry-level tag immutability remains
