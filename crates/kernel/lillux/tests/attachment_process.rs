@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use lillux::{
-    SubprocessLimits, SubprocessRequest, is_alive, retain_fork_sensitive_descriptors, spawn,
-    spawn_awaiting_attachment, supervised_launcher_attachment_status_pipe,
-    supervised_launcher_status_pipe,
+    ExactExclusiveFileLock, SubprocessLimits, SubprocessRequest, is_alive,
+    retain_fork_sensitive_descriptors, spawn, spawn_awaiting_attachment,
+    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
 };
 
 fn shell(script: String) -> SubprocessRequest {
@@ -364,6 +364,22 @@ fn direct_fork_fails_loudly_for_same_thread_descriptor_scope() {
         error.stderr
     );
     drop(lease);
+}
+
+#[test]
+fn held_attachment_child_does_not_retain_exact_operational_lock() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let lock_path = temp.path().join("operator.lock");
+    let lock = ExactExclusiveFileLock::acquire(&lock_path).expect("exact lock");
+
+    let pending = spawn_awaiting_attachment(shell("exit 0".to_string()))
+        .expect("spawn held attachment child");
+    drop(lock);
+
+    let reacquired = ExactExclusiveFileLock::acquire_existing_read_only(&lock_path)
+        .expect("held pre-exec child must not retain the parent's exact lock");
+    drop(reacquired);
+    pending.abort_and_reap().expect("abort held test target");
 }
 
 #[test]

@@ -224,6 +224,48 @@ impl PinnedProjectMaterialization {
         })
     }
 
+    /// Reconstitute the immutable project-resolution authority for a retained
+    /// writable workspace after a proved-dead execution owner.
+    ///
+    /// This constructor deliberately does not compare the current tree with
+    /// the base snapshot: a retained CoW lower is expected to contain the
+    /// session's unpublished changes. Its caller must first verify the durable
+    /// execution-workspace journal, including the original snapshot, backend,
+    /// mount identity, and all pinned root identities. The exact lower
+    /// device/inode recorded by that journal is repeated here so a replaced
+    /// pathname cannot be promoted into project authority.
+    ///
+    /// The returned value continues to answer authoritative project metadata
+    /// and blob reads from the admitted CAS closure. Only the descriptor-rooted
+    /// execution view is retained as mutable workspace state.
+    pub fn recover_retained_workspace_from_closure(
+        authority: &PinnedStateAuthority,
+        guard: &CasMutationGuard,
+        closure: &VerifiedProjectSnapshotClosure,
+        path: &Path,
+        expected_root_identity: &str,
+    ) -> anyhow::Result<Self> {
+        authority.ensure_guard(guard)?;
+        let cas = Arc::new(authority.cas_store()?);
+        let root = lillux::PinnedDirectory::open(path)?.ok_or_else(|| {
+            anyhow::anyhow!("retained project workspace is missing: {}", path.display())
+        })?;
+        let (device, inode) = root.device_inode()?;
+        let observed_root_identity = format!("dev{device}-ino{inode}");
+        if observed_root_identity != expected_root_identity {
+            anyhow::bail!(
+                "retained project workspace root identity changed: expected {expected_root_identity}, observed {observed_root_identity}"
+            );
+        }
+        root.ensure_path_binding()?;
+        Ok(Self {
+            snapshot_hash: closure.snapshot_hash().to_owned(),
+            root: Arc::new(root),
+            expected_tree: Arc::clone(&closure.tree.files),
+            cas,
+        })
+    }
+
     pub fn snapshot_hash(&self) -> &str {
         &self.snapshot_hash
     }

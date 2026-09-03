@@ -1,0 +1,6 @@
+# ryeos:signed:2026-08-26T10:09:18Z:8697c4b8c0d36e8d9f4f1c2e907b20b514827fb2230cd29d6ff1361861ed2ab1:J3KWYOpGfQsDUuaUHOvq9HOX/ClUKPE139M620BFilhXYN+oIk5irzzyz2qnhOLEfzud/uKhadFq6qM7VtgRBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-executions.status
+required_caps: ["ryeos.execute.service.worker-executions/status"]
+schema: {chain_root_id: string}
+description: Read one owner-bound session worker execution projection.

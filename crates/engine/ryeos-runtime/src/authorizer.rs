@@ -36,8 +36,6 @@
 //! assert!(authorizer.authorize(&scopes, &policy).is_ok());
 //! ```
 
-use regex::Regex;
-
 // ── Capability struct ─────────────────────────────────────────────────
 
 /// Parsed capability string in `ryeos.<verb>.<kind>.<subject>` format.
@@ -349,31 +347,7 @@ impl Default for Authorizer {
 /// Special regex chars in the granted pattern are escaped; only `*` and `?`
 /// are treated as wildcards.
 pub fn cap_matches(granted: &str, required: &str) -> bool {
-    if granted == required {
-        return true;
-    }
-    let mut regex_str = String::from("^");
-    for ch in granted.chars() {
-        match ch {
-            '*' => regex_str.push_str(".*"),
-            '?' => regex_str.push('.'),
-            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
-                regex_str.push('\\');
-                regex_str.push(ch);
-            }
-            _ => regex_str.push(ch),
-        }
-    }
-    regex_str.push('$');
-    Regex::new(&regex_str)
-        .map(|re| re.is_match(required))
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                granted = %granted,
-                "capability pattern produced invalid regex: {e}"
-            );
-            false
-        })
+    ryeos_state::capability::grant_matches(granted, required)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -859,7 +833,7 @@ mod tests {
     fn slash_subject_matches_across_systems() {
         assert!(cap_matches(
             "ryeos.execute.*",
-            &canonical_cap("service", "node-sign", "execute")
+            &canonical_cap("service", "maintenance/gc", "execute")
         ));
         assert!(cap_matches(
             "ryeos.execute.*",

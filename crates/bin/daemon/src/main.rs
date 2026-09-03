@@ -7,6 +7,7 @@ use axum::serve;
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
 
+use ryeos_api::handlers::remote_reconcile_project_head::recover_durable_project_head_reconciliations;
 use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
@@ -171,6 +172,8 @@ fn prospective_node_config_validator(
 }
 
 fn main() -> Result<()> {
+    ryeos_app::provider_object_contracts::install()
+        .context("install application object contracts")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -188,12 +191,46 @@ fn main() -> Result<()> {
     result
 }
 
+#[cfg(feature = "handoff-test-support")]
+fn build_handoff_phase_gate(
+    cli: &Cli,
+) -> Result<Option<Arc<ryeos_app::worker_handoff::test_support::HandoffPhaseGate>>> {
+    use std::str::FromStr as _;
+
+    use ryeos_app::worker_handoff::test_support::{
+        HANDOFF_PHASE_CUT_FD_ENV, HandoffCrashBoundary, HandoffPhaseGate,
+    };
+
+    let descriptor_configured = std::env::var_os(HANDOFF_PHASE_CUT_FD_ENV).is_some();
+    let boundary = match (
+        descriptor_configured,
+        cli.handoff_phase_cut_boundary.as_deref(),
+    ) {
+        (false, None) => return Ok(None),
+        (true, Some(boundary)) => boundary,
+        _ => anyhow::bail!("handoff phase-cut boundary and channel must be supplied together"),
+    };
+    // SAFETY: the test parent minted this exact connected channel through
+    // Lillux and consumed its child authority into this daemon spawn.
+    let writer =
+        unsafe { lillux::take_inherited_duplex_channel_from_env(HANDOFF_PHASE_CUT_FD_ENV) }
+            .map_err(anyhow::Error::msg)
+            .context("adopt inherited handoff phase-cut channel")?;
+    Ok(Some(Arc::new(HandoffPhaseGate::new(
+        HandoffCrashBoundary::from_str(boundary)?,
+        writer,
+    ))))
+}
+
 async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
     let process_started = Instant::now();
     let process_started_at = lillux::time::iso8601_now();
     let cli = Cli::parse();
+
+    #[cfg(feature = "handoff-test-support")]
+    let handoff_phase_gate = build_handoff_phase_gate(&cli)?;
 
     if let Some(config::DaemonCommand::BuildInfo {
         revision,
@@ -223,7 +260,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     // Verify operator-owned node initialization before any local repairs
     // or runtime-state writes. `ryeos init` is authoritative for bundle
     // registrations and operator identity/trust artifacts.
-    bootstrap::verify_initialized(&config)?;
+    ryeos_node::require_initialized(&config.app_root)?;
 
     // Handle subcommands BEFORE acquiring the daemon state lock or
     // initializing tracing. Subcommands (e.g. `run-service`) manage
@@ -246,10 +283,19 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
     let state_lock_path = state_lock::default_lock_path(&config.app_root);
-    let state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
+    let state_lock = state_lock::StateLock::acquire_with_timeout(
+        &state_lock_path,
+        Duration::from_secs(5),
+    )
+    .context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
     *process_state_lock = Some(state_lock);
+
+    // Recheck the signed whole-init fence after acquiring the same lock as
+    // initialization. The pre-lock check provides early guidance; this check
+    // prevents a daemon from crossing an in-flight or failed bundle/policy cut.
+    bootstrap::verify_initialized(&config)?;
 
     // Initialize tracing with file sink only after init-state passes so direct
     // `ryeosd` startup on a fresh system cannot create runtime state.
@@ -374,7 +420,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 &identity,
             )
             .context(
-                "authorized-key cutover failed; stop the daemon and run `ryeos node auth-reset --confirm-discard-authorized-keys` to discard every client/remote grant and recreate only the local operator grant",
+                "authorized-key cutover failed; stop the daemon and run `ryeos node reset authorization --confirm` to discard every client/remote grant and recreate only the local operator grant",
             )?;
             let repaired_bundles =
                 ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
@@ -387,25 +433,17 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     "reconciled interrupted bundle transactions before registry loading"
                 );
             }
+            // Reconciliation may complete a prepared per-bundle mutation.
+            // The whole-node completion fence must still describe the exact
+            // resulting bundle and policy generation before any registry is
+            // loaded or executable authority is constructed.
+            if !repaired_bundles.is_empty() {
+                bootstrap::verify_initialized(&config)?;
+            }
 
             // ── Two-phase node-config bootstrap ──
-            let (engine, node_config_snapshot, isolation) =
+            let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
                 bootstrap::load_node_config_two_phase(&config)?;
-            let node_history_policy = {
-                let roots = engine.resolution_roots(Some(config.app_root.clone()));
-                let parsers = engine.effective_parser_dispatcher(
-                    Some(&config.app_root),
-                    &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
-                )?;
-                let context = ryeos_engine::config_loading::ConfigLoadContext {
-                    roots: &roots,
-                    parsers: &parsers,
-                    kinds: &engine.kinds,
-                    trust_store: &engine.node_trust_store,
-                    project_authority: None,
-                };
-                Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
-            };
 
             // Build the service registry early — self-check needs it.
             let services = Arc::new(build_service_registry());
@@ -552,15 +590,26 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             // Execution admission limits must be armed before projection recovery
             // or any later runtime recovery action is classified or enqueued.
-            let node_fanout = load_node_max_live_fanout(&engine, &config.app_root);
-            ryeos_executor::execution::launch::arm_global_live_fanout_limit(node_fanout);
-            if let Some(n) = node_fanout {
-                tracing::info!(max_live_fanout = n, "node execution limits armed");
-            }
+            let execution_limits = node_policy_snapshot.require::<
+                ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+            >()?;
+            ryeos_executor::execution::launch::arm_global_live_fanout_limit(Some(
+                execution_limits.max_live_fanout,
+            ));
+            let private_copy_limit = execution_limits.max_private_materialization_copy_bytes;
+            ryeos_executor::execution::arm_private_materialization_copy_limit(private_copy_limit)?;
+            tracing::info!(
+                max_live_fanout = execution_limits.max_live_fanout,
+                "node execution limits armed"
+            );
+            tracing::info!(
+                max_private_materialization_copy_bytes = private_copy_limit,
+                "node private materialization limit armed"
+            );
 
             startup.phase(
                 ryeos_node::StartupPhase::OpeningProjection,
-                "opening thread projection",
+                "verifying runtime state and opening thread projection",
             )?;
             let state_open_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver> =
                 Arc::new(startup.clone());
@@ -643,6 +692,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
+                &identity.site_id(),
             )?);
             threads.set_scheduler_db(
                 scheduler_db.clone(),
@@ -678,7 +728,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             let command_registry = Arc::new(
                 ryeos_runtime::CommandRegistry::from_records(
                     &node_config_snapshot.commands,
-                    &node_config_snapshot.command_registration_policy.policy,
+                    &node_policy_snapshot
+                        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+                        .runtime_policy(),
                 )
                 .context("failed to build command registry from node-config records")?,
             );
@@ -720,6 +772,32 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 }
             };
 
+            let node_execution_identity =
+                ryeos_app::execution_identity_probe::boot_node_execution_identity(
+                    &state_store,
+                    &identity,
+                    &build,
+                )?;
+            let persistent_session_policy = node_policy_snapshot.require::<
+                ryeos_app::node_policy::sections::persistent_sessions::PersistentSessionPolicy,
+            >()?;
+            let persistent_sessions = if persistent_session_policy.enabled {
+                ryeos_app::persistent_session::PersistentSessionPool::with_limits(
+                    persistent_session_policy
+                        .limits
+                        .clone()
+                        .context("enabled persistent-session policy has no limits")?,
+                )?
+            } else {
+                ryeos_app::persistent_session::PersistentSessionPool::disabled()
+            };
+            let ignore_matcher = Arc::new(
+                node_policy_snapshot
+                    .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+                    .matcher
+                    .clone(),
+            );
+
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
@@ -745,6 +823,11 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
+                    ext.insert(node_execution_identity);
+                    #[cfg(feature = "handoff-test-support")]
+                    if let Some(gate) = handoff_phase_gate.clone() {
+                        ext.insert(gate);
+                    }
                     Arc::new(ext)
                 },
                 write_barrier: Arc::new(write_barrier),
@@ -754,17 +837,14 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 services,
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
-                node_history_policy,
+                node_policy: node_policy_snapshot,
                 vault,
                 command_registry,
                 authorizer,
                 scheduler_db,
                 scheduler_runtime_gate,
                 scheduler_reload_tx: None,
-                ignore_matcher: Arc::new(
-                    ryeos_app::ignore::load_from_app_root(&config.app_root)
-                        .context("load ingest ignore config — did `ryeos init` run?")?,
-                ),
+                ignore_matcher,
                 vault_fingerprint: {
                     let vault_pk_path = config
                         .app_root
@@ -779,7 +859,22 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     }
                 },
                 accounting,
+                persistent_sessions: Arc::new(persistent_sessions),
             };
+            // This is a generation cut, not a periodic repair. Settle every
+            // attempt owned by the dead predecessor before any startup
+            // recovery can terminalize its job and before application
+            // admission can create an attempt owned by this process.
+            let interrupted_sync_attempts = app_state
+                .state_store
+                .reconcile_interrupted_sync_job_attempts()
+                .context("reconcile predecessor sync-job attempts")?;
+            if interrupted_sync_attempts != 0 {
+                tracing::warn!(
+                    interrupted_sync_attempts,
+                    "settled sync-job attempts interrupted by the previous daemon process"
+                );
+            }
             let admission_store = app_state.state_store.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
@@ -855,12 +950,10 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Reconcile active execution state while the stable listeners continue to
             // serve lifecycle status. Recovery work is collected before application
             // publication and dispatched only after callback state is available.
-            // Node-scoped execution limits ride the SAME signed, layered config
-            // family as every other execution limit: `config/execution/execution.yaml`,
-            // `node:` section. Bundle layers carry defaults; the node's own tree
-            // (`<app_root>/.ai/config/...`) is the top overlay — the operator's
-            // surface, which no project layer can touch (per-launch policy reads use
-            // the project as overlay instead and never read `node:`).
+            // Node-wide admission limits were compiled from the mandatory
+            // node-signed execution policy before startup recovery. Per-launch
+            // project execution configuration remains a separate item-resolution
+            // contract and cannot alter this node-wide ceiling.
             startup.phase(
                 ryeos_node::StartupPhase::ReconcilingThreads,
                 "reconciling active thread execution state",
@@ -876,6 +969,11 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 );
             }
             let active_reconcile = reconcile::reconcile_active_threads(&app_state).await?;
+            ryeos_api::handlers::dedicated_sessions::reconcile_candidate_publications(Arc::new(
+                app_state.clone(),
+            ))
+            .await
+            .context("reconcile hosted candidate publications")?;
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);
             })?;
@@ -953,7 +1051,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 "reconciling scheduler state",
             )?;
             maintenance_schedule::ensure_maintenance_schedule(&app_state)
-                .context("reconcile bundle-authored maintenance schedules")?;
+                .context("materialize node-policy maintenance schedules")?;
             let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
                 app_state.clone(),
             )));
@@ -1282,64 +1380,6 @@ async fn settle_uds_listener(task: &mut tokio::task::JoinHandle<Result<()>>) -> 
     }
 }
 
-/// Read `node.max_live_fanout` from the layered signed execution config,
-/// bundle defaults first and the node's own `.ai` tree last (last layer
-/// wins, matching execution-policy layering). A layer that fails signature
-/// verification is skipped loudly rather than trusted.
-fn load_node_max_live_fanout(
-    engine: &ryeos_engine::engine::Engine,
-    app_root: &std::path::Path,
-) -> Option<u32> {
-    let roots = engine.resolution_roots(Some(app_root.to_path_buf()));
-    let parsers = match engine.effective_parser_dispatcher(
-        Some(app_root),
-        &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
-    ) {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::warn!(error = %err, "node execution limits: parser dispatcher unavailable");
-            return None;
-        }
-    };
-    let ctx = ryeos_engine::config_loading::ConfigLoadContext {
-        roots: &roots,
-        parsers: &parsers,
-        kinds: &engine.kinds,
-        trust_store: &engine.node_trust_store,
-        project_authority: None,
-    };
-    let mut limit: Option<u32> = None;
-    for root in &roots.ordered {
-        let candidate = root
-            .ai_root
-            .join("config")
-            .join("execution")
-            .join("execution.yaml");
-        if !candidate.exists() {
-            continue;
-        }
-        match ryeos_engine::config_loading::load_and_verify_config_file(&candidate, &ctx) {
-            Ok(value) => {
-                if let Some(n) = value
-                    .get("node")
-                    .and_then(|n| n.get("max_live_fanout"))
-                    .and_then(|v| v.as_u64())
-                {
-                    limit = Some(n as u32);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    path = %candidate.display(),
-                    error = %err,
-                    "node execution limits: config layer failed verification — ignoring"
-                );
-            }
-        }
-    }
-    limit.filter(|n| *n > 0)
-}
-
 /// Cross the durable ownership boundary for every active-thread resume intent.
 /// The same path is used at startup (while the execution gate is armed) and by
 /// the periodic live sweep (after the gate opens), so recovery semantics cannot
@@ -1614,7 +1654,7 @@ fn prepare_follow_recovery_actions(
 /// `created|running` set. The startup execution gate keeps every detached
 /// recovery task inert here, so each row must be terminal, attached to a
 /// verified RyeOS process, protected by a launch claim, or owned by a durable
-/// follow/launch-window state machine.
+/// follow/launch-window/remote-adoption state machine.
 fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<String>) -> Result<()> {
     for thread_id in targets {
         let thread = state
@@ -1659,18 +1699,39 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
                 .is_follow_resume_successor(upstream_id, thread_id)?,
             None => false,
         };
+        let durable_remote_adoption_edge = status == ryeos_state::objects::ThreadStatus::Created
+            && thread.upstream_thread_id.is_some()
+            && state
+                .state_store
+                .remote_continuation_authority(&thread.chain_root_id, thread_id)?
+                .is_some();
+        let durable_source_handoff_owner = match state
+            .state_store
+            .active_source_worker_handoff_for_placement(thread_id)?
+        {
+            Some((_job, operation)) if operation.chain_root_id == thread.chain_root_id => true,
+            Some((_job, operation)) => {
+                anyhow::bail!(
+                    "active source handoff {} contradicts recovery target {thread_id} chain authority",
+                    operation.operation_id
+                );
+            }
+            None => false,
+        };
         if status.is_terminal()
             || live_owned_process
             || state.state_store.get_launch_claim(thread_id)?.is_some()
             || thread.runtime.recovery_wait.is_some()
             || durable_follow_owner
             || durable_follow_resume_edge
+            || durable_remote_adoption_edge
+            || durable_source_handoff_owner
             || durable_window_owner
         {
             continue;
         }
         anyhow::bail!(
-            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/wait/follow/window ownership"
+            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/wait/follow/handoff/window ownership"
         );
     }
     Ok(())
@@ -1779,6 +1840,56 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
         return Ok(());
     }
+    if let Err(error) =
+        ryeos_api::handlers::external_content_activate::recover_durable_activations(&state).await
+    {
+        tracing::error!(
+            error = %error,
+            "initial managed external-content recovery failed; durable jobs remain inspectable"
+        );
+    }
+    if let Err(error) = recover_durable_project_head_reconciliations(&state).await {
+        tracing::error!(
+            error = %error,
+            "initial remote project-head reconciliation failed; durable jobs remain retryable"
+        );
+    }
+    match state.threads.reconcile_remote_follow_terminal_deliveries() {
+        Ok(reconciled) if reconciled != 0 => tracing::info!(
+            reconciled,
+            "verified or rebuilt remote follow-terminal delivery jobs from authoritative terminals"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            error = %error,
+            "remote follow-terminal job reconstruction failed; signed terminals remain authoritative"
+        ),
+    }
+    if let Err(error) =
+        ryeos_api::handlers::dedicated_sessions::recover_durable_source_handoffs(&state).await
+    {
+        tracing::error!(
+            error = %error,
+            "initial source worker-handoff recovery failed; durable jobs remain retryable"
+        );
+    }
+    if let Err(error) =
+        ryeos_api::handlers::worker_placements::recover_durable_target_handoffs(&state).await
+    {
+        tracing::error!(
+            error = %error,
+            "initial target worker-handoff recovery failed; durable jobs remain retryable"
+        );
+    }
+    if let Err(error) =
+        ryeos_api::handlers::federated_follow::recover_durable_remote_follow_deliveries(&state)
+            .await
+    {
+        tracing::error!(
+            error = %error,
+            "initial remote follow-terminal recovery failed; durable jobs remain retryable"
+        );
+    }
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let period = Duration::from_secs(120);
@@ -1801,7 +1912,74 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     }
 }
 
+async fn run_cache_metric_flush_loop() -> Result<()> {
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let period = Duration::from_secs(5);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                ryeos_tracing::flush_cache_metrics();
+                return Ok(());
+            }
+            _ = tick.tick() => ryeos_tracing::flush_cache_metrics_due(),
+        }
+    }
+}
+
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    let recovered_activations =
+        ryeos_api::handlers::external_content_activate::recover_durable_activations(state)
+            .await
+            .context("periodic managed external-content recovery")?;
+    if recovered_activations != 0 {
+        tracing::info!(
+            recovered_activations,
+            "periodic recovery advanced managed external-content activations"
+        );
+    }
+    let recovered_project_heads = recover_durable_project_head_reconciliations(state)
+        .await
+        .context("periodic remote project-head reconciliation")?;
+    if recovered_project_heads != 0 {
+        tracing::info!(
+            recovered_project_heads,
+            "periodic recovery completed remote project-head reconciliations"
+        );
+    }
+    let recovered_source_handoffs =
+        ryeos_api::handlers::dedicated_sessions::recover_durable_source_handoffs(state)
+            .await
+            .context("periodic source worker-handoff recovery")?;
+    if recovered_source_handoffs != 0 {
+        tracing::info!(
+            recovered_source_handoffs,
+            "periodic recovery completed source worker handoffs"
+        );
+    }
+    let recovered_handoffs =
+        ryeos_api::handlers::worker_placements::recover_durable_target_handoffs(state)
+            .await
+            .context("periodic target worker-handoff recovery")?;
+    if recovered_handoffs != 0 {
+        tracing::info!(
+            recovered_handoffs,
+            "periodic recovery completed target worker handoffs"
+        );
+    }
+    let recovered_follow_deliveries =
+        ryeos_api::handlers::federated_follow::recover_durable_remote_follow_deliveries(state)
+            .await
+            .context("periodic remote follow-terminal recovery")?;
+    if recovered_follow_deliveries != 0 {
+        tracing::info!(
+            recovered_follow_deliveries,
+            "periodic recovery completed remote follow-terminal deliveries"
+        );
+    }
     ryeos_app::cascade::repair_cancelled_window_members(state)
         .context("periodic cancelled launch-window repair")?;
 
@@ -1943,6 +2121,8 @@ async fn supervise_background_tasks(
         )
     });
 
+    tasks.spawn(async move { ("cache metric flush", run_cache_metric_flush_loop().await) });
+
     let hint_hub = state.event_streams.clone();
     tasks.spawn(async move { ("UI hint fanout", run_ui_hint_loop(hint_hub, ui).await) });
 
@@ -2008,6 +2188,62 @@ async fn drain_running_threads(state: &AppState) -> bool {
         return false;
     }
 
+    // Snapshot every root attachment before retiring independent hosted
+    // workers. Retiring a worker can make its root controller exit and
+    // compare-clear itself immediately; the shutdown coordinator must still
+    // retain the exact old identity so it can prove absence and re-arm that
+    // root's consumed restart budget.
+    let attached_ids = match state.state_store.list_attached_thread_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list attached threads during shutdown");
+            return false;
+        }
+    };
+    let mut attached_snapshot_clean = true;
+    let mut attached = Vec::with_capacity(attached_ids.len());
+    for thread_id in attached_ids {
+        let thread = match state.state_store.get_thread(&thread_id) {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                attached_snapshot_clean = false;
+                tracing::warn!(thread_id, "attached runtime row has no thread");
+                continue;
+            }
+            Err(error) => {
+                attached_snapshot_clean = false;
+                tracing::warn!(thread_id, error = %error, "failed to load attached thread");
+                continue;
+            }
+        };
+        let Some(identity) = thread.runtime.process_identity.clone() else {
+            attached_snapshot_clean = false;
+            tracing::warn!(thread_id, "attached row lost its durable process identity");
+            continue;
+        };
+        let action = process::resolve_shutdown_action(
+            thread
+                .runtime
+                .launch_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.cancellation_mode),
+        );
+        attached.push((thread_id, thread.status, identity, action));
+    }
+
+    // Close the generic persistent-session pool first. Pooled request workers
+    // have no durable per-process row, so the pool itself is their only exact
+    // shutdown owner. Exclusive workers are reaped through the same boundary,
+    // then their durable identities are fenced below.
+    let persistent_session_pool_drained = drain_persistent_session_pool(state).await;
+
+    // Exclusive persistent-session workers are independent process groups,
+    // not descendants represented by `thread_runtime`. Durably fence those
+    // exact worker epochs before draining their root controllers. This
+    // releases the workspace/profile lease only after process death is proved
+    // and leaves the session in the ordinary restart-recovery state.
+    let persistent_session_workers_drained = drain_persistent_session_workers(state).await;
+
     let drain_deadline = Instant::now()
         .checked_add(Duration::from_secs(
             process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
@@ -2023,45 +2259,16 @@ async fn drain_running_threads(state: &AppState) -> bool {
             return false;
         }
     };
-    let attached_ids = match state.state_store.list_attached_thread_ids() {
-        Ok(ids) => ids,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to list attached threads during shutdown");
-            return false;
-        }
-    };
-    if !attached_ids.is_empty() {
+    if !attached.is_empty() {
         tracing::info!(
-            count = attached_ids.len(),
+            count = attached.len(),
             "draining attached threads concurrently"
         );
     }
 
     const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
-    let mut pending = Vec::with_capacity(attached_ids.len());
-    for thread_id in attached_ids {
-        let thread = match state.state_store.get_thread(&thread_id) {
-            Ok(Some(thread)) => thread,
-            Ok(None) => {
-                tracing::warn!(thread_id, "attached runtime row has no thread");
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(thread_id, error = %error, "failed to load attached thread");
-                continue;
-            }
-        };
-        let Some(identity) = thread.runtime.process_identity.clone() else {
-            tracing::warn!(thread_id, "attached row lost its durable process identity");
-            continue;
-        };
-        let action = process::resolve_shutdown_action(
-            thread
-                .runtime
-                .launch_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.cancellation_mode),
-        );
+    let mut pending = Vec::with_capacity(attached.len());
+    for (thread_id, status, identity, action) in attached {
         let kill_identity = identity.clone();
         let kill_task = tokio::task::spawn_blocking(move || {
             let bounded_action = match action {
@@ -2076,18 +2283,20 @@ async fn drain_running_threads(state: &AppState) -> bool {
             };
             process::kill_by_action(&kill_identity, bounded_action)
         });
-        pending.push((thread_id, thread.status, identity, kill_task));
+        pending.push((thread_id, status, identity, kill_task));
     }
 
     for (thread_id, status, identity, kill_task) in pending {
         let result = match kill_task.await {
             Ok(result) => result,
             Err(error) => {
+                attached_snapshot_clean = false;
                 tracing::warn!(thread_id, error = %error, "shutdown process-kill worker failed");
                 continue;
             }
         };
         if !result.success {
+            attached_snapshot_clean = false;
             tracing::warn!(
                 thread_id,
                 method = result.method,
@@ -2095,21 +2304,44 @@ async fn drain_running_threads(state: &AppState) -> bool {
             );
             continue;
         }
-        match state
+        let detached = match state
             .state_store
             .clear_thread_process_if_matches(&thread_id, &identity)
         {
-            Ok(true) => {}
-            Ok(false) => tracing::warn!(thread_id, "shutdown identity changed before clear"),
-            Err(error) => tracing::warn!(
-                thread_id,
-                error = %error,
-                "failed to clear shutdown process identity"
-            ),
+            Ok(true) => true,
+            Ok(false) => match state.state_store.get_thread(&thread_id) {
+                Ok(Some(current)) if current.runtime.process_identity.is_none() => true,
+                Ok(Some(_)) => {
+                    tracing::warn!(thread_id, "shutdown identity changed before clear");
+                    false
+                }
+                Ok(None) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id,
+                        error = %error,
+                        "failed to confirm concurrently cleared shutdown identity"
+                    );
+                    false
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to clear shutdown process identity"
+                );
+                false
+            }
+        };
+        if !detached {
+            attached_snapshot_clean = false;
+            continue;
         }
         if !ryeos_app::state_store::is_terminal_status(&status) {
             let reset_result = state.state_store.reset_resume_attempts(&thread_id);
             if let Err(error) = reset_result {
+                attached_snapshot_clean = false;
                 tracing::warn!(
                     thread_id,
                     error = %error,
@@ -2197,7 +2429,177 @@ async fn drain_running_threads(state: &AppState) -> bool {
             }
         }
     };
-    attached_drained && in_process_drained && in_process_authoritative_clean
+    persistent_session_pool_drained
+        && persistent_session_workers_drained
+        && attached_snapshot_clean
+        && attached_drained
+        && in_process_drained
+        && in_process_authoritative_clean
+}
+
+async fn drain_persistent_session_pool(state: &AppState) -> bool {
+    let pool = Arc::clone(&state.persistent_sessions);
+    match tokio::task::spawn_blocking(move || {
+        pool.shutdown_and_reap_all(Duration::from_secs(
+            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+        ))
+    })
+    .await
+    {
+        Ok(Ok(reaped)) => {
+            if reaped != 0 {
+                tracing::info!(reaped, "reaped persistent-session pool before daemon exit");
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                error = %error,
+                "persistent-session pool shutdown cleanup remains unproved"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "persistent-session pool shutdown task panicked"
+            );
+            false
+        }
+    }
+}
+
+async fn drain_persistent_session_workers(state: &AppState) -> bool {
+    let workers = match state.state_store.live_worker_processes() {
+        Ok(workers) => workers,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to list persistent-session workers during shutdown"
+            );
+            return false;
+        }
+    };
+    if !workers.is_empty() {
+        tracing::info!(
+            count = workers.len(),
+            "draining persistent-session workers concurrently"
+        );
+    }
+
+    let mut pending = Vec::with_capacity(workers.len());
+    for worker in workers {
+        let worker_state = state.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let cleanup = ryeos_app::dedicated_session_service::retire_worker_process(
+                &worker_state,
+                &worker.placement_thread_id,
+                &worker,
+            );
+            (worker, cleanup)
+        });
+        pending.push(task);
+    }
+
+    let mut clean = true;
+    for task in pending {
+        let (worker, cleanup) = match task.await {
+            Ok(result) => result,
+            Err(error) => {
+                clean = false;
+                tracing::error!(
+                    error = %error,
+                    "persistent-session shutdown worker panicked"
+                );
+                continue;
+            }
+        };
+        let cleanup_state = match cleanup {
+            Ok(cleanup_state) => cleanup_state,
+            Err(error) => {
+                clean = false;
+                tracing::error!(
+                    worker_instance_id = %worker.worker_instance_id,
+                    placement_thread_id = %worker.placement_thread_id,
+                    error = %error,
+                    "persistent-session worker retirement failed during shutdown"
+                );
+                continue;
+            }
+        };
+
+        let fenced = state.state_store.fence_abandoned_worker_process(
+            &worker.worker_instance_id,
+            &worker.placement_thread_id,
+            worker.boot_epoch,
+            cleanup_state,
+        );
+        if let Err(error) = fenced {
+            // A concurrent worker-I/O failure may have fenced the exact epoch
+            // after the shutdown snapshot. Accept only the matching durable
+            // dead record; every other CAS loss remains an unclean shutdown.
+            let already_fenced = state
+                .state_store
+                .worker_process(&worker.worker_instance_id)
+                .ok()
+                .flatten()
+                .is_some_and(|current| {
+                    current.placement_thread_id == worker.placement_thread_id
+                        && current.boot_epoch == worker.boot_epoch
+                        && current.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+                        && current.cleanup_state == cleanup_state
+                });
+            if !already_fenced {
+                clean = false;
+                tracing::error!(
+                    worker_instance_id = %worker.worker_instance_id,
+                    placement_thread_id = %worker.placement_thread_id,
+                    cleanup_state,
+                    error = %error,
+                    "failed to persist persistent-session shutdown fence"
+                );
+                continue;
+            }
+        }
+        if cleanup_state != "reaped" {
+            clean = false;
+            tracing::error!(
+                worker_instance_id = %worker.worker_instance_id,
+                placement_thread_id = %worker.placement_thread_id,
+                cleanup_state,
+                "persistent-session worker death remains unproved after shutdown drain"
+            );
+        } else {
+            tracing::info!(
+                worker_instance_id = %worker.worker_instance_id,
+                placement_thread_id = %worker.placement_thread_id,
+                boot_epoch = worker.boot_epoch,
+                "persistent-session worker epoch durably fenced for restart"
+            );
+        }
+    }
+
+    match state.state_store.live_worker_processes() {
+        Ok(remaining) if remaining.is_empty() => clean,
+        Ok(remaining) => {
+            let worker_ids = remaining
+                .into_iter()
+                .map(|worker| worker.worker_instance_id)
+                .collect::<Vec<_>>();
+            tracing::error!(
+                remaining = ?worker_ids,
+                "shutdown drain exhausted with persistent-session workers still live or unproved"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed final persistent-session worker shutdown audit"
+            );
+            false
+        }
+    }
 }
 
 fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<bool> {
@@ -2427,7 +2829,7 @@ async fn run_service_standalone(
     use ryeos_executor::executor::{ExecutionContext, ExecutionMode};
 
     // Verify initialization
-    bootstrap::verify_initialized(config)?;
+    ryeos_node::require_initialized(&config.app_root)?;
 
     // Acquire the state lock immediately after init verification, BEFORE
     // any expensive bootstrap work. Otherwise standalone mode would
@@ -2436,33 +2838,22 @@ async fn run_service_standalone(
     let _state_lock =
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
             .context("failed to acquire state lock — is the daemon running?")?;
+    bootstrap::verify_initialized(config)?;
 
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-    ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
+    let repaired_bundles = ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
         &config.app_root,
         identity.signing_key(),
     )
     .context("reconcile interrupted bundle transactions")?;
+    if !repaired_bundles.is_empty() {
+        bootstrap::verify_initialized(config)?;
+    }
 
     // Two-phase node-config bootstrap without daemon callback-socket authority:
     // standalone mode does not bind the configured UDS listener.
-    let (engine, node_config_snapshot, isolation) =
+    let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
         bootstrap::load_node_config_two_phase_standalone(config)?;
-    let node_history_policy = {
-        let roots = engine.resolution_roots(Some(config.app_root.clone()));
-        let parsers = engine.effective_parser_dispatcher(
-            Some(&config.app_root),
-            &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
-        )?;
-        let context = ryeos_engine::config_loading::ConfigLoadContext {
-            roots: &roots,
-            parsers: &parsers,
-            kinds: &engine.kinds,
-            trust_store: &engine.node_trust_store,
-            project_authority: None,
-        };
-        Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
-    };
 
     let params: serde_json::Value = match params_json {
         Some(json_str) => {
@@ -2470,7 +2861,13 @@ async fn run_service_standalone(
         }
         None => serde_json::json!({}),
     };
-    let standalone_principal = identity.principal_id();
+    // Standalone services are invoked by the configured local operator. The
+    // node identity still signs node-owned state below, but it is the server's
+    // attesting identity, not the caller principal. Keeping those authorities
+    // distinct lets the same local-operator handler run live or standalone.
+    let standalone_operator = NodeIdentity::load(&config.operator_signing_key_path)
+        .context("load configured local operator identity for standalone service")?;
+    let standalone_principal = standalone_operator.principal_id();
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
@@ -2554,6 +2951,7 @@ async fn run_service_standalone(
         kind_profiles.clone(),
         events.clone(),
         event_streams.clone(),
+        &identity.site_id(),
     )?);
     let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
     threads.set_live_input_queue(live_input.clone());
@@ -2566,7 +2964,9 @@ async fn run_service_standalone(
     let standalone_command_registry = Arc::new(
         ryeos_runtime::CommandRegistry::from_records(
             &node_config_snapshot.commands,
-            &node_config_snapshot.command_registration_policy.policy,
+            &node_policy_snapshot
+                .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+                .runtime_policy(),
         )
         .context("failed to build command registry from node-config records")?,
     );
@@ -2633,7 +3033,7 @@ async fn run_service_standalone(
         services,
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
-        node_history_policy,
+        node_policy: node_policy_snapshot.clone(),
         vault: Arc::new(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
                 .context("load sealed-envelope vault — did `ryeos init` run?")?,
@@ -2643,11 +3043,19 @@ async fn run_service_standalone(
         scheduler_db: standalone_scheduler_db,
         scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
-        ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+        ignore_matcher: Arc::new(
+            node_policy_snapshot
+                .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+                .matcher
+                .clone(),
+        ),
         vault_fingerprint: None,
         // Standalone service invocations perform no paid launches; hard
         // admission is uniformly unavailable here.
         accounting: None,
+        persistent_sessions: Arc::new(
+            ryeos_app::persistent_session::PersistentSessionPool::disabled(),
+        ),
     };
 
     let ctx = ExecutionContext {

@@ -1,0 +1,6 @@
+# ryeos:signed:2026-08-11T02:28:07Z:c4c6fe257499a38e342acafacf9c99d9054dcaf761fb6fa2984b8d238499bb0a:BYjW/dY8Bs12IPoCHoOAwnn0cvr8HNo4ikkMDB5x7pHXDIMG0oN3FYjyIEbWTdHViD4UIRypEU6NGoo61De7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, scrub]
+description: Scrub retained external-content large objects
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/scrub

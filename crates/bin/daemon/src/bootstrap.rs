@@ -10,7 +10,8 @@ use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
 use ryeos_app::identity::NodeIdentity;
-use ryeos_app::node_config::{NodeConfigSnapshot, SectionTable};
+use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
+use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
 
 /// Bootstrap options.
 ///
@@ -432,6 +433,8 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
 /// installed. Any registered bundle contributes its kinds and items.
 pub fn verify_initialized(config: &Config) -> Result<()> {
     ryeos_node::require_initialized(&config.app_root)?;
+    ryeos_node::verify_init_completion(&config.app_root)?
+        .context("node has no complete signed initialization transaction")?;
 
     if !config.node_signing_key_path.exists() {
         tracing::warn!("no node signing key found — signed items will fail to verify");
@@ -606,6 +609,7 @@ pub fn load_node_config_two_phase(
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
+    Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
     load_node_config_two_phase_with_socket(config, Some(&config.uds_path))
@@ -619,6 +623,7 @@ pub fn load_node_config_two_phase_standalone(
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
+    Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
     load_node_config_two_phase_with_socket(config, None)
@@ -630,6 +635,7 @@ fn load_node_config_two_phase_with_socket(
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
+    Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
     let app_root = &config.app_root;
@@ -680,23 +686,72 @@ fn load_node_config_two_phase_with_socket(
 
     let effective_bundle_roots = generation.roots();
 
+    // Load one exact complete node-signed policy generation before composing
+    // any runtime authority. The same generation is passed to the generic
+    // full-section compiler below; isolation is never reopened from a second
+    // raw path.
+    let config_table = NodeConfigTable::new();
+    let policy_table = NodePolicyTable::new();
+    let policy_generation = ryeos_app::node_policy::generation::load_policy_generation(
+        app_root,
+        &bootstrap_trust_store,
+        &policy_table,
+    )
+    .context("Phase 1: load exact node policy generation")?;
+    let node_policy = Arc::new(ryeos_app::node_policy::compile_generation(
+        app_root,
+        &policy_table,
+        &policy_generation,
+        NodeIdentity::load(&config.node_signing_key_path)?.fingerprint(),
+    )?);
+    let command_registration = node_policy.require::<
+        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+    >()?;
+    let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
+        app_root,
+        trust_store: &bootstrap_trust_store,
+    };
+    let snapshot = Arc::new(generation.checked(&bootstrap_trust_store, || {
+        full_loader
+            .load_full(
+                &config_table,
+                generation.records(),
+                command_registration,
+                &policy_table,
+            )
+            .context("Phase 2: failed to load full node config")
+    })?);
+
     let isolation_backend = generation
         .checked(&bootstrap_trust_store, || {
             ryeos_app::engine_init::resolve_isolation_backend(
-                app_root,
                 &generation,
                 &bootstrap_trust_store,
+                node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
             )
         })
         .context("Phase 1: resolve selected isolation backend")?;
     let isolation = match daemon_socket {
-        Some(daemon_socket) => ryeos_engine::isolation::IsolationRuntime::load_for_daemon(
+        Some(daemon_socket) => {
+            ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
+                app_root,
+                daemon_socket,
+                node_policy
+                    .require::<ryeos_engine::isolation::IsolationPolicy>()?
+                    .clone(),
+                ryeos_app::node_policy::generation::policy_directory(app_root)
+                    .join("isolation.yaml"),
+                format!("sha256:{}", node_policy.generation_digest()),
+                isolation_backend,
+            )
+        }
+        None => ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
             app_root,
-            daemon_socket,
-            isolation_backend,
-        ),
-        None => ryeos_engine::isolation::IsolationRuntime::load_with_backend(
-            app_root,
+            node_policy
+                .require::<ryeos_engine::isolation::IsolationPolicy>()?
+                .clone(),
+            ryeos_app::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+            format!("sha256:{}", node_policy.generation_digest()),
             isolation_backend,
         ),
     }
@@ -716,28 +771,24 @@ fn load_node_config_two_phase_with_socket(
     );
 
     // ── Build engine ──
-    let (engine, isolation) =
-        crate::engine_init::build_engine(config, &generation, isolation, &bootstrap_trust_store)?;
+    let (engine, isolation) = crate::engine_init::build_engine(
+        config,
+        &generation,
+        isolation,
+        &bootstrap_trust_store,
+        node_policy
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            )?,
+    )?;
     let engine = Arc::new(engine);
 
-    // ── Phase 2: full node-config scan ──
-    let section_table = SectionTable::new();
-    let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
-        app_root,
-        trust_store: &bootstrap_trust_store,
-    };
-    let snapshot = Arc::new(generation.checked(&bootstrap_trust_store, || {
-        full_loader
-            .load_full(&section_table, generation.records())
-            .context("Phase 2: failed to load full node config")
-    })?);
     tracing::info!(
         bundle_count = snapshot.bundles.len(),
         route_count = snapshot.routes.len(),
         "Phase 2: node config loaded"
     );
 
-    Ok((engine, snapshot, isolation))
+    Ok((engine, snapshot, node_policy, isolation))
 }
 
 #[cfg(test)]
@@ -775,9 +826,6 @@ mod tests {
                 .join("node")
                 .join("auth")
                 .join("authorized_keys"),
-            require_auth: false,
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         }
     }
 
@@ -1044,9 +1092,6 @@ mod tests {
                 .join("node")
                 .join("auth")
                 .join("authorized_keys"),
-            require_auth: false,
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
 
         let err = repair_daemon_local(&config).expect_err("should refuse without user key");

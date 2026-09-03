@@ -8,8 +8,8 @@
 # Usage: scripts/dev/sign-dev.sh <file> [<file> ...]
 # Env:   RYEOS_DEV_KEY  override the key path (default: .dev-keys/PUBLISHER_DEV.pem)
 #
-# Envelope is chosen by extension: `# ryeos:signed:...` for .yaml/.yml/.toml,
-# `<!-- ryeos:signed:... -->` for .md.
+# Envelope is chosen by extension: `# ryeos:signed:...` for
+# .yaml/.yml/.toml/.py, `<!-- ryeos:signed:... -->` for .md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -30,8 +30,8 @@ sign_file() {
   [[ -f "$file" ]] || { echo "sign-dev: missing file: $file" >&2; return 1; }
   case "$file" in
     *.md)            prefix='<!-- '; suffix=' -->'; strip_re='^<!-- ryeos:signed:' ;;
-    *.yaml|*.yml|*.toml) prefix='# '; suffix='';     strip_re='^# ryeos:signed:' ;;
-    *)               echo "sign-dev: unknown envelope for $file (expected .yaml/.yml/.toml/.md)" >&2; return 1 ;;
+    *.yaml|*.yml|*.toml|*.py) prefix='# '; suffix=''; strip_re='^# ryeos:signed:' ;;
+    *)               echo "sign-dev: unknown envelope for $file (expected .yaml/.yml/.toml/.py/.md)" >&2; return 1 ;;
   esac
 
   local body_tmp hash_tmp tmp hash sig timestamp

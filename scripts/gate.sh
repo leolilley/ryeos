@@ -9,6 +9,8 @@
 #     ./scripts/gate.sh -p ryeosd               # forwarded to nextest
 #     ./scripts/gate.sh --refresh-bundles       # explicit full bundle refresh, then tests
 #     ./scripts/gate.sh --refresh-bundles --no-tests
+#     ./scripts/gate.sh --refresh-bundles --crash-qualification-only
+#     ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
 #     ./scripts/gate.sh --bundle-set hosted-node --refresh-bundles
 #
 # CI/release jobs that need regenerated bundle binaries/manifests must pass
@@ -41,6 +43,8 @@ OWNER="${OWNER:-ryeos-dev}"
 
 skip_tests=0
 refresh_bundles=0
+skip_crash_qualification=0
+crash_qualification_only=0
 bundle_set="full"
 nextest_args=()
 while [[ $# -gt 0 ]]; do
@@ -51,6 +55,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --refresh-bundles)
             refresh_bundles=1
+            shift
+            ;;
+        --skip-crash-qualification)
+            skip_crash_qualification=1
+            shift
+            ;;
+        --crash-qualification-only)
+            crash_qualification_only=1
             shift
             ;;
         --bundle-set)
@@ -64,6 +76,25 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$skip_crash_qualification" == "1" && "$crash_qualification_only" == "1" ]]; then
+    gate_fail "--skip-crash-qualification conflicts with --crash-qualification-only"
+    exit 2
+fi
+if [[ "$crash_qualification_only" == "1" ]]; then
+    if [[ "$skip_tests" == "1" ]]; then
+        gate_fail "--crash-qualification-only conflicts with --no-tests"
+        exit 2
+    fi
+    if [[ "$refresh_bundles" != "1" || "$bundle_set" != "full" ]]; then
+        gate_fail "--crash-qualification-only requires --refresh-bundles with the full bundle set"
+        exit 2
+    fi
+    if [[ ${#nextest_args[@]} -ne 0 ]]; then
+        gate_fail "--crash-qualification-only does not accept forwarded nextest arguments"
+        exit 2
+    fi
+fi
 
 if [[ "$refresh_bundles" == "1" ]]; then
     if [[ ! -s "$KEY" ]]; then
@@ -110,6 +141,49 @@ cargo_jobs_args=()
 test_threads_args=()
 [[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
 
-gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
-"$CARGO" nextest run --workspace --no-fail-fast \
-    "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"
+if [[ "$crash_qualification_only" != "1" ]]; then
+    gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
+    "$CARGO" nextest run --workspace --no-fail-fast \
+        "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"
+fi
+
+# A production daemon must not expose the crash-cut endpoint, so this matrix
+# cannot be part of the default-feature workspace binary. A full, explicitly
+# refreshed source gate has the exact signed runtime bytes required by the
+# process-kill qualification and must execute every durable cut before release.
+if [[ "$refresh_bundles" == "1" \
+    && "$bundle_set" == "full" \
+    && "$skip_crash_qualification" != "1" \
+    && ${#nextest_args[@]} -eq 0 ]]; then
+    crash_qualification_features="crash-qualification-test-support,handoff-test-support"
+    gate_info "qualifying directive native-resume crash cuts"
+    RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
+        "$CARGO" nextest run -p ryeosd \
+        --features "$crash_qualification_features" \
+        --test directive_crash_recovery_e2e \
+        "${cargo_jobs_args[@]}" --test-threads 1
+
+    gate_info "qualifying explicit cross-site worker handoff crash cuts"
+    handoff_report_dir="$ROOT/target/qualification"
+    mkdir -p "$handoff_report_dir"
+    handoff_report="$handoff_report_dir/explicit-worker-handoff.json"
+    handoff_report_candidate="$(mktemp "$handoff_report_dir/.explicit-worker-handoff.XXXXXX")"
+    rm -f -- "$handoff_report" "$handoff_report_candidate"
+    cleanup_handoff_report_candidate() {
+        rm -f -- "$handoff_report_candidate"
+    }
+    trap cleanup_handoff_report_candidate EXIT
+    RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
+    RYEOS_HANDOFF_QUALIFICATION_REPORT="$handoff_report_candidate" \
+        "$CARGO" nextest run -p ryeosd \
+        --features "$crash_qualification_features" \
+        --test handoff_crash_recovery_e2e \
+        "${cargo_jobs_args[@]}" --test-threads 1 --success-output immediate
+    if [[ ! -f "$handoff_report_candidate" || ! -s "$handoff_report_candidate" ]]; then
+        gate_fail "handoff qualification succeeded without a nonempty canonical report"
+        exit 1
+    fi
+    mv -- "$handoff_report_candidate" "$handoff_report"
+    trap - EXIT
+    gate_info "retained explicit handoff qualification report: $handoff_report"
+fi

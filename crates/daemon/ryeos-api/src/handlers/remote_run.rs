@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::handlers::remote_push::OutboundPrincipal;
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
@@ -23,12 +24,24 @@ pub struct Request {
     pub item_ref: String,
     pub ref_bindings: BTreeMap<String, String>,
     /// Local project path used to resolve the configured remote binding.
-    pub project: PathBuf,
+    /// Omit only for an explicitly projectless execution policy.
+    #[serde(default)]
+    pub project: Option<PathBuf>,
+    /// Principal used to sign the destination request. Retained-current-HEAD
+    /// launches always preserve the configured operator; projectless session
+    /// control selects it explicitly.
+    #[serde(default)]
+    pub outbound_principal: OutboundPrincipal,
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
     /// Explicit execution semantics for the destination project.
     pub execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
+    /// Caller-retained remote request coordinate. Required exactly when the
+    /// destination policy returns `accepted`, so uncertain delivery can be
+    /// queried without risking a second launch.
+    #[serde(default)]
+    pub launch_id: Option<String>,
 }
 
 fn default_remote() -> String {
@@ -41,15 +54,19 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))
-        .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let report =
+        config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
+            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
-    let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)
+    let binding = req
+        .project
+        .as_ref()
+        .map(|project| config::resolve_loaded_project_binding(&loaded_remote, project))
+        .transpose()
         .map_err(|e| HandlerError::BadRequest(format!("project binding: {e:#}")))?;
     let remote_cfg = loaded_remote.config;
 
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     req.execution_policy
         .validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
@@ -58,31 +75,125 @@ pub async fn handle(
             "remote run receives a destination-local policy; target must be `here`".to_string(),
         ));
     }
-    if !matches!(
-        req.execution_policy.project,
+    let live_direct = matches!(
+        &req.execution_policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
-    ) {
+    );
+    let retained_current_head = matches!(
+        &req.execution_policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
+            source: ryeos_app::execution_policy::PinnedSource::CurrentHead,
+            realization: ryeos_app::execution_policy::PinnedRealization::Cow {
+                terminal_publication:
+                    ryeos_app::execution_policy::TerminalPublication::RetainCurrentHead,
+            },
+            ..
+        }
+    );
+    let projectless = matches!(
+        &req.execution_policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
+    );
+    if !live_direct && !retained_current_head && !projectless {
         return Err(HandlerError::BadRequest(
-            "remote run executes the configured deployed project and requires live_direct project authority"
+            "remote run requires projectless authority, live_direct authority, or a retained current_head COW launch".to_string(),
+        ));
+    }
+    if projectless && req.project.is_some() {
+        return Err(HandlerError::BadRequest(
+            "projectless remote run must omit project".to_string(),
+        ));
+    }
+    if !projectless && binding.is_none() {
+        return Err(HandlerError::BadRequest(
+            "project-backed remote run requires a project and configured binding".to_string(),
+        ));
+    }
+    if retained_current_head
+        && req.execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Accepted
+    {
+        return Err(HandlerError::BadRequest(
+            "retained current_head remote launches must return accepted so the caller can drive the durable session"
                 .to_string(),
         ));
+    }
+    if retained_current_head
+        && binding.as_ref().map(|value| value.sync_scope)
+            != Some(config::ProjectSyncScope::FullProject)
+    {
+        let binding = binding
+            .as_ref()
+            .expect("project-backed binding checked above");
+        return Err(HandlerError::BadRequest(format!(
+            "retained current_head remote launches require a full_project binding; '{}' is {:?}",
+            binding.local_project_path.display(),
+            binding.sync_scope
+        )));
+    }
+    let use_configured_operator =
+        retained_current_head || req.outbound_principal == OutboundPrincipal::ConfiguredOperator;
+    let client = if use_configured_operator {
+        RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?
+    } else {
+        RemoteClient::from_remote_cfg(&state, &remote_cfg)
+    };
+    let accepted =
+        req.execution_policy.response == ryeos_app::execution_policy::ExecutionResponse::Accepted;
+    match (accepted, req.launch_id.as_deref()) {
+        (true, Some(launch_id)) if ryeos_app::state_store::is_canonical_launch_id(launch_id) => {}
+        (true, Some(_)) => {
+            return Err(HandlerError::BadRequest(
+                "accepted remote launch_id must be L- followed by exactly 32 hexadecimal characters"
+                    .to_string(),
+            ));
+        }
+        (true, None) => {
+            return Err(HandlerError::BadRequest(
+                "accepted remote launches require a caller-retained launch_id".to_string(),
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(HandlerError::BadRequest(
+                "launch_id is valid only for an accepted remote launch".to_string(),
+            ));
+        }
+        (false, None) => {}
     }
     let remote_result = client
         .execute(
             &req.item_ref,
             &req.ref_bindings,
-            Some(&binding.remote_project_path),
+            binding
+                .as_ref()
+                .map(|binding| binding.remote_project_path.as_str()),
             &req.parameters,
             &req.execution_policy,
+            req.launch_id.as_deref(),
         )
         .await
-        .map_err(|e| HandlerError::Internal(format!("remote run failed: {e:#}")))?;
+        .map_err(|error| {
+            let coordinate = req
+                .launch_id
+                .as_deref()
+                .map(|launch_id| {
+                    format!(
+                        "; retain remote launch coordinate {launch_id} and query that exact owner-bound launch before retrying"
+                    )
+                })
+                .unwrap_or_default();
+            crate::remote::client::map_remote_call_error(
+                error,
+                format!("remote run failed{coordinate}"),
+            )
+        })?;
 
     Ok(serde_json::json!({
         "remote": req.remote,
-        "local_project_path": binding.local_project_path,
-        "remote_project_path": binding.remote_project_path,
-        "sync_scope": binding.sync_scope,
+        "outbound_principal": if use_configured_operator { "configured_operator" } else { "node" },
+        "local_project_path": binding.as_ref().map(|value| &value.local_project_path),
+        "remote_project_path": binding.as_ref().map(|value| &value.remote_project_path),
+        "sync_scope": binding.as_ref().map(|value| value.sync_scope),
         "result": remote_result,
     }))
 }
@@ -131,3 +242,83 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::Request;
+
+    fn retained_request() -> serde_json::Value {
+        serde_json::json!({
+            "remote": "hosted",
+            "item_ref": "worker_execution:fixture/session",
+            "ref_bindings": {},
+            "project": "/project",
+            "parameters": {"credential_profile_id": "personal"},
+            "launch_id": "L-0123456789abcdef0123456789abcdef",
+            "execution_policy": {
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "accepted",
+                "target": {"kind": "here"},
+                "environment": {"kind": "none"},
+                "project": {
+                    "kind": "pinned",
+                    "source": {"kind": "current_head"},
+                    "realization": {
+                        "kind": "cow",
+                        "terminal_publication": {"kind": "retain_current_head"}
+                    },
+                    "child_policy": {"kind": "inherit"}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn signed_service_payload_requires_policy_and_carries_launch_coordinate() {
+        let request: Request = serde_json::from_value(retained_request()).unwrap();
+        assert_eq!(
+            request.launch_id.as_deref(),
+            Some("L-0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            request.execution_policy.response,
+            ryeos_app::execution_policy::ExecutionResponse::Accepted
+        );
+
+        let mut missing = retained_request();
+        missing.as_object_mut().unwrap().remove("execution_policy");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+    }
+
+    #[test]
+    fn projectless_control_request_selects_configured_operator_without_project() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "remote": "hosted",
+            "item_ref": "service:worker-executions/status",
+            "ref_bindings": {},
+            "outbound_principal": "configured_operator",
+            "parameters": {"session_id": "T-session"},
+            "execution_policy": {
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "wait",
+                "target": {"kind": "here"},
+                "environment": {"kind": "none"},
+                "project": {"kind": "projectless"}
+            }
+        }))
+        .unwrap();
+        assert!(request.project.is_none());
+        assert_eq!(
+            request.outbound_principal,
+            crate::handlers::remote_push::OutboundPrincipal::ConfiguredOperator
+        );
+        assert!(matches!(
+            request.execution_policy.project,
+            ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
+        ));
+    }
+}

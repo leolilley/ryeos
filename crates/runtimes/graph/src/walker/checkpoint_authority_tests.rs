@@ -69,6 +69,19 @@ impl AuthorityClient {
         assert_eq!(self.follow_handoffs.load(Ordering::SeqCst), 0);
         assert_eq!(self.continuation_handoffs.load(Ordering::SeqCst), 0);
     }
+
+    fn live_dispatch_response(result: Value) -> Value {
+        json!({
+            "thread": {},
+            "result": result,
+            "dispatch": {
+                "source": "executed",
+                "effect_class": "live",
+                "action_digest": "ab".repeat(32),
+                "publication": "not_applicable"
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -89,7 +102,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
                 results.remove(0)
             }
         };
-        Ok(json!({"thread": {}, "result": result}))
+        Ok(Self::live_dispatch_response(result))
     }
 
     async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -153,7 +166,37 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         Ok(json!({}))
     }
 
-    async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+    async fn append_events(&self, _: &str, events: Vec<Value>) -> Result<Value, CallbackError> {
+        let event_types = events
+            .iter()
+            .map(|event| {
+                event
+                    .get("event_type")
+                    .and_then(Value::as_str)
+                    .expect("batched event type")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        self.event_types
+            .lock()
+            .unwrap()
+            .extend(event_types.iter().cloned());
+        let target = {
+            let boundary = self.crash_boundary.lock().unwrap();
+            boundary.as_ref().and_then(|boundary| match boundary {
+                CallbackCrashBoundary::Event(target)
+                    if event_types
+                        .iter()
+                        .any(|event_type| event_type == target.as_str()) =>
+                {
+                    Some(*target)
+                }
+                _ => None,
+            })
+        };
+        if let Some(target) = target {
+            self.crash_if_armed(CallbackCrashBoundary::Event(target));
+        }
         Ok(json!({}))
     }
 
@@ -218,7 +261,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
 }
 
 fn graph(yaml: &str) -> GraphDefinition {
-    GraphDefinition::from_yaml(yaml, Some("checkpoint-authority.yaml")).unwrap()
+    GraphDefinition::from_yaml_effective_fixture(yaml, Some("checkpoint-authority.yaml")).unwrap()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,7 +297,7 @@ fn schema_3_checkpoint(
     let mut checkpoint = json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "definition_ref": definition.definition_ref.clone(),
-        "definition_hash": definition.definition_hash.clone(),
+        "effective_definition_digest": definition.effective_definition_digest.clone(),
         "expression_language": EXPRESSION_LANGUAGE,
         "graph_run_id": graph_run_id,
         "current_node": current_node,
@@ -398,12 +441,11 @@ config:
                         "item_refs": ["directive:test/child"],
                     })),
                     Some(json!({
+                        "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                         "success": true,
                         "child_thread_id": "T-authority-child",
                         "status": ThreadTerminalStatus::Completed.as_str(),
                         "result": {"answer": 42},
-                        "outputs": null,
-                        "warnings": [],
                         "cost": null,
                     })),
                 );
@@ -462,21 +504,19 @@ config:
                         "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Completed],
                         "items": [
                             {
+                                "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                                 "success": true,
                                 "child_thread_id": "T-authority-child-1",
                                 "status": RuntimeResultStatus::Completed,
                                 "result": {"answer": 1},
-                                "outputs": null,
-                                "warnings": [],
                                 "cost": null,
                             },
                             {
+                                "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                                 "success": true,
                                 "child_thread_id": "T-authority-child-2",
                                 "status": RuntimeResultStatus::Completed,
                                 "result": {"answer": 2},
-                                "outputs": null,
-                                "warnings": [],
                                 "cost": null,
                             },
                         ],
@@ -787,7 +827,7 @@ config:
     let checkpoint = json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "definition_ref": definition.definition_ref.clone(),
-        "definition_hash": definition.definition_hash.clone(),
+        "effective_definition_digest": definition.effective_definition_digest.clone(),
         "expression_language": EXPRESSION_LANGUAGE,
         "graph_run_id": "gr-numeric-resume",
         "current_node": "increment",
@@ -826,4 +866,66 @@ config:
     assert_eq!(result.steps, 11);
     assert_eq!(result.state["count"], json!(42));
     assert_eq!(result.result, Some(json!(42)));
+}
+
+#[tokio::test]
+async fn resume_uses_admitted_definition_after_live_source_mutation() {
+    let project = tempfile::tempdir().unwrap();
+    let source_path = project.path().join("resume-source.yaml");
+    let original = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output: admitted
+"#;
+    std::fs::write(&source_path, original).unwrap();
+    let definition =
+        GraphDefinition::from_yaml_effective_fixture(original, source_path.to_str()).unwrap();
+    let checkpoint = schema_3_checkpoint(
+        &definition,
+        "gr-source-mutation",
+        "done",
+        0,
+        json!({}),
+        None,
+        None,
+    );
+
+    std::fs::write(
+        &source_path,
+        original.replace("output: admitted", "output: mutated"),
+    )
+    .unwrap();
+
+    let resume = crate::resume::from_checkpoint_value(&checkpoint, &definition).unwrap();
+    let callback = Arc::new(AuthorityClient::new(Vec::new(), None));
+    let client = CallbackClient::from_inner(
+        callback,
+        "thread-source-mutation",
+        project.path().to_str().unwrap(),
+        "tat-source-mutation",
+    );
+    let walker = Walker::new(
+        definition,
+        project.path().to_str().unwrap().to_string(),
+        "thread-source-mutation".to_string(),
+        client,
+        None,
+    );
+    let result = walker
+        .execute(
+            json!({"resume_state": serde_json::to_value(resume).unwrap()}),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.success,
+        "resume failed after source mutation: {result:?}"
+    );
+    assert_eq!(result.result, Some(json!("admitted")));
 }

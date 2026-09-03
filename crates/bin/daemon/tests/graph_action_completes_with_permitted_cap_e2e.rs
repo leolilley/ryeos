@@ -42,11 +42,9 @@ fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
 
 /// Plant a Python tool at `.ai/tools/echo.py`.
 ///
-/// Unsigned — Unsigned trust class is accepted by the engine for tool
-/// items the chain doesn't gate on (matches `hello_world_python.rs`'s
-/// working pattern). Signing with `after_shebang: true` is brittle to
-/// reproduce in tests; unsigned is the documented test path.
-fn plant_echo_tool(project_dir: &Path) -> anyhow::Result<()> {
+/// Project-owned executable source is signed by the fixture publisher so the
+/// exact source closure retains one verified owner.
+fn plant_echo_tool(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let tools_dir = project_dir.join(".ai").join("tools");
     let tool_dir = tools_dir.join("echo");
     std::fs::create_dir_all(&tool_dir)?;
@@ -63,7 +61,8 @@ raw = sys.stdin.read()
 params = json.loads(raw) if raw.strip() else {}
 print(json.dumps({"msg": params.get("msg", "default")}))
 "#;
-    std::fs::write(tool_dir.join("echo.py"), body)?;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(tool_dir.join("echo.py"), signed)?;
     Ok(())
 }
 
@@ -75,10 +74,11 @@ fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Res
     // an object with a `type` discriminator (was a bare scalar before).
     //
     // `requires.capabilities.declared` populates the callback token's
-    // effective_caps via the graph_permissions composer; the cap shape mirrors
+    // effective_caps through the graph kind's generic signed composition rule;
+    // the cap shape mirrors
     // `enforce_callback_caps` in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>`
     // where the bare id keeps its `/` separators (canonical Capability format).
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -106,11 +106,42 @@ config:
     Ok(())
 }
 
+/// Plant a graph whose ordinary inline action targets an in-process service.
+/// This is the other launch-driver half of the generic runtime-action intent
+/// contract; the existing echo fixture above covers a subprocess child.
+fn plant_in_process_service_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.service.health/status
+config:
+  start: inspect
+  nodes:
+    inspect:
+      action:
+        item_id: "service:health/status"
+        ref_bindings: {}
+        params: {}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("in_process.yaml"), signed)?;
+    Ok(())
+}
+
 /// Plant a graph with empty permissions (deny-all).
 fn plant_denied_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: greet
@@ -140,7 +171,7 @@ config:
 fn plant_runtime_authority_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -158,12 +189,12 @@ config:
 }
 
 /// Plant a graph using the removed `requires.capabilities.callbacks` key. The
-/// daemon's `graph_permissions` composer must reject it at compose time — no
-/// silent acceptance — so the graph never runs.
+/// graph's strict generic composition/validation path must reject it before
+/// launch — no silent acceptance — so the graph never runs.
 fn plant_legacy_callbacks_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -317,9 +348,13 @@ fn assert_graph_runtime_event_identity(
         "persisted event must carry definition_ref; event={payload:#}"
     );
     assert_eq!(
-        payload.get("definition_hash").and_then(|v| v.as_str()),
-        graph_result.get("definition_hash").and_then(|v| v.as_str()),
-        "persisted event definition_hash must match GraphResult; event={payload:#}; graph_result={graph_result:#?}"
+        payload
+            .get("effective_definition_digest")
+            .and_then(|v| v.as_str()),
+        graph_result
+            .get("effective_definition_digest")
+            .and_then(|v| v.as_str()),
+        "persisted event effective_definition_digest must match GraphResult; event={payload:#}; graph_result={graph_result:#?}"
     );
     assert_eq!(
         payload.get("graph_run_id").and_then(|v| v.as_str()),
@@ -353,7 +388,7 @@ async fn graph_action_completes_with_permitted_cap() {
     .expect("start daemon with standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_echo_tool(project.path()).expect("plant echo tool");
+    plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");
     plant_permitted_graph(project.path(), &fixture.publisher).expect("plant permitted graph");
 
     let post_fut = h.post_execute(
@@ -502,10 +537,10 @@ async fn graph_action_completes_with_permitted_cap() {
     );
     assert!(
         receipt_metadata
-            .get("definition_hash")
+            .get("effective_definition_digest")
             .and_then(|v| v.as_str())
             .is_some_and(|hash| !hash.is_empty()),
-        "receipt must carry a non-empty portable definition hash; receipt_metadata={receipt_metadata:#?}"
+        "receipt must carry a non-empty effective definition digest; receipt_metadata={receipt_metadata:#?}"
     );
     assert!(
         receipt_metadata
@@ -531,6 +566,170 @@ async fn graph_action_completes_with_permitted_cap() {
         "graph:flow",
         "greet",
         Some("ok"),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_in_process_service_graph(project.path(), &fixture.publisher)
+        .expect("plant in-process service graph");
+
+    let (status, body) = h
+        .post_execute(
+            "graph:in_process",
+            project.path().to_str().unwrap(),
+            json!({}),
+        )
+        .await
+        .expect("execute in-process service graph");
+    if status != reqwest::StatusCode::OK
+        || body.pointer("/result/status").and_then(Value::as_str) != Some("completed")
+    {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!(
+            "in-process service graph did not complete: status={status}; body={body:#}\n\
+             --- daemon stderr ---\n{stderr}"
+        );
+    }
+
+    let graph_thread = graph_thread_id(&body, "in-process service graph");
+    let runtime_path = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let runtime = rusqlite::Connection::open_with_flags(
+        runtime_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open runtime database read-only");
+    let intents = runtime
+        .prepare(
+            "SELECT operation_id, mode, child_thread_id FROM runtime_action_intent \
+             WHERE chain_root_id=?1 ORDER BY operation_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([graph_thread], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read runtime-action intents");
+    assert_eq!(
+        intents.len(),
+        1,
+        "one graph action occurrence must reserve exactly one generic intent: {intents:#?}"
+    );
+    let (operation_id, mode, child_thread) = &intents[0];
+    assert_eq!(
+        operation_id.len(),
+        64,
+        "operation id must be a SHA-256 hex digest"
+    );
+    assert_eq!(mode, "inline");
+    assert_ne!(child_thread, graph_thread);
+
+    let warnings = body
+        .pointer("/result/warnings")
+        .and_then(Value::as_array)
+        .expect("graph runtime result carries warnings array");
+    assert!(
+        warnings.is_empty(),
+        "canonical graph lifecycle events must not be rejected: {warnings:#?}"
+    );
+    let graph_events = persisted_thread_events(&h.state_path, graph_thread);
+    for event_type in ["tool_call_start", "tool_call_result"] {
+        let payload = graph_events
+            .iter()
+            .find(|(actual, _)| actual == event_type)
+            .map(|(_, payload)| payload)
+            .unwrap_or_else(|| panic!("missing persisted {event_type} event: {graph_events:#?}"));
+        assert_eq!(
+            payload.get("operation_id").and_then(Value::as_str),
+            Some(operation_id.as_str()),
+            "graph lifecycle testimony must identify the same runtime-action occurrence"
+        );
+    }
+
+    let child_events = persisted_thread_events(&h.state_path, child_thread);
+    assert!(
+        child_events
+            .iter()
+            .any(|(event, _)| event == "thread_started"),
+        "the pre-minted in-process child must be an ordinary recorded thread: {child_events:#?}"
+    );
+    assert!(
+        child_events
+            .iter()
+            .any(|(event, _)| event == "thread_completed"),
+        "the retained in-process child must settle terminally: {child_events:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");
+    plant_permitted_graph(project.path(), &fixture.publisher).expect("plant permitted graph");
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "graph:flow",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("execute pinned graph action");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.pointer("/result/status").and_then(Value::as_str),
+        Some("completed"),
+        "pinned graph action must complete without a phantom runtime-pin subject: {body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/success").and_then(Value::as_bool),
+        Some(true),
+        "body={body:#}"
+    );
+
+    let graph_thread = graph_thread_id(&body, "pinned graph action");
+    let events = persisted_thread_events(&h.state_path, graph_thread);
+    assert!(
+        events.iter().any(|(event_type, payload)| {
+            event_type == "tool_call_result"
+                && payload.get("status").and_then(Value::as_str) == Some("ok")
+        }),
+        "the born tool child must return through the graph callback: {events:#?}"
     );
 }
 
@@ -596,7 +795,7 @@ async fn graph_with_runtime_authority_permission_rejected_at_launch() {
 }
 
 /// A graph using the removed `requires.capabilities.callbacks` key must be
-/// rejected by the daemon (at compose time, in `graph_permissions`) — it must
+/// rejected by the daemon during strict generic composition/validation — it must
 /// never run. No back-compat: old authoring fails loud.
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_with_legacy_callbacks_rejected() {
@@ -668,7 +867,7 @@ async fn graph_action_denied_without_permitted_cap() {
     .expect("start daemon with standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_echo_tool(project.path()).expect("plant echo tool");
+    plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");
     plant_denied_graph(project.path(), &fixture.publisher).expect("plant denied graph");
 
     let post_fut = h.post_execute(
@@ -757,10 +956,10 @@ async fn graph_action_denied_without_permitted_cap() {
     );
     assert!(
         receipt_metadata
-            .get("definition_hash")
+            .get("effective_definition_digest")
             .and_then(|v| v.as_str())
             .is_some_and(|hash| !hash.is_empty()),
-        "error receipt must carry a non-empty portable definition hash; receipt_metadata={receipt_metadata:#?}"
+        "error receipt must carry a non-empty effective definition digest; receipt_metadata={receipt_metadata:#?}"
     );
     assert_eq!(
         receipt_metadata.get("node_result_hash"),

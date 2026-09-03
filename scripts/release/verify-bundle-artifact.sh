@@ -159,6 +159,32 @@ while IFS= read -r bundle; do
     }
 done < <(ryeos_bundle_set_names full)
 
+ryeos_validate_node_init_root "$stage/.ai/node/init" || {
+    ryeos_term_fail "source-root node init namespace is not closed"
+    exit 2
+}
+node_init_profile_prefix="$archive_root/.ai/node/init/profiles/"
+expected_node_init_profiles="$(ryeos_node_init_profile_file_names | sort)"
+actual_node_init_profiles="$(awk -v prefix="$node_init_profile_prefix" '
+    index($0, prefix) == 1 {
+        suffix = substr($0, length(prefix) + 1)
+        if (suffix == "") next
+        sub(/\/$/, "", suffix)
+        print suffix
+    }
+' "$entries" | sort)"
+[[ "$actual_node_init_profiles" == "$expected_node_init_profiles" ]] || {
+    ryeos_term_fail "source-root node init-profile inventory is incomplete or unsupported"
+    exit 2
+}
+while IFS= read -r node_init_profile_name; do
+    ryeos_validate_node_init_profile \
+        "$node_init_profile_name" "$stage/.ai/node/init/profiles/$node_init_profile_name.yaml" || {
+        ryeos_term_fail "node init-profile contract is invalid: $node_init_profile_name"
+        exit 2
+    }
+done < <(ryeos_node_init_profile_names)
+
 official_fp="$("$root/scripts/release/official-publisher-fingerprint.sh")"
 trust_doc="$(tar -xOzf "$archive" "$archive_root/.ai/PUBLISHER_TRUST.toml")"
 artifact_fp="$(printf '%s\n' "$trust_doc" | sed -n 's/^[[:space:]]*fingerprint[[:space:]]*=[[:space:]]*"\([0-9A-Fa-f]\{64\}\)"[[:space:]]*$/\1/p')"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-17T05:31:30Z:2699ea4742fcee55e9cc414e09890ec02ad3cf34e33e00035eaec68799a72d3f:Tr6qvmBaAV1rWNgofhvcf7od8p1kybQz+zKTGNN2RoXmnhqFyigD65sGpOF7Lq7cyPkP5Wf/f3+2K7P2mLNVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:03Z:001a12ab054a34a947ce6d21fa9edf73f8accff58d9393e8d0f335102fd17ba3:OM+lvwMJ3tWKNYT0Lps3hJ2+3UZF6GNHeSRWQHaZqdY909s42H6dKOWZIlVSpC/OhMih+ldYIkD/Ci3KCi3tAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/streaming_tool"
 version: "1.0.0"
 location:
@@ -8,6 +8,15 @@ effective_trust:
   include_references: false
 resolution: []
 execution:
+  source_closure:
+    derived: effective_source_closure
+    location:
+      type: item_namespace
+    testimony: owner_signed_files
+    max_files: 4096
+    max_total_bytes: 67108864
+    max_file_bytes: 8388608
+    max_depth: 64
   terminator:
     kind: subprocess
     protocol: protocol:ryeos/core/tool_streaming
@@ -47,7 +56,6 @@ runtime:
     - type: config
     - type: env_config
     - type: config_resolve
-    - type: verify_deps
     - type: execution_params
     - type: native_async
     - type: native_resume
@@ -63,6 +71,7 @@ runtime:
     - config_schema
     - execution_owner
     - native_resume
+    - source_scope
 metadata:
   rules:
     name:

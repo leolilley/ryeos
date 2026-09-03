@@ -9,7 +9,7 @@
 //! Delegates to the canonical `ryeos_app::identity::write_authorized_key_toml`
 //! so there is exactly one TOML emitter.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -39,9 +39,18 @@ pub struct AuthorizeClientParams {
     /// the write replaces the scope set (and any dropped scope is reported
     /// in `AuthorizeClientResult::dropped_scopes`).
     pub merge: bool,
+    /// Bind this operator-owned key to an authenticated forwarding site.
+    /// Presence emits a `remote_operator` grant and requires exact,
+    /// non-wildcard scopes.
+    pub origin_site_id: Option<String>,
+    /// Explicitly authorize changing an incumbent grant's principal class or
+    /// origin constraint. Operationally this is valid only with the daemon
+    /// stopped; ordinary scope updates leave it false.
+    pub allow_semantic_conversion: bool,
 }
 
 /// Result of a successful authorize-client run.
+#[derive(Debug)]
 pub struct AuthorizeClientResult {
     /// Fingerprint of the authorized key.
     pub fingerprint: String,
@@ -54,6 +63,14 @@ pub struct AuthorizeClientResult {
     pub dropped_scopes: Vec<String>,
     /// Whether existing scopes were merged into the written set.
     pub merged: bool,
+    /// Allowed forwarding site constraint for a `remote_operator` grant.
+    pub origin_site_id: Option<String>,
+    /// Exact incumbent semantic class observed under the publication lock.
+    pub previous_principal_class: Option<String>,
+    /// Exact incumbent origin constraint observed under the publication lock.
+    pub previous_origin_site_id: Option<String>,
+    /// Semantic class written by this operation.
+    pub principal_class: String,
 }
 
 /// Reconcile a requested scope set against the scopes already on disk.
@@ -62,6 +79,7 @@ pub struct AuthorizeClientResult {
 /// `existing ∪ requested` (order-preserving) and nothing is dropped. Without
 /// `merge`, the result is exactly `requested` and `dropped` lists the existing
 /// scopes that are not being re-granted.
+#[cfg(test)]
 fn reconcile_scopes(
     existing: &[String],
     requested: &[String],
@@ -85,22 +103,6 @@ fn reconcile_scopes(
     }
 }
 
-/// Read the `scopes` array from an existing signed authorized-key TOML.
-/// The signature line is a `#`-prefixed comment, so TOML parsing skips it.
-/// Returns an empty vec if the file is absent or unparseable.
-fn read_existing_scopes(entry_path: &Path) -> Vec<String> {
-    #[derive(serde::Deserialize)]
-    struct Existing {
-        #[serde(default)]
-        scopes: Vec<String>,
-    }
-    std::fs::read_to_string(entry_path)
-        .ok()
-        .and_then(|c| toml::from_str::<Existing>(&c).ok())
-        .map(|e| e.scopes)
-        .unwrap_or_default()
-}
-
 pub struct MintAdmissionTokenParams {
     /// App root directory for the target node.
     pub app_root: PathBuf,
@@ -112,7 +114,7 @@ pub struct MintAdmissionTokenParams {
     pub ttl_secs: u64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 pub struct MintAdmissionTokenResult {
     /// One-time bearer token. Show once to the local node being admitted.
     pub token: String,
@@ -146,12 +148,15 @@ struct AdmissionTokenFile<'a> {
 
 /// Authorize a client by writing a node-signed authorized-key TOML.
 ///
-/// Idempotent: if the file already exists with the same fingerprint,
-/// it is overwritten with the new scopes/label.
+/// Reconciles an existing fingerprint only within the explicitly selected
+/// same-class or stopped-node semantic-transition contract.
 ///
 /// Delegates to the canonical writer in `ryeos_app::identity` so the
 /// TOML format is identical to what the daemon's own handler produces.
 pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeClientResult> {
+    if params.origin_site_id.is_some() && params.allow_wildcard {
+        bail!("remote-operator grants require exact, non-wildcard scopes");
+    }
     let node_key_path = params
         .app_root
         .join(".ai")
@@ -166,7 +171,22 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         );
     }
 
-    let node_key = load_node_key(&node_key_path)?;
+    // Principal-class and origin changes alter the meaning of an existing
+    // fingerprint. Prove stopped-node ownership and retain it through the
+    // read/verify/sign/publish transaction instead of treating the CLI flag
+    // as sufficient authority on its own. Ordinary same-class provisioning
+    // remains usable for bootstrap and release tooling while the daemon runs.
+    let _stopped_node_lock = params
+        .allow_semantic_conversion
+        .then(|| {
+            let lock_path = ryeos_app::state_lock::default_lock_path(&params.app_root);
+            ryeos_app::state_lock::StateLock::acquire(&lock_path).with_context(
+                || "semantic authorized-key conversion requires stopped-node authority",
+            )
+        })
+        .transpose()?;
+
+    let node_identity = ryeos_app::identity::NodeIdentity::load(&node_key_path)?;
 
     let fp = lillux::crypto::fingerprint(&params.public_key);
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(params.public_key.as_bytes());
@@ -186,33 +206,37 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         ryeos_app::identity::WildcardPolicy::Reject
     };
 
-    // `authorize-client` writes one file per fingerprint and replaces it
-    // wholesale. To avoid silently narrowing an existing grant (the
-    // operator-bootstrap footgun), reconcile against the scopes already on
-    // disk: union them when `merge`, otherwise report what is being dropped.
-    let entry_path = auth_dir.join(format!("{fp}.toml"));
-    let existing_scopes = read_existing_scopes(&entry_path);
-    let (final_scopes, dropped_scopes) =
-        reconcile_scopes(&existing_scopes, &params.scopes, params.merge);
-
-    let path = ryeos_app::identity::write_authorized_key_toml(
-        &auth_dir,
-        &fp,
-        &key_b64,
-        &final_scopes,
-        &params.label,
-        "cli-authorize-key",
-        &now,
-        &node_key,
-        wildcard,
-    )
-    .context("failed to write authorized-key TOML")?;
+    // Verified load, scope reconciliation, signing, and conditional
+    // publication share one descriptor-pinned directory lock. A concurrent
+    // merge can therefore never silently lose scopes.
+    let (path, dropped_scopes, transition) =
+        ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+            &auth_dir,
+            &fp,
+            &key_b64,
+            &params.scopes,
+            &params.label,
+            "cli-authorize-key",
+            &now,
+            &node_identity,
+            wildcard,
+            params.merge,
+            params.origin_site_id.as_deref(),
+            params.allow_semantic_conversion,
+        )
+        .context("failed to write authorized-key TOML")?;
 
     Ok(AuthorizeClientResult {
         fingerprint: fp,
         path,
         dropped_scopes,
         merged: params.merge,
+        origin_site_id: params.origin_site_id,
+        previous_principal_class: transition
+            .previous_principal_class
+            .map(|class| class.as_str().to_string()),
+        previous_origin_site_id: transition.previous_origin_site_id,
+        principal_class: transition.principal_class.as_str().to_string(),
     })
 }
 
@@ -222,13 +246,21 @@ pub fn run_mint_admission_token(
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
     }
-    if let Some(policy) = load_hosted_policy(&params.app_root)?
-        && params.ttl_secs > policy.admission.token_ttl_secs
-    {
+    let policy = load_hosted_policy(&params.app_root)?;
+    if !policy.admission_enabled {
+        bail!(
+            "hosted-node admission is disabled by policy from {}",
+            policy.source_file.display()
+        );
+    }
+    let maximum_token_ttl_secs = policy
+        .admission_token_ttl_secs
+        .context("enabled hosted-node admission policy is missing its bounded token TTL")?;
+    if params.ttl_secs > maximum_token_ttl_secs {
         bail!(
             "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
             params.ttl_secs,
-            policy.admission.token_ttl_secs,
+            maximum_token_ttl_secs,
             policy.source_file.display()
         );
     }
@@ -278,7 +310,6 @@ pub fn run_mint_admission_token(
         )
     })?;
     let path = token_dir.join(format!("{token_hash}.toml"));
-    let tmp = path.with_extension("tmp");
 
     let doc = toml::to_string(&AdmissionTokenFile {
         version: 1,
@@ -289,14 +320,17 @@ pub fn run_mint_admission_token(
         ttl_secs: params.ttl_secs,
         expires_at_unix,
     })?;
-    std::fs::write(&tmp, doc).with_context(|| {
-        format!(
-            "failed to write admission token temp file {}",
-            tmp.display()
+    let token_dir = lillux::PinnedDirectory::open(&token_dir)?
+        .ok_or_else(|| anyhow::anyhow!("admission token directory is unavailable"))?;
+    token_dir
+        .atomic_write_if_same(
+            path.file_name().expect("token path has a file name"),
+            None,
+            doc.as_bytes(),
+            0o600,
         )
-    })?;
-    std::fs::rename(&tmp, &path)
         .with_context(|| format!("failed to install admission token file {}", path.display()))?;
+    token_dir.ensure_path_binding()?;
 
     Ok(MintAdmissionTokenResult {
         token,
@@ -308,11 +342,6 @@ pub fn run_mint_admission_token(
         scopes,
         label,
     })
-}
-
-/// Load the node signing key from a PKCS#8 PEM file.
-fn load_node_key(path: &std::path::Path) -> Result<lillux::crypto::SigningKey> {
-    lillux::crypto::load_signing_key(path)
 }
 
 #[cfg(test)]
@@ -343,36 +372,20 @@ mod tests {
 
     fn write_hosted_policy(
         app_root: &std::path::Path,
+        admission_enabled: bool,
         token_ttl_secs: u64,
         key: &lillux::crypto::SigningKey,
     ) {
-        let path = app_root.join(".ai/node/hosted/policy.yaml");
+        let path = app_root.join(".ai/node/policies/hosted.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let ttl = admission_enabled
+            .then(|| format!("admission_token_ttl_secs: {token_ttl_secs}\n"))
+            .unwrap_or_default();
         let body = format!(
             r#"
-version: "0.1.0"
-schema_version: "1.0.0"
-description: "test hosted policy"
-transport:
-  public_https_required: true
-  loopback_http_allowed: true
-admission:
-  mode: "one_time_token"
-  token_ttl_secs: {token_ttl_secs}
-  reject_wildcard_scopes: true
-  token_delivery: "out_of_band"
-descriptor:
-  require_live_identity_match: true
-  advertised_capabilities: []
-authorization:
-  authority: "target_node_authorized_keys"
-  central_bearer_tokens_allowed: false
-  implicit_cross_node_authority_allowed: false
-operations:
-  audit_admission_events: true
-  audit_grant_changes: true
-  prefer_isolated_node_per_principal: true
-  shared_daemon_multitenancy_enabled: false
+schema: 1
+admission_enabled: {admission_enabled}
+{ttl}allow_loopback_http: true
 "#
         );
         std::fs::write(path, lillux::signature::sign_content(&body, key, "#", None)).unwrap();
@@ -409,21 +422,10 @@ operations:
         ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", &app_trust_dir, None)
             .unwrap();
 
-        let policy_dir = app_root.join(".ai/node/command_registration");
-        std::fs::create_dir_all(&policy_dir).unwrap();
-        let policy = r#"claim_rules:
-  - claim:
-      kind: command.root
-      value: execute
-    required_caps: []
-system_source_caps:
-  - ryeos.register.command.root.execute
-"#;
-        std::fs::write(
-            policy_dir.join("default.yaml"),
-            lillux::signature::sign_content(policy, node_identity.signing_key(), "#", None),
-        )
-        .unwrap();
+        crate::actions::hosted_policy::write_required_non_hosted_test_policies(
+            app_root,
+            node_identity.signing_key(),
+        );
     }
 
     #[test]
@@ -457,10 +459,106 @@ system_source_caps:
     }
 
     #[test]
+    fn authorize_client_can_emit_exact_scope_remote_operator_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
+        let result = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "forwarded operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: Some("site:source".to_owned()),
+            allow_semantic_conversion: false,
+        })
+        .unwrap();
+
+        assert_eq!(result.origin_site_id.as_deref(), Some("site:source"));
+        let signed = std::fs::read_to_string(result.path).unwrap();
+        assert!(signed.contains("principal_class = \"remote_operator\""));
+        assert!(signed.contains("origin_site_id = \"site:source\""));
+    }
+
+    #[test]
+    fn authorize_client_reports_and_requires_explicit_semantic_conversion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
+        let local = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: None,
+            allow_semantic_conversion: false,
+        })
+        .unwrap();
+        assert_eq!(local.principal_class, "local_client");
+        assert_eq!(local.previous_principal_class, None);
+
+        let denied = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: Some("site:source".to_owned()),
+            allow_semantic_conversion: false,
+        })
+        .expect_err("class conversion must require explicit authorization");
+        assert!(
+            format!("{denied:#}").contains("semantic-conversion"),
+            "got: {denied:#}"
+        );
+
+        let converted = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: Some("site:source".to_owned()),
+            allow_semantic_conversion: true,
+        })
+        .unwrap();
+        assert_eq!(
+            converted.previous_principal_class.as_deref(),
+            Some("local_client")
+        );
+        assert_eq!(converted.previous_origin_site_id, None);
+        assert_eq!(converted.principal_class, "remote_operator");
+        assert_eq!(converted.origin_site_id.as_deref(), Some("site:source"));
+
+        let lock_path = ryeos_app::state_lock::default_lock_path(tmp.path());
+        let _live_daemon_lock = ryeos_app::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let while_live = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: None,
+            allow_semantic_conversion: true,
+        })
+        .expect_err("semantic conversion must prove stopped-node ownership");
+        assert!(
+            format!("{while_live:#}").contains("stopped-node authority"),
+            "got: {while_live:#}"
+        );
+    }
+
+    #[test]
     fn mint_admission_token_rejects_ttl_above_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let fixture = HostedPolicyFixture::new(tmp.path());
-        write_hosted_policy(tmp.path(), 60, &fixture.key);
+        write_hosted_policy(tmp.path(), true, 60, &fixture.key);
 
         let err = match run_mint_admission_token(MintAdmissionTokenParams {
             app_root: tmp.path().to_path_buf(),
@@ -474,6 +572,26 @@ system_source_caps:
 
         assert!(
             err.to_string().contains("hosted-node policy maximum"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn mint_admission_token_refuses_when_hosted_admission_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), false, 60, &fixture.key);
+
+        let err = run_mint_admission_token(MintAdmissionTokenParams {
+            app_root: tmp.path().to_path_buf(),
+            scopes: vec!["ryeos.execute.service.threads".into()],
+            label: None,
+            ttl_secs: 60,
+        })
+        .expect_err("explicitly disabled hosted admission must block token minting");
+
+        assert!(
+            format!("{err:#}").contains("hosted-node admission is disabled"),
             "got: {err:#}"
         );
     }

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-08-18T23:03:53Z:b752fae2724c00aa4d28fc337fb3fbb8a1ab2aaa710eb19f63acd71bdd54b6fe:14v5mARENurOjrB+8lDVy2Eik1kqlbStsaWhv3jaHQpdmWr0zotWkJ4pnzPSEnqJWmU+DJr6/6gk8HziisXyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: credential-profiles.get
+required_caps: ["ryeos.execute.service.credential-profiles/get"]
+schema:
+  profile_id: string
+description: "Read sanitized owner-bound credential-profile metadata"

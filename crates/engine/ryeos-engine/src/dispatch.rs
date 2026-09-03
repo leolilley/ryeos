@@ -11,7 +11,7 @@
 use serde_json::Value;
 
 use crate::contracts::{
-    EngineContext, ExecutionCompletion, ExecutionPlan, PlanNode, PlanSubprocessSpec,
+    EngineContext, ExecutionCompletion, ExecutionPlan, PlanArgument, PlanNode, PlanSubprocessSpec,
     ThreadTerminalStatus,
 };
 use crate::error::EngineError;
@@ -104,7 +104,16 @@ impl DebugCapture {
         env_keys.sort_unstable();
         Self {
             cmd: spec.cmd.clone(),
-            args: spec.args.clone(),
+            args: spec
+                .args
+                .iter()
+                .map(|argument| match argument {
+                    PlanArgument::Literal { value } => value.clone(),
+                    PlanArgument::AdmittedSourceEntry => {
+                        "<unbound-admitted-source-entry>".to_owned()
+                    }
+                })
+                .collect(),
             cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             env_keys,
         }
@@ -160,10 +169,22 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         })
         .transpose()?;
 
+    let args = spec
+        .args
+        .iter()
+        .map(|argument| match argument {
+            PlanArgument::Literal { value } => Ok(value.clone()),
+            PlanArgument::AdmittedSourceEntry => Err(EngineError::InvalidRuntimeConfig {
+                path: "config.args".to_owned(),
+                reason: "admitted source entry was not bound before subprocess dispatch".to_owned(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
         argv0: None,
-        args: spec.args.clone(),
+        args,
         cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
         stdin_data,
@@ -218,7 +239,9 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
         };
     }
 
-    // Process-level failure (non-zero exit). stdout+stderr ride in `error`.
+    // Process-level failure (non-zero exit). The actionable exception is
+    // normally at the end of stderr, so retain its bounded tail instead of a
+    // prefix that can stop midway through a traceback.
     if !result.success {
         return ExecutionCompletion {
             status: ThreadTerminalStatus::Failed,
@@ -227,7 +250,7 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
             error: Some(serde_json::json!({
                 "exit_code": result.exit_code,
                 "stdout": truncate_for_error(&result.stdout, 2000),
-                "stderr": truncate_for_error(&result.stderr, 2000),
+                "stderr": truncate_tail_for_error(&result.stderr, STDERR_TAIL_CAP),
             })),
             artifacts: Vec::new(),
             final_cost: None,
@@ -388,8 +411,43 @@ pub struct RunningExecution {
 }
 
 impl RunningExecution {
+    /// Read the fixed-size diagnostic tail already captured by Lillux without
+    /// changing process ownership or settlement.
+    pub fn stderr_diagnostic_tail(&self) -> Option<String> {
+        self.running.stderr_diagnostic_tail()
+    }
+
+    /// Settle a process that exits naturally within `timeout`, or return the
+    /// still-running execution with ownership intact.
+    pub fn wait_for_natural_exit(
+        self,
+        timeout: std::time::Duration,
+    ) -> Result<ExecutionCompletion, Self> {
+        let Self { running, debug } = self;
+        match running.wait_for_natural_exit(timeout) {
+            Ok(result) => {
+                let rendered_debug = debug.map(|capture| capture.into_block(&result));
+                let mut completion = translate_result(result);
+                if let Some(rendered_debug) = rendered_debug {
+                    inject_debug(&mut completion, rendered_debug);
+                }
+                Ok(completion)
+            }
+            Err(running) => Err(Self { running, debug }),
+        }
+    }
+
     pub fn abort(self) {
         self.running.abort();
+    }
+
+    /// Terminate the complete supervised ownership unit and prove the wrapper
+    /// was reaped. Persistent pools use this form because cleanup is part of
+    /// their resource-accounting boundary, not a best-effort drop fallback.
+    pub fn abort_and_reap_checked(self) -> Result<(), EngineError> {
+        self.running
+            .abort_and_reap_checked()
+            .map_err(|reason| EngineError::ExecutionFailed { reason })
     }
 
     /// Block until the subprocess completes and return the completion.
@@ -453,9 +511,12 @@ fn isolation_plan_request(
         crate::isolation::IsolationLaunchContext {
             project_path,
             project_authority: ctx.isolation_project_authority,
+            filesystem_authority_ceiling: ctx.isolation_filesystem_authority_ceiling,
+            network_authority_ceiling: ctx.isolation_network_authority_ceiling,
             live_access: ctx.isolation_live_access_authority.as_ref(),
             state_root: ctx.isolation_state_root.as_deref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+            checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
@@ -469,6 +530,8 @@ fn isolation_plan_request(
                         command.code() as &dyn crate::isolation::IsolationCommandAuthority
                     })
                 }),
+            external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
+            target_channel: ctx.isolation_target_channel.as_ref(),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -486,9 +549,12 @@ fn isolation_plan_request_awaiting_attachment(
         crate::isolation::IsolationLaunchContext {
             project_path,
             project_authority: ctx.isolation_project_authority,
+            filesystem_authority_ceiling: ctx.isolation_filesystem_authority_ceiling,
+            network_authority_ceiling: ctx.isolation_network_authority_ceiling,
             live_access: ctx.isolation_live_access_authority.as_ref(),
             state_root: ctx.isolation_state_root.as_deref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+            checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
@@ -502,6 +568,8 @@ fn isolation_plan_request_awaiting_attachment(
                         command.code() as &dyn crate::isolation::IsolationCommandAuthority
                     })
                 }),
+            external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
+            target_channel: ctx.isolation_target_channel.as_ref(),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -519,7 +587,11 @@ fn isolation_plan_request_parts<'a>(
     ),
     EngineError,
 > {
-    let request = spec_to_request(spec)?;
+    let mut request = spec_to_request(spec)?;
+    request.limits = ctx.subprocess_limits;
+    request
+        .inherited_fds
+        .extend(ctx.inherited_fds.iter().cloned());
     let mut verified_code = ctx.isolation_verified_code.clone();
     if let Some(command) = &spec.verified_command {
         let command = command.code();
@@ -527,25 +599,29 @@ fn isolation_plan_request_parts<'a>(
             verified_code.push(command.clone());
         }
     }
-    let project_path = match &ctx.project_context {
-        crate::contracts::ProjectContext::LocalPath { path } => path.as_path(),
-        crate::contracts::ProjectContext::None
-        | crate::contracts::ProjectContext::SnapshotHash { .. }
-        | crate::contracts::ProjectContext::ProjectRef { .. }
-            if !ctx.isolation.is_enforced() =>
-        {
-            // Disabled mode is an exact no-op. The value is never resolved or
-            // promoted into mount authority, but apply still accepts one
-            // uniform launch-context shape.
-            ctx.app_root.as_path()
-        }
-        crate::contracts::ProjectContext::None
-        | crate::contracts::ProjectContext::SnapshotHash { .. }
-        | crate::contracts::ProjectContext::ProjectRef { .. } => {
-            return Err(EngineError::IsolationPolicyRefused {
-                reason: "enforced executable plan requires an authoritative project context"
-                    .to_string(),
-            });
+    let project_path = if let Some(workspace) = ctx.isolation_workspace.as_deref() {
+        workspace
+    } else {
+        match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => path.as_path(),
+            crate::contracts::ProjectContext::None
+            | crate::contracts::ProjectContext::SnapshotHash { .. }
+            | crate::contracts::ProjectContext::ProjectRef { .. }
+                if !ctx.isolation.is_enforced() =>
+            {
+                // Disabled mode is an exact no-op. The value is never resolved or
+                // promoted into mount authority, but apply still accepts one
+                // uniform launch-context shape.
+                ctx.app_root.as_path()
+            }
+            crate::contracts::ProjectContext::None
+            | crate::contracts::ProjectContext::SnapshotHash { .. }
+            | crate::contracts::ProjectContext::ProjectRef { .. } => {
+                return Err(EngineError::IsolationPolicyRefused {
+                    reason: "enforced executable plan requires an authoritative project context"
+                        .to_string(),
+                });
+            }
         }
     };
     Ok((request, project_path, verified_code))
@@ -618,10 +694,10 @@ mod tests {
 
     fn test_engine_context() -> EngineContext {
         let app_root = tempdir();
-        let policy_dir = app_root.join(".ai/node");
+        let policy_dir = app_root.join(".ai/test-fixtures");
         fs::create_dir_all(&policy_dir).unwrap();
         fs::write(
-            policy_dir.join("isolation.yaml"),
+            policy_dir.join("isolation-policy.yaml"),
             "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
@@ -631,6 +707,10 @@ mod tests {
             app_root,
             isolation,
             isolation_project_authority: crate::isolation::IsolationProjectAuthority::External,
+            isolation_filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            isolation_network_authority_ceiling:
+                crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             isolation_live_access_authority: Some(
                 crate::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                     authorized_write_namespaces: vec!["project".into()],
@@ -638,11 +718,17 @@ mod tests {
             ),
             isolation_state_root: None,
             isolation_checkpoint_dir: None,
+            isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
             isolation_bundle_roots: Vec::new(),
             isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
+            isolation_external_read_only_mounts: Vec::new(),
+            isolation_target_channel: None,
+            isolation_workspace: None,
+            subprocess_limits: None,
+            inherited_fds: Vec::new(),
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),
@@ -780,7 +866,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
@@ -834,6 +920,31 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_exit_retains_the_actionable_stderr_tail() {
+        let stderr = format!("{}FINAL_EXCEPTION", "traceback frame\n".repeat(1024));
+        let completion = translate_result(lillux::SubprocessResult {
+            success: false,
+            stdout: String::new(),
+            stderr,
+            exit_code: 1,
+            duration_ms: 1.0,
+            pid: 42,
+            timed_out: false,
+            launcher_refusal: None,
+            output_limit_exceeded: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        });
+
+        let retained = completion.error.unwrap()["stderr"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(retained.starts_with("… (truncated,"));
+        assert!(retained.ends_with("FINAL_EXCEPTION"));
+    }
+
+    #[test]
     fn output_limit_maps_to_a_distinct_failed_outcome() {
         let completion = translate_result(lillux::SubprocessResult {
             success: false,
@@ -881,7 +992,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
@@ -939,7 +1050,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
@@ -1028,7 +1139,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env,
                     env_sources: HashMap::new(),
@@ -1091,7 +1202,7 @@ mod tests {
 
         let ctx = test_engine_context();
         fs::write(
-            ctx.app_root.join(".ai/node/isolation.yaml"),
+            ctx.app_root.join(".ai/test-fixtures/isolation-policy.yaml"),
             "version: 1\nmode: enforce\nbackend:\n  bundle: example-isolation-backend\n  implementation: example\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();

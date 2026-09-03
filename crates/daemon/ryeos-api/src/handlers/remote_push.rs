@@ -15,6 +15,17 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::project_sync::ProjectSyncScope;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundPrincipal {
+    /// Existing node-to-node remote synchronization semantics.
+    #[default]
+    Node,
+    /// Preserve the configured operator principal so the resulting remote
+    /// project HEAD can authorize a later operator-owned durable workflow.
+    ConfiguredOperator,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -25,13 +36,22 @@ pub struct Request {
     /// is a no-op so `--no-project` is not accepted here. CLI must
     /// canonicalize before sending.
     pub project: PathBuf,
+    /// Principal used to sign the remote CAS/HEAD transaction. The default is
+    /// the source node. Selecting configured_operator requires the request
+    /// itself to be authenticated as that exact configured operator.
+    #[serde(default)]
+    pub outbound_principal: OutboundPrincipal,
 }
 
 fn default_remote() -> String {
     "default".to_string()
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(
+    req: Request,
+    context: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
     let path = &req.project;
     if !path.is_absolute() {
         return Err(anyhow::anyhow!(
@@ -51,8 +71,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut project_path_for_ref = config::local_project_identity(&canonical_abs)?.to_owned();
     let abs_project_path = canonical_abs;
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, Some(&abs_project_path))?;
-
     // Resolve scope and remote-path-for-ref from any configured binding.
     // Default scope is `AiOnly` (see `ProjectSyncScope::default`) so an
     // unbound `remote push` ships only the `.ai/` subtree, never the
@@ -60,6 +78,20 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
+    let client = match req.outbound_principal {
+        OutboundPrincipal::Node => {
+            RemoteClient::from_named_remote(&state, &req.remote, Some(&abs_project_path))?
+        }
+        OutboundPrincipal::ConfiguredOperator => {
+            let remote = remote_cfg.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "configured remote '{}' is required for configured-operator push",
+                    req.remote
+                )
+            })?;
+            RemoteClient::from_remote_cfg_as_configured_operator(&state, remote, &context)?
+        }
+    };
     let mut scope = ProjectSyncScope::default();
     if let Some(loaded) = loaded_remote.as_ref() {
         match config::resolve_loaded_project_binding(loaded, &abs_project_path) {
@@ -165,10 +197,42 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.push",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/push"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::{OutboundPrincipal, Request};
+
+    #[test]
+    fn outbound_principal_is_explicit_and_closed() {
+        assert!(matches!(
+            serde_json::from_str::<OutboundPrincipal>(r#""configured_operator""#).unwrap(),
+            OutboundPrincipal::ConfiguredOperator
+        ));
+        assert!(matches!(
+            serde_json::from_str::<OutboundPrincipal>(r#""node""#).unwrap(),
+            OutboundPrincipal::Node
+        ));
+        assert!(serde_json::from_str::<OutboundPrincipal>(r#""caller""#).is_err());
+    }
+
+    #[test]
+    fn signed_service_payload_exposes_outbound_principal() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "remote": "hosted",
+            "project": "/project",
+            "outbound_principal": "configured_operator"
+        }))
+        .unwrap();
+        assert!(matches!(
+            request.outbound_principal,
+            OutboundPrincipal::ConfiguredOperator
+        ));
+    }
+}

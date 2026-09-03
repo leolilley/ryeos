@@ -191,14 +191,6 @@ pub async fn handle(
     let import_report = {
         let engine = state.engine.clone();
         let isolation = state.isolation.clone();
-        let isolation_bundle_roots = engine
-            .resolution_roots(Some(project_path.clone()))
-            .ordered
-            .iter()
-            .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
-            .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
-            .collect::<Vec<_>>();
-        let isolation_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
         let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -215,14 +207,21 @@ pub async fn handle(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: &project_path,
                     project_authority: ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling:
+                        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
-                    bundle_roots: &isolation_bundle_roots,
-                    node_trusted_keys_dir: Some(&isolation_node_trusted_keys_dir),
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
                     verified_code: &isolation_verified_code,
                     verified_command: None,
+                    external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: &isolation_item_ref,
                     thread_id: "tool-env-check",
                 },

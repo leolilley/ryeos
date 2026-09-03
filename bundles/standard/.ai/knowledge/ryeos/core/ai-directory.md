@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:b5fff22bd8716b64813c3b6a72c6b3ef4acaebc33e0fec28d5e5e054216c2192:w9pm3niJ7rfdTmhP1PuTs6qMAjtkVuoj4Dq/DuVmdpxdCGpNHtJ59rRzb6AwRJss/73hbOqO3JBRS1VzqzVBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T21:49:18Z:a7633264ed70a527a434b7399ac99393b337b7aef4659c2688c708c315595f69:MY0N/POn2yxpNPQdnMNQ3rg2WWU6JRXEksQtDMeG5AgYQVnl0/vi0bCE0FNaQDj4BthaPhZqEO0oqfK2evDdCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   The exact .ai/ directory layout — bundle structure and the daemon
   state directory, and how they relate.
@@ -12,6 +12,20 @@ description: >
 
 Rye OS uses `.ai/` directories across two spaces. Each space has a
 different layout serving different purposes.
+
+The project `.ai/` tree is an authored RyeOS control and item surface, not a
+general dependency directory. Source that belongs to one executable item stays
+beside that item under its kind directory: a namespaced tool may keep helpers
+under its tool namespace, and a worker may keep publisher-owned source under
+its worker namespace. RyeOS admits that adjacent source as one exact source
+closure before execution; it is not declared as external content.
+
+Opaque runtimes, datasets, simulator closures, model files, and other content
+trees live outside `.ai/`. Executable items refer to those bytes through
+`external_content` with a `project_files` locator and an exact admitted
+manifest digest. This keeps kind coverage meaningful, keeps source intuitive
+to author, and prevents arbitrary dependency files from being mistaken for
+RyeOS items.
 
 ## Bundle Layout (Core)
 
@@ -31,7 +45,7 @@ machine, not the LLM workflow layer:
 │   ├── aliases/                         # core CLI aliases + remote/vault aliases
 │   ├── engine/kinds/                    # config, handler, parser, protocol,
 │   │                                     # runtime, service, node, tool,
-│   │                                     # streaming_tool
+│   │                                     # streaming_tool, worker
 │   ├── routes/                          # execute, health, public-key,
 │   │                                     # objects, vault, remote status, push-head
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
@@ -58,6 +72,7 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 .ai/
 ├── config/ryeos-runtime/
 │   ├── execution.yaml
+│   ├── hooks/base.yaml                  # trusted-bundle hook policy layers
 │   ├── model_routing.yaml
 │   └── model-providers/
 │       ├── anthropic.yaml
@@ -66,7 +81,7 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 ├── directives/
 ├── handlers/ryeos/core/
 │   ├── extends-chain.yaml
-│   └── graph-permissions.yaml
+│   └── graph-effective-validator.yaml
 ├── knowledge/ryeos/standard/
 ├── node/
 │   ├── aliases/                         # thread/events/commands/compose aliases
@@ -94,7 +109,7 @@ Created by `ryeos init`. Lives in the system space
     │       ├── signing/private_key.pem  # operator Ed25519 signing key (0600)
     │       └── trusted/<fp>.toml        # trusted publisher/operator/node keys
     ├── node/
-    │   ├── config.yaml                  # daemon bind address, db_path, auth config
+    │   ├── config.yaml                  # daemon bootstrap paths and listener addresses
     │   ├── isolation.yaml                 # create-once strict execution policy
     │   ├── identity/
     │   │   ├── private_key.pem          # node Ed25519 signing key (0600)
@@ -144,6 +159,7 @@ kind live relative to any `.ai/` root:
 | `service`       | `services/`    | Yes         | In-process service endpoints |
 | `streaming_tool`| `tools/`       | Yes         | Same dir as tool, streaming protocol |
 | `tool`          | `tools/`       | Yes         | `.py`, `.yaml`, `.js`, `.ts` |
+| `worker`        | `workers/`     | Yes         | Persistent subprocess definition + adjacent source |
 
 Note: `tool` and `streaming_tool` share the `tools/` directory.
 Differentiation is by execution protocol, not directory.

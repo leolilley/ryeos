@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub const NODE_MAINTENANCE_SCHEDULE_SOURCE: &str = "maintenance/schedules.yaml";
+pub const NODE_MAINTENANCE_POLICY_SOURCE: &str = "policies/maintenance.yaml";
 
 /// The one current wire shape for signed schedule sources.
 ///
@@ -106,8 +106,8 @@ pub enum ScheduleManagedBy {
         source_path: String,
         source_body_hash: String,
     },
-    #[serde(rename = "node_maintenance_declaration")]
-    NodeMaintenanceDeclaration { source: String },
+    #[serde(rename = "node_maintenance_policy")]
+    NodeMaintenancePolicy { source: String },
 }
 
 impl ScheduleSourceRecord {
@@ -233,11 +233,11 @@ fn validate_managed_by(
             }
             validate_canonical_source_path(source_path)?;
         }
-        ScheduleManagedBy::NodeMaintenanceDeclaration { source } => {
-            if source != NODE_MAINTENANCE_SCHEDULE_SOURCE {
+        ScheduleManagedBy::NodeMaintenancePolicy { source } => {
+            if source != NODE_MAINTENANCE_POLICY_SOURCE {
                 anyhow::bail!(
                     "node-maintenance schedule source must be {}",
-                    NODE_MAINTENANCE_SCHEDULE_SOURCE
+                    NODE_MAINTENANCE_POLICY_SOURCE
                 );
             }
             if schedule_project_root.is_some() {
@@ -255,7 +255,7 @@ fn require_non_empty(value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_schedule_ref_bindings(ref_bindings: &BTreeMap<String, String>) -> Result<()> {
+pub fn validate_schedule_ref_bindings(ref_bindings: &BTreeMap<String, String>) -> Result<()> {
     if ref_bindings.len() > 32 {
         anyhow::bail!("schedule ref_bindings exceeds the limit of 32");
     }

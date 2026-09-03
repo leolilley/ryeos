@@ -23,16 +23,13 @@
 
 pub mod loader;
 pub mod sections;
-pub mod writer;
 
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::node_config::sections::command::CommandRecord;
-use crate::node_config::sections::command_registration::CommandRegistrationPolicyRecord;
-use crate::node_config::sections::hosted_node::HostedNodePolicyRecord;
 use crate::route_raw::RawRouteSpec;
 
 /// Loader-derived structural context for a node-config item.
@@ -54,13 +51,53 @@ pub struct NodeItemContext {
 
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SectionSourcePolicy {
+pub enum NodeConfigSourceScope {
     /// Only `app_root`.
     /// Used by the `bundles` section so bundles can't self-register.
-    SystemAndState,
+    AppRootOnly,
     /// `app_root` + all effective bundle roots.
     /// Used by sections like `routes` and `commands` that bundles can contribute to.
-    EffectiveBundleRootsAndState,
+    AppRootAndBundleRoots,
+}
+
+/// When a registered section participates in node-config loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionLoadPhase {
+    /// Establishes the exact installed bundle generation used by every later
+    /// scan. This is the first bootstrap boundary.
+    BundleBootstrap,
+    /// Loaded by the generic full-section pass.
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionTraversal {
+    Flat,
+    Recursive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionSignerPolicy {
+    Trusted,
+    CurrentNode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionCardinality {
+    Any,
+    AtLeastOne,
+    AtMostOne,
+    ExactlyOne,
+}
+
+/// Closed loading contract owned by the section compiler rather than the
+/// filesystem walker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionLoadSpec {
+    pub phase: SectionLoadPhase,
+    pub traversal: SectionTraversal,
+    pub signer: SectionSignerPolicy,
+    pub cardinality: SectionCardinality,
 }
 
 /// A single parsed bundle registration record.
@@ -71,9 +108,6 @@ pub struct BundleRecord {
     pub name: String,
     /// Absolute, canonicalized path to the bundle root directory.
     pub path: PathBuf,
-    /// Node-owned command registration grants for commands loaded from this bundle.
-    #[serde(default)]
-    pub command_registration_caps: Vec<String>,
     /// Path to the `.yaml` file that declared this record.
     pub source_file: PathBuf,
 }
@@ -87,75 +121,97 @@ pub struct NodeConfigSnapshot {
     pub routes: Vec<RawRouteSpec>,
     /// All loaded command definitions.
     pub commands: Vec<CommandRecord>,
-    /// Hosted node operator policies loaded from installed bundle/runtime state dirs.
-    pub hosted_node_policies: Vec<HostedNodePolicyRecord>,
-    /// Effective command registration admission policy.
-    pub command_registration_policy: CommandRegistrationPolicyRecord,
 }
 
 impl NodeConfigSnapshot {}
 
+/// Erased typed contribution returned by one registered node-config compiler.
+///
+/// Each section owns admission of its concrete record into the typed snapshot.
+/// The generic loader verifies the registered section identity and invokes
+/// this interface; it never enumerates record variants or branches on names.
+pub(crate) trait CompiledNodeConfigItem: std::fmt::Debug + Send + Sync {
+    fn section_name(&self) -> &'static str;
+
+    fn admit(
+        self: Box<Self>,
+        target: &mut loader::NodeConfigSnapshotBuilder,
+        admission: &loader::NodeConfigAdmission,
+    ) -> anyhow::Result<()>;
+}
+
 /// Trait implemented by each node-config section handler.
-pub trait NodeConfigSection: Send + Sync {
+pub(crate) trait NodeConfigSection: Send + Sync {
+    /// Canonical first path segment and registry key for this compiler.
+    fn name(&self) -> &'static str;
+
     /// Which sources this section scans.
-    fn source_policy(&self) -> SectionSourcePolicy;
+    fn source_scope(&self) -> NodeConfigSourceScope;
+
+    /// Complete loader-owned mechanics for this section.
+    fn load_spec(&self) -> SectionLoadSpec;
 
     /// Parse a verified YAML body into a section record.
     fn parse(
         &self,
         ctx: &NodeItemContext,
         body: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn SectionRecord>>;
-}
-
-/// A parsed section record (type-erased).
-pub trait SectionRecord: Send + Sync + std::fmt::Debug {
-    /// Downcast to `Any` for concrete type recovery.
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-impl SectionRecord for BundleRecord {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    ) -> anyhow::Result<Box<dyn CompiledNodeConfigItem>>;
 }
 
 /// Registry of all known sections, keyed by section name.
-pub struct SectionTable {
-    sections: HashMap<&'static str, Box<dyn NodeConfigSection>>,
+pub struct NodeConfigTable {
+    sections: Vec<Box<dyn NodeConfigSection>>,
 }
 
-impl SectionTable {
+impl NodeConfigTable {
     /// Build the section table with all known sections.
     pub fn new() -> Self {
-        let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
-        sections.insert("bundles", Box::new(sections::bundle::BundleSection));
-        sections.insert("commands", Box::new(sections::command::CommandSection));
-        sections.insert(
-            "command_registration",
-            Box::new(sections::command_registration::CommandRegistrationSection),
-        );
-        sections.insert(
-            "hosted",
-            Box::new(sections::hosted_node::HostedNodePolicySection),
-        );
-        sections.insert("routes", Box::new(sections::route::RouteSection));
-        Self { sections }
+        Self::from_sections(vec![
+            Box::new(sections::bundle::BundleSection),
+            Box::new(sections::command::CommandSection),
+            Box::new(sections::route::RouteSection),
+        ])
+        .expect("built-in node-config section table is valid")
     }
 
-    /// Get a section handler by name.
-    pub fn get(&self, name: &str) -> Option<&dyn NodeConfigSection> {
-        self.sections.get(name).map(|s| s.as_ref())
+    fn from_sections(sections: Vec<Box<dyn NodeConfigSection>>) -> anyhow::Result<Self> {
+        let mut names = BTreeSet::new();
+        for section in &sections {
+            let name = section.name();
+            validate_section_name(name)?;
+            if !names.insert(name) {
+                anyhow::bail!("duplicate node-config section `{name}`");
+            }
+        }
+        Ok(Self { sections })
     }
 
-    /// Iterate over all registered section names.
-    pub fn section_names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.sections.keys().copied()
+    pub(crate) fn sections(&self) -> impl Iterator<Item = &dyn NodeConfigSection> + '_ {
+        self.sections.iter().map(|section| section.as_ref())
     }
 }
 
-impl Default for SectionTable {
+impl Default for NodeConfigTable {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn validate_section_name(name: &str) -> anyhow::Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !name.ends_with('_')
+        && !name.contains("__");
+    if !valid {
+        anyhow::bail!("invalid node-config section name `{name}`");
+    }
+    Ok(())
 }

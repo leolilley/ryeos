@@ -1,0 +1,12 @@
+# ryeos:signed:2026-08-11T02:28:14Z:c53b0c4ab81371d8a47289b699a3ff28cea12ceaab0448efc813f711d2b5ccab:5euwQe9P/AsXtzoidKNo52dNDbZWdP8aLfESZWltaCnPzc9wpmDrByDJ6e5ORUYBiShGr5hwZwu7rPCuMEinCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.import
+required_caps: ["ryeos.execute.service.external-content/import"]
+schema:
+  root: string
+  path: string
+  shape: string
+  storage: string
+  maximum_bytes: integer
+  expected_file_sha256: string?
+description: "Import bounded external bytes from a node-admitted named root into a durable staging capability"

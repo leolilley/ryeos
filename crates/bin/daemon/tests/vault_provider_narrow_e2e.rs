@@ -52,8 +52,10 @@ fn plant_provider_config(
         None => "  env_var: null\n".to_string(),
     };
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"

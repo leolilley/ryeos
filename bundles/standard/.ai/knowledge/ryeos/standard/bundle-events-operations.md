@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T10:54:58Z:ff86c44525fa336df2f43bf5b625912aec184d3b977fa1e3e8b0b467bcdadcb3:FK+kfxZS/3f2ab881hE0LoJN0Z0U5c9cWQFUuQ2Rq+cn4QilTmBFxs8qoUTrx4Fml0FXFEIJpqWGdpMJ9MICAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:37Z:ff86c44525fa336df2f43bf5b625912aec184d3b977fa1e3e8b0b467bcdadcb3:FK+kfxZS/3f2ab881hE0LoJN0Z0U5c9cWQFUuQ2Rq+cn4QilTmBFxs8qoUTrx4Fml0FXFEIJpqWGdpMJ9MICAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime, operations, callbacks, identity]

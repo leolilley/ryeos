@@ -97,6 +97,11 @@ pub enum PinnedSource {
 pub enum TerminalPublication {
     Discard,
     RetainResult,
+    /// Retain a private result for a later explicit, owner-authorized CAS to
+    /// the principal project HEAD selected at admission. The exact destination
+    /// identity is derived by the destination node, never supplied as a path
+    /// after execution.
+    RetainCurrentHead,
     AdvanceHead {
         head_ref: String,
         expected_hash: String,
@@ -124,6 +129,10 @@ pub enum ChildProjectPolicy {
 pub enum PinnedChildRealization {
     ReadOnly,
     CowDiscard,
+    /// Retain the child's private terminal generation without granting it a
+    /// project-HEAD destination. Publication or discard remains an explicit
+    /// owner operation.
+    CowRetainResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +200,43 @@ impl ExecutionPolicy {
         }
     }
 
+    /// Capture the complete local project at admission, then execute from a
+    /// daemon-owned copy-on-write generation. The live tree supplies bytes
+    /// only to the admitted capture; execution and recovery use the retained
+    /// generation and never fall back to the mutable source tree.
+    pub fn local_pinned_capture(response: ExecutionResponse) -> Self {
+        Self {
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CaptureLive {
+                    scope: ProjectCaptureScope::FullProject,
+                },
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainResult,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+            ..Self::local_live(response)
+        }
+    }
+
+    /// Execute from the caller's already-published principal project HEAD in
+    /// a daemon-owned copy-on-write generation. Unlike
+    /// [`Self::local_pinned_capture`], this preserves an existing publication
+    /// boundary that a later explicit retain-result disposition can compare
+    /// and swap.
+    pub fn local_pinned_current_head(response: ExecutionResponse) -> Self {
+        Self {
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+            ..Self::local_live(response)
+        }
+    }
+
     pub fn projectless(response: ExecutionResponse) -> Self {
         Self {
             recovery: ExecutionRecovery::RestartRecoverable,
@@ -198,6 +244,46 @@ impl ExecutionPolicy {
             project: ProjectExecutionPolicy::Projectless,
             ..Self::local_live(response)
         }
+    }
+
+    /// Authorize project-backed child roots to capture one exact generation
+    /// at spawn and retain an independent private COW result. The retained
+    /// result carries no project-HEAD publication destination; a specialized
+    /// child may therefore wait for its ordinary owner-authorized publish or
+    /// discard operation without inheriting the parent's publication grant.
+    pub fn retain_child_results(mut self) -> anyhow::Result<Self> {
+        let child_policy = ChildProjectPolicy::PinAtSpawn {
+            realization: PinnedChildRealization::CowRetainResult,
+        };
+        match &mut self.project {
+            ProjectExecutionPolicy::LiveDirect {
+                child_policy: slot, ..
+            }
+            | ProjectExecutionPolicy::Pinned {
+                child_policy: slot, ..
+            } => *slot = child_policy,
+            ProjectExecutionPolicy::Projectless => {
+                anyhow::bail!("retained child results require project-backed execution")
+            }
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Narrow a project-overlay environment so it cannot resolve names from
+    /// the operator vault. Project files (including an admitted project
+    /// environment) retain their existing authority; this method only removes
+    /// the node-private vault leg and can never widen another environment
+    /// policy.
+    pub fn exclude_operator_vault(mut self) -> Self {
+        if let ExecutionEnvironmentPolicy::ProjectOverlay {
+            include_operator_vault,
+            ..
+        } = &mut self.environment
+        {
+            *include_operator_vault = false;
+        }
+        self
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -272,6 +358,17 @@ impl ExecutionPolicy {
                     anyhow::bail!("advance-head publication requires a target ref");
                 }
                 validate_hash("advance-head expected hash", expected_hash)?;
+            }
+            if matches!(
+                realization,
+                PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                }
+            ) && !matches!(source, PinnedSource::CurrentHead)
+            {
+                anyhow::bail!(
+                    "retain-current-head publication requires current_head pinned source"
+                );
             }
         }
         Ok(())
@@ -351,6 +448,9 @@ impl ExecutionPolicy {
                         }
                         PinnedChildRealization::CowDiscard => {
                             ryeos_state::objects::PinnedChildProjectRealization::CowDiscard
+                        }
+                        PinnedChildRealization::CowRetainResult => {
+                            ryeos_state::objects::PinnedChildProjectRealization::CowRetainResult
                         }
                     },
                 }
@@ -629,6 +729,45 @@ mod policy_tests {
     }
 
     #[test]
+    fn local_pinned_capture_is_daemon_owned_cow_with_retained_result() {
+        let policy = ExecutionPolicy::local_pinned_capture(ExecutionResponse::Wait);
+        policy.validate().unwrap();
+        assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
+        assert!(matches!(
+            policy.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CaptureLive {
+                    scope: ProjectCaptureScope::FullProject,
+                },
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainResult,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            }
+        ));
+    }
+
+    #[test]
+    fn local_pinned_current_head_is_daemon_owned_cow_with_retained_current_head() {
+        let policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
+        assert_eq!(policy.response, ExecutionResponse::Accepted);
+        assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
+        assert!(matches!(
+            policy.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            }
+        ));
+        policy.validate().unwrap();
+    }
+
+    #[test]
     fn projectless_execution_can_be_restart_recoverable() {
         let policy = ExecutionPolicy::projectless(ExecutionResponse::Accepted);
         policy.validate().unwrap();
@@ -688,7 +827,7 @@ mod policy_tests {
             let error = resolve_standard_local_live_authority(
                 project.path(),
                 vec![insufficient.to_string()],
-                &ryeos_engine::isolation::IsolationRuntime::default(),
+                &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             )
             .unwrap_err();
             assert!(error.to_string().contains(LIVE_PROJECT_WRITE_CAPABILITY));
@@ -697,7 +836,7 @@ mod policy_tests {
         let authority = resolve_standard_local_live_authority(
             project.path(),
             vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
         assert!(matches!(
@@ -714,7 +853,7 @@ mod policy_tests {
         resolve_standard_local_live_authority(
             project.path(),
             vec!["*".to_string()],
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .expect("node-local wildcard authority remains valid");
         assert_eq!(
@@ -735,7 +874,7 @@ mod policy_tests {
         let project = tempfile::tempdir().unwrap();
         let authority = resolve_offline_local_live_project_authority(
             project.path(),
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
 

@@ -77,6 +77,10 @@ impl std::fmt::Debug for PreparedManagedLaunchSkeleton {
                 "has_financial_authority",
                 &self.prepared.financial_authority.is_some(),
             )
+            .field(
+                "has_external_effect_authority",
+                &self.prepared.external_effect_authority.is_some(),
+            )
             .finish()
     }
 }
@@ -396,7 +400,16 @@ pub(super) fn emit_metric(
     entry_bytes: usize,
     wait_milliseconds: u64,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "prepared_managed_launch_skeleton_cache",
+        namespace: None,
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes,
+        wait_microseconds: wait_milliseconds.saturating_mul(1_000),
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "prepared_managed_launch_skeleton_cache",
         outcome = outcome.as_str(),
@@ -528,8 +541,12 @@ mod tests {
                 required_secrets: Vec::new(),
                 runtime_facts: Default::default(),
                 binding_records: Default::default(),
+                execution_dependencies: Default::default(),
+                content_dependencies: Default::default(),
+                admitted_sessions: Default::default(),
                 config_contributors: Vec::new(),
                 financial_authority: None,
+                external_effect_authority: None,
             },
         }
     }
@@ -724,8 +741,12 @@ mod tests {
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
+                    execution_dependencies: Default::default(),
+                    content_dependencies: Default::default(),
+                    admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
                     financial_authority: None,
+                    external_effect_authority: None,
                 },
             },
             1,
@@ -744,8 +765,12 @@ mod tests {
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
+                    execution_dependencies: Default::default(),
+                    content_dependencies: Default::default(),
+                    admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
                     financial_authority: None,
+                    external_effect_authority: None,
                 },
             },
             1,
@@ -757,8 +782,12 @@ mod tests {
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
+                    execution_dependencies: Default::default(),
+                    content_dependencies: Default::default(),
+                    admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
                     financial_authority: None,
+                    external_effect_authority: None,
                 },
             },
             1,
@@ -785,8 +814,12 @@ mod tests {
                 }],
                 runtime_facts: Default::default(),
                 binding_records: Default::default(),
+                execution_dependencies: Default::default(),
+                content_dependencies: Default::default(),
+                admitted_sessions: Default::default(),
                 config_contributors: Vec::new(),
                 financial_authority: None,
+                external_effect_authority: None,
             },
         };
         let debug = format!("{skeleton:?}");

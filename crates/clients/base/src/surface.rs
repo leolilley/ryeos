@@ -17,48 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SurfaceProvenance {
-    pub root: SurfaceProvenanceNode,
-    pub ancestors: Vec<SurfaceProvenanceNode>,
-    pub references: Vec<SurfaceProvenanceEdge>,
-    pub referenced_items: Vec<SurfaceProvenanceNode>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SurfaceProvenanceNode {
-    pub requested_id: String,
-    pub resolved_ref: String,
-    pub source_path: PathBuf,
-    pub source_space: SurfaceItemSpace,
-    pub trust_class: String,
-    pub alias_resolution: Option<serde_json::Value>,
-    pub added_by: String,
-    pub source_content_digest: String,
-    pub raw_content_digest: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SurfaceProvenanceEdge {
-    pub from_ref: String,
-    pub from_source_path: PathBuf,
-    pub to_ref: String,
-    pub to_source_path: PathBuf,
-    pub to_source_space: SurfaceItemSpace,
-    pub trust_class: String,
-    pub added_by: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum SurfaceItemSpace {
-    Bundle,
-    Project,
-}
-
 // ---------------------------------------------------------------------------
 // SurfaceSpec — the declarative UI contract
 // ---------------------------------------------------------------------------
@@ -605,7 +563,10 @@ pub enum LoadedSurface {
         /// Boxed: the composed spec dwarfs the other variants' payloads.
         spec: Box<SurfaceSpec>,
         trusted: bool,
-        provenance: SurfaceProvenance,
+        /// Engine-owned resolution testimony. The client validates the
+        /// envelope topology but does not maintain a second authority parser
+        /// for provenance-node fields it never interprets.
+        provenance: serde_json::Value,
         item_diagnostics: Vec<SurfaceDiagnostic>,
         tui_diagnostics: Vec<SurfaceDiagnostic>,
     },
@@ -673,23 +634,14 @@ impl LoadedSurface {
             .get("trusted")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let provenance = match value
-            .get("provenance")
-            .cloned()
-            .map(serde_json::from_value::<SurfaceProvenance>)
-        {
-            Some(Ok(p)) => p,
-            Some(Err(e)) => {
-                return Err(SurfaceDiagnostic::ValidationError {
-                    message: format!("daemon returned invalid provenance: {e}"),
-                });
-            }
-            None => {
-                return Err(SurfaceDiagnostic::ValidationError {
+        let provenance =
+            value
+                .get("provenance")
+                .cloned()
+                .ok_or_else(|| SurfaceDiagnostic::ValidationError {
                     message: "daemon response missing provenance".into(),
-                });
-            }
-        };
+                })?;
+        validate_provenance_envelope(&provenance)?;
 
         if !trusted {
             return Err(SurfaceDiagnostic::ValidationError {
@@ -783,23 +735,37 @@ impl LoadedSurface {
     }
 }
 
-fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
-    SurfaceProvenance {
-        root: SurfaceProvenanceNode {
-            requested_id: requested_ref.to_string(),
-            resolved_ref: requested_ref.to_string(),
-            source_path: PathBuf::new(),
-            source_space: SurfaceItemSpace::Project,
-            trust_class: "unsigned".into(),
-            alias_resolution: None,
-            added_by: "pipeline_init".into(),
-            source_content_digest: String::new(),
-            raw_content_digest: String::new(),
-        },
-        ancestors: Vec::new(),
-        references: Vec::new(),
-        referenced_items: Vec::new(),
+fn validate_provenance_envelope(value: &serde_json::Value) -> Result<(), SurfaceDiagnostic> {
+    let Some(object) = value.as_object() else {
+        return Err(SurfaceDiagnostic::ValidationError {
+            message: "daemon returned invalid provenance: expected an object".into(),
+        });
+    };
+    if !object.get("root").is_some_and(serde_json::Value::is_object) {
+        return Err(SurfaceDiagnostic::ValidationError {
+            message: "daemon returned invalid provenance: root must be an object".into(),
+        });
     }
+    for field in ["ancestors", "references", "referenced_items"] {
+        if !object.get(field).is_some_and(serde_json::Value::is_array) {
+            return Err(SurfaceDiagnostic::ValidationError {
+                message: format!("daemon returned invalid provenance: {field} must be an array"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn empty_provenance(requested_ref: &str) -> serde_json::Value {
+    serde_json::json!({
+        "root": {
+            "requested_id": requested_ref,
+            "resolved_ref": requested_ref,
+        },
+        "ancestors": [],
+        "references": [],
+        "referenced_items": [],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,7 +969,9 @@ mod tests {
             "resolved_ref": ref_,
             "source_path": format!("/mock/{ref_}"),
             "source_space": "bundle",
+            "source_root": { "kind": "bundle", "name": "ryeos-ui" },
             "trust_class": "trusted_bundle",
+            "signer_fingerprint": "f".repeat(64),
             "alias_resolution": null,
             "added_by": added_by,
             "source_content_digest": "0".repeat(64),
@@ -1578,8 +1546,8 @@ id = "test"
                 assert_eq!(spec.affordances.len(), 1);
                 assert_eq!(spec.affordances[0].id, "view.thread");
                 assert!(*trusted, "signed surface should be trusted");
-                assert_eq!(provenance.root.resolved_ref, "surface:ryeos/ui/base");
-                assert!(provenance.ancestors.is_empty());
+                assert_eq!(provenance["root"]["resolved_ref"], "surface:ryeos/ui/base");
+                assert_eq!(provenance["ancestors"].as_array().map(Vec::len), Some(0));
                 assert!(
                     item_diagnostics.is_empty(),
                     "signed surface should have no item diagnostics"
@@ -1828,9 +1796,9 @@ id = "test"
 
         match &loaded {
             LoadedSurface::RyeResolved { provenance, .. } => {
-                assert_eq!(provenance.root.resolved_ref, "surface:my/custom");
+                assert_eq!(provenance["root"]["resolved_ref"], "surface:my/custom");
                 assert_eq!(
-                    provenance.ancestors[0].resolved_ref,
+                    provenance["ancestors"][0]["resolved_ref"],
                     "surface:ryeos/ui/base"
                 );
             }

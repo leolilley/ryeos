@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-17T23:05:47Z:c2242bfa3df6418ba9b173e3edb6a2ebf05bdbd4e409024905e7dda83e5d4afc:gPlOTuayp16qbZ3ckI4gwHPJN9aMNSyGZ21jlRfjVEVUl7ROtVCze5fpbwKEfvfxNS8CEgSKrNfBFFGX4qgGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: content.pin
+availability: both
+record_thread: false
+required_caps: ["ryeos.execute.service.content/pin"]
+schema:
+  item_ref: string
+  project_path: string
+  id: string[]?
+  all: boolean?
+  update: boolean?
+description: "Complete and sign external-content pins through the daemon's exact local-operator authoring authority without launching the item or publishing runtime state."

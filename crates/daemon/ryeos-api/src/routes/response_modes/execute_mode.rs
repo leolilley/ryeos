@@ -51,6 +51,16 @@ pub struct ExecuteRequest {
     #[serde(default)]
     pub parameters: Value,
     pub execution_policy: ExecutionPolicy,
+    /// Caller-retained coordinate for accepted execution. It lets an exact
+    /// owner query the planning/bound state when an HTTP acknowledgement is
+    /// lost, without discovering threads globally or risking a relaunch.
+    #[serde(default)]
+    pub launch_id: Option<String>,
+    /// Signed assertion made by a forwarding RyeOS node. The target compares
+    /// it to origin from the verified source-node proof and target-signed
+    /// grant constraints; it is not an origin claim by itself.
+    #[serde(default)]
+    pub required_origin_site_id: Option<String>,
     #[serde(skip)]
     pub launch_mode: String,
     #[serde(skip)]
@@ -225,6 +235,7 @@ fn resolve_project_authority(
     policy: &ExecutionPolicy,
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
+    current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
@@ -233,6 +244,15 @@ fn resolve_project_authority(
         ExecutionProjectAuthority, LiveProjectAccess, PinnedChildProjectRealization,
         PinnedProjectRealization, PinnedTerminalPublication,
     };
+
+    // Authorization scopes are a set. Authorized-key files and composed
+    // grants need not preserve a particular ordering, while the immutable
+    // project-authority evidence intentionally requires one canonical
+    // representation. Canonicalize at that evidence boundary without
+    // changing the caller's effective authorization.
+    let mut capability_ceiling = capability_ceiling.to_vec();
+    capability_ceiling.sort();
+    capability_ceiling.dedup();
 
     let resolve_name_authority =
         |policy: &ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy| match policy {
@@ -299,6 +319,9 @@ fn resolve_project_authority(
                         ryeos_app::execution_policy::PinnedChildRealization::CowDiscard => {
                             PinnedChildProjectRealization::CowDiscard
                         }
+                        ryeos_app::execution_policy::PinnedChildRealization::CowRetainResult => {
+                            PinnedChildProjectRealization::CowRetainResult
+                        }
                     },
                 }
             }
@@ -326,7 +349,7 @@ fn resolve_project_authority(
                     isolation.mode(),
                 ),
                 environment,
-                capability_ceiling.to_vec(),
+                capability_ceiling.clone(),
             )
         }
         ProjectExecutionPolicy::Pinned { realization, .. } => {
@@ -343,6 +366,23 @@ fn resolve_project_authority(
                         TerminalPublication::Discard => PinnedTerminalPublication::Discard,
                         TerminalPublication::RetainResult => {
                             PinnedTerminalPublication::RetainResult
+                        }
+                        TerminalPublication::RetainCurrentHead => {
+                            let destination = current_head_destination.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "retain-current-head authority requires the destination proven by the authoritative HEAD lookup"
+                                )
+                            })?;
+                            if destination.expected_hash != snapshot_hash {
+                                anyhow::bail!(
+                                    "retain-current-head destination expected hash does not match the admitted snapshot"
+                                );
+                            }
+                            PinnedTerminalPublication::RetainCurrentHead {
+                                principal_key: destination.principal_key.clone(),
+                                project_hash: destination.project_hash.clone(),
+                                expected_hash: destination.expected_hash.clone(),
+                            }
                         }
                         TerminalPublication::AdvanceHead {
                             head_ref,
@@ -362,7 +402,7 @@ fn resolve_project_authority(
                 snapshot_hash.to_string(),
                 realization,
                 environment,
-                capability_ceiling.to_vec(),
+                capability_ceiling,
             )
         }
     }?;
@@ -453,6 +493,7 @@ pub(crate) fn resolve_execution_contract(
         policy,
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
+        project_ctx.current_head_destination.as_ref(),
         &state.isolation,
         caller_scopes,
     )?;
@@ -734,9 +775,46 @@ pub struct ExecuteMode;
 
 pub struct CompiledExecuteMode;
 
+/// Own a durably reserved accepted-launch coordinate until the background
+/// task captures its own settlement guard. Any admission return, unwind, or
+/// rejection before that handoff leaves a terminal, queryable refusal instead
+/// of an ambiguous planning row.
+struct AcceptedLaunchAdmissionGuard {
+    state: ryeos_app::state::AppState,
+    reserved_thread_id: String,
+    armed: bool,
+}
+
+impl AcceptedLaunchAdmissionGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AcceptedLaunchAdmissionGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(error) = self
+                .state
+                .state_store
+                .settle_launch_planning_admission_exit(&self.reserved_thread_id)
+        {
+            tracing::error!(
+                thread_id = %self.reserved_thread_id,
+                error = %error,
+                "failed to settle accepted launch admission exit"
+            );
+        }
+    }
+}
+
 impl ResponseMode for ExecuteMode {
     fn key(&self) -> &'static str {
         "execute"
+    }
+
+    fn allows_zero_timeout(&self) -> bool {
+        true
     }
 
     fn compile(
@@ -823,7 +901,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let caller_principal_id = principal.id.clone();
         let caller_scopes = principal.scopes.clone();
         // A remote origin is accepted only when it came from the verifier's
-        // node-signed v2 remote-node grant. Local clients originate here.
+        // node-signed v2 remote-node or remote-operator grant. Local clients
+        // originate here.
         let execution_origin_site_id = principal
             .authenticated_origin_site_id
             .clone()
@@ -833,6 +912,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let mut request: ExecuteRequest =
             ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        ryeos_app::identity::validate_forwarding_origin_assertion(
+            request.required_origin_site_id.as_deref(),
+            principal.authorized_key_class,
+            principal.authenticated_origin_site_id.as_deref(),
+        )
+        .map_err(|error| RouteDispatchError::Forbidden(error.to_string()))?;
         request
             .execution_policy
             .validate()
@@ -857,6 +942,34 @@ impl CompiledResponseMode for CompiledExecuteMode {
         {
             return Err(RouteDispatchError::BadRequest(
                 "/execute/launch requires execution_policy.response=accepted".to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() == "/execute/launch" && request.launch_id.is_none() {
+            return Err(RouteDispatchError::BadRequest(
+                "/execute/launch requires a caller-retained launch_id".to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() == "/execute/launch"
+            && !request
+                .launch_id
+                .as_deref()
+                .is_some_and(ryeos_app::state_store::is_canonical_launch_id)
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "launch_id must be L- followed by exactly 32 hexadecimal characters".to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() != "/execute/launch"
+            && request.execution_policy.response == ExecutionResponse::Accepted
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "execution_policy.response=accepted is supported only by /execute/launch"
+                    .to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() != "/execute/launch" && request.launch_id.is_some() {
+            return Err(RouteDispatchError::BadRequest(
+                "launch_id is accepted only by /execute/launch".to_string(),
             ));
         }
 
@@ -971,6 +1084,61 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     ))
                 })?;
             Some(caller_principal_id.clone())
+        } else {
+            None
+        };
+
+        // Reject unauthorized policy shapes before reserving a durable launch
+        // coordinate. Everything above is bounded parsing/authorization; no
+        // filesystem capture or execution-capable work has begun.
+        if let Err(error) =
+            preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
+        {
+            return Err(RouteDispatchError::BadRequest(error.to_string()));
+        }
+
+        // The caller retained `launch_id` before sending the request. Reserve
+        // it after authorization but before canonicalization, workspace
+        // creation, capture, checkout, or runtime preflight can block. Once
+        // this succeeds every uncertain HTTP outcome has an exact owner-bound
+        // status and a retry can never race still-running admission work.
+        let mut accepted_admission_guard = if request.launch_mode == "accepted" {
+            let reserved_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let launch_id = request
+                .launch_id
+                .as_deref()
+                .expect("accepted route validated caller-retained launch id");
+            state
+                .state_store
+                .reserve_launch_planning_with_id(
+                    launch_id,
+                    &reserved_thread_id,
+                    &caller_principal_id,
+                )
+                .map_err(|error| match error {
+                    ryeos_app::state_store::LaunchPlanningReservationError::AlreadyReserved(_) => {
+                        RouteDispatchError::Conflict(
+                            "launch_id is unavailable; query its exact owner-bound status and do not relaunch while its state is planning, bound, or unknown"
+                                .to_string(),
+                        )
+                    }
+                    ryeos_app::state_store::LaunchPlanningReservationError::CapacityExceeded(_) => {
+                        RouteDispatchError::ServiceUnavailable {
+                            code: "launch_planning_capacity_exceeded".to_string(),
+                            message: "pending launch admission reached node capacity".to_string(),
+                        }
+                    }
+                    ryeos_app::state_store::LaunchPlanningReservationError::Internal(error) => {
+                        RouteDispatchError::Internal(format!(
+                            "reserve accepted launch identity: {error:#}"
+                        ))
+                    }
+                })?;
+            Some(AcceptedLaunchAdmissionGuard {
+                state: state.clone(),
+                reserved_thread_id,
+                armed: true,
+            })
         } else {
             None
         };
@@ -1163,14 +1331,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 Some(canonical_state)
             }
         };
-
-        // Reject unauthorized policy shapes before capture, checkout, or COW
-        // workspace reservation performs expensive or durable work.
-        if let Err(error) =
-            preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
-        {
-            return Err(RouteDispatchError::BadRequest(error.to_string()));
-        }
 
         // Resolve project execution context.
         let pinned_realization =
@@ -1418,6 +1578,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 &project_ctx.effective_path,
                 request.ref_bindings.clone(),
                 lifecycle_authority,
+                Some(principal.handler_context()),
             )
             .map_err(|error| {
                 RouteDispatchError::Internal(format!(
@@ -1429,8 +1590,16 @@ impl CompiledResponseMode for CompiledExecuteMode {
             launch_options.call = request.call().cloned();
             launch_options =
                 launch_options.retain_captured_generation(project_ctx.take_captured_generation());
-            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let thread_id = accepted_admission_guard
+                .as_ref()
+                .expect("accepted route reserved admission guard")
+                .reserved_thread_id
+                .clone();
             let response_thread_id = thread_id.clone();
+            let launch_id = request
+                .launch_id
+                .clone()
+                .expect("accepted route validated caller-retained launch id");
 
             let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
@@ -1442,6 +1611,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 provenance.clone(),
                 launch_options,
             );
+            accepted_admission_guard
+                .as_mut()
+                .expect("accepted route retained admission guard")
+                .disarm();
             // No-project execution uses a request-owned scratch workspace.
             // Keep its guard alive until the accepted background launch has
             // actually finished, not merely until this HTTP response returns.
@@ -1502,6 +1675,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 StatusCode::ACCEPTED,
                 axum::Json(json!({
                     "status": "accepted",
+                    "launch_id": launch_id,
                     "thread_id": response_thread_id,
                 })),
             )
@@ -1692,19 +1866,21 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     "local root preflight returned no admitted resolution".to_string(),
                 )
             })?;
-            if !matches!(
-                &exec_ctx.plan_ctx.subject_resolution_authority,
-                ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
-            ) && let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
-                preflight.root_dispatch_evidence.applicability(),
-                &root_admission,
-                &request.ref_bindings,
-                &lifecycle_authority,
-                &provenance,
-                &exec_ctx,
-                &state,
-            )
-            .await
+            if !request.validate_only
+                && !matches!(
+                    &exec_ctx.plan_ctx.subject_resolution_authority,
+                    ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
+                )
+                && let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
+                    preflight.root_dispatch_evidence.applicability(),
+                    &root_admission,
+                    &request.ref_bindings,
+                    &lifecycle_authority,
+                    &provenance,
+                    &exec_ctx,
+                    &state,
+                )
+                .await
             {
                 return Ok(dispatch_error_response(error));
             }
@@ -1737,26 +1913,24 @@ impl CompiledResponseMode for CompiledExecuteMode {
             root_admission: local_root_admission,
             root_dispatch_evidence: local_root_dispatch_evidence,
             parent_execution_context: None,
+            effect_authority: None,
         };
 
-        let dispatch_result = if lifecycle_authority.ownership
-            == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
-        {
-            ryeos_executor::dispatch::dispatch_daemon_owned(
-                item_ref,
-                &dispatch_req,
-                &exec_ctx,
-                &state,
-            )
-            .await
-            .map_err(|error| {
-                RouteDispatchError::Internal(format!(
-                    "daemon-owned execution task ended without a dispatch result: {error}"
-                ))
-            })?
-        } else {
-            ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await
-        };
+        let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
+            principal.id.clone(),
+            principal.scopes.clone(),
+            principal.verified,
+            principal.authorized_key_class,
+            principal.authenticated_origin_site_id.clone(),
+        );
+        let dispatch_result = ryeos_executor::dispatch::dispatch_with_handler_context(
+            item_ref,
+            handler_context,
+            &dispatch_req,
+            &exec_ctx,
+            &state,
+        )
+        .await;
 
         match dispatch_result {
             Ok(mut value) => {
@@ -2020,7 +2194,7 @@ fn map_forward_error_to_dispatch(
         RemoteForwardError::MissingSnapshotHash => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
-                detail: "remote result missing snapshot_hash".into(),
+                detail: "remote result missing authoritative result_project_snapshot_hash".into(),
             }
         }
         RemoteForwardError::PullLocalConflict { path } => {
@@ -2132,6 +2306,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
         let capability_ceiling = vec![
+            ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
             "ryeos.execute.tool.core/snapshot-create".to_string(),
             ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
         ];
@@ -2140,12 +2315,92 @@ mod tests {
             &policy,
             Some(project.path()),
             None,
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            None,
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
         )
         .unwrap();
 
-        assert_eq!(authority.capability_ceiling(), capability_ceiling);
+        assert_eq!(
+            authority.capability_ceiling(),
+            &[
+                "ryeos.execute.tool.core/snapshot-create".to_string(),
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn retain_current_head_consumes_only_the_retained_lookup_destination() {
+        let project = tempfile::tempdir().unwrap();
+        let snapshot_hash = "a".repeat(64);
+        let destination = project_source::ResolvedCurrentHeadDestination {
+            principal_key: "d".repeat(64),
+            project_hash: "b".repeat(64),
+            expected_hash: snapshot_hash.clone(),
+        };
+        let policy = ExecutionPolicy {
+            schema_version: 2,
+            ownership: ryeos_app::execution_policy::ExecutionOwnership::DaemonOwned,
+            recovery: ryeos_app::execution_policy::ExecutionRecovery::RestartRecoverable,
+            response: ExecutionResponse::Accepted,
+            target: ryeos_app::execution_policy::ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::None,
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                },
+                child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+            },
+        };
+
+        let authority = resolve_project_authority(
+            &policy,
+            Some(project.path()),
+            Some(&snapshot_hash),
+            Some(&destination),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            authority.terminal_publication(),
+            Some(
+                &ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key: destination.principal_key.clone(),
+                    project_hash: destination.project_hash.clone(),
+                    expected_hash: snapshot_hash.clone(),
+                }
+            )
+        );
+
+        assert!(
+            resolve_project_authority(
+                &policy,
+                Some(project.path()),
+                Some(&snapshot_hash),
+                None,
+                &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+                &[],
+            )
+            .is_err()
+        );
+        let mismatch = project_source::ResolvedCurrentHeadDestination {
+            expected_hash: "c".repeat(64),
+            ..destination
+        };
+        assert!(
+            resolve_project_authority(
+                &policy,
+                Some(project.path()),
+                Some(&snapshot_hash),
+                Some(&mismatch),
+                &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2250,6 +2505,11 @@ mod tests {
     }
 
     #[test]
+    fn accepted_execute_route_may_disable_the_dispatcher_timeout() {
+        assert!(ExecuteMode.allows_zero_timeout());
+    }
+
+    #[test]
     fn compile_rejects_non_ryeos_signed_auth() {
         let mode = ExecuteMode;
         let raw = make_raw("none", RawRequestBody::Json);
@@ -2341,6 +2601,8 @@ mod tests {
                 }),
                 ..ExecutionPolicy::local_live(ExecutionResponse::Wait)
             },
+            launch_id: None,
+            required_origin_site_id: None,
             launch_mode: "wait".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,

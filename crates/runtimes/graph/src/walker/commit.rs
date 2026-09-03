@@ -2,7 +2,6 @@ use anyhow::Context as _;
 use serde_json::{Value, json};
 
 use crate::edges;
-use crate::knowledge;
 use crate::model::*;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
@@ -59,6 +58,9 @@ impl Walker {
         };
 
         match outcome {
+            StepOutcome::RecoveryRequired { .. } => {
+                unreachable!("recovery-required outcomes are intercepted before commit")
+            }
             StepOutcome::FollowSuspend(outcome) => {
                 self.commit_follow_suspend(context, outcome).await
             }
@@ -100,22 +102,50 @@ impl Walker {
         step: u32,
         observation: &DispatchObservation,
     ) -> anyhow::Result<()> {
+        if !observation.project_observations_well_formed {
+            anyhow::bail!("action project_observations must be an array");
+        }
+        if observation.project_observations.len()
+            > ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION
+        {
+            anyhow::bail!(
+                "action proposed {} project observations; maximum is {}",
+                observation.project_observations.len(),
+                ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION
+            );
+        }
+        // Normalize the complete authored list before the first authoritative
+        // append. A malformed later entry must not turn an earlier entry into
+        // an accidental partial result of input validation.
+        let requests = observation
+            .project_observations
+            .iter()
+            .cloned()
+            .map(ryeos_runtime::ProjectObservationRequest::from_value)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .context("normalize project observation requests")?;
+        for request in requests {
+            self.client
+                .publish_project_observation(graph_run_id, node, step, request)
+                .await
+                .context("publish authoritative project observation")?;
+        }
         for request in &observation.state_anchors {
             let mut request = request.clone();
             let object = request
                 .as_object_mut()
                 .ok_or_else(|| anyhow::anyhow!("state_anchors entries must be objects"))?;
-            object.insert("graph_run_id".to_string(), json!(graph_run_id));
             object.insert(
-                "definition_ref".to_string(),
-                json!(&self.graph.definition_ref),
+                "subject".to_string(),
+                json!({
+                    "kind": "graph",
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
+                    "node": node,
+                    "step": step,
+                }),
             );
-            object.insert(
-                "definition_hash".to_string(),
-                json!(&self.graph.definition_hash),
-            );
-            object.insert("node".to_string(), json!(node));
-            object.insert("step".to_string(), json!(step));
             self.client
                 .publish_state_anchor(request)
                 .await
@@ -199,7 +229,7 @@ impl Walker {
                     json!({
                         "graph_run_id": graph_run_id,
                         "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
+                        "effective_definition_digest": &self.graph.effective_definition_digest,
                         "node": node,
                         "node_ref": node_ref(&self.graph.definition_ref, node),
                         "step": step,
@@ -301,7 +331,7 @@ impl Walker {
             success,
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id: graph_run_id.to_string(),
             status,
             steps,
@@ -332,7 +362,7 @@ impl Walker {
                     json!({
                         "graph_id": &self.graph.graph_id,
                         "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
+                        "effective_definition_digest": &self.graph.effective_definition_digest,
                         "graph_run_id": graph_run_id,
                         "status": status.as_str(),
                         "steps": steps,
@@ -341,25 +371,6 @@ impl Walker {
                 .await;
             self.record_callback_warning(RuntimeEventType::GraphCompleted.as_str(), r);
         }
-
-        // Write transcript.
-        let r = knowledge::write_knowledge_transcript(
-            &self.project_path,
-            &self.graph.graph_id,
-            graph_run_id,
-            &serde_json::to_string(&graph_result).unwrap_or_default(),
-        );
-        self.record_callback_warning("write_knowledge_transcript", r);
-
-        // Publish artifact.
-        let r = self
-            .client
-            .publish_artifact(json!({
-                "artifact_type": "graph_transcript",
-                "uri": format!("graph://{}/runs/{}", self.graph.graph_id, graph_run_id),
-            }))
-            .await;
-        self.record_callback_warning("publish_artifact", r.map(|_| ()));
 
         // Finalize thread. A cooperative cancel/kill settles the THREAD as
         // cancelled/killed (a distinct terminal an operator can tell apart from a

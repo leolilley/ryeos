@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-04T23:37:21Z:90aea575721e7cf5c4909e0f1ea982f37ddbf532cb0bf14b56fdbbc72bf838af:LSNmnmQyYIySPL6byL+sbctyUSpyunJSfRdhGBRnIuVINdaPCVUd7qFpS4cmsdOip6vscX0KwR1xgpWy5WalDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T04:56:59Z:8c70a4d71faafb3e1d0ad7112e346b87a4c5b4643dc179ecca751a25cba6a8ce:qpb3WTpOYAADgR5Fz/vEjCRjhx5Lr0e7weLSGBs6oGlREDrA1tVv2BT2Libu1OTlYG0HLNMkZ1MpFT/xwwUWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -23,6 +23,7 @@ source.
 | `text` | text body | string/detail fallback |
 | `timeline` | append-ordered events | `{primary, meta?, tone?, role?, pair_key?, raw}` per event |
 | `scene` | ambient/spatial projection | semantic scene objects |
+| `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
 
 Engine chrome (not content-targetable in v1): notice, dock/tile chrome.
 Input is no longer engine chrome: it is a content capability (the `input`
@@ -66,7 +67,27 @@ affordances:
       #   {value}          -- from an input submit (the buffer text; no {input} alias)
       #   @facet:<key>      -- facet reads (unchanged)
 refresh: { on_hint: <kind> | on_facet: <key> } # default for channels without their own refresh
+field_state:                  # OPTIONAL; field widget only; composes atomically
+  cursor_scope:
+    id: <scope-id>
+    subject: ["@facet:<key>[.path]", ...]
 ```
+
+### Shared field cursor scope
+
+A field view may bind its cursor parameter to `@field:cursor` and join a signed
+`field_state.cursor_scope`. Views with the same scope ID in one surface instance
+share one causal cursor and playback state in both web and terminal. Every
+member refreshes before playback advances. The nonempty `subject` list names
+the facet values that define what is being replayed; any subject transition
+resets the whole scope to live and advances its generation, so switching away
+and back cannot resurrect a cut from another selected subject.
+
+`field_state` composes as one root-last value. Scope IDs are bounded lowercase
+identifiers, subject bindings are bounded and unique, and peer declarations for
+one ID must have exactly the same subject list. A non-field declaration, a
+scope with no participating `@field:cursor` source, or divergent peers fails
+content validation/degrades visibly rather than creating independent cursors.
 
 ### Selection (row activation)
 

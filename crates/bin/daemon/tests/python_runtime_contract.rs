@@ -33,9 +33,9 @@ use serde_json::Value;
 
 fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
-    let node = root.join(".ai/node");
-    fs::create_dir_all(&node).unwrap();
-    fs::write(node.join("isolation.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    let fixtures = root.join(".ai/test-fixtures");
+    fs::create_dir_all(&fixtures).unwrap();
+    fs::write(fixtures.join("isolation-policy.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
     root
 }
 
@@ -149,7 +149,13 @@ fn run_tool_with_hints(
         .verify(&plan_ctx, resolved)
         .expect("verify tool (unsigned allowed)");
     let plan = engine
-        .build_plan(&plan_ctx, &verified, &params, &plan_ctx.execution_hints)
+        .build_plan(
+            &plan_ctx,
+            &verified,
+            &params,
+            &plan_ctx.execution_hints,
+            None,
+        )
         .expect("build_plan walks to subprocess terminal");
 
     let app_root = isolation_app_root();
@@ -158,9 +164,14 @@ fn run_tool_with_hints(
             .expect("load disabled isolation fixture"),
     );
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_filesystem_authority_ceiling:
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        isolation_network_authority_ceiling:
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         isolation_live_access_authority: Some(
             ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                 authorized_write_namespaces: vec!["project".to_string()],
@@ -168,6 +179,7 @@ fn run_tool_with_hints(
         ),
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
+        isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
@@ -176,6 +188,10 @@ fn run_tool_with_hints(
             content_hash: verified.resolved.content_hash.clone(),
         }],
         isolation_verified_command: None,
+        isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

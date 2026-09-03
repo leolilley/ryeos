@@ -1,26 +1,40 @@
-<!-- ryeos:signed:2026-08-02T11:12:41Z:f2aa8665d9e2452417204e772f8e90ff20bba742fdf69afefc8ce6adb69ebd7f:tNMcLPIYFVr73AX+3i2kh+yTI/IJAX1S7Huj1GJfw4mrZWaIpJy3WnInlZPwx5Tzh3UOKh5ezR/RzR2LcRPkBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-27T04:21:37Z:5171ba55f5f7274f3128ecf829989f25475c771122c590973a9978728db47a41:i4Gz/YfpDPwaPbhhK164iFMl3gx/6UnD3HKCvL8z9t1psYJNOW+nYfBWoOBou/WFg36gI9aPrx1V+y1Iqt0ECA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
 title: Content-Addressed Managed Runtime Workers
-description: Deferred design for reusing warm RyeOS managed runtimes without reusing invocation authority, secrets, accounting, or recovery state
+description: Deferred leased-invocation class for the existing worker kind, reusing warm managed runtimes without reusing invocation authority, secrets, accounting, or recovery state
 entry_type: design
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # Content-Addressed Managed Runtime Workers
 
 ## Status
 
-This is a future design, not the current execution contract. Pull it forward
-only after the content-addressed admission and augmentation fast paths have
-landed and measurements still show material time between durable planning and
-provider request submission. Progressive provider output must also use bounded
-ordered callback batching first; a warm worker cannot fix per-delta daemon
-round-trip backpressure inside an already-running provider call.
+This is the deferred **leased-invocation worker class**, not a proposal for a
+second RyeOS kind. The generic signed `worker` kind, exact external-content
+realizations, admitted persistent-session capsules, daemon persistent-session
+pool, target-channel isolation, cancellation, and the fixed local-provider
+worker have landed. Their current operating contract is documented at
+`knowledge:local-inference/activation`.
 
-The first implementation is deliberately narrower than a general distributed
-worker system:
+The current worker is deliberately narrower than this design: its executable
+closure, realizations, provider role, isolation ceiling, and session protocol
+are fixed before boot. It accepts bounded local-provider requests but never
+receives a general RyeOS invocation capability, callback token, project handle,
+secret set, or mutable resolver. That is a complete and useful worker class,
+not a temporary workaround.
+
+This note owns the remaining step: admitting a separately authorized RyeOS
+invocation into an already warm worker vessel. Pull it forward only when
+measurements still show material time between durable planning and provider
+request submission. Progressive provider output must also use bounded ordered
+callback batching first; a warm worker cannot fix per-delta daemon round-trip
+backpressure inside an already-running provider call.
+
+The first leased implementation is deliberately narrower than a general
+distributed worker system:
 
 - local-node managed runtimes only;
 - directive runtime first;
@@ -48,13 +62,21 @@ a distribution, not a single sample, after signed workflow bounds and provider
 reasoning/model policy have been benchmarked. See
 `knowledge:ryeos/future/chat-latency-investigation` for the measurement model.
 
-This document's "worker" is a reusable trusted managed-runtime process inside
-one RyeOS node. It is not the hostile-workload outer worker/VM described by
+This document's future leased worker is a reusable trusted managed-runtime
+process inside one RyeOS node. It is the same item kind as the fixed local
+worker and a different admitted lifecycle/protocol class. It is not the
+hostile-workload outer worker/VM described by
 `knowledge:ryeos/future/hosted-node-trust-boundaries`. A hosted deployment may
 eventually place these runtime workers inside that stronger boundary, but the
 two lifecycles and threat models must not be conflated.
 
 ## Decision
+
+**Kind decision:** both fixed persistent sessions and future leased managed
+runtimes are `worker` items. A kind names the mechanical execution vessel and
+its signed compilation contract. Lease capability is protocol/config data and
+admitted authority, not a consumer-specific kind. The leased class extends the
+shared process/session mechanics without widening or replacing the fixed class.
 
 A warm worker is an **execution vessel**, not an admitted execution and not an
 invocation-authority holder. It retains only its boot-time isolation/domain
@@ -75,11 +97,13 @@ This applies the RyeOS thesis at two levels:
 The worker must never turn "this process was trusted once" into "anything sent
 to this process may execute."
 
-## Why workers exist
+## Why leased workers may exist
 
-The current managed-runtime path starts a fresh process for every root
-invocation. That gives a strong, simple authority boundary, but repeatedly
-pays for:
+Ordinary managed-runtime invocation still starts a fresh process for every root
+invocation. The fixed local-provider worker is an explicit exception under its
+own narrow persistent-session contract; it does not accelerate ordinary
+directive execution. Fresh processes give a strong, simple authority boundary,
+but ordinary invocations repeatedly pay for:
 
 - process creation and isolation setup;
 - runtime bootstrap and static configuration parsing;
@@ -684,9 +708,25 @@ Worker ids and thread ids belong in traces/audit, not unbounded metric labels.
 15. Signed CAS lease binding precedes send; acceptance/running are later
     idempotent transitions, and SQLite remains projection only.
 
-## Implementation increments
+## Landed substrate
 
-### Increment 1 — Contracts and state machine
+The following parts of the earlier implementation ladder now exist and are no
+longer owned by this future note:
+
+- the signed `worker` kind and `persistent_session` protocol;
+- exact source/realization admission and path-free retained capsules;
+- a bounded daemon-owned pool keyed by admitted session identity;
+- one active request per fixed local-provider session;
+- enforced-isolation target-channel plumbing, cancellation, teardown, restart,
+  and no-contact terminal replay; and
+- the local-inference bundle's Tinygrad/Qwen recorded provider fixture.
+
+These mechanics are reusable by the leased class, but none of them constitute
+an invocation lease or authorize a worker to execute arbitrary admitted items.
+
+## Remaining implementation increments
+
+### Increment 1 — Lease contracts and state machine
 
 - Define `WorkerClass`, `WorkerIsolationDomain`, `WorkerPoolKey`,
   `InvocationLease`, lifecycle enums, refusal enums, and canonical hashes.
@@ -694,18 +734,19 @@ Worker ids and thread ids belong in traces/audit, not unbounded metric labels.
 - Add pure lifecycle/lease validation and adversarial tests.
 - Do not spawn a persistent process yet.
 
-### Increment 2 — Lillux worker ownership
+### Increment 2 — Durable worker-instance ownership
 
-- Add Lillux-managed start/attach/release/kill handles for a persistent target.
-- Add the durable `WorkerProcessRecord`, typed thread process/lease projection,
-  daemon worker registry, and bounded pool state.
+- Reuse the landed persistent-target ownership and add the durable
+  `WorkerProcessRecord`, typed thread process/lease projection, daemon worker
+  registry, and leased pool state.
 - Route cancellation, reconciliation, status, and allowed actions through the
   active lease projection without copying process ownership into the thread.
 - Start a fixture worker, complete challenge/ready, drain, and kill.
 
-### Increment 3 — Directive runtime, one lease
+### Increment 3 — One generic invocation lease
 
-- Add worker framing to the directive runtime.
+- Add leased framing to one eligible runtime without changing the fixed-session
+  framing.
 - Execute exactly one admitted fixture lease through the normal callback and
   accounting paths.
 - Reset and execute a second lease in the same process.
@@ -716,10 +757,10 @@ Worker ids and thread ids belong in traces/audit, not unbounded metric labels.
 - Cover cancel before lease, cancel after lease, hard kill, daemon shutdown,
   provider-issued ambiguity, reset failure, and exact-capsule recovery.
 
-### Increment 5 — Real provider acceptance
+### Increment 5 — Measured consumer acceptance
 
-- Reuse a provider connection across sequential invocations in one exact
-  isolation domain.
+- For a directive consumer, reuse a provider connection across sequential
+  invocations in one exact isolation domain.
 - Compare cold and warm paths using the existing stage timings.
 - Confirm provider/model/accounting facts and no secret-value logging.
 
@@ -743,6 +784,9 @@ The worker path is ready only when:
 - Lillux performs all process/isolation teardown;
 - real warm measurements show a material improvement over the completed
   pre-worker path.
+
+Passing this gate activates the leased class only. Failure leaves the existing
+fixed local-provider worker untouched and correct.
 
 ## Related contracts
 

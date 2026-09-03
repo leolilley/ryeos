@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T10:54:59Z:6c3c77b98cee05bea29e76a25478a755b08db6b55771bc74cd0559c097b5081d:AHhlIx5LXwL5MsaFyeRSbevZLNirrJXWnq2/Cp6m/umeLTODWPhp1yA10Y6MA9hZgs1CTgtXhqjtSMBSJp1cBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:39Z:6c3c77b98cee05bea29e76a25478a755b08db6b55771bc74cd0559c097b5081d:AHhlIx5LXwL5MsaFyeRSbevZLNirrJXWnq2/Cp6m/umeLTODWPhp1yA10Y6MA9hZgs1CTgtXhqjtSMBSJp1cBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [learner, weights, cas, bundle-events, durable, agents, learning]
 version: "2.0.0"

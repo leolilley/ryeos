@@ -1,0 +1,14 @@
+# ryeos:signed:2026-08-29T09:08:38Z:136d74610f5d75a1fb62c53d499f5eda3c9bd580e3b71169d4963a8295f18b3b:DtjIjQ7EW4/9Sw83cCVrAC1aV7qBBU0aQbsclr9egckc2zkV+9VDKx5Xjb70Kk+uAe90LMTc9A/Qbp2Ek/YjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- remote
+- reconcile-project-head
+description: Explicitly converge divergent local and remote project HEADs
+forms:
+- slots:
+  - field: remote
+project:
+  resolution: required
+  bind_parameter: project
+dispatch:
+  kind: execute_ref
+  execute: service:remote/reconcile-project-head

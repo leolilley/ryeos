@@ -73,7 +73,7 @@ fn plant_chain_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<
     std::fs::create_dir_all(&graphs_dir)?;
     // A branch with no `when` is the default/fallback (always taken) —
     // the proven shape from the walker's gate fixtures.
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: a

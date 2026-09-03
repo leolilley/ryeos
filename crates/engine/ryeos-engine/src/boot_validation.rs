@@ -47,8 +47,10 @@ use crate::runtime_registry::{
     RuntimeFactKind, RuntimeRegistry,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, FinancialAuthorityDeclWire, HandlerRequest, HandlerResponse,
-    ItemSpaceWire, LaunchConfigInputDeclWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
+    ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, FinancialAuthorityDeclWire,
+    HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchConfigInputDeclWire,
+    LaunchContentDependencyPolicyWire, LaunchContentExternalPolicyWire,
+    LaunchExecutionDependencyPolicyWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
     RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
     ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
     ValidateParserConfigRequest,
@@ -716,12 +718,52 @@ fn launch_preparer_validation_request(
         },
         required_runtime_data: contract.required_runtime_data.clone(),
         runtime_facts,
+        execution_dependencies: LaunchExecutionDependencyPolicyWire {
+            max_dependencies: contract.execution_dependencies.max_dependencies,
+            allowed_kinds: contract.execution_dependencies.allowed_kinds.clone(),
+            allowed_spaces: contract
+                .execution_dependencies
+                .allowed_spaces
+                .iter()
+                .copied()
+                .map(item_space_wire)
+                .collect(),
+            allowed_trust: contract
+                .execution_dependencies
+                .allowed_trust
+                .iter()
+                .copied()
+                .map(trust_class_wire)
+                .collect(),
+        },
+        content_dependencies: LaunchContentDependencyPolicyWire {
+            max_dependencies: contract.content_dependencies.max_dependencies,
+            allowed_bindings: contract.content_dependencies.allowed_bindings.clone(),
+            max_targets_per_dependency: contract.content_dependencies.max_targets_per_dependency,
+            max_executable_search_entries: contract
+                .content_dependencies
+                .max_executable_search_entries,
+            external_content: contract.content_dependencies.external_content.as_ref().map(
+                |external| LaunchContentExternalPolicyWire {
+                    max_declarations: external.max_declarations,
+                    large_content_max_total_bytes: external.large_content_max_total_bytes,
+                },
+            ),
+        },
         financial_authority: match contract.financial_authority {
             crate::runtime_registry::FinancialAuthorityDecl::None => {
                 FinancialAuthorityDeclWire::None
             }
-            crate::runtime_registry::FinancialAuthorityDecl::ProviderAccountingAuthorityV1 => {
-                FinancialAuthorityDeclWire::ProviderAccountingAuthorityV1
+            crate::runtime_registry::FinancialAuthorityDecl::Accounting => {
+                FinancialAuthorityDeclWire::Accounting
+            }
+        },
+        external_effect_authority: match contract.external_effect_authority {
+            crate::runtime_registry::ExternalEffectAuthorityDecl::None => {
+                ExternalEffectAuthorityDeclWire::None
+            }
+            crate::runtime_registry::ExternalEffectAuthorityDecl::External => {
+                ExternalEffectAuthorityDeclWire::External
             }
         },
     }
@@ -793,7 +835,9 @@ pub fn validate_protocol_builder(
             args: &[],
             cwd: dummy_path,
             project_path: dummy_path,
-            callback_project_path: dummy_path,
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "boot-check",
             // Supplying synthetic callback authority lets callback-capable
             // descriptors exercise their declared injection sources. A
@@ -843,14 +887,17 @@ pub fn validate_protocol_builder(
             Some(e) => e,
             None => continue,
         };
-        if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref }) =
+        if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol }) =
             &exec.terminator
-            && protocols.get(protocol_ref).is_none()
         {
-            issues.push(BootIssue::DanglingProtocolRef {
-                kind: kind_name.to_string(),
-                protocol_ref: protocol_ref.clone(),
-            });
+            for protocol_ref in protocol.boot_required_refs() {
+                if protocols.get(protocol_ref).is_none() {
+                    issues.push(BootIssue::DanglingProtocolRef {
+                        kind: kind_name.to_string(),
+                        protocol_ref: protocol_ref.clone(),
+                    });
+                }
+            }
         }
         if let Some(method_dispatch) = &exec.method_dispatch {
             match protocols.get(&method_dispatch.protocol) {
@@ -993,7 +1040,7 @@ mod tests {
     /// Build a composer registry from `kinds` using the live handler
     /// registry — necessary because every kind schema written by these
     /// tests now declares `composer: handler:ryeos/core/identity` (or
-    /// extends-chain / graph-permissions) which only resolves through
+    /// extends-chain) which only resolves through
     /// the live registry.
     fn composers_from(kinds: &KindRegistry) -> ComposerRegistry {
         ComposerRegistry::from_kinds(kinds, &live_handler_registry()).unwrap()
@@ -1886,7 +1933,7 @@ composed_value_contract:
         assert_eq!(
             requirements,
             vec![ComposerFieldRequirement {
-                field: "lifecycle_policy".into(),
+                path: vec!["lifecycle_policy".into()],
                 semantics: ComposerFieldSemantics::InheritOrReplace,
             }]
         );
@@ -1947,6 +1994,7 @@ composed_value_contract:
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
+            session: None,
         }
     }
 
@@ -1979,7 +2027,9 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
-            callback_project_path: dummy,
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "test",
             callback: None,
             launch_envelope: None,
@@ -2028,6 +2078,7 @@ composed_value_contract:
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
+            session: None,
         };
 
         let synthetic_ref = CanonicalRef::parse("tool:synthetic/test").unwrap();
@@ -2038,7 +2089,9 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
-            callback_project_path: dummy,
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "test",
             callback: None,
             launch_envelope: None, // <-- triggers EnvelopeRequired

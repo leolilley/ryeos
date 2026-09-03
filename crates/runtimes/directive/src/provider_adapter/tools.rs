@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 
-use crate::directive::{ToolSchema, ToolSchemaConfig};
+use crate::directive::ToolSchema;
+use ryeos_directive_definition::ToolSchemaConfig;
 
 pub fn serialize_tools(tools: &[ToolSchema], tool_schema: &Option<ToolSchemaConfig>) -> Value {
     match tool_schema {
@@ -290,7 +291,6 @@ mod tests {
 
     #[test]
     fn serialize_tools_with_gemini_template_produces_function_declarations_wrap() {
-        use crate::directive::ToolSchemaConfig;
         let tools = sample_tools();
         let cfg = ToolSchemaConfig {
             template: json!({
@@ -318,7 +318,6 @@ mod tests {
 
     #[test]
     fn serialize_tools_with_anthropic_template_produces_input_schema_no_function_wrapper() {
-        use crate::directive::ToolSchemaConfig;
         let tools = sample_tools();
         let cfg = ToolSchemaConfig {
             template: json!({
@@ -341,7 +340,6 @@ mod tests {
 
     #[test]
     fn serialize_tools_with_openai_template_keeps_function_wrapper() {
-        use crate::directive::ToolSchemaConfig;
         let tools = sample_tools();
         let cfg = ToolSchemaConfig {
             template: json!({
@@ -364,7 +362,6 @@ mod tests {
     #[test]
     fn serialize_tools_empty_returns_flat_empty_array_even_with_list_wrap() {
         // Critical: Gemini empty-tools must NOT become [{functionDeclarations: []}].
-        use crate::directive::ToolSchemaConfig;
         let cfg = ToolSchemaConfig {
             template: json!({
                 "name": "{name}",

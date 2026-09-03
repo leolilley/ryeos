@@ -153,7 +153,9 @@ pub async fn handle_open(
         .unwrap_or(&state.config.app_root);
     let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
         &state.engine,
-        &state.node_history_policy,
+        state
+            .node_history_policy()
+            .map_err(|error| HandlerError::Internal(error.to_string()))?,
         &surface_ref,
         project_root,
         &owner,

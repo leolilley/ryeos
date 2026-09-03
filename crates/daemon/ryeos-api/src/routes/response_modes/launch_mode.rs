@@ -583,6 +583,7 @@ mod tests {
             scopes: vec![],
             verifier_key: "hmac",
             verified: true,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
             metadata,
         };

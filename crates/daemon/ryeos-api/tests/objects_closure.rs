@@ -9,15 +9,16 @@ use ryeos_api::handlers::{objects_closure_describe, objects_closure_get};
 fn request(root: String, max_objects: usize) -> objects_closure_describe::Request {
     objects_closure_describe::Request {
         roots: vec![root],
-        max_objects,
-        max_blobs: 16,
-        max_object_bytes: 1024,
-        max_total_object_bytes: 4096,
-        max_blob_bytes: 1024,
-        max_total_blob_bytes: 4096,
-        max_response_bytes: 8192,
-        max_links_per_object: 16,
+        max_objects: Some(max_objects),
+        max_blobs: Some(16),
+        max_object_bytes: Some(1024),
+        max_total_object_bytes: Some(4096),
+        max_blob_bytes: Some(1024),
+        max_total_blob_bytes: Some(4096),
+        max_response_bytes: Some(8192),
+        max_links_per_object: Some(16),
         allow_incomplete: false,
+        allow_untransported_large_objects: false,
     }
 }
 
@@ -127,7 +128,7 @@ async fn closure_get_enforces_blob_byte_budget() {
     let (_tmp, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
-    req.max_blob_bytes = 1;
+    req.max_blob_bytes = Some(1);
 
     let err = objects_closure_get::handle(req, Arc::new(state))
         .await
@@ -137,11 +138,65 @@ async fn closure_get_enforces_blob_byte_budget() {
 }
 
 #[tokio::test]
+async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_transport() {
+    let (_tmp, state) = test_state::build_test_state();
+    let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
+    let state = Arc::new(state);
+    let large_hash = "ab".repeat(32);
+    let manifest_hash = cas
+        .store_object(&json!({
+            "kind": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+            "schema": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
+            "entries": [{
+                "path": "model.safetensors",
+                "kind": "file",
+                "mode": 420,
+                "file_sha256": large_hash,
+                "size": 5,
+                "chunk_size": ryeos_state::objects::MIN_LARGE_CONTENT_CHUNK_BYTES,
+                "chunk_hashes": ["cd".repeat(32)]
+            }],
+            "entry_count": 1,
+            "total_bytes": 5
+        }))
+        .unwrap();
+
+    let described =
+        objects_closure_describe::handle(request(manifest_hash.clone(), 16), Arc::clone(&state))
+            .await
+            .unwrap();
+    assert_eq!(described["large_object_hashes"], json!([large_hash]));
+
+    let error = objects_closure_get::handle(request(manifest_hash.clone(), 16), Arc::clone(&state))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot transport 1 referenced large objects")
+    );
+
+    let mut requirements_only = request(manifest_hash, 16);
+    requirements_only.allow_untransported_large_objects = true;
+    let value = objects_closure_get::handle(requirements_only, state)
+        .await
+        .unwrap();
+    assert_eq!(value["closure"]["large_object_hashes"], json!([large_hash]));
+    assert!(
+        value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["kind"] == "object")
+    );
+}
+
+#[tokio::test]
 async fn closure_get_enforces_object_byte_budget() {
     let (_tmp, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
-    req.max_total_object_bytes = 1;
+    req.max_total_object_bytes = Some(1);
 
     let err = objects_closure_get::handle(req, Arc::new(state))
         .await
@@ -172,4 +227,41 @@ async fn closure_describe_enforces_max_objects() {
         .unwrap_err();
 
     assert!(err.to_string().contains("exceeds max_objects"));
+}
+
+#[tokio::test]
+async fn closure_serving_intersects_peer_ceiling_with_node_policy() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (root, _, _) = store_fixture(&state);
+    let mut req = request(root.clone(), 16);
+    req.max_total_blob_bytes = Some(128 * 1024 * 1024 + 1);
+    let response = objects_closure_describe::handle(req, Arc::new(state))
+        .await
+        .unwrap();
+    assert_eq!(response["complete"], true);
+    assert_eq!(response["roots"], serde_json::json!([root]));
+}
+
+#[tokio::test]
+async fn closure_request_root_fan_in_cannot_exceed_node_policy() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (root, _, _) = store_fixture(&state);
+    let mut req = request(root.clone(), 16);
+    req.roots = vec![root; 257];
+    let error = objects_closure_describe::handle(req, Arc::new(state))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("root count exceeds node policy"));
+}
+
+#[tokio::test]
+async fn closure_describe_enforces_exact_serialized_response_budget() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (root, _, _) = store_fixture(&state);
+    let mut req = request(root, 16);
+    req.max_response_bytes = Some(1);
+    let error = objects_closure_describe::handle(req, Arc::new(state))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeds max_response_bytes"));
 }

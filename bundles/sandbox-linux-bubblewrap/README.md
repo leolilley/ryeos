@@ -1,15 +1,18 @@
-# Bubblewrap isolation example bundle
+# Bubblewrap isolation backend bundle
 
-This is an optional reference implementation of RyeOS's data-driven isolation
-protocol. It is not part of any default bundle set, local install, container
-image, release artifact, or RyeOS build.
+This is the independently installed Linux implementation of RyeOS's
+data-driven isolation protocol. It remains outside every default bundle set,
+ordinary local install, container image, release artifact, and RyeOS build. The
+explicit `full-sandbox` source-checkout set preserves and publishes an
+operator-built payload; it never builds or downloads one implicitly. A route
+uses it only after an operator explicitly builds, installs, and selects it.
 
 RyeOS runs normally with isolation disabled and no selected backend. Nothing
 downloads, builds, installs, or probes Bubblewrap unless an operator explicitly
 authors and installs this bundle.
 
-To experiment with the example, install Bubblewrap's authoring prerequisites
-(`meson`, `ninja`, `libcap`, `readelf`, and `xz`), then run:
+To author the backend, install its build prerequisites (`meson`, `ninja`,
+`make`, a C compiler, `pkg-config`, `readelf`, and `xz`), then run:
 
 ```bash
 ./bundles/sandbox-linux-bubblewrap/build-payload.sh

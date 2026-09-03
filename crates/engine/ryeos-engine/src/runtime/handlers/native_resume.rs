@@ -115,6 +115,10 @@ mod tests {
             resolved_ref: "tool:demo".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/tmp/demo.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "native_resume": block.clone() }),
         }];
         let parsers = dispatcher_with_canonical_bundle_descriptors();
@@ -137,6 +141,7 @@ mod tests {
             node_trust_store: &trust,
             project_root: None,
             project_authority: None,
+            sealed_content: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };
@@ -212,6 +217,10 @@ mod tests {
             resolved_ref: "tool:demo".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/tmp/demo.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "native_resume": true }),
         }];
         let parsers = dispatcher_with_canonical_bundle_descriptors();
@@ -234,6 +243,7 @@ mod tests {
             node_trust_store: &trust,
             project_root: None,
             project_authority: None,
+            sealed_content: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T05:13:14Z:eef3c50804d860f27897ab0d2cfbabcbcbf137cd8eabf2a26d79e7774be2a6ba:IYoO4Mq/TzphbWc0LzvTeti26pwF3wwCa30pfhB4Go/Cfds9gxNf9rRvD19TwGCy1928RlBp7lFbYRyowj1kBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:17d7077e357dc543f4966c05078894716d09e3573bb7eed8843ed7c73b3fd2a1:2lGUkpdnAgLnMK8QylENo+UhdisMOGOgQJdlW72wCyFH4mepfXU0q2NvwMGe7Bn1y9d5kDMsdjXTdg0wWd5PBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-admitted-heads
 required_caps: ["ryeos.execute.service.remote/sync-admitted-heads"]
@@ -16,4 +16,4 @@ schema:
   max_total_blob_bytes: number?
   max_response_bytes: number?
   max_links_per_object: number?
-description: "Mirror missing verified admission heads from a pinned remote under a policy; defaults to at most 50 imports per batch"
+description: "Mirror missing verified admission heads from a pinned remote within node object_closure policy; defaults to at most 50 imports per batch"

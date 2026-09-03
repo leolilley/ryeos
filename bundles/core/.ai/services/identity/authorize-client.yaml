@@ -1,0 +1,15 @@
+# ryeos:signed:2026-08-24T16:46:23Z:5c543f426cb6c97187e42114a90ec4e5f86e7163bff4893d50c1a92a458987e5:5Kcq9G3Avn4Jx1GY4UG0bSp6urPZ4aNncjEiacNT3BTYErYciPOrmFqYcVXVTzCDK9rw2QTsoNH3dnlJOsZ4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: identity.authorize-client
+availability: local
+record_thread: false
+local_execute: tool:ryeos/core/authorize-client
+required_caps: ["ryeos.execute.service.identity/authorize-client"]
+schema:
+  public_key: string
+  scopes: string
+  label: string?
+  merge_scopes: boolean?
+  origin_site_id: string?
+  allow_semantic_conversion: boolean?
+description: "Reconcile one exact authorized-key grant with node-signed local authority. Semantic class or origin conversion additionally requires and holds stopped-node authority through publication."

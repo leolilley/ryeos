@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-19T05:40:59Z:8346403b0da731f9b1f80f7aa19d9b673b08562511079298b47b195572563540:yW2Pa89yoWqO10SBkCZujYL71yB/u9JJ+EHXsm9y2x6e9qWE3DoBh9byj2jRJ8j2ibkJeUWeFt9EHiemoAoGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-18T22:04:34Z:002f74c1f00bc3dbc8a4e6b2b0a596634cd435fdc13e8b5dc5437b1949ba3bcc:bD9P4LIFx7g6WsiIi5dcmY2AqVeD4ic/jGEKPOHj81pNoKT+pdZjJGOAnbgGwKv4Nk9G7OfJYTovjeCXA43+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - f
 description: Fetch/resolve an item (read-only)
@@ -12,7 +12,7 @@ forms:
     matcher: canonical_ref
 project:
   resolution: optional
-  bind_parameter: project
+  bind_parameter: project_path
   no_project_flag: true
 dispatch:
   kind: execute_ref

@@ -32,6 +32,7 @@ impl CompiledRouteInvocation for CompiledNoneVerifier {
             scopes: vec![],
             verifier_key: "none",
             verified: false,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
             metadata: BTreeMap::new(),
         }))
@@ -56,10 +57,7 @@ mod tests {
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
@@ -115,8 +113,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![],
-            hosted_node_policies: vec![],
-            command_registration_policy: Default::default(),
         };
         let test_command_registry = Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
@@ -125,10 +121,14 @@ mod tests {
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
-            isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            isolation: Arc::new(
+                ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             state_store,
             engine,
-            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+            resolution_cache: std::sync::Arc::new(
+                ryeos_app::resolution_cache::ResolutionCache::new(128),
+            ),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -151,8 +151,10 @@ mod tests {
             services: Arc::new(crate::registry::build_service_registry()),
             service_descriptors: crate::handlers::ALL,
             node_config: Arc::new(snapshot.clone()),
-            node_history_policy: Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            node_policy: Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: test_command_registry,
@@ -163,6 +165,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
         (tmpdir, state)
     }

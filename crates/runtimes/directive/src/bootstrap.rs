@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::directive::*;
-use ryeos_directive_core::ResolvedProviderSnapshot;
+use crate::directive::{BootstrapConfig, ExecutionConfig, ToolSchema};
+use ryeos_directive_definition::{
+    DirectiveHeader, ProviderConfig, ReasoningConfig, ResolvedProviderSnapshot, SamplingConfig,
+};
 use ryeos_engine::resolution::KindComposedView;
 use ryeos_runtime::verified_loader::VerifiedLoader;
 
@@ -113,38 +115,7 @@ pub fn bootstrap(
     // from the inventory is treated as "no such tool" by the
     // dispatcher's per-call resolution.
     let tools = project_tool_inventory(inventory);
-    let mut directive_hooks = Vec::new();
-
-    // Parse directive-declared hooks (header.hooks) as the authored layer.
-    // Source ownership, not authored data, fixes their precedence before all
-    // configured layers.
-    if let Some(ref header_hooks) = header.hooks
-        && !header_hooks.is_empty()
-    {
-        tracing::info!(
-            count = header_hooks.len(),
-            "directive runtime: merging directive-declared hooks"
-        );
-        for (idx, def) in header_hooks.iter().cloned().enumerate() {
-            // Dead-config: a directive-authored `continuation` hook can only
-            // fire when continuation is enabled. Validate here, before the
-            // merge loses header provenance, and fail loud rather than ship a
-            // hook that silently never runs.
-            if def.event == "continuation" && !header.continuation.enabled() {
-                return Err(anyhow::anyhow!(
-                    "directive header hooks[{idx}]: a `continuation` event hook is \
-                         declared but `continuation` is disabled — it can never fire. \
-                         Enable `continuation` or remove the hook."
-                ));
-            }
-            directive_hooks.push(def);
-        }
-    }
-
-    // Source layers are ordered once, then compiled against the only context
-    // roots the directive runner actually supplies. No raw hook definition
-    // crosses the bootstrap boundary into execution.
-    let hooks = compile_directive_hooks(directive_hooks, loader)?;
+    let hooks = compile_admitted_directive_hooks(&header, composed_view)?;
 
     let risk_policy = load_risk_policy(loader)?;
 
@@ -248,9 +219,12 @@ pub fn bootstrap(
         })?
         .to_string();
 
+    let provider_effects_recorded = header.effects.records_provider_calls();
+
     Ok(BootstrapOutput {
         config: BootstrapConfig {
             execution,
+            provider_effects_recorded,
             tools,
             system_prompt,
             user_prompt,
@@ -301,35 +275,12 @@ fn sanitized_context_item_contributions(value: &serde_json::Value) -> Option<ser
     Some(serde_json::Value::Object(sanitized))
 }
 
-/// Project the engine-supplied composed view down to the keys the
-/// runtime actually consumes, then deserialise into the typed
-/// `DirectiveHeader`.
-///
-/// The composer ships every frontmatter key it preserved (e.g.
-/// `body`, `category`, `description`, `inputs`, `required_secrets`)
-/// in `view.composed`. Most of those are owned by the daemon — the
-/// dispatcher reads `required_secrets` to populate vault bindings,
-/// the engine reads `category` for kind routing, etc. The runtime
-/// only needs the model/permissions/limits/outputs/context/hooks
-/// surface, so we project explicitly and let `deny_unknown_fields`
-/// keep catching drift in the keys we *do* own.
+/// Invoke the directive-kind parser over the engine-supplied composed value.
+/// Launch preparation uses the same function before token minting, so the
+/// runtime cannot discover a second semantic interpretation after spawn.
 pub(super) fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
-    let projected = match view.composed.as_object() {
-        Some(map) => {
-            let mut out = serde_json::Map::with_capacity(DIRECTIVE_HEADER_RUNTIME_KEYS.len());
-            for &key in DIRECTIVE_HEADER_RUNTIME_KEYS {
-                if let Some(v) = map.get(key) {
-                    out.insert(key.to_string(), v.clone());
-                }
-            }
-            serde_json::Value::Object(out)
-        }
-        // Non-object composed views are unexpected — fall through to
-        // the typed deserialise so the error names the actual cause.
-        None => view.composed.clone(),
-    };
-    serde_json::from_value(projected)
-        .map_err(|e| anyhow!("deserialize composed view into DirectiveHeader: {e}"))
+    ryeos_directive_definition::parse_effective_header(&view.composed)
+        .map_err(|error| anyhow!("parse effective directive header: {error}"))
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in
@@ -363,16 +314,39 @@ fn project_tool_inventory(
         .unwrap_or_default()
 }
 
-fn compile_directive_hooks(
-    directive_hooks: Vec<ryeos_runtime::HookDefinition>,
-    loader: &VerifiedLoader,
+fn compile_admitted_directive_hooks(
+    header: &DirectiveHeader,
+    composed_view: &KindComposedView,
 ) -> Result<Vec<ryeos_runtime::CompiledHook>> {
-    let mut sources = ryeos_runtime::load_configured_hook_sources(loader)?;
-    sources.authored = directive_hooks;
-    sources.retain_configured_events(&["after_step", "continuation"]);
-    compile_directive_hook_sources(sources)
+    let mut directive_hooks = Vec::new();
+    if let Some(ref header_hooks) = header.hooks
+        && !header_hooks.is_empty()
+    {
+        tracing::info!(
+            count = header_hooks.len(),
+            "directive runtime: compiling directive-declared hooks"
+        );
+        for definition in header_hooks.iter().cloned() {
+            directive_hooks.push(definition);
+        }
+    }
+
+    let plan_value = composed_view
+        .derived
+        .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
+        .ok_or_else(|| anyhow!("directive effective definition has no captured hook plan"))?;
+    let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(plan_value)
+        .map_err(|error| anyhow!(error))?;
+    if plan.owner_kind != "directive" || plan.authored.hooks != directive_hooks {
+        return Err(anyhow!(
+            "directive authored hooks differ from the captured effective hook plan"
+        ));
+    }
+    ryeos_runtime::compile_effective_hook_plan(&plan, &ryeos_runtime::CompilationLimits::default())
+        .context("compile captured directive hook plan")
 }
 
+#[cfg(test)]
 pub(super) fn compile_directive_hook_sources(
     sources: ryeos_runtime::HookSources,
 ) -> Result<Vec<ryeos_runtime::CompiledHook>> {
@@ -478,10 +452,13 @@ fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::{
-        ExpressionCondition, HookDefinition, HookLayer, HookResultMode, HookSources,
+    use ryeos_engine::hooks::{
+        EFFECTIVE_HOOK_PLAN_SCHEMA, EffectiveHookLayer, EffectiveHookPlan, ExpressionCondition,
+        HOOK_CONTEXT_SCHEMA, HookContextContract, HookEventContract,
     };
+    use ryeos_runtime::{HookDefinition, HookLayer, HookResultMode, HookSources};
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn hook(id: &str, event: &str, action: serde_json::Value) -> HookDefinition {
         HookDefinition {
@@ -491,6 +468,63 @@ mod tests {
             condition: ExpressionCondition::Absent,
             action,
         }
+    }
+
+    fn admitted_plan(authored: Vec<HookDefinition>) -> EffectiveHookPlan {
+        let empty = EffectiveHookLayer::empty();
+        EffectiveHookPlan {
+            schema: EFFECTIVE_HOOK_PLAN_SCHEMA.to_string(),
+            owner_kind: "directive".to_string(),
+            event_contracts: BTreeMap::from([(
+                "after_step".to_string(),
+                HookEventContract {
+                    context_contract: HookContextContract {
+                        schema: HOOK_CONTEXT_SCHEMA.to_string(),
+                        allowed_roots: BTreeSet::from(["turn".to_string()]),
+                    },
+                    allowed_results: BTreeSet::from([HookResultMode::Control]),
+                },
+            )]),
+            authored: EffectiveHookLayer {
+                hooks: authored,
+                dispatch_caps: vec!["ryeos.execute.tool.test/directive".to_string()],
+            },
+            builtin: empty.clone(),
+            infrastructure: empty.clone(),
+            context: empty.clone(),
+            operator: empty.clone(),
+            project: empty,
+            sources: Vec::new(),
+        }
+    }
+
+    fn effective_view(authored: Vec<HookDefinition>) -> KindComposedView {
+        let plan = admitted_plan(authored.clone());
+        KindComposedView {
+            composed: json!({"hooks": authored}),
+            derived: HashMap::from([("effective_hook_plan".to_string(), plan.to_value().unwrap())]),
+            policy_facts: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn admitted_composed_hooks_compile_only_when_the_captured_plan_matches() {
+        let authored = hook(
+            "directive",
+            "after_step",
+            json!({"item_id": "tool:test/directive", "params": {"turn": "${turn}"}}),
+        );
+        let view = effective_view(vec![authored]);
+        let header = parse_effective_header(&view).unwrap();
+        let compiled = compile_admitted_directive_hooks(&header, &view).unwrap();
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].id(), "directive");
+
+        let mut divergent = view;
+        divergent.composed["hooks"] = json!([]);
+        let header = parse_effective_header(&divergent).unwrap();
+        let error = compile_admitted_directive_hooks(&header, &divergent).unwrap_err();
+        assert!(error.to_string().contains("differ from the captured"));
     }
 
     #[test]

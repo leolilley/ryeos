@@ -7,9 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, bail};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
-use serde::Deserialize;
 
-use ryeos_app::identity::NodeIdentity;
+use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_app::state::AppState;
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
@@ -23,6 +22,7 @@ pub struct Principal {
     pub fingerprint: String,
     pub scopes: Vec<String>,
     pub owner: String,
+    pub principal_class: AuthorizedKeyPrincipalClass,
     pub authenticated_site_id: Option<String>,
 }
 
@@ -90,22 +90,8 @@ struct AuthorizedKey {
     public_key: VerifyingKey,
     scopes: Vec<String>,
     owner: String,
-    authenticated_site_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuthorizedKeyGrantBody {
-    schema_version: u32,
-    principal_class: String,
-    #[serde(default)]
-    origin_site_id: Option<String>,
-    fingerprint: String,
-    public_key: String,
-    scopes: Vec<String>,
-    label: String,
-    granted_by: String,
-    created_at: String,
+    principal_class: AuthorizedKeyPrincipalClass,
+    configured_origin_site_id: Option<String>,
 }
 
 fn load_authorized_key(
@@ -113,137 +99,15 @@ fn load_authorized_key(
     auth_dir: &Path,
     node_identity: &NodeIdentity,
 ) -> Result<AuthorizedKey> {
-    let key_file = auth_dir.join(format!("{fingerprint}.toml"));
-    if !key_file.exists() {
-        bail!("unknown principal");
-    }
-
-    let raw = fs::read_to_string(&key_file)?;
-    let (sig_line, body) = raw.split_once('\n').unwrap_or(("", &raw));
-
-    // Verify node signature header
-    let sig_line = sig_line.trim();
-    if !sig_line.starts_with("# ryeos:signed:") {
-        bail!("unsigned key file");
-    }
-
-    // Format: # ryeos:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>
-    // Timestamp may contain colons (ISO 8601), so rsplit from the right.
-    let remainder = &sig_line["# ryeos:signed:".len()..];
-    let parts: Vec<&str> = remainder.rsplitn(4, ':').collect();
-    if parts.len() != 4 {
-        bail!("malformed signature header");
-    }
-    let signer_fp = parts[0];
-    let sig_b64 = parts[1];
-    let content_hash = parts[2];
-
-    // Verify signer is this node
-    if signer_fp != node_identity.fingerprint() {
-        bail!("wrong signer");
-    }
-
-    // Verify content hash
-    let actual_hash = lillux::cas::sha256_hex(body.as_bytes());
-    if actual_hash != content_hash {
-        bail!("tampered key file");
-    }
-
-    // Verify signature over the content hash
-    let sig_bytes = base64::engine::general_purpose::STANDARD.decode(sig_b64)?;
-    let signature = Signature::from_slice(&sig_bytes)?;
-    node_identity.verify_hash(content_hash, &signature)?;
-
-    let grant: AuthorizedKeyGrantBody = toml::from_str(body)
-        .map_err(|error| anyhow::anyhow!("invalid authorized-key grant body: {error}"))?;
-    if grant.schema_version != 2 {
-        bail!(
-            "authorized-key grant schema_version must be exactly 2 (got {})",
-            grant.schema_version
-        );
-    }
-    let authenticated_site_id = match grant.principal_class.as_str() {
-        "local_client" => {
-            if grant.origin_site_id.is_some() {
-                bail!("local_client authorized-key grant cannot carry origin_site_id");
-            }
-            None
-        }
-        "remote_node" => {
-            let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "remote_node authorized-key grant has no authenticated origin_site_id"
-                )
-            })?;
-            ryeos_app::identity::validate_canonical_site_id(site_id).map_err(|error| {
-                anyhow::anyhow!(
-                    "remote_node authorized-key grant origin_site_id is not canonical: {error}"
-                )
-            })?;
-            Some(site_id.to_string())
-        }
-        other => bail!("unknown authorized-key principal_class '{}'", other),
-    };
-
-    // Verify fingerprint matches
-    if grant.fingerprint != fingerprint {
-        bail!("fingerprint mismatch");
-    }
-
-    // Extract public key
-    let public_key_str = grant.public_key.as_str();
-    if !public_key_str.starts_with("ed25519:") {
-        bail!("invalid public key format");
-    }
-    let key_bytes = base64::engine::general_purpose::STANDARD.decode(&public_key_str[8..])?;
-    let key_array: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    let public_key = VerifyingKey::from_bytes(&key_array)?;
-
-    let computed_fp = lillux::signature::compute_fingerprint(&public_key);
-    if computed_fp != fingerprint {
-        bail!(
-            "authorized-key file {} declares fingerprint {} but \
-             its public_key fingerprint computes to {} — refusing to load",
-            key_file.display(),
-            fingerprint,
-            computed_fp
-        );
-    }
-
-    let scopes = grant.scopes;
-
-    // Loud rejection of short-form / malformed scopes. A TOML on
-    // disk with `scopes = ["bundle.install"]` would otherwise
-    // authenticate fine but silently authorize nothing (the
-    // matcher does not auto-prefix) — that "inert auth" is the
-    // worst kind of failure: the request looks signed and
-    // accepted but every operation 403s with a misleading
-    // capability message. Reject the file outright so the
-    // operator sees the problem at first call.
-    for scope in &scopes {
-        if let Err(msg) = ryeos_runtime::authorizer::validate_scope_pattern(scope) {
-            bail!(
-                "authorized-key file {} contains an invalid scope: {}. \
-                 Refusing to load — re-issue the key with canonical scopes \
-                 (`ryeos.<verb>.<kind>.<subject>`).",
-                key_file.display(),
-                msg
-            );
-        }
-    }
-
-    if grant.granted_by.trim().is_empty() || grant.created_at.trim().is_empty() {
-        bail!("authorized-key grant audit fields must not be empty");
-    }
-    let owner = grant.label;
-
+    let grant =
+        ryeos_app::identity::load_verified_authorized_key(fingerprint, auth_dir, node_identity)?
+            .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
     Ok(AuthorizedKey {
-        public_key,
-        scopes,
-        owner,
-        authenticated_site_id,
+        public_key: grant.public_key,
+        scopes: grant.scopes,
+        owner: grant.owner,
+        principal_class: grant.principal_class,
+        configured_origin_site_id: grant.configured_origin_site_id,
     })
 }
 
@@ -319,6 +183,37 @@ fn canonical_path(uri: &axum::http::Uri) -> String {
     }
 }
 
+/// Hash the exact request facts authenticated by a source-node forwarding
+/// co-signature. The primary signature is included so the source node attests
+/// to this operator authorization, not merely to a coincident request body.
+pub(crate) fn forwarding_request_content_hash(
+    method: &str,
+    canonical_path: &str,
+    body_hash: &str,
+    timestamp: &str,
+    nonce: &str,
+    audience: &str,
+    primary_key_id: &str,
+    primary_signature: &str,
+    forwarding_key_id: &str,
+    forwarding_site_id: &str,
+) -> String {
+    let string_to_sign = format!(
+        "ryeos-forwarded-request-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        method.to_uppercase(),
+        canonical_path,
+        body_hash,
+        timestamp,
+        nonce,
+        audience,
+        primary_key_id,
+        primary_signature,
+        forwarding_key_id,
+        forwarding_site_id,
+    );
+    lillux::cas::sha256_hex(string_to_sign.as_bytes())
+}
+
 pub(crate) fn verify_request(
     state: &AppState,
     method: &str,
@@ -342,6 +237,15 @@ pub(crate) fn verify_request(
         .get("x-ryeos-signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    let forwarding_key_id = headers
+        .get("x-ryeos-forwarding-key-id")
+        .and_then(|v| v.to_str().ok());
+    let forwarding_site_id = headers
+        .get("x-ryeos-forwarding-site-id")
+        .and_then(|v| v.to_str().ok());
+    let forwarding_signature = headers
+        .get("x-ryeos-forwarding-signature")
+        .and_then(|v| v.to_str().ok());
 
     if key_id.is_empty() || timestamp.is_empty() || nonce.is_empty() || signature.is_empty() {
         return Err("missing auth headers".to_string());
@@ -372,6 +276,16 @@ pub(crate) fn verify_request(
         &state.identity,
     )
     .map_err(|e| e.to_string())?;
+    if auth_key.principal_class == AuthorizedKeyPrincipalClass::RemoteNode {
+        let configured_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            .map_err(|error| format!("load configured operator identity: {error}"))?;
+        if configured_operator.fingerprint() == fingerprint {
+            return Err(
+                "configured operator key cannot authenticate through a remote_node grant"
+                    .to_string(),
+            );
+        }
+    }
 
     // Compute audience (this node's identity)
     let audience = state.identity.principal_id();
@@ -400,6 +314,102 @@ pub(crate) fn verify_request(
         .verify(content_hash.as_bytes(), &sig)
         .map_err(|_| "invalid signature".to_string())?;
 
+    let forwarding_headers_present = forwarding_key_id.is_some()
+        || forwarding_site_id.is_some()
+        || forwarding_signature.is_some();
+    let authenticated_site_id = match auth_key.principal_class {
+        AuthorizedKeyPrincipalClass::LocalClient => {
+            if forwarding_headers_present {
+                return Err("local_client request cannot carry forwarding proof".to_string());
+            }
+            None
+        }
+        AuthorizedKeyPrincipalClass::RemoteNode => {
+            if forwarding_headers_present {
+                return Err(
+                    "remote_node request cannot carry operator forwarding proof".to_string()
+                );
+            }
+            auth_key.configured_origin_site_id.clone()
+        }
+        AuthorizedKeyPrincipalClass::RemoteOperator => {
+            let (forwarding_key_id, forwarding_site_id, forwarding_signature) =
+                match (forwarding_key_id, forwarding_site_id, forwarding_signature) {
+                    (Some(key_id), Some(site_id), Some(signature))
+                        if !key_id.is_empty() && !site_id.is_empty() && !signature.is_empty() =>
+                    {
+                        (key_id, site_id, signature)
+                    }
+                    _ => {
+                        return Err(
+                        "remote_operator request requires a complete source-node forwarding proof"
+                            .to_string(),
+                    );
+                    }
+                };
+            ryeos_app::identity::validate_canonical_site_id(forwarding_site_id)
+                .map_err(|error| error.to_string())?;
+            if auth_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
+                return Err(
+                    "source-node forwarding site does not match the remote_operator grant"
+                        .to_string(),
+                );
+            }
+            let forwarding_fingerprint = forwarding_key_id
+                .strip_prefix("fp:")
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "invalid forwarding key ID format".to_string())?;
+            let forwarding_key = load_authorized_key(
+                forwarding_fingerprint,
+                &state.config.authorized_keys_dir,
+                &state.identity,
+            )
+            .map_err(|error| format!("untrusted forwarding node: {error}"))?;
+            if forwarding_key.principal_class != AuthorizedKeyPrincipalClass::RemoteNode {
+                return Err(
+                    "forwarding proof must be signed by an admitted remote_node".to_string()
+                );
+            }
+            if !forwarding_key
+                .scopes
+                .iter()
+                .any(|scope| scope == ryeos_app::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE)
+            {
+                return Err(
+                    "forwarding-node grant lacks forwarded-operator attestation authority"
+                        .to_string(),
+                );
+            }
+            if forwarding_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
+                return Err(
+                    "forwarding-node grant does not match the asserted source site".to_string(),
+                );
+            }
+            let forwarding_sig_bytes = base64::engine::general_purpose::STANDARD
+                .decode(forwarding_signature)
+                .map_err(|_| "invalid forwarding signature encoding".to_string())?;
+            let forwarding_sig = Signature::from_slice(&forwarding_sig_bytes)
+                .map_err(|_| "invalid forwarding signature".to_string())?;
+            let forwarding_content_hash = forwarding_request_content_hash(
+                method,
+                &canon,
+                &body_hash,
+                timestamp,
+                nonce,
+                &audience,
+                key_id,
+                signature,
+                forwarding_key_id,
+                forwarding_site_id,
+            );
+            forwarding_key
+                .public_key
+                .verify(forwarding_content_hash.as_bytes(), &forwarding_sig)
+                .map_err(|_| "invalid forwarding signature".to_string())?;
+            Some(forwarding_site_id.to_string())
+        }
+    };
+
     // Replay check
     {
         let mut guard = match REPLAY_GUARD.lock() {
@@ -418,7 +428,8 @@ pub(crate) fn verify_request(
         fingerprint: fingerprint.to_string(),
         scopes: auth_key.scopes,
         owner: auth_key.owner,
-        authenticated_site_id: auth_key.authenticated_site_id,
+        principal_class: auth_key.principal_class,
+        authenticated_site_id,
     })
 }
 
@@ -596,7 +607,43 @@ mod tests {
         .unwrap();
 
         let loaded = load_authorized_key(&client_fp, &auth_dir, &node_identity).unwrap();
-        assert_eq!(loaded.authenticated_site_id.as_deref(), Some("site:origin"));
+        assert_eq!(
+            loaded.principal_class,
+            AuthorizedKeyPrincipalClass::RemoteNode
+        );
+        assert_eq!(
+            loaded.configured_origin_site_id.as_deref(),
+            Some("site:origin")
+        );
+    }
+
+    #[test]
+    fn remote_operator_grant_rejects_missing_or_noncanonical_origin() {
+        let client_key = SigningKey::from_bytes(&[44u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[99u8; 32]);
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let client_vk = client_key.verifying_key();
+        let client_fp = lillux::signature::compute_fingerprint(&client_vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(client_vk.as_bytes());
+        let path = auth_dir.join(format!("{client_fp}.toml"));
+
+        for origin_line in ["", "origin_site_id = \"source\"\n"] {
+            let body = format!(
+                "schema_version = 2\nprincipal_class = \"remote_operator\"\n{origin_line}fingerprint = \"{client_fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.remote/run\"]\nlabel = \"remote operator\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+            );
+            let signed = lillux::signature::sign_content_at(
+                &body,
+                &node_signer,
+                "#",
+                None,
+                "2026-01-01T00:00:00Z",
+            );
+            std::fs::write(&path, signed).unwrap();
+            assert!(load_authorized_key(&client_fp, &auth_dir, &node_identity).is_err());
+        }
     }
 
     #[test]
@@ -794,10 +841,7 @@ mod tests {
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
@@ -853,8 +897,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![],
-            hosted_node_policies: vec![],
-            command_registration_policy: Default::default(),
         };
         let test_command_registry = Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
@@ -863,10 +905,14 @@ mod tests {
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
-            isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            isolation: Arc::new(
+                ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             state_store,
             engine,
-            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+            resolution_cache: std::sync::Arc::new(
+                ryeos_app::resolution_cache::ResolutionCache::new(128),
+            ),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -889,8 +935,10 @@ mod tests {
             services: Arc::new(crate::registry::build_service_registry()),
             service_descriptors: crate::handlers::ALL,
             node_config: Arc::new(snapshot.clone()),
-            node_history_policy: Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            node_policy: Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: test_command_registry,
@@ -901,6 +949,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
         (tmpdir, state)
     }
@@ -922,6 +973,55 @@ mod tests {
             "2026-01-01T00:00:00Z",
             state.identity.signing_key(),
             ryeos_app::identity::WildcardPolicy::Reject,
+        )
+        .unwrap();
+        fp
+    }
+
+    fn register_remote_operator_key(
+        state: &ryeos_app::state::AppState,
+        operator_key: &SigningKey,
+        site_id: &str,
+    ) -> String {
+        let vk = operator_key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+            &state.config.authorized_keys_dir,
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.vault/list".to_string()],
+            "test-remote-operator",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &state.identity,
+            ryeos_app::identity::WildcardPolicy::Reject,
+            false,
+            Some(site_id),
+            false,
+        )
+        .unwrap();
+        fp
+    }
+
+    fn register_remote_node_key(
+        state: &ryeos_app::state::AppState,
+        node_key: &SigningKey,
+        site_id: &str,
+    ) -> String {
+        let vk = node_key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        ryeos_app::identity::write_authorized_remote_node_key_toml(
+            &state.config.authorized_keys_dir,
+            &fp,
+            &key_b64,
+            &[ryeos_app::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()],
+            "test-forwarding-node",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            site_id,
+            state.identity.signing_key(),
         )
         .unwrap();
         fp
@@ -966,6 +1066,53 @@ mod tests {
         headers.insert("x-ryeos-nonce", nonce.parse().unwrap());
         headers.insert("x-ryeos-signature", sig_b64.parse().unwrap());
         headers
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_forwarding_proof(
+        headers: &mut axum::http::HeaderMap,
+        forwarding_key: &SigningKey,
+        forwarding_fingerprint: &str,
+        forwarding_site_id: &str,
+        method: &str,
+        uri: &axum::http::Uri,
+        body: &[u8],
+        audience: &str,
+    ) {
+        let header = |name: &str| headers.get(name).unwrap().to_str().unwrap().to_string();
+        let primary_key_id = header("x-ryeos-key-id");
+        let timestamp = header("x-ryeos-timestamp");
+        let nonce = header("x-ryeos-nonce");
+        let primary_signature = header("x-ryeos-signature");
+        let forwarding_key_id = format!("fp:{forwarding_fingerprint}");
+        let content_hash = forwarding_request_content_hash(
+            method,
+            &canonical_path(uri),
+            &lillux::cas::sha256_hex(body),
+            &timestamp,
+            &nonce,
+            audience,
+            &primary_key_id,
+            &primary_signature,
+            &forwarding_key_id,
+            forwarding_site_id,
+        );
+        let signature = lillux::crypto::Signer::sign(forwarding_key, content_hash.as_bytes());
+        headers.insert(
+            "x-ryeos-forwarding-key-id",
+            forwarding_key_id.parse().unwrap(),
+        );
+        headers.insert(
+            "x-ryeos-forwarding-site-id",
+            forwarding_site_id.parse().unwrap(),
+        );
+        headers.insert(
+            "x-ryeos-forwarding-signature",
+            base64::engine::general_purpose::STANDARD
+                .encode(signature.to_bytes())
+                .parse()
+                .unwrap(),
+        );
     }
 
     fn unix_now() -> u64 {
@@ -1071,5 +1218,121 @@ mod tests {
             err.contains("invalid signature"),
             "value change should break the signature, got: {err}"
         );
+    }
+
+    #[test]
+    fn remote_operator_requires_and_verifies_source_node_cosignature() {
+        let (_tmp, state) = build_test_state();
+        let operator_key = SigningKey::from_bytes(&[23u8; 32]);
+        let forwarding_key = SigningKey::from_bytes(&[24u8; 32]);
+        let site_id = "site:source";
+        let operator_fp = register_remote_operator_key(&state, &operator_key, site_id);
+        let forwarding_fp = register_remote_node_key(&state, &forwarding_key, site_id);
+        let audience = state.identity.principal_id();
+        let uri: axum::http::Uri = "/execute".parse().unwrap();
+        let body = br#"{"item_ref":"test"}"#;
+
+        let headers = signed_headers(
+            &operator_key,
+            &operator_fp,
+            "POST",
+            &uri,
+            body,
+            unix_now(),
+            "nonce-remote-operator-missing-proof",
+            &audience,
+        );
+        let error = verify_request(&state, "POST", &uri, &headers, body)
+            .expect_err("remote operator without a source-node proof must fail");
+        assert!(error.contains("source-node forwarding proof"));
+
+        let mut headers = signed_headers(
+            &operator_key,
+            &operator_fp,
+            "POST",
+            &uri,
+            body,
+            unix_now(),
+            "nonce-remote-operator-valid-proof",
+            &audience,
+        );
+        add_forwarding_proof(
+            &mut headers,
+            &forwarding_key,
+            &forwarding_fp,
+            site_id,
+            "POST",
+            &uri,
+            body,
+            &audience,
+        );
+        let principal = verify_request(&state, "POST", &uri, &headers, body)
+            .expect("co-signed remote operator request must verify");
+        assert_eq!(
+            principal.principal_class,
+            AuthorizedKeyPrincipalClass::RemoteOperator
+        );
+        assert_eq!(principal.authenticated_site_id.as_deref(), Some(site_id));
+    }
+
+    #[test]
+    fn remote_operator_rejects_forwarding_proof_from_wrong_site() {
+        let (_tmp, state) = build_test_state();
+        let operator_key = SigningKey::from_bytes(&[25u8; 32]);
+        let forwarding_key = SigningKey::from_bytes(&[26u8; 32]);
+        let operator_fp =
+            register_remote_operator_key(&state, &operator_key, "site:expected-source");
+        let forwarding_fp =
+            register_remote_node_key(&state, &forwarding_key, "site:different-source");
+        let audience = state.identity.principal_id();
+        let uri: axum::http::Uri = "/execute".parse().unwrap();
+        let body = br#"{"item_ref":"test"}"#;
+        let mut headers = signed_headers(
+            &operator_key,
+            &operator_fp,
+            "POST",
+            &uri,
+            body,
+            unix_now(),
+            "nonce-remote-operator-wrong-site",
+            &audience,
+        );
+        add_forwarding_proof(
+            &mut headers,
+            &forwarding_key,
+            &forwarding_fp,
+            "site:different-source",
+            "POST",
+            &uri,
+            body,
+            &audience,
+        );
+        let error = verify_request(&state, "POST", &uri, &headers, body)
+            .expect_err("a different admitted site must not satisfy the operator grant");
+        assert!(error.contains("does not match the remote_operator grant"));
+    }
+
+    #[test]
+    fn configured_operator_key_is_never_accepted_as_remote_node() {
+        let (_tmp, state) = build_test_state();
+        let operator_key = SigningKey::from_bytes(&[27u8; 32]);
+        let pem = operator_key.to_pkcs8_pem(Default::default()).unwrap();
+        std::fs::write(&state.config.operator_signing_key_path, pem.as_bytes()).unwrap();
+        let operator_fp = register_remote_node_key(&state, &operator_key, "site:source");
+        let audience = state.identity.principal_id();
+        let uri: axum::http::Uri = "/execute".parse().unwrap();
+        let headers = signed_headers(
+            &operator_key,
+            &operator_fp,
+            "POST",
+            &uri,
+            b"{}",
+            unix_now(),
+            "nonce-configured-operator-remote-node",
+            &audience,
+        );
+        let error = verify_request(&state, "POST", &uri, &headers, b"{}")
+            .expect_err("configured operator remote_node confusion must fail");
+        assert!(error.contains("cannot authenticate through a remote_node grant"));
     }
 }

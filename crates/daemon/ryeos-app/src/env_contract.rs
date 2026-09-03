@@ -19,6 +19,11 @@ pub const BASE_ALLOWLIST_NAMES: &[&str] = &[
     // checkpoint-park node name into the graph runtime subprocess. Prod-inert
     // (unset in every non-test launch), same pattern as RYEOSD_TEST_STDERR_DIR.
     "RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT",
+    // Test-only: parks the first directive runtime at an exact durable
+    // event/effect boundary for the native-resume crash matrix. This name is
+    // absent from every production build's host-environment contract.
+    #[cfg(feature = "crash-qualification-test-support")]
+    "RYEOS_DIRECTIVE_TEST_BLOCK_AT",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",
@@ -46,11 +51,16 @@ const DAEMON_CALLBACK_NAMES: &[&str] = &[
     "RYEOSD_SOCKET_PATH",
     "RYEOSD_CALLBACK_TOKEN",
     "RYEOSD_THREAD_ID",
-    "RYEOSD_PROJECT_PATH",
+    "RYEOSD_PROJECT_STATE_SCOPE",
     "RYEOSD_THREAD_AUTH_TOKEN",
 ];
 
 const DAEMON_RESUME_NAMES: &[&str] = &["RYEOS_CHECKPOINT_DIR", "RYEOS_RESUME"];
+
+/// Sealed external-realization facts injected per spawn: the canonical JSON
+/// of the launch's admitted realization set, so a runtime can reference the
+/// identity it executes under without re-observing any content.
+const DAEMON_REALIZATION_NAMES: &[&str] = &["RYEOS_EXTERNAL_REALIZATIONS", "RYEOS_ADMITTED_SOURCE"];
 
 const PROXY_AND_CA_NAMES: &[&str] = &[
     "HTTP_PROXY",
@@ -324,7 +334,9 @@ fn validate_binding_name(binding: &EnvBinding) -> Result<(), EnvContractError> {
             validate_protocol_injection_name(&binding.key, *source, &binding.source)
         }
         EnvSourceDetail::PerSpawnDaemon => {
-            if DAEMON_CALLBACK_NAMES.contains(&binding.key.as_str()) {
+            if DAEMON_CALLBACK_NAMES.contains(&binding.key.as_str())
+                || DAEMON_REALIZATION_NAMES.contains(&binding.key.as_str())
+            {
                 Ok(())
             } else {
                 invalid(
@@ -394,8 +406,8 @@ fn validate_protocol_injection_name(
             | (EnvInjectionSource::ThreadId, "RYE_THREAD_ID")
             | (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID")
             | (
-                EnvInjectionSource::CallbackProjectPath,
-                "RYEOSD_PROJECT_PATH"
+                EnvInjectionSource::ProjectStateScope,
+                "RYEOSD_PROJECT_STATE_SCOPE"
             )
             | (EnvInjectionSource::ProjectPath, "RYE_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
@@ -523,6 +535,37 @@ mod tests {
         assert!(!map.contains_key("RYEOS_BROWSER_INTEGRATION"));
         assert!(!map.contains_key("OPENAI_API_KEY"));
         assert!(!map.contains_key("RYEOSD_THREAD_AUTH_TOKEN"));
+    }
+
+    #[cfg(not(feature = "crash-qualification-test-support"))]
+    #[test]
+    fn production_base_allowlist_excludes_directive_crash_cut() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[(
+                "RYEOS_DIRECTIVE_TEST_BLOCK_AT",
+                "effect_committed",
+            )]))
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key("RYEOS_DIRECTIVE_TEST_BLOCK_AT"));
+    }
+
+    #[cfg(feature = "crash-qualification-test-support")]
+    #[test]
+    fn crash_qualification_build_forwards_exact_directive_cut() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[(
+                "RYEOS_DIRECTIVE_TEST_BLOCK_AT",
+                "effect_committed",
+            )]))
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            map.get("RYEOS_DIRECTIVE_TEST_BLOCK_AT").map(String::as_str),
+            Some("effect_committed")
+        );
     }
 
     #[test]
@@ -680,6 +723,26 @@ mod tests {
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("RYEOSD_THREAD_AUTH_TOKEN"));
+
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_PROJECT_STATE_SCOPE",
+                "a".repeat(64),
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ProjectStateScope,
+                },
+            )])
+            .unwrap();
+        let err = EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_PROJECT_STATE_SCOPE",
+                "a".repeat(64),
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ThreadId,
+                },
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("RYEOSD_PROJECT_STATE_SCOPE"));
     }
 
     #[test]

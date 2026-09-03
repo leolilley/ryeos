@@ -16,9 +16,11 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// attributable error — the client holds the shared connection mutex across
 /// the roundtrip, so an unbounded wait silently stalls every later callback
 /// in the process. Generous relative to any healthy control-plane RPC; the
-/// one legitimately unbounded case (an inline dispatch, whose response
-/// arrives only after the leaf settles) opts out via
-/// [`DaemonRpcClient::request_with_timeout`].
+/// calls whose response is itself an authoritative lifecycle boundary opt out
+/// through a dedicated connection: inline dispatch waits for its leaf, while
+/// follow suspension waits for durable cohort and successor handoff. Those
+/// calls remain bounded by admitted execution/cancellation policy rather than
+/// by this transport timer.
 pub const DEFAULT_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
@@ -261,6 +263,22 @@ impl DaemonRpcClient {
         Self::parse_response(&response_bytes, request_id)
     }
 
+    /// One authoritative lifecycle handoff on a dedicated connection.
+    ///
+    /// Once the daemon begins applying such a request, a transport timeout
+    /// cannot distinguish refusal from a durable commit still in progress.
+    /// Returning a timeout would let the runtime terminally fail its caller
+    /// while the daemon later publishes the requested successor or child. The
+    /// connection still reports daemon death/EOF immediately; admitted
+    /// execution and cancellation policy provide the operation's real bound.
+    pub async fn request_authoritative_handoff(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        self.request_dedicated(method, params, None).await
+    }
+
     fn parse_response(response_bytes: &[u8], request_id: u64) -> Result<Value, RpcError> {
         let response: RpcResponseFrame = rmp_serde::from_slice(response_bytes)?;
 
@@ -397,6 +415,37 @@ mod tests {
             "expected Timeout, got: {err:?}"
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn authoritative_handoff_waits_for_the_daemon_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ryeosd.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let req_bytes = framing::recv_frame(&mut stream).await.unwrap();
+            let request: Value = rmp_serde::from_slice(&req_bytes).unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let response = serde_json::json!({
+                "request_id": request["request_id"].clone(),
+                "result": {"phase": "waiting", "child_thread_id": "T-child"}
+            });
+            let bytes = rmp_serde::to_vec_named(&response).unwrap();
+            framing::send_frame(&mut stream, &bytes).await.unwrap();
+        });
+
+        let client = DaemonRpcClient::new(socket_path);
+        let result = client
+            .request_authoritative_handoff(
+                "runtime.spawn_follow_child",
+                serde_json::json!({"thread_id": "T-parent"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["phase"], "waiting");
+        assert_eq!(result["child_thread_id"], "T-child");
+        task.await.unwrap();
     }
 
     #[test]

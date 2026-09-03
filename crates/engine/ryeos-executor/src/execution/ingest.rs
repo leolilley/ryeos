@@ -13,8 +13,30 @@ pub fn ingest_project_tree(
     project_root: &lillux::PinnedDirectory,
     policy: &ProjectSnapshotPolicy,
 ) -> Result<ProjectTree> {
+    ingest_project_tree_with_operational_exclusions(authority, guard, project_root, policy, &[])
+}
+
+/// Capture a daemon-owned execution workspace while omitting operational
+/// shadow roots that were populated from separately admitted realizations.
+/// The exclusions are not author policy and never change source capture;
+/// they prevent mounted/copy-bound inputs from becoming project outputs.
+pub fn ingest_project_tree_with_operational_exclusions(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+    operational_exclusions: &[String],
+) -> Result<ProjectTree> {
     authority.ensure_guard(guard)?;
     policy.validate()?;
+    let mut previous: Option<&str> = None;
+    for exclusion in operational_exclusions {
+        ryeos_state::project_sync::validate_safe_relative_path(exclusion)?;
+        if previous.is_some_and(|value| value >= exclusion.as_str()) {
+            anyhow::bail!("operational project exclusions are not uniquely path-sorted");
+        }
+        previous = Some(exclusion);
+    }
     let matcher = policy.matcher()?;
     let cas = authority.cas_store()?;
     let mut files = std::collections::BTreeMap::new();
@@ -26,7 +48,8 @@ pub fn ingest_project_tree(
         ),
         |relative, is_directory| {
             let rel = canonical_relative_path(relative)?;
-            if ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
+            if is_operationally_excluded(&rel, operational_exclusions)
+                || ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
                 || matcher.is_ignored(&rel)
             {
                 return Ok(true);
@@ -86,6 +109,15 @@ pub fn ingest_project_tree(
     Ok(tree)
 }
 
+fn is_operationally_excluded(path: &str, exclusions: &[String]) -> bool {
+    exclusions.iter().any(|root| {
+        path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
+}
+
 fn canonical_relative_path(relative: &Path) -> Result<String> {
     let value = relative
         .to_str()
@@ -122,4 +154,24 @@ pub fn materialize_project_file(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_operationally_excluded;
+
+    #[test]
+    fn operational_shadow_roots_match_only_segment_bounded_descendants() {
+        let exclusions = vec!["vendor/runtime".to_string()];
+        assert!(is_operationally_excluded("vendor/runtime", &exclusions));
+        assert!(is_operationally_excluded(
+            "vendor/runtime/lib/module.py",
+            &exclusions
+        ));
+        assert!(!is_operationally_excluded(
+            "vendor/runtime-extra/module.py",
+            &exclusions
+        ));
+        assert!(!is_operationally_excluded("vendor", &exclusions));
+    }
 }

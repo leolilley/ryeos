@@ -6,7 +6,7 @@
 //! 2. Verify trust chain (signature + content hash).
 //! 3. Extract endpoint + required_caps from verified metadata.
 //! 4. Check availability for this mode (DaemonOnly + Standalone → error,
-//!    OfflineOnly + Live → error).
+//!    StoppedNodeOnly + Live → error).
 //! 5. **Live mode only:** enforce caps (AND semantics — all required caps
 //!    must be in caller scopes).
 //! 6. Dispatch to handler in the registry.
@@ -139,6 +139,29 @@ pub fn mint_service_invocation_id() -> String {
         lillux::time::timestamp_millis(),
         rand::random::<u32>()
     )
+}
+
+/// Validate the correlation coordinate minted for an in-process service
+/// execution. Service invocations are audit threads, but they intentionally do
+/// not claim the runtime `T-...` identity class.
+pub fn validate_service_invocation_id(value: &str) -> anyhow::Result<()> {
+    let body = value
+        .strip_prefix("svc-")
+        .ok_or_else(|| anyhow::anyhow!("service invocation id must start with `svc-`"))?;
+    let (millis, nonce) = body
+        .rsplit_once('-')
+        .ok_or_else(|| anyhow::anyhow!("service invocation id is missing its nonce"))?;
+    if !(10..=20).contains(&millis.len()) || !millis.bytes().all(|byte| byte.is_ascii_digit()) {
+        anyhow::bail!("service invocation id has an invalid timestamp");
+    }
+    if nonce.len() != 8
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("service invocation id has an invalid nonce");
+    }
+    Ok(())
 }
 
 struct RecordedServiceTerminalGuard {
@@ -276,27 +299,26 @@ fn select_service_handler_context(
             }),
         ryeos_app::service_registry::UiDispatchMode::Verified => {
             if let Some(context) = local_handler_context {
-                let mut expected_scopes = scopes.to_vec();
-                expected_scopes.sort();
-                expected_scopes.dedup();
-                let mut supplied_scopes = context.scopes.clone();
-                supplied_scopes.sort();
-                supplied_scopes.dedup();
-                if context.fingerprint != principal
-                    || supplied_scopes != expected_scopes
-                    || context.execution_origin(current_site_id) != origin_site_id
-                {
-                    bail!(
-                        "trusted service handler context differs from the sealed execution principal/scopes/origin"
-                    );
-                }
+                context
+                    .validate_execution_authority(
+                        principal,
+                        scopes,
+                        current_site_id,
+                        origin_site_id,
+                    )
+                    .context(
+                        "trusted service handler context differs from sealed execution authority",
+                    )?;
                 Ok(context)
             } else {
-                Ok(ryeos_app::handler_context::HandlerContext::new_with_origin(
+                // Node-internal launches have an execution principal but no
+                // cryptographically authenticated handler boundary. Preserve
+                // that distinction; never reconstruct `verified: true` from a
+                // sealed principal string.
+                Ok(ryeos_app::handler_context::HandlerContext::new(
                     principal.to_string(),
                     scopes.to_vec(),
-                    true,
-                    (origin_site_id != current_site_id).then(|| origin_site_id.to_string()),
+                    false,
                 ))
             }
         }
@@ -344,16 +366,97 @@ fn confirm_recorded_service_terminal(
     if snapshot.budget.is_some() {
         bail!("authoritative terminal final_cost is unexpectedly present");
     }
-    if snapshot
-        .facets
-        .contains_key("runtime.terminal_envelope_json")
-    {
+    if snapshot.managed_runtime_terminal.is_some() {
         bail!("authoritative managed terminal envelope is unexpectedly present");
     }
     if !snapshot.artifacts.is_empty() {
         bail!("terminal artifacts are unexpectedly present");
     }
     Ok(())
+}
+
+/// Build the exact daemon-owned terminal that the recorded service path will
+/// commit. The handler's live result remains untouched for its caller; only
+/// this durable terminal projection applies the frozen, kind-declared policy.
+fn recorded_service_terminal_projection(
+    thread_id: &str,
+    dispatch_result: &Result<Value>,
+    result_policy: &ryeos_engine::history_policy::ResolvedThreadResultPolicy,
+) -> (
+    ryeos_app::thread_lifecycle::ThreadFinalizeParams,
+    Option<anyhow::Error>,
+) {
+    let (durable_result, durable_error, result_retention_error) = match dispatch_result {
+        Ok(value) => {
+            match ryeos_app::thread_lifecycle::retained_thread_result(value, result_policy) {
+                Ok(value) => (Some(value), None, None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(recording_integrity(format!(
+                        "apply admitted durable-result policy: {error:#}"
+                    ))),
+                ),
+            }
+        }
+        Err(error) => {
+            let live_error = match ryeos_app::handler_error::extract_handler_error(error) {
+                Some(ryeos_app::handler_error::HandlerError::Structured { body, .. }) => body,
+                _ => serde_json::json!({ "error": error.to_string() }),
+            };
+            match ryeos_app::thread_lifecycle::retained_thread_error(&live_error, result_policy) {
+                Ok(value) => (None, Some(value), None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(recording_integrity(format!(
+                        "apply admitted durable-error policy: {error:#}"
+                    ))),
+                ),
+            }
+        }
+    };
+
+    let terminal = match (dispatch_result, &result_retention_error) {
+        (Ok(_), None) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread_id.to_owned(),
+            status: "completed".to_string(),
+            outcome_code: Some("success".to_string()),
+            result: durable_result,
+            error: None,
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        },
+        (Ok(_), Some(error)) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread_id.to_owned(),
+            status: "failed".to_string(),
+            outcome_code: Some("result_retention_failed".to_string()),
+            result: None,
+            error: Some(serde_json::json!({ "error": error.to_string() })),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        },
+        (Err(_), _) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread_id.to_owned(),
+            status: "failed".to_string(),
+            outcome_code: Some("handler_error".to_string()),
+            result: None,
+            error: durable_error.or_else(|| {
+                Some(serde_json::json!({
+                    "error": "durable error retention failed"
+                }))
+            }),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        },
+    };
+    (terminal, result_retention_error)
 }
 
 /// Commit and confirm a recorded service outcome before allowing the handler
@@ -513,6 +616,7 @@ pub async fn execute_service(
         recording,
         None,
         None,
+        None,
     )
     .await
 }
@@ -530,6 +634,12 @@ pub async fn execute_service(
 /// from the very first lifecycle event onward. When `None`, a fresh
 /// `svc-<ts>-<rand>` id is minted as before.
 ///
+/// `admitted_root`: the exact synchronous root admission produced by generic
+/// dispatch preflight. When the service is recorded, the in-process terminator
+/// verifies and persists that admission; it never recompiles authority from
+/// mutable state. Authored hot-read services do not create a thread and
+/// therefore do not consume a root admission.
+///
 /// `local_handler_context` is trusted out-of-band context supplied by a local
 /// transport. Session-local services require it. Ordinary verified services
 /// may receive it only when its fingerprint/scopes exactly match `ctx`; this
@@ -546,6 +656,7 @@ pub async fn execute_service_verified(
     ctx: &ExecutionContext,
     state: &AppState,
     recording: ServiceRecordingContext<'_>,
+    admitted_root: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     pre_minted_thread_id: Option<&str>,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<ServiceExecutionResult> {
@@ -586,9 +697,9 @@ pub async fn execute_service_verified(
         (ExecutionMode::Standalone, ServiceAvailability::DaemonOnly) => {
             bail!("{service_ref} is DaemonOnly; start the daemon and call /execute");
         }
-        (ExecutionMode::Live, ServiceAvailability::OfflineOnly) => {
+        (ExecutionMode::Live, ServiceAvailability::StoppedNodeOnly) => {
             bail!(
-                "{service_ref} is OfflineOnly; engine reload not implemented; \
+                "{service_ref} requires stopped-node authority; engine reload is unavailable; \
                  run `ryeosd run-service {service_ref}` while daemon is stopped"
             );
         }
@@ -638,75 +749,117 @@ pub async fn execute_service_verified(
             )
         })?;
 
-    // Decide recording before deriving persistence-only project authority.
-    // `UnrecordedOnly` is an assertion by the caller, not a way to override a
-    // verified service's recording contract.
-    let project_binding = match (&recording.authority_source, record_thread) {
-        (ServiceRecordingAuthoritySource::Execution { provenance }, true) => Some(
-            ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
-                &ctx.engine,
-                &ctx.plan_ctx,
-                provenance,
-            )?,
-        ),
-        (ServiceRecordingAuthoritySource::Execution { .. }, false) => None,
-        (ServiceRecordingAuthoritySource::ExplicitProjectless, should_record) => {
-            if !matches!(
-                &ctx.plan_ctx.project_context,
-                ryeos_engine::contracts::ProjectContext::None
-            ) {
-                bail!("explicit projectless service authority requires no project context");
+    // A preflighted runtime action carries the exact root admission that
+    // minted its child identity. Consume that authority directly instead of
+    // resolving mutable project/bundle state again at the in-process
+    // terminator. Other service surfaces still compile their admission here.
+    let recorded_root_admission = if !record_thread {
+        None
+    } else if let Some(root_admission) = admitted_root {
+        root_admission.ensure_matches_plan_context(&ctx.engine, &ctx.plan_ctx)?;
+        root_admission.ensure_matches_subject(&ctx.engine, &verified, &thread_profile)?;
+        root_admission.ensure_matches_usage_attribution(
+            recording.usage_subject,
+            recording.usage_subject_asserted_by,
+        )?;
+        match &recording.authority_source {
+            ServiceRecordingAuthoritySource::Execution { provenance } => {
+                root_admission.ensure_matches_provenance(provenance)?;
             }
-            if should_record {
-                Some(
-                    ryeos_app::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
-                        &ctx.engine,
+            ServiceRecordingAuthoritySource::ExplicitProjectless => {
+                if !matches!(
+                    &ctx.plan_ctx.project_context,
+                    ryeos_engine::contracts::ProjectContext::None
+                ) {
+                    bail!("explicit projectless service authority requires no project context");
+                }
+            }
+            ServiceRecordingAuthoritySource::UnrecordedOnly => {
+                return Err(recording_integrity(format!(
+                    "caller asserted unrecorded-only execution for admitted service root `{service_ref}`"
+                )));
+            }
+        }
+        Some(root_admission)
+    } else {
+        // Decide recording before deriving persistence-only project authority.
+        // `UnrecordedOnly` is an assertion by the caller, not a way to
+        // override a verified service's recording contract.
+        let project_binding = match (&recording.authority_source, record_thread) {
+            (ServiceRecordingAuthoritySource::Execution { provenance }, true) => Some(
+                ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    provenance,
+                )?,
+            ),
+            (ServiceRecordingAuthoritySource::Execution { .. }, false) => None,
+            (ServiceRecordingAuthoritySource::ExplicitProjectless, should_record) => {
+                if !matches!(
+                    &ctx.plan_ctx.project_context,
+                    ryeos_engine::contracts::ProjectContext::None
+                ) {
+                    bail!("explicit projectless service authority requires no project context");
+                }
+                if should_record {
+                    Some(
+                        ryeos_app::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
+                            &ctx.engine,
+                            &ctx.plan_ctx,
+                        )?,
+                    )
+                } else {
+                    None
+                }
+            }
+            (ServiceRecordingAuthoritySource::UnrecordedOnly, true) => {
+                return Err(recording_integrity(format!(
+                    "caller asserted unrecorded-only execution for recorded service `{service_ref}`"
+                )));
+            }
+            (ServiceRecordingAuthoritySource::UnrecordedOnly, false) => None,
+        };
+        match project_binding {
+            Some(project_binding) => {
+                let admitted_request_snapshot =
+                    project_binding.admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)?;
+                let verified_attestation = match admitted_request_snapshot.as_ref() {
+                    Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
                         &ctx.plan_ctx,
-                    )?,
-                )
-            } else {
-                None
+                        &verified.resolved.canonical_ref,
+                        project_binding.execution_workspace().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "content-addressed recorded service has no execution workspace"
+                            )
+                        })?,
+                        authority,
+                    ),
+                    None => ctx
+                        .engine
+                        .verify_attested(&ctx.plan_ctx, verified.resolved.clone()),
+                }
+                .map_err(|error| {
+                    anyhow::anyhow!("attest recorded service subject before persistence: {error}")
+                })?;
+                Some(ryeos_app::thread_lifecycle::admit_verified_root_execution(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    &ctx.plan_ctx,
+                    project_binding,
+                    verified_attestation,
+                    state.node_history_policy()?,
+                    thread_profile,
+                    std::collections::BTreeMap::new(),
+                    recording.usage_subject.cloned(),
+                    recording.usage_subject_asserted_by.map(str::to_owned),
+                )?)
             }
+            None => None,
         }
-        (ServiceRecordingAuthoritySource::UnrecordedOnly, true) => {
-            return Err(recording_integrity(format!(
-                "caller asserted unrecorded-only execution for recorded service `{service_ref}`"
-            )));
-        }
-        (ServiceRecordingAuthoritySource::UnrecordedOnly, false) => None,
     };
 
-    let dispatch_result = if let Some(project_binding) = project_binding {
-        let admitted_request_snapshot =
-            project_binding.admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)?;
-        let verified_attestation = match admitted_request_snapshot.as_ref() {
-            Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
-                &ctx.plan_ctx,
-                &verified.resolved.canonical_ref,
-                project_binding.execution_workspace().ok_or_else(|| {
-                    anyhow::anyhow!("content-addressed recorded service has no execution workspace")
-                })?,
-                authority,
-            ),
-            None => ctx
-                .engine
-                .verify_attested(&ctx.plan_ctx, verified.resolved.clone()),
-        }
-        .map_err(|error| {
-            anyhow::anyhow!("attest recorded service subject before persistence: {error}")
-        })?;
-        let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
-            &ctx.engine,
-            &ctx.plan_ctx,
-            &ctx.plan_ctx,
-            project_binding,
-            verified_attestation,
-            &state.node_history_policy,
-            thread_profile,
-            std::collections::BTreeMap::new(),
-            recording.usage_subject.cloned(),
-            recording.usage_subject_asserted_by.map(str::to_owned),
-        )?;
+    let dispatch_result = if let Some(root_admission) = recorded_root_admission {
+        let result_policy = root_admission.resolved_result_policy().clone();
         let recorded_admission = ryeos_app::thread_lifecycle::RecordedServiceAdmission::new(
             root_admission,
             endpoint.clone(),
@@ -766,38 +919,11 @@ pub async fn execute_service_verified(
             }
             .await;
 
-            let terminal = match &dispatch_result {
-                Ok(value) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: task_invocation_id.clone(),
-                    status: "completed".to_string(),
-                    outcome_code: Some("success".to_string()),
-                    result: Some(value.clone()),
-                    error: None,
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-                Err(error) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: task_invocation_id.clone(),
-                    status: "failed".to_string(),
-                    outcome_code: Some("handler_error".to_string()),
-                    result: None,
-                    error: Some(
-                        match ryeos_app::handler_error::extract_handler_error(error) {
-                            Some(ryeos_app::handler_error::HandlerError::Structured {
-                                body,
-                                ..
-                            }) => body,
-                            _ => serde_json::json!({ "error": error.to_string() }),
-                        },
-                    ),
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-            };
+            let (terminal, result_retention_error) = recorded_service_terminal_projection(
+                &task_invocation_id,
+                &dispatch_result,
+                &result_policy,
+            );
             lifecycle_guard.record_completed_handler_terminal(&terminal);
             let terminal_confirmation =
                 finalize_recorded_service_exact(&task_state, lifecycle_guard.owner(), &terminal);
@@ -838,6 +964,9 @@ pub async fn execute_service_verified(
             }
 
             terminal_confirmation?;
+            if let Some(error) = result_retention_error {
+                return Err(error);
+            }
             dispatch_result
         });
 
@@ -928,6 +1057,84 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn service_invocation_identity_is_a_distinct_strict_coordinate() {
+        let minted = mint_service_invocation_id();
+        validate_service_invocation_id(&minted).unwrap();
+        for invalid in [
+            "T-runtime-thread",
+            "svc-short-deadbeef",
+            "svc-1787790000000-DEADBEEF",
+            "svc-1787790000000-deadbee",
+            "svc-1787790000000-deadbeef-extra",
+        ] {
+            assert!(
+                validate_service_invocation_id(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    fn digest_only_result_policy() -> ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+        ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::DigestOnly,
+            canonical_item_ref: "service:test/sensitive".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::ItemAuthored {
+                composed_path: "result_retention".to_string(),
+                effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            },
+        }
+    }
+
+    #[test]
+    fn recorded_service_terminal_applies_digest_only_to_success_and_failure() {
+        let policy = digest_only_result_policy();
+        let live_success = serde_json::json!({
+            "userCode":"SERVICE-SUCCESS-SECRET",
+            "verificationUri":"https://example.invalid"
+        });
+        let success: Result<Value> = Ok(live_success.clone());
+        let (terminal, retention_error) =
+            recorded_service_terminal_projection("thread:test", &success, &policy);
+        assert!(retention_error.is_none());
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(
+            terminal.result.as_ref().unwrap()["kind"],
+            "ryeos.digest_only_result"
+        );
+        assert!(
+            !serde_json::to_string(&terminal.result)
+                .unwrap()
+                .contains("SERVICE-SUCCESS-SECRET")
+        );
+        assert_eq!(success.unwrap(), live_success, "live result is unchanged");
+
+        let failure: Result<Value> = Err(anyhow::anyhow!("SERVICE-FAILURE-SECRET"));
+        let (terminal, retention_error) =
+            recorded_service_terminal_projection("thread:test", &failure, &policy);
+        assert!(retention_error.is_none());
+        assert_eq!(terminal.status, "failed");
+        assert_eq!(
+            terminal.error.as_ref().unwrap()["kind"],
+            "ryeos.digest_only_error"
+        );
+        assert!(
+            !serde_json::to_string(&terminal.error)
+                .unwrap()
+                .contains("SERVICE-FAILURE-SECRET")
+        );
+        assert!(
+            failure
+                .unwrap_err()
+                .to_string()
+                .contains("SERVICE-FAILURE-SECRET")
+        );
+    }
+
+    #[test]
     fn availability_unknown_is_error() {
         // Empty descriptor table — any endpoint is "unknown".
         assert!(availability_for_endpoint(&[], "future.service").is_err());
@@ -989,6 +1196,35 @@ mod tests {
     }
 
     #[test]
+    fn verified_dispatch_preserves_the_supplied_authorized_key_class() {
+        let metadata = HashMap::from([("ui_dispatch".to_string(), serde_json::json!("verified"))]);
+        let supplied = ryeos_app::handler_context::HandlerContext::new_with_authority(
+            "fp:operator".to_string(),
+            vec!["cap:verified".to_string()],
+            true,
+            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some("site:source".to_string()),
+        );
+        let selected = select_service_handler_context(
+            &metadata,
+            Some(supplied),
+            "fp:operator",
+            &["cap:verified".to_string()],
+            "site:target",
+            "site:source",
+        )
+        .unwrap();
+        assert_eq!(
+            selected.authorized_key_class,
+            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+        );
+        assert_eq!(
+            selected.authenticated_origin_site_id.as_deref(),
+            Some("site:source")
+        );
+    }
+
+    #[test]
     fn verified_dispatch_rejects_a_handler_context_with_different_identity() {
         let metadata = HashMap::new();
         let supplied = ryeos_app::handler_context::HandlerContext::new(
@@ -1027,5 +1263,23 @@ mod tests {
         assert_eq!(selected.fingerprint, "");
         assert!(selected.scopes.is_empty());
         assert!(!selected.verified);
+    }
+
+    #[test]
+    fn verified_service_without_ingress_context_remains_unverified() {
+        let selected = select_service_handler_context(
+            &HashMap::new(),
+            None,
+            "machine:scheduled",
+            &["service.read".to_string()],
+            "site:local",
+            "site:local",
+        )
+        .expect("node-internal service context");
+        assert_eq!(selected.fingerprint, "machine:scheduled");
+        assert_eq!(selected.scopes, vec!["service.read"]);
+        assert!(!selected.verified);
+        assert!(selected.authorized_key_class.is_none());
+        assert!(selected.authenticated_origin_site_id.is_none());
     }
 }

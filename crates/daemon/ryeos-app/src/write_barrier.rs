@@ -17,6 +17,14 @@ const NORMAL: u8 = 0;
 const QUIESCING: u8 = 1;
 const QUIESCED: u8 = 2;
 
+/// Bound on how long a request-time write waits out a GC quiesce window
+/// before failing.
+///
+/// Long enough to ride out an ordinary maintenance commit pause, short
+/// enough that a stuck barrier turns into a loud failure rather than a
+/// hung request.
+pub const ONLINE_WRITE_PERMIT_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// RAII guard representing an active write permit.
 ///
 /// While held, GC cannot quiesce. Released on drop.
@@ -114,6 +122,37 @@ impl WriteBarrier {
                 bail!("write barrier is quiescing/quiesced, cannot acquire write permit");
             }
             _ => bail!("write barrier in unknown state: {state}"),
+        }
+    }
+
+    /// Acquire a write permit, waiting up to `timeout` for a quiesce window
+    /// to end.
+    ///
+    /// A request-time write observing GC's brief quiesce should outwait it
+    /// rather than fail; an ordinary maintenance window clears within this
+    /// bound, and a genuinely stuck barrier still fails loudly.
+    ///
+    /// Deliberately synchronous even for async callers: every acquiring
+    /// section holds the non-Send CAS mutation guard and blocks on real
+    /// I/O anyway, and a bounded sleep-poll cannot poison a spawned
+    /// future's Send bound the way an await point here would.
+    pub fn acquire_with_timeout(&self, timeout: Duration) -> Result<WritePermit> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            match self.try_acquire() {
+                Ok(permit) => return Ok(permit),
+                Err(error) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(error.context(format!(
+                            "write permit did not become available within {timeout:?}"
+                        )));
+                    }
+                    std::thread::sleep(backoff.min(remaining));
+                    backoff = backoff.saturating_mul(2).min(Duration::from_millis(25));
+                }
+            }
         }
     }
 
@@ -306,5 +345,41 @@ mod tests {
             assert!(!barrier.is_quiesced());
             let _permit2 = barrier.try_acquire().unwrap();
         });
+    }
+
+    #[test]
+    fn acquire_with_timeout_outwaits_a_quiesce_window() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let barrier = WriteBarrier::new();
+        rt.block_on(barrier.quiesce(Duration::from_millis(100)))
+            .unwrap();
+        assert!(barrier.is_quiesced());
+
+        let resumer = barrier.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            resumer.resume();
+        });
+        let permit = barrier.acquire_with_timeout(Duration::from_secs(2));
+        handle.join().unwrap();
+        assert!(permit.is_ok());
+        assert_eq!(barrier.active_writers(), 1);
+    }
+
+    #[test]
+    fn acquire_with_timeout_fails_while_quiesce_holds() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let barrier = WriteBarrier::new();
+        rt.block_on(barrier.quiesce(Duration::from_millis(100)))
+            .unwrap();
+
+        assert!(
+            barrier
+                .acquire_with_timeout(Duration::from_millis(30))
+                .is_err()
+        );
+
+        barrier.resume();
+        assert!(barrier.try_acquire().is_ok());
     }
 }

@@ -693,19 +693,10 @@ pub(crate) fn read_item_body(path: &std::path::Path) -> Option<String> {
     Some(lillux::signature::strip_signature_lines(&raw))
 }
 
-/// Parse one already-verified graph body through the same structural collector
-/// used by the live project topology. No path resolution or mutable item lookup
-/// occurs here; callers must establish the exact source identity first.
-pub(crate) fn build_exact_graph_topology(
+pub(crate) fn build_effective_graph_topology(
     canonical_ref: &str,
-    raw_content: &str,
-    extension: &str,
+    composed: &Value,
 ) -> Result<TopologyGraph> {
-    let value: Value = match extension.trim_start_matches('.') {
-        "yaml" | "yml" => serde_yaml::from_str(raw_content)?,
-        "json" => serde_json::from_str(raw_content)?,
-        other => anyhow::bail!("unsupported exact graph source extension `{other}`"),
-    };
     let parsed = CanonicalRef::parse(canonical_ref)
         .map_err(|error| anyhow::anyhow!("invalid exact graph ref `{canonical_ref}`: {error}"))?;
     if parsed.kind != "graph" {
@@ -724,7 +715,7 @@ pub(crate) fn build_exact_graph_topology(
         missing: false,
         status: Some(NodeStatus {
             resolved: true,
-            composed: None,
+            composed: Some(true),
             executable: true,
         }),
         trust: None,
@@ -732,7 +723,7 @@ pub(crate) fn build_exact_graph_topology(
     add_workflow_definition_edges(
         &mut builder,
         canonical_ref,
-        &value,
+        composed,
         std::path::Path::new("<admitted-program>"),
     );
     Ok(builder.finish(TopologyMetadata {

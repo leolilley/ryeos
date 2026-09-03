@@ -1,17 +1,24 @@
-<!-- ryeos:signed:2026-07-28T23:59:20Z:4d5fe0d29bab251b0fa53a3de4fd00495e64d457934f2aef82a16a0670a50fab:TyxFz2gW3tEcY86pzCuNBqLPWrrT8nSFMOua6gdN+BWvY7Pl7Gysi2x64YsGaum0PILCgBobsrCBf3kN9VOeAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-01T20:42:16Z:cdbe689fda8273ace4e676e285019581983e873db68aa4b08a6359e21d021328:0LNhXf0eWhzNEHwhpYM8JeL44pu3kDHbOO98Rw9t4hmM3s5IdaH71KaDziyvx8cnTVIgYZMetjzc0vMjwirMDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "dev-workflow"
 title: "Development Workflow"
 description: "Short LLM-facing guide for choosing the right RyeOS dev workflow"
 entry_type: reference
-version: "1.3.0"
+version: "1.3.2"
 ```
 
 # Development Workflow
 
+This directory is repository-contributor knowledge: it exists to help people
+and coding agents change, test, sign, review, and release the RyeOS project.
+Installed product architecture and operator runbooks belong in bundle knowledge,
+normally under `bundles/standard/.ai/knowledge/`.
+
 Use this when an agent needs orientation before changing code. For exact build,
 signing, and install commands, prefer `development/build-and-test.md`.
+For a stronger operator-controlled host plus authenticated RyeOS workload
+qualification, use `development/remote-development-and-qualification.md`.
 
 ## Pick the loop
 

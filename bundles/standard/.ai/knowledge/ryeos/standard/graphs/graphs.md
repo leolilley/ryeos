@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-04T08:52:12Z:02f20547012c801759541916ce9aefb632859dc02736faebe1f4b561d27a4cf8:Ntja3qkolvAkpTtH5Wx+UIaPc2CLFrdTNY0K/wKnmdBTdKGXX2yp9R3BPMMDjZMfTp2SSOrOcpmcnR9eOKTHDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-19T09:42:33Z:07be3ebf7a07eb65e96494e5bcb8343f9c225cfbc7004288763e56b5e0b3b3aa:zwcvwZAb0cbxRui58w2g9ntxnE8jvqubk3ugZJlMHOiy0D9l4xqDWptlECTbFNA2Vspaasezj/5F3iuojsysDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   How state graphs work — YAML DAG definitions, node types,
   conditional edges, foreach, hooks, and state persistence.
@@ -49,6 +49,28 @@ config:
       output: "${state.context}"
 ```
 
+## Inheritance and the executable graph
+
+Graphs may `extend` another graph. Every child still declares its own
+`version` and `category`. The generic extends-chain composer processes the
+deepest ancestor first and applies these rules:
+
+- omitted `config` keys inherit;
+- a declared `config` key replaces that complete inherited value;
+- `nodes` and `hooks` are never recursively or ID-wise merged;
+- `requires.capabilities` can only narrow at each direct parent/child edge;
+- `hooks: []` explicitly clears the inherited authored hook list.
+
+This shallow rule makes graph reuse predictable: a child may inherit a whole
+topology and change `max_steps`, but declaring `nodes` supplies the complete
+effective node mapping. After composition, the signed graph validator proves
+that `start`, every edge and error target, expressions, retry policy, hooks,
+and capability facts are coherent.
+
+The result in `LaunchEnvelope.resolution.composed.composed` is the executable
+graph. The runtime never reconstructs behavior from the root file or reopens
+ancestor paths. Root and ancestor bytes remain visible provenance.
+
 ## Nodes
 
 Each node has:
@@ -71,6 +93,51 @@ action:
   item_id: "directive:my/review"     # Execute a directive
   params: { scope: "full" }
 ```
+
+An action result may propose authoritative, meaning-blind project observations:
+
+```json
+{
+  "project_observations": [{
+    "namespace": "example.classification",
+    "stable_id": "classification:subject-1",
+    "payload": {"status": "accepted"}
+  }]
+}
+```
+
+When the graph already has every claimed value, author the same bounded
+request directly on the action node instead of dispatching an observation-only
+tool or hook:
+
+```yaml
+classify:
+  action: {item_id: "tool:my/classify", params: {subject: "${inputs.subject}"}}
+  project_observations:
+    - namespace: example.classification
+      stable_id: "classification:${inputs.subject}"
+      payload:
+        status: "${result.status}"
+        graph_run_id: "${run.graph_run_id}"
+```
+
+The field is valid only on an ordinary action node. It renders from the same
+pre-assignment `state`, `inputs`, successful `result`, `dispatch`, and `run`
+context as `assign`, and it does not launch a second child. Use a hook when an
+independent observer must execute or derive new evidence; do not use one merely
+to repackage values already accepted at the node fence.
+
+Graph-authored requests remain behind successful assignment and branch
+evaluation. Action-returned requests retain the existing dispatch-observation
+fence. On a successful action their combined list may contain at most 256
+entries. The daemon supplies the chain and admitted graph
+definition/effective digest, derives the durable observation identity, and
+refuses ordinary runtime append of the reserved event kind. A byte-identical
+retry returns the original event; reusing the same source-scoped stable ID with
+different payload or occurrence fails the graph commit. The field therefore
+projects one selectable entity across a crash/retry. This boundary is for
+accepted project claims, not progress telemetry; use milestones for advisory
+status.
 
 ### Edge Conditions
 
@@ -167,24 +234,28 @@ review_all:
     item_id: "directive:example/review"
     params:
       subject: "${subject}"
-      run_id: "${_run.graph_run_id}"
-  facets: {cohort: "${_run.graph_run_id}", subject: "${subject}"}
+      run_id: "${run.graph_run_id}"
+  facets: {cohort: "${run.graph_run_id}", subject: "${subject}"}
   collect: reviews
+  collect_threads: review_threads
   on_error: handle-failure
   next: {type: unconditional, to: finish}
 ```
 
-This cohort form requires `as` and `parallel: true`; `collect`, when present,
-must differ from `as`, and the node must not declare `assign`, `retry`, caching,
-or `detach`. `max_concurrency`, when set, must be between 1 and 256 and bounds
-launched-and-live child chains.
-Collection is input-ordered and failed slots are `null`. Under `continue`, the
-ordered collection commits; an explicit redirect or failure discards the
-candidate collection. An empty input succeeds with `[]`. Actions, params, and
-facets render per item, including `${_run.graph_run_id}`. The parent's effective
-capabilities and hard limits bound every child. The complete rendered launch
-cohort is also held to one rye-expr/1 JSON result budget; exceeding it fails the
-node before suspension or daemon handoff. See
+This cohort form requires `as` and `parallel: true`; `collect` and
+`collect_threads`, when present, must use distinct state keys and differ from
+`as`, and the node must not declare `assign`, `retry`, caching, or `detach`.
+`max_concurrency`, when set, must be between 1 and 256 and bounds
+launched-and-live child chains. Result collection is input-ordered and failed
+slots are `null`. `collect_threads` independently records the exact daemon-owned
+terminal thread id for every aligned child chain, including a failed child;
+it does not alter the child's return value. Under `continue`, both ordered
+collections commit atomically; an explicit redirect or failure discards both.
+An empty input contributes `[]` to every declared collection. Actions, params,
+and facets render per item, including `${run.graph_run_id}`. The parent's
+effective capabilities and hard limits bound every child. The complete rendered
+launch cohort is also held to one rye-expr/1 JSON result budget; exceeding it
+fails the node before suspension or daemon handoff. See
 `graphs/follow.md` for capability wildcard examples, cancellation/resume
 behavior, and a complete authoring example.
 
@@ -208,17 +279,25 @@ Fire points are `graph_started`, `graph_step_completed` (after every node,
 with typed `ok`, `error`, or `retry` status), and `graph_completed`.
 Each event exposes an exact root schema; unknown hook events and references to
 roots outside that event fail graph loading.
-Every hook declares its successful leaf policy: `discard`, `control`, or
-`observation`. Graph hooks use `discard` for side-effect observers or
-`observation` for a bounded namespaced `{kind, payload}` record; their return
-value never redirects the graph.
-Hooks are **observers**: a hook action is a real dispatch (its `effective_caps`
-are enforced, its cost accrues to the run, it shows in the braid) but it cannot
+Every graph hook declares either `discard` for a side-effect observer or
+`observation` for a bounded namespaced `{kind, payload}` record. `control` is
+rejected for graph hooks at admission; a hook return value never redirects the
+graph.
+Hooks are **observers**: a hook action is a real dispatch, its cost accrues to
+the run, and it shows in the braid, but it cannot
 redirect the walk — routing stays the walker's job. Ordinary condition/action
 evaluation or child-dispatch failures are warnings; accounting or integrity
 failures invalidate terminal authority and fail closed. Node-level resilience
 is the node `retry:` block, not a hook action. See `retry-and-hooks.md` for the
-full contract.
+full contract. If an ordinary action already returned the values to record,
+prefer node-level `project_observations`; it shares the action commit fence and
+does not create an observer child.
+
+Before launch, authored hooks and signed builtin, infrastructure, context,
+operator, and project policy are normalized into one captured effective hook
+plan. Authored hooks use the graph's admitted capabilities. A configured hook
+uses only the dispatch grants declared by its own signed source. The runtime
+does not read hook configuration from the filesystem.
 
 ## Execution and durability
 
@@ -227,9 +306,10 @@ produces exactly one outcome, and every outcome is committed through one fence.
 The observable guarantees an author can rely on:
 
 - **The checkpoint is written last.** For an advancing node the durable cursor is
-  written only after that node's events, state mutation, and receipt. A crash
-  anywhere before it leaves the previous checkpoint authoritative, so **the
-  current node re-runs on resume** — never a half-applied node. Events, receipts,
+  written only after that node's events, authoritative project observations,
+  state mutation, and receipt. A crash anywhere before it leaves the previous
+  checkpoint authoritative, so **the current node re-runs on resume** — never a
+  half-applied node. Events, receipts,
   and advancing-step hooks are therefore at-least-once observability; only the
   checkpoint advances resumable state.
 - **`cache_result` is fenced.** An entry becomes visible only after its advancing
@@ -245,14 +325,16 @@ The observable guarantees an author can rely on:
 ### State persistence
 
 The last successfully written versioned checkpoint is the authoritative resume
-cursor. It records graph definition ref/hash, `expression_language:
+cursor. It records graph definition ref, `effective_definition_digest`,
+`expression_language:
 "rye-expr/1"`, current node, state, retry count, accounting, and suppressed
 errors. Resume requires that identity-bearing local checkpoint and the exact
 definition; event replay is not a state reconstruction fallback. An older
 schema or identity/language mismatch fails with
 `restart_required_after_expression_language_cutover` and requires a new run.
-Editing (and re-signing) a graph changes its hash, so a live run cannot be
-edited mid-flight and later resumed — start a new run instead.
+Changing any effective contributor, composed behavior, trust/signer evidence,
+or captured hook policy changes the digest, so a live run cannot resume into
+that different program — start a new run instead.
 
 Receipts, runtime events, transcripts, and artifacts remain durable
 observability, but do not advance resumable state without a later successful
@@ -264,9 +346,11 @@ ordering, the cache fence, segment continuation, and cooperative control — see
 
 ## Permissions
 
-Graph permissions are lifted by the `graph-permissions` composer
-into `policy_facts.effective_caps`. Each node action is checked
-against these capabilities before execution.
+The signed generic composition rules project
+`requires.capabilities.declared` into `policy_facts.effective_caps` and narrow
+it across every inheritance edge. The graph validator proves parity between
+the composed declaration and the policy fact. Each node action is checked
+against the resulting admitted authority before execution.
 
 ## Thread Integration
 

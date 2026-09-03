@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-03T11:56:16Z:824157a30fc86fcb13be9ae63e6d153b875a57bdbe03117cd149298b520720e0:UHGHaMqivAkaBNvX6Y0dB4tpCi9bj3NdsajXMqzxh7L1xv7qJRMVMk08vdE9ytgWE4/n4+HiSBDinrRghmX7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, command-observation]
+description: "Read one exact authoritatively settled structured-session command and turn observation"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: placement_thread_id
+      - field: command_sequence
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/command-observation
+  availability: daemon

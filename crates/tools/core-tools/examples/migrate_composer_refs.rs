@@ -41,10 +41,6 @@ fn main() {
             "ryeos/core/extends_chain",
             "handler:ryeos/core/extends-chain",
         ),
-        (
-            "ryeos/core/graph_permissions",
-            "handler:ryeos/core/graph-permissions",
-        ),
         ("ryeos/core/identity", "handler:ryeos/core/identity"),
     ];
 

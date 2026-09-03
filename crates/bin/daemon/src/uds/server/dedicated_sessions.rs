@@ -1,0 +1,1004 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use ryeos_app::callback_token::CallbackCapability;
+use ryeos_app::runtime_db::{
+    NewDedicatedSession, WorkspaceBinding, WorkspaceRecord, WorkspaceState,
+};
+use ryeos_app::state::AppState;
+use ryeos_executor::execution::persistent_session::ExclusivePersistentSessionIdentity;
+use ryeos_runtime::authorizer::AuthorizationPolicy;
+use ryeos_runtime::callback::{DedicatedSessionCommandRequest, DedicatedSessionStartRequest};
+
+const START_CAPABILITY: &str = "ryeos.runtime.dedicated_session.start";
+const COMMAND_CAPABILITY: &str = "ryeos.runtime.dedicated_session.command";
+const TERMINATE_CAPABILITY: &str = "ryeos.runtime.dedicated_session.terminate";
+
+/// Normalize an internal diagnostic before it crosses the durable session
+/// boundary. Worker stderr may contain newlines and can be much larger than
+/// the database contract; neither property is valid for a terminal reason.
+fn bounded_worker_failure_reason(prefix: &str, detail: &str) -> String {
+    const MAX_BYTES: usize = 2_048;
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let available = MAX_BYTES.saturating_sub(prefix.len());
+    let detail = normalized
+        .chars()
+        .scan(0usize, |bytes, character| {
+            let next = *bytes + character.len_utf8();
+            if next > available {
+                None
+            } else {
+                *bytes = next;
+                Some(character)
+            }
+        })
+        .collect::<String>();
+    format!("{prefix}{detail}").trim().to_owned()
+}
+
+/// Complete the explicit failed-start state machine without replacing the
+/// initiating worker error. Any secondary failure leaves cleanup unproved and
+/// therefore keeps the credential fence in place.
+fn settle_failed_dedicated_worker_start(
+    state: &AppState,
+    placement_thread_id: &str,
+    worker_instance_id: &str,
+    boot_epoch: u64,
+    reason: &str,
+    cleanup_was_proved_before_attachment: bool,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let mut cleanup_proved = cleanup_was_proved_before_attachment;
+    match state.state_store.worker_process(worker_instance_id) {
+        Ok(Some(worker)) => {
+            match ryeos_app::dedicated_session_service::retire_worker_process(
+                state,
+                placement_thread_id,
+                &worker,
+            ) {
+                Ok(cleanup_state) => {
+                    cleanup_proved = cleanup_state == "reaped";
+                    if let Err(error) = state.state_store.settle_worker_process(
+                        worker_instance_id,
+                        placement_thread_id,
+                        boot_epoch,
+                        cleanup_state,
+                        reason,
+                    ) {
+                        cleanup_proved = false;
+                        failures.push(format!("persist worker cleanup: {error:#}"));
+                    }
+                }
+                Err(error) => {
+                    cleanup_proved = false;
+                    failures.push(format!("retire failed worker: {error:#}"));
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            cleanup_proved = false;
+            failures.push(format!("read failed-worker identity: {error:#}"));
+        }
+    }
+    if let Err(error) = state.state_store.fail_dedicated_session_start(
+        placement_thread_id,
+        worker_instance_id,
+        reason,
+        cleanup_proved,
+    ) {
+        failures.push(format!(
+            "persist dedicated-session start failure: {error:#}"
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
+    }
+}
+
+fn release_credential_after_unadmitted_start(
+    state: &AppState,
+    profile_id: &str,
+    worker_instance_id: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match state
+        .state_store
+        .release_credential_profile(profile_id, worker_instance_id)
+    {
+        Ok(()) => error,
+        Err(release) => error.context(format!(
+            "release credential profile after failed worker admission also failed: {release:#}"
+        )),
+    }
+}
+
+fn require_start_authority(state: &AppState, cap: &CallbackCapability) -> Result<()> {
+    state
+        .authorizer
+        .authorize(
+            &cap.effective_caps,
+            &AuthorizationPolicy::require(START_CAPABILITY),
+        )
+        .map_err(|error| anyhow!(error.to_string()))
+}
+
+fn require_command_authority(state: &AppState, cap: &CallbackCapability) -> Result<()> {
+    state
+        .authorizer
+        .authorize(
+            &cap.effective_caps,
+            &AuthorizationPolicy::require(COMMAND_CAPABILITY),
+        )
+        .map_err(|error| anyhow!(error.to_string()))
+}
+
+fn require_terminate_authority(state: &AppState, cap: &CallbackCapability) -> Result<()> {
+    state
+        .authorizer
+        .authorize(
+            &cap.effective_caps,
+            &AuthorizationPolicy::require(TERMINATE_CAPABILITY),
+        )
+        .map_err(|error| anyhow!(error.to_string()))
+}
+
+fn admitted_session_capsule(
+    state: &AppState,
+    thread_id: &str,
+    dependency_ref: &str,
+) -> Result<String> {
+    let launch = state
+        .state_store
+        .admitted_launch_capsule(thread_id)?
+        .ok_or_else(|| anyhow!("thread has no authoritative admitted launch capsule"))?;
+    let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+        prepared_runtime_launch,
+        ..
+    } = launch.execution_closure
+    else {
+        bail!("dedicated session requires a managed runtime launch closure");
+    };
+    let prepared: ryeos_executor::execution::launch_preparation::PreparedRuntimeLaunch =
+        serde_json::from_value(prepared_runtime_launch)
+            .context("decode retained runtime launch authority")?;
+    let mut matches = prepared
+        .execution_dependencies
+        .iter()
+        .filter(|(_, dependency)| dependency.canonical_ref == dependency_ref)
+        .map(|(name, _)| name.as_str());
+    let name = matches
+        .next()
+        .ok_or_else(|| anyhow!("requested dependency was not admitted by this launch"))?;
+    if matches.next().is_some() {
+        bail!("requested dependency ref is ambiguous in the admitted launch");
+    }
+    prepared
+        .admitted_sessions
+        .get(name)
+        .cloned()
+        .ok_or_else(|| anyhow!("admitted dependency has no retained session capsule"))
+}
+
+fn require_structured_session_route_effect_contract(
+    state: &AppState,
+    capsule_hash: &str,
+    route_set: &str,
+    allowed_effect_classes: &[String],
+    recover_upstream_session: bool,
+) -> Result<()> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let value = authority
+        .cas_store()?
+        .get_object(capsule_hash)?
+        .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
+    let capsule =
+        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+    if capsule.content_hash()? != capsule_hash {
+        bail!("admitted session capsule content hash changed");
+    }
+    let profile = capsule
+        .structured_session_profile
+        .ok_or_else(|| anyhow!("structured session capsule has no admitted protocol profile"))?;
+    validate_structured_session_route_effect_contract(
+        &profile.contract,
+        route_set,
+        allowed_effect_classes,
+        recover_upstream_session,
+    )
+}
+
+fn validate_structured_session_route_effect_contract(
+    contract: &Value,
+    route_set: &str,
+    allowed_effect_classes: &[String],
+    recover_upstream_session: bool,
+) -> Result<()> {
+    let object = contract
+        .as_object()
+        .ok_or_else(|| anyhow!("admitted structured-session contract is not an object"))?;
+    let selected_routes = object
+        .get("route_sets")
+        .and_then(Value::as_object)
+        .and_then(|sets| sets.get(route_set))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!("worker execution selects an unknown structured-session route set")
+        })?;
+    let routes = object
+        .get("routes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("admitted structured-session contract has no route table"))?;
+    let route_effects = routes
+        .iter()
+        .map(|route| {
+            let route = route
+                .as_object()
+                .ok_or_else(|| anyhow!("admitted structured-session route is not an object"))?;
+            let id = route
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("admitted structured-session route has no identity"))?;
+            let effect = route
+                .get("effect_class")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("admitted structured-session route has no effect class"))?;
+            Ok((id, effect))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    for route_id in selected_routes {
+        let route_id = route_id
+            .as_str()
+            .ok_or_else(|| anyhow!("admitted structured-session route-set entry is invalid"))?;
+        let effect = route_effects
+            .get(route_id)
+            .ok_or_else(|| anyhow!("admitted structured-session route set lost a route"))?;
+        if !allowed_effect_classes
+            .iter()
+            .any(|allowed| allowed == effect)
+        {
+            bail!(
+                "structured-session route `{route_id}` effect `{effect}` exceeds the root launch ceiling"
+            );
+        }
+    }
+    let initialization = object
+        .get("initialization")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("admitted structured-session contract has no initialization"))?;
+    for step in initialization {
+        let effect = step
+            .get("effect_class")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!("admitted structured-session initialization has no effect class")
+            })?;
+        if !allowed_effect_classes
+            .iter()
+            .any(|allowed| allowed == effect)
+        {
+            bail!(
+                "structured-session initialization effect `{effect}` exceeds the root launch ceiling"
+            );
+        }
+    }
+    if recover_upstream_session {
+        let recovery = object
+            .get("recovery")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                anyhow!(
+                    "worker execution enables upstream recovery but the admitted protocol does not"
+                )
+            })?;
+        let recovery_route_sets = recovery
+            .get("route_sets")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("admitted structured-session recovery has no route sets"))?;
+        if !recovery_route_sets
+            .iter()
+            .any(|candidate| candidate.as_str() == Some(route_set))
+        {
+            bail!(
+                "worker execution enables upstream recovery for a route set not admitted by the protocol"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn scratch_home_id(thread_id: &str) -> String {
+    let digest = lillux::cas::sha256_hex(thread_id.as_bytes());
+    format!("scratch-{}", &digest[..32])
+}
+
+fn create_dedicated_runtime_workspace(
+    state: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    launch_owner: &str,
+) -> Result<WorkspaceRecord> {
+    let base_snapshot = lillux::cas::sha256_hex(&[]);
+    let (project, guard) = ryeos_app::temp_dir_guard::create_runtime_workspace(
+        &state.config.runtime_root().cache(),
+        workspace_id,
+    )?;
+    let root = project
+        .parent()
+        .ok_or_else(|| anyhow!("runtime workspace project has no root"))?;
+    let layout =
+        ryeos_executor::execution::workspace::WorkspaceLayout::from_root(root.to_path_buf());
+    state.state_store.reserve_execution_workspace(
+        workspace_id,
+        &base_snapshot,
+        root.to_str()
+            .ok_or_else(|| anyhow!("runtime workspace path is not UTF-8"))?,
+    )?;
+    guard.preserve_for_explicit_cleanup();
+    state.state_store.transition_execution_workspace(
+        workspace_id,
+        &[WorkspaceState::Reserved],
+        WorkspaceState::Constructing,
+        None,
+    )?;
+    state.state_store.claim_execution_workspace_construction(
+        workspace_id,
+        thread_id,
+        launch_owner,
+    )?;
+    let (backend_id, backend_version) = state
+        .isolation
+        .workspace_backend_identity()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    state.state_store.prepare_execution_workspace_backend(
+        workspace_id,
+        thread_id,
+        launch_owner,
+        backend_id,
+        backend_version,
+    )?;
+    let created = state
+        .isolation
+        .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+            workspace_id,
+            launch_owner,
+            base_snapshot: &base_snapshot,
+            project_path: &layout.project,
+        })
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let pinned = lillux::canonical_json(&serde_json::to_value(&created.pinned_root_identities)?)?;
+    state
+        .state_store
+        .bind_execution_workspace(WorkspaceBinding {
+            workspace_id,
+            thread_id,
+            launch_owner: Some(launch_owner),
+            backend_id: Some(&created.backend_id),
+            backend_version: Some(&created.backend_version),
+            pinned_root_identities: Some(&pinned),
+            mount_identity: Some(&created.mount_identity),
+        })?;
+    guard.disarm();
+    state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow!("bound dedicated runtime workspace disappeared"))
+}
+
+pub(super) fn status(params: &Value, state: &AppState, cap: &CallbackCapability) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        thread_id: String,
+    }
+    let params: Params = serde_json::from_value(params.clone())?;
+    if params.thread_id != cap.thread_id {
+        bail!("dedicated-session status is restricted to the callback root");
+    }
+    let session = state
+        .state_store
+        .dedicated_session(&params.thread_id)?
+        .ok_or_else(|| anyhow!("dedicated session is not admitted"))?;
+    Ok(serde_json::to_value(session)?)
+}
+
+pub(super) async fn wait(
+    params: &Value,
+    state: &AppState,
+    cap: &CallbackCapability,
+) -> Result<Value> {
+    let request: ryeos_runtime::callback::DedicatedSessionWaitRequest =
+        serde_json::from_value(params.clone())?;
+    if request.thread_id != cap.thread_id {
+        bail!("dedicated-session wait is restricted to the callback root");
+    }
+    if request.timeout_ms == 0 || request.timeout_ms > 300_000 {
+        bail!("dedicated-session wait timeout is outside its bound");
+    }
+    let session = ryeos_app::dedicated_session_service::wait_for_projection_change(
+        state,
+        &request.thread_id,
+        request.observed_updated_at_ms,
+        std::time::Duration::from_millis(request.timeout_ms),
+    )
+    .await?;
+    Ok(serde_json::to_value(session)?)
+}
+
+pub(super) async fn command(
+    params: &Value,
+    state: &AppState,
+    cap: &CallbackCapability,
+) -> Result<Value> {
+    require_command_authority(state, cap)?;
+    let request: DedicatedSessionCommandRequest = serde_json::from_value(params.clone())?;
+    if request.thread_id != cap.thread_id {
+        bail!("dedicated-session command is restricted to the callback root");
+    }
+    let session = state
+        .state_store
+        .dedicated_session(&request.thread_id)?
+        .ok_or_else(|| anyhow!("dedicated session is not admitted"))?;
+    match request.command_kind.as_str() {
+        "reattach" if session.state == "recovering" => {}
+        "route" if session.state != "recovering" => {}
+        _ => bail!("dedicated-session command kind contradicts its lifecycle state"),
+    }
+    ryeos_app::dedicated_session_service::execute_command(
+        state,
+        &request.thread_id,
+        &request.idempotency_key,
+        &request.command_kind,
+        request.payload,
+    )
+    .await
+}
+
+pub(super) async fn terminate(
+    params: &Value,
+    state: &AppState,
+    cap: &CallbackCapability,
+) -> Result<Value> {
+    require_terminate_authority(state, cap)?;
+    let request: ryeos_runtime::callback::DedicatedSessionTerminateRequest =
+        serde_json::from_value(params.clone())?;
+    if request.thread_id != cap.thread_id {
+        bail!("dedicated-session termination is restricted to the callback root");
+    }
+    ryeos_app::dedicated_session_service::terminate_session(
+        state,
+        &request.thread_id,
+        &request.reason,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn start(
+    params: &Value,
+    state: &AppState,
+    cap: &CallbackCapability,
+) -> Result<Value> {
+    require_start_authority(state, cap)?;
+    let request: DedicatedSessionStartRequest = serde_json::from_value(params.clone())?;
+    if request.thread_id != cap.thread_id {
+        bail!("dedicated-session start is restricted to the callback root");
+    }
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &request.thread_id,
+    )?;
+    let _credential_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+        &request.credential_profile_id,
+    )
+    .await?;
+    ryeos_engine::protocol_vocabulary::validate_env_name(&request.credential_home_env)?;
+    ryeos_engine::protocol_vocabulary::validate_env_name(&request.workspace_env)?;
+    if request.route_set.is_empty()
+        || request.route_set.len() > 128
+        || !request.route_set.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        bail!("dedicated-session route set is not canonical");
+    }
+    const ALLOWED_EFFECT_CLASSES: &[&str] = &[
+        "credential_delete",
+        "credential_read",
+        "credential_write",
+        "external_effect",
+        "pure_read",
+        "session_mutation",
+    ];
+    if request.allowed_effect_classes.is_empty()
+        || request.allowed_effect_classes.len() > ALLOWED_EFFECT_CLASSES.len()
+        || request
+            .allowed_effect_classes
+            .iter()
+            .any(|effect| !ALLOWED_EFFECT_CLASSES.contains(&effect.as_str()))
+        || request
+            .allowed_effect_classes
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        bail!("dedicated-session effect classes are not a sorted admitted subset");
+    }
+    if request.credential_home_env == request.workspace_env {
+        bail!("credential-home and workspace environment slots must be distinct");
+    }
+    if request.require_pinned_cow {
+        if request.required_terminal_publication != "retain_result" {
+            bail!("pinned CoW worker execution requires retain_result terminal publication");
+        }
+        use ryeos_state::objects::{
+            ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+        };
+        let ExecutionProjectAuthority::PinnedGeneration { realization, .. } =
+            cap.provenance.project_authority()
+        else {
+            bail!("dedicated-session launch requires pinned project authority");
+        };
+        let PinnedProjectRealization::Cow {
+            terminal_publication,
+        } = realization
+        else {
+            bail!("dedicated-session launch requires a private CoW realization");
+        };
+        if !matches!(
+            terminal_publication,
+            PinnedTerminalPublication::RetainResult
+                | PinnedTerminalPublication::RetainCurrentHead { .. }
+        ) {
+            bail!("worker execution requires a retain-result pinned CoW realization");
+        }
+    } else if request.required_terminal_publication != "any" {
+        bail!("projectless worker execution requires any terminal publication");
+    }
+    let recovering =
+        if let Some(existing) = state.state_store.dedicated_session(&request.thread_id)? {
+            if existing.credential_profile_id != request.credential_profile_id {
+                bail!("dedicated-session retry changed credential profile identity");
+            }
+            if existing.state != "recovering" {
+                return Ok(serde_json::to_value(existing)?);
+            }
+            true
+        } else {
+            false
+        };
+
+    let thread = state
+        .state_store
+        .get_thread(&request.thread_id)?
+        .ok_or_else(|| anyhow!("dedicated-session root thread does not exist"))?;
+    if thread.status != "running" {
+        bail!("dedicated-session root must already be running");
+    }
+    let owner = thread
+        .requested_by
+        .as_deref()
+        .ok_or_else(|| anyhow!("dedicated-session root has no owner principal"))?;
+    ryeos_app::operator_authority::retained_admitted_operator_authority_digest(
+        state,
+        owner,
+        &thread.origin_site_id,
+    )
+    .context("dedicated-session root owner no longer has exact admitted authority")?;
+    let profile = state
+        .state_store
+        .credential_profile(&request.credential_profile_id)?
+        .ok_or_else(|| anyhow!("credential profile does not exist"))?;
+    if !matches!(request.required_credential_state.as_str(), "any" | "active") {
+        bail!("dedicated-session credential-state requirement is not canonical");
+    }
+    if request.required_credential_state == "active" && profile.state != "active" {
+        bail!("dedicated-session credential profile is not active");
+    }
+    if profile.owner_principal != owner {
+        bail!("credential profile is not owned by the session principal");
+    }
+    ryeos_app::private_artifact_home::require_within_default_limit(
+        &state.config.runtime_state_dir(),
+        &profile.home_id,
+    )?;
+    let workspace = match state
+        .state_store
+        .execution_workspace_for_thread(&request.thread_id)?
+    {
+        Some(workspace) => workspace,
+        None if !request.require_pinned_cow && request.required_terminal_publication == "any" => {
+            let claim = state
+                .state_store
+                .get_launch_claim(&request.thread_id)?
+                .ok_or_else(|| anyhow!("projectless dedicated root has no launch owner"))?;
+            let home_id = scratch_home_id(&request.thread_id);
+            let workspace_id = format!("dedicated-{home_id}");
+            create_dedicated_runtime_workspace(
+                state,
+                &workspace_id,
+                &request.thread_id,
+                &claim.claimed_by,
+            )?
+        }
+        None => bail!("dedicated-session root has no owned execution workspace"),
+    };
+    match workspace.state {
+        WorkspaceState::Ready => {}
+        WorkspaceState::Active if request.require_pinned_cow => {
+            let root_process_identity =
+                thread.runtime.process_identity.as_ref().ok_or_else(|| {
+                    anyhow!("active dedicated workspace has no attached root process")
+                })?;
+            let root_process_identity = serde_json::to_string(root_process_identity)
+                .context("serialize attached root process identity")?;
+            if workspace.process_identity.as_deref() != Some(root_process_identity.as_str()) {
+                bail!("active dedicated workspace is not owned by the callback root process");
+            }
+        }
+        _ => bail!("dedicated-session workspace is not attachable by this worker root"),
+    }
+    let workspace_root = PathBuf::from(&workspace.root_path);
+    let workspace_path =
+        ryeos_executor::execution::workspace::WorkspaceLayout::from_root(workspace_root).project;
+    if !workspace_path.is_absolute() {
+        bail!("dedicated-session workspace path is not absolute");
+    }
+    let capsule_hash =
+        admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
+    require_structured_session_route_effect_contract(
+        state,
+        &capsule_hash,
+        &request.route_set,
+        &request.allowed_effect_classes,
+        request.recover_upstream_session,
+    )?;
+    let worker_instance_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let credential_generation = profile.credential_generation;
+    if recovering {
+        state.state_store.acquire_credential_profile(
+            &request.credential_profile_id,
+            owner,
+            &worker_instance_id,
+        )?;
+    }
+    if recovering && profile.state == "enrolling" {
+        let Some(login_id) = profile.active_login_id.as_deref() else {
+            return Err(release_credential_after_unadmitted_start(
+                state,
+                &request.credential_profile_id,
+                &worker_instance_id,
+                anyhow!("recovering enrollment has no active login identity"),
+            ));
+        };
+        if let Err(error) = state.state_store.cancel_credential_enrollment(
+            &request.credential_profile_id,
+            &worker_instance_id,
+            login_id,
+            profile.login_epoch,
+        ) {
+            return Err(release_credential_after_unadmitted_start(
+                state,
+                &request.credential_profile_id,
+                &worker_instance_id,
+                error.context("abandon enrollment bound to the dead worker epoch"),
+            ));
+        }
+    }
+    let profile_home = ryeos_app::private_artifact_home::home_path(
+        &state.config.runtime_state_dir(),
+        &profile.home_id,
+    )?;
+    // The pinned upstream currently owns authentication, refresh, rollout and
+    // thread state beneath one workload home. RyeOS therefore admits the exact
+    // profile-generation home as the worker state root and serializes it with
+    // the profile lock. We do not invent a second per-session home that the
+    // upstream process would never use.
+    let state_root = profile_home.clone();
+    let handoff_reservation = if recovering {
+        None
+    } else {
+        state
+            .state_store
+            .credential_profile_reservation_for_successor(&request.thread_id)?
+            .filter(|reservation| reservation.state == "reserved")
+    };
+    if let Some(reservation) = &handoff_reservation {
+        let remote = state
+            .state_store
+            .remote_continuation_authority(&thread.chain_root_id, &request.thread_id)?
+            .ok_or_else(|| anyhow!("worker adoption successor has no remote-continuation edge"))?;
+        if reservation.profile_id != request.credential_profile_id
+            || reservation.owner_principal != owner
+            || reservation.credential_generation != profile.credential_generation
+            || reservation.operation_id != remote.operation_id
+            || reservation.checkpoint_manifest_hash != remote.checkpoint_manifest_hash
+            || thread.admitted_launch_capsule_hash.as_deref()
+                != Some(remote.target_launch_capsule_hash.as_str())
+        {
+            bail!(
+                "worker adoption credential reservation contradicts the authoritative remote continuation"
+            );
+        }
+    }
+    let continuation_remote_thread_id = if let Some(reservation) = &handoff_reservation {
+        if !request.recover_upstream_session {
+            bail!("worker adoption reservation requires upstream-session recovery");
+        }
+        Some(reservation.upstream_session_id.clone())
+    } else if !recovering && request.recover_upstream_session {
+        match thread.upstream_thread_id.as_deref() {
+            Some(source_thread_id) => {
+                let source = state
+                    .state_store
+                    .dedicated_session(source_thread_id)?
+                    .ok_or_else(|| {
+                        anyhow!("worker continuation source has no dedicated session")
+                    })?;
+                if source.chain_root_id != thread.chain_root_id || source.state != "frozen" {
+                    bail!("worker continuation source is not the frozen predecessor placement");
+                }
+                Some(source.remote_thread_id.ok_or_else(|| {
+                    anyhow!("worker continuation source has no upstream session identity")
+                })?)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let admitted_epoch = if recovering {
+        state.state_store.prepare_dedicated_session_recovery(
+            &request.thread_id,
+            credential_generation,
+            &worker_instance_id,
+        )
+    } else if let Some(reservation) = handoff_reservation.as_ref() {
+        state
+            .state_store
+            .admit_dedicated_session_from_reservation(
+                NewDedicatedSession {
+                    placement_thread_id: &request.thread_id,
+                    chain_root_id: &thread.chain_root_id,
+                    owner_principal: owner,
+                    admitted_capsule_hash: &capsule_hash,
+                    workspace_id: &workspace.workspace_id,
+                    candidate_required: request.require_pinned_cow,
+                    credential_profile_id: &request.credential_profile_id,
+                    credential_generation,
+                    credential_lock_owner: &worker_instance_id,
+                },
+                continuation_remote_thread_id.as_deref(),
+                &reservation.reservation_id,
+            )
+            .map(|()| 1)
+    } else if let Some(remote_thread_id) = continuation_remote_thread_id.as_deref() {
+        state
+            .state_store
+            .admit_dedicated_session_with_remote(
+                NewDedicatedSession {
+                    placement_thread_id: &request.thread_id,
+                    chain_root_id: &thread.chain_root_id,
+                    owner_principal: owner,
+                    admitted_capsule_hash: &capsule_hash,
+                    workspace_id: &workspace.workspace_id,
+                    candidate_required: request.require_pinned_cow,
+                    credential_profile_id: &request.credential_profile_id,
+                    credential_generation,
+                    credential_lock_owner: &worker_instance_id,
+                },
+                remote_thread_id,
+            )
+            .map(|()| 1)
+    } else {
+        state
+            .state_store
+            .admit_dedicated_session(NewDedicatedSession {
+                placement_thread_id: &request.thread_id,
+                chain_root_id: &thread.chain_root_id,
+                owner_principal: owner,
+                admitted_capsule_hash: &capsule_hash,
+                workspace_id: &workspace.workspace_id,
+                candidate_required: request.require_pinned_cow,
+                credential_profile_id: &request.credential_profile_id,
+                credential_generation,
+                credential_lock_owner: &worker_instance_id,
+            })
+            .map(|()| 1)
+    };
+    let boot_epoch = match admitted_epoch {
+        Ok(epoch) => epoch,
+        // Fresh admission acquires the credential lock in the same SQLite
+        // transaction as the placement row, so a failed transaction leaves no
+        // lock for this path to release.
+        Err(error) if !recovering => return Err(error),
+        Err(error) => {
+            return Err(release_credential_after_unadmitted_start(
+                state,
+                &request.credential_profile_id,
+                &worker_instance_id,
+                error,
+            ));
+        }
+    };
+
+    let control_channel_identity = ryeos_app::thread_lifecycle::new_thread_id();
+    let boot_identity_hash = lillux::cas::sha256_hex(
+        lillux::canonical_json(&json!({
+            "placement_thread_id": request.thread_id,
+            "worker_instance_id": worker_instance_id,
+            "capsule_hash": capsule_hash,
+            "credential_generation": credential_generation,
+            "boot_epoch":boot_epoch,
+            "control_channel_identity": control_channel_identity,
+        }))?
+        .as_bytes(),
+    );
+    let identity = ExclusivePersistentSessionIdentity {
+        placement_thread_id: request.thread_id.clone(),
+        worker_instance_id: worker_instance_id.clone(),
+        boot_identity_hash,
+        boot_epoch,
+        lifecycle_generation: credential_generation,
+        control_channel_identity,
+    };
+    let runtime_environment = BTreeMap::from([
+        (
+            request.credential_home_env.clone(),
+            profile_home.to_string_lossy().into_owned(),
+        ),
+        (
+            request.workspace_env.clone(),
+            workspace_path.to_string_lossy().into_owned(),
+        ),
+        (
+            "RYEOS_STRUCTURED_SESSION_ROUTE_SET".to_owned(),
+            request.route_set.clone(),
+        ),
+        (
+            "RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES".to_owned(),
+            request.allowed_effect_classes.join(","),
+        ),
+    ]);
+    let start_state = state.clone();
+    let start_capsule = capsule_hash.clone();
+    let start_workspace = workspace_path.clone();
+    let start_state_root = state_root.clone();
+    let start_identity = identity.clone();
+    let observation_state = state.clone();
+    let observation_thread_id = identity.placement_thread_id.clone();
+    let observation_boot_epoch = identity.boot_epoch;
+    let observation_sink: ryeos_app::persistent_session::PersistentSessionObservationSink =
+        Arc::new(move |raw| {
+            ryeos_app::dedicated_session_service::ingest_observation_batch(
+                &observation_state,
+                &observation_thread_id,
+                observation_boot_epoch,
+                raw,
+            )
+        });
+    let started = tokio::task::spawn_blocking(move || {
+        ryeos_executor::execution::persistent_session::start_exclusive_capsule(
+            &start_state,
+            &start_capsule,
+            &start_workspace,
+            Some(&start_state_root),
+            &runtime_environment,
+            &start_identity,
+            observation_sink,
+        )
+    })
+    .await
+    .context("join dedicated-session worker start")?;
+    if let Err(error) = started {
+        let detail = format!("{error:#}");
+        let reason = bounded_worker_failure_reason("dedicated worker start failed: ", &detail);
+        let cleanup_was_proved_before_attachment = error
+            .downcast_ref::<
+                ryeos_executor::execution::persistent_session::ExclusiveWorkerCleanupUnproved,
+            >()
+            .is_none();
+        let settlement = settle_failed_dedicated_worker_start(
+            state,
+            &request.thread_id,
+            &worker_instance_id,
+            boot_epoch,
+            &reason,
+            cleanup_was_proved_before_attachment,
+        );
+        return match settlement {
+            Ok(()) => Err(anyhow!(reason)),
+            Err(settlement) => Err(anyhow!(
+                "{reason}; explicit failed-start settlement also failed: {settlement:#}"
+            )),
+        };
+    }
+    let session = state
+        .state_store
+        .dedicated_session(&request.thread_id)?
+        .ok_or_else(|| anyhow!("started dedicated session disappeared"))?;
+    Ok(serde_json::to_value(session)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bounded_worker_failure_reason, validate_structured_session_route_effect_contract};
+
+    fn structured_contract() -> serde_json::Value {
+        serde_json::json!({
+            "initialization":[{"effect_class":"pure_read"}],
+            "recovery":{
+                "resume_route":"record.restore",
+                "inspect_route":"record.inspect",
+                "route_sets":["records"]
+            },
+            "route_sets":{"records":["record.read", "operation.run"]},
+            "routes":[
+                {"id":"record.read", "effect_class":"credential_read"},
+                {"id":"operation.run", "effect_class":"external_effect"}
+            ]
+        })
+    }
+
+    #[test]
+    fn worker_failure_reason_is_canonical_and_bounded_by_bytes() {
+        let detail = format!("first line\n{}\tend", "é".repeat(2_048));
+        let reason = bounded_worker_failure_reason("worker failed: ", &detail);
+        assert!(reason.len() <= 2_048);
+        assert!(!reason.is_empty());
+        assert_eq!(reason.trim(), reason);
+        assert!(!reason.chars().any(char::is_control));
+        assert!(reason.starts_with("worker failed: first line "));
+    }
+
+    #[test]
+    fn route_effect_contract_is_rejected_before_worker_launch() {
+        let missing_credential_read = vec!["external_effect".to_owned(), "pure_read".to_owned()];
+        let error = validate_structured_session_route_effect_contract(
+            &structured_contract(),
+            "records",
+            &missing_credential_read,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("credential_read"));
+
+        let complete = vec![
+            "credential_read".to_owned(),
+            "external_effect".to_owned(),
+            "pure_read".to_owned(),
+        ];
+        validate_structured_session_route_effect_contract(
+            &structured_contract(),
+            "records",
+            &complete,
+            true,
+        )
+        .unwrap();
+
+        let error = validate_structured_session_route_effect_contract(
+            &structured_contract(),
+            "records",
+            &complete,
+            false,
+        );
+        assert!(error.is_ok());
+
+        let mut contract = structured_contract();
+        contract["recovery"] = serde_json::Value::Null;
+        let error = validate_structured_session_route_effect_contract(
+            &contract, "records", &complete, true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("enables upstream recovery"));
+    }
+}

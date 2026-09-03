@@ -1,0 +1,107 @@
+# ryeos:signed:2026-08-24T01:11:11Z:b6ebb129f78884855816abd184fe4cbb8fcc51265c23b322145b72dfd6622038:QhISiPrCseI+7MVA2nrjPV/5eiRDIOd24Af0Yhqezajz/5+HrnL5vYceZFYmWCsE+Ll4txZbI9Rm+smruc+yAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/worker"
+version: "1.0.0"
+location:
+  directory: workers
+  excluded_directories: [lib]
+effective_trust:
+  include_references: false
+resolution: []
+execution:
+  source_closure:
+    derived: effective_source_closure
+    location:
+      type: owner_relative_source
+      path: [source]
+    testimony: owner_signed_digest
+    max_files: 256
+    max_total_bytes: 16777216
+    max_file_bytes: 8388608
+    max_depth: 32
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      allowed:
+        - protocol:ryeos/core/persistent_session
+        - protocol:ryeos/core/structured_session
+  aliases:
+    "@subprocess": "tool:ryeos/core/subprocess/execute"
+  persistent_session:
+    target_path: [supported_target]
+    max_processes: 1
+    max_inflight_per_process: 1
+    max_address_space_bytes: 17179869184
+    max_cpu_seconds: 3600
+    real_uid_process_limit: 512
+    resource_overrides_path: [session_resources]
+    max_real_uid_process_limit: 4096
+    ready_timeout_ms: 600000
+    request_timeout_ms: 3600000
+    idle_timeout_ms: 1800000
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: ["bundle:own"]
+    max_declarations: 8
+    large_content:
+      max_total_bytes: 4294967296
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
+  required_metadata: [executor_id]
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    category: {type: single, prim: string}
+    version: {type: single, prim: string}
+    executor_id: {type: single, prim: string}
+    config: {type: single, prim: mapping}
+    external_content: {type: single, prim: array}
+    execution_protocol: {type: single, prim: string}
+    source: {type: single, prim: mapping}
+    supported_target: {type: single, prim: mapping}
+  optional:
+    description: {type: single, prim: string}
+    session_resources: {type: single, prim: mapping}
+runtime:
+  handlers:
+    - type: config
+    - type: env_config
+    - type: config_resolve
+    - type: execution_params
+  ignored_keys:
+    - category
+    - version
+    - description
+    - executor_id
+    - execution_protocol
+    - external_content
+    - source
+    - supported_target
+    - session_resources
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    description:
+      from: path
+      key: description
+    executor_id:
+      from: path
+      key: executor_id

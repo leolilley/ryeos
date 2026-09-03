@@ -1,0 +1,6 @@
+# ryeos:signed:2026-08-26T11:48:47Z:5359b108bf0cc62a4c89cbfdca9877d813ef34077ab8fddb45234b2275d14a3c:QB9EuJcRO2tOhyovAB8CEmi9Ty6c7vVhILma1eq9UeIlKAwlS1gSbIrmNO48iQPy8DhvYLETd+BNrEJko/xkCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-executions.checkpoint
+required_caps: ["ryeos.execute.service.worker-executions/checkpoint"]
+schema: {chain_root_id: string}
+description: Publish one quiesced portable-state checkpoint for an owner-bound worker execution.

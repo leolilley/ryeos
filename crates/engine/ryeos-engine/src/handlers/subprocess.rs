@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ryeos_handler_protocol::{HandlerRequest, HandlerResponse};
+use ryeos_handler_protocol::{
+    HandlerRequest, HandlerRequestEnvelope, HandlerResponse, HandlerResponseEnvelope,
+};
 
 use crate::error::EngineError;
 use crate::handlers::VerifiedHandler;
@@ -38,7 +40,10 @@ impl HandlerLaunchRuntime {
     }
 
     pub(crate) fn disabled() -> Self {
-        Self::new(Arc::new(IsolationRuntime::default()), Vec::new())
+        Self::new(
+            Arc::new(IsolationRuntime::disabled_for_authoring()),
+            Vec::new(),
+        )
     }
 }
 
@@ -91,7 +96,7 @@ pub(crate) fn run_handler_subprocess(
         }
     };
 
-    let request_json = serde_json::to_string(request)
+    let request_json = serde_json::to_string(&HandlerRequestEnvelope::new(request.clone()))
         .map_err(|e| EngineError::Internal(format!("encode handler request: {e}")))?;
 
     let req = lillux::exec::SubprocessRequest {
@@ -116,14 +121,21 @@ pub(crate) fn run_handler_subprocess(
         IsolationLaunchContext {
             project_path: &bundle_root,
             project_authority: IsolationProjectAuthority::ReadOnly,
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling:
+                crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
             checkpoint_dir: None,
+            checkpoint_authority: None,
             daemon_socket_path: None,
             bundle_roots: &launch.bundle_roots,
             node_trusted_keys_dir: None,
             verified_code: &verified_code,
             verified_command: Some(&verified_code[0]),
+            external_read_only_mounts: &[],
+            target_channel: None,
             item_ref: &canonical_ref,
             thread_id: "handler",
         },
@@ -131,6 +143,12 @@ pub(crate) fn run_handler_subprocess(
 
     let output = lillux::exec::lib_run(req);
     if !output.success {
+        if let Some(refusal) = output.launcher_refusal {
+            return Err(EngineError::HandlerSpawnFailed {
+                handler: canonical_ref.clone(),
+                detail: format!("isolation adapter refused launch: {refusal}"),
+            });
+        }
         if output.timed_out {
             return Err(EngineError::HandlerSpawnFailed {
                 handler: canonical_ref.clone(),
@@ -144,10 +162,17 @@ pub(crate) fn run_handler_subprocess(
         });
     }
 
-    ryeos_handler_protocol::from_json_str_strict(&output.stdout).map_err(|e| {
-        EngineError::HandlerProtocolViolation {
+    let envelope: HandlerResponseEnvelope =
+        ryeos_handler_protocol::from_json_str_strict(&output.stdout).map_err(|e| {
+            EngineError::HandlerProtocolViolation {
+                handler: canonical_ref.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+    envelope
+        .into_response()
+        .map_err(|detail| EngineError::HandlerProtocolViolation {
             handler: canonical_ref,
-            detail: e.to_string(),
-        }
-    })
+            detail,
+        })
 }

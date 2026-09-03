@@ -284,6 +284,7 @@ async fn execute_read_only_service(
                 terminator,
                 ryeos_engine::kind_registry::TerminatorDecl::InProcess {
                     registry: ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                    ..
                 }
             )
         });
@@ -333,6 +334,7 @@ async fn execute_read_only_service(
             usage_subject: None,
             usage_subject_asserted_by: None,
         },
+        None,
         None,
         Some(local_handler_context),
     )
@@ -397,6 +399,7 @@ async fn execute_prepared_item_ref(
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,
+        effect_authority: None,
     };
 
     let result = ryeos_executor::dispatch::dispatch_verified_with_handler_context(

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-26T15:16:44Z:898298669375f2714cee413ed82eed3f18e1edf4003f830dc5db338548604fe1:ZYoPZEEye5EojAWAt7QI8I9ih4vM6twxb7MrrB6AxXgzLe2cUWgMTlUGTLwE3d7WczqX4QS1ewm2XQYXRRw1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-executions.handoff
+required_caps: ["ryeos.execute.service.worker-executions/handoff"]
+schema:
+  chain_root_id: string
+  manifest_ref: string
+  remote: string
+  target_credential_profile_id: string
+  preflight_id: string
+description: Transfer one frozen portable worker execution using an exact completed target preflight.

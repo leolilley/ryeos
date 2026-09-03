@@ -26,17 +26,11 @@ impl StateStore {
     }
 
     pub fn projection_health_snapshot(&self) -> ThreadProjectionHealthSnapshot {
-        let pending = self
-            .lock()
-            .and_then(|g| g.state_db.pending_chain_transitions());
-        match pending {
-            Ok(pending) => self
-                .projection_health
-                .observe_pending_transitions(pending.len()),
-            Err(error) => self
-                .projection_health
-                .observe_pending_transition_error(&error),
-        }
+        // This snapshot is deliberately lock-free with respect to StateStore.
+        // Every failed projection publication calls the repair sink before the
+        // writer releases authority, while startup/repair/status scans refresh
+        // the exact pending count. Health and lifecycle reads must remain
+        // available when execution traffic is queued behind the store mutex.
         self.projection_health.snapshot()
     }
 

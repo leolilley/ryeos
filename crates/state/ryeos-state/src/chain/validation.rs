@@ -1237,7 +1237,7 @@ mod tests {
             item_trust_class: CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: hash,
             resolved_from: CapturedPolicyProvenance::NodeDefault {
-                node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
             },
         }))
         .build()

@@ -5,7 +5,7 @@
 //!
 //! | Owner | What it holds |
 //! |---|---|
-//! | Engine user-overlay cache | `Arc<TempDirGuard>` for its shared overlay |
+//! | Engine derived-project cache | `Arc<TempDirGuard>` for its shared generation |
 //! | Admitted request binding | `Arc<TempDirGuard>` for its active checkout |
 //! | Request runner | `Arc<TempDirGuard>` for project checkout |
 //! | Callback token lifeline | `Arc<TempDirGuard>` (callback workstream) |
@@ -19,6 +19,7 @@
 //! the dir. Disarm is rare; the common path is just Drop.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct PinnedRemoval {
@@ -33,8 +34,8 @@ pub struct TempDirGuard {
     inner: Mutex<Option<PathBuf>>,
     effective_path: PathBuf,
     leases: Mutex<Vec<std::fs::File>>,
-    explicit_cleanup: bool,
-    remove_on_drop: bool,
+    explicit_cleanup: AtomicBool,
+    remove_on_drop: AtomicBool,
     owns_removal: bool,
     pinned_removal: Option<PinnedRemoval>,
 }
@@ -45,8 +46,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path.clone())),
             effective_path: path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: false,
-            remove_on_drop: true,
+            explicit_cleanup: AtomicBool::new(false),
+            remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: None,
         }
@@ -66,8 +67,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path)),
             effective_path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: true,
-            remove_on_drop: false,
+            explicit_cleanup: AtomicBool::new(true),
+            remove_on_drop: AtomicBool::new(false),
             owns_removal: true,
             pinned_removal: None,
         })
@@ -81,8 +82,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path.clone())),
             effective_path: path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: false,
-            remove_on_drop: false,
+            explicit_cleanup: AtomicBool::new(false),
+            remove_on_drop: AtomicBool::new(false),
             owns_removal: false,
             pinned_removal: None,
         }
@@ -98,8 +99,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path.clone())),
             effective_path: path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: false,
-            remove_on_drop: true,
+            explicit_cleanup: AtomicBool::new(false),
+            remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: Some(PinnedRemoval { parent, name, root }),
         }
@@ -108,6 +109,15 @@ impl TempDirGuard {
     /// Retain an exact-generation cache lease for the lifetime of this guard.
     pub fn retain_lease(&self, lease: std::fs::File) {
         self.leases.lock().unwrap().push(lease);
+    }
+
+    /// A durable journal now owns recovery. From this point, Drop preserves
+    /// the directory and only the explicit owner-fenced lifecycle may remove
+    /// it. Before this transition the guard remains an automatic rollback for
+    /// filesystem creation that never reached durable reservation.
+    pub fn preserve_for_explicit_cleanup(&self) {
+        self.explicit_cleanup.store(true, Ordering::Release);
+        self.remove_on_drop.store(false, Ordering::Release);
     }
 
     /// The guarded path, if not yet disarmed.
@@ -174,12 +184,12 @@ impl TempDirGuard {
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         if let Some(p) = self.inner.lock().unwrap().take() {
-            if self.explicit_cleanup {
+            if self.explicit_cleanup.load(Ordering::Acquire) {
                 tracing::error!(
                     path = %p.display(),
                     "backend workspace guard dropped while still armed; preserving for journal reconciliation"
                 );
-            } else if self.remove_on_drop {
+            } else if self.remove_on_drop.load(Ordering::Acquire) {
                 let removal = if let Some(pinned) = &self.pinned_removal {
                     pinned.root.remove_contents_recursive().and_then(|()| {
                         pinned
@@ -223,6 +233,105 @@ pub fn create_projectless_workspace(
     Ok((path, guard))
 }
 
+const ADMITTED_INPUT_WORKSPACE_PREFIX: &str = "admitted-input-";
+const MAX_ADMITTED_INPUT_WORKSPACE_ROOTS: usize = 65_536;
+
+/// Create the per-process root used to deliver an already-admitted sparse
+/// source/external view. The root is mechanical execution state: its name and
+/// materialization strategy never enter program or effect identity.
+pub fn create_admitted_input_workspace(
+    runtime_cache_root: &std::path::Path,
+    thread_id: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    ryeos_runtime::validate_runtime_thread_id(thread_id)
+        .map_err(|error| anyhow::anyhow!("invalid admitted-input thread id: {error}"))?;
+    create_projectless_workspace(
+        runtime_cache_root,
+        &format!("{ADMITTED_INPUT_WORKSPACE_PREFIX}{thread_id}"),
+    )
+}
+
+/// Remove an abandoned admitted-input root for one exclusively claimed
+/// thread. Callers must first prove that no prior process owner remains alive.
+/// Persistent-session and pinned-COW roots use different namespaces and are
+/// structurally outside this cleanup.
+pub fn remove_abandoned_admitted_input_workspace(
+    runtime_cache_root: &std::path::Path,
+    thread_id: &str,
+) -> anyhow::Result<bool> {
+    ryeos_runtime::validate_runtime_thread_id(thread_id)
+        .map_err(|error| anyhow::anyhow!("invalid admitted-input thread id: {error}"))?;
+    let Some(execution_root) =
+        lillux::PinnedDirectory::open(&runtime_cache_root.join("executions"))?
+    else {
+        return Ok(false);
+    };
+    let name = std::ffi::OsString::from(format!("{ADMITTED_INPUT_WORKSPACE_PREFIX}{thread_id}"));
+    let Some(workspace) = execution_root.open_child_directory(&name)? else {
+        return Ok(false);
+    };
+    workspace.remove_contents_recursive()?;
+    if !execution_root.remove_empty_child_if_same(&name, &workspace)? {
+        anyhow::bail!("abandoned admitted-input workspace remained non-empty");
+    }
+    Ok(true)
+}
+
+/// Inventory the exact transient-input namespace for reconciliation. Only the
+/// reserved directory form is accepted; malformed entries fail startup rather
+/// than being ignored or treated as deletion authority.
+pub fn admitted_input_workspace_thread_ids(
+    runtime_cache_root: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
+    let Some(execution_root) =
+        lillux::PinnedDirectory::open(&runtime_cache_root.join("executions"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut thread_ids = Vec::new();
+    for entry in execution_root.entries_no_follow_bounded(MAX_ADMITTED_INPUT_WORKSPACE_ROOTS)? {
+        let Some(name) = entry.name.to_str() else {
+            continue;
+        };
+        let Some(thread_id) = name.strip_prefix(ADMITTED_INPUT_WORKSPACE_PREFIX) else {
+            continue;
+        };
+        if entry.entry_type != lillux::PinnedEntryType::Directory {
+            anyhow::bail!("admitted-input namespace entry {name} is not a directory");
+        }
+        ryeos_runtime::validate_runtime_thread_id(thread_id)
+            .map_err(|error| anyhow::anyhow!("invalid admitted-input workspace name: {error}"))?;
+        thread_ids.push(thread_id.to_owned());
+    }
+    thread_ids.sort();
+    Ok(thread_ids)
+}
+
+/// Create one durable runtime-workspace root through the same pinned
+/// `.ai/state/cache/executions` authority consumed by the isolation runtime.
+/// The caller must either bind the workspace journal and disarm the returned
+/// guard, or let the guard roll the unbound directory back.
+pub fn create_runtime_workspace(
+    runtime_cache_root: &std::path::Path,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    let execution_root =
+        lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
+    execution_root.set_mode(0o700)?;
+    let name = std::ffi::OsString::from(workspace_name);
+    let workspace = execution_root.create_child(&name, 0o700)?;
+    workspace.create_child(
+        std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
+        0o700,
+    )?;
+    workspace.sync()?;
+    let project = workspace
+        .path()
+        .join(ryeos_engine::execution_workspace::PROJECT_DIR);
+    let guard = Arc::new(TempDirGuard::new_pinned(execution_root, name, workspace));
+    Ok((project, guard))
+}
+
 impl std::fmt::Debug for TempDirGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TempDirGuard")
@@ -258,10 +367,40 @@ mod tests {
     }
 
     #[test]
+    fn runtime_workspace_uses_the_canonical_execution_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, guard) = create_runtime_workspace(tmp.path(), "runtime-one").unwrap();
+        let root = project.parent().unwrap();
+        assert_eq!(root.parent().unwrap(), tmp.path().join("executions"));
+        assert!(root.join("project").is_dir());
+        assert!(!root.join("backend-state").exists());
+        assert!(!root.join("upper").exists());
+        assert!(!root.join("work").exists());
+        drop(guard);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn durable_reservation_transfers_drop_to_explicit_reconciliation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, guard) = create_runtime_workspace(tmp.path(), "runtime-durable").unwrap();
+        let root = project.parent().unwrap().to_path_buf();
+        guard.preserve_for_explicit_cleanup();
+        drop(guard);
+        assert!(root.is_dir());
+
+        TempDirGuard::new_workspace(root.clone(), project)
+            .unwrap()
+            .remove_now()
+            .unwrap();
+        assert!(!root.exists());
+    }
+
+    #[test]
     fn workspace_guard_carries_exact_effective_path_authority() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("workspace");
-        let effective = root.join("lower");
+        let effective = root.join("project");
         std::fs::create_dir_all(&effective).unwrap();
         let guard = TempDirGuard::new_workspace(root.clone(), effective.clone()).unwrap();
 
@@ -308,5 +447,53 @@ mod tests {
         // Prevent TempDirGuard from trying to remove the disarmed dir
         // (it was disarmed, so drop is a no-op, but let's be explicit).
         drop(g);
+    }
+
+    #[test]
+    fn admitted_input_workspace_is_per_thread_and_removed_by_its_guard() {
+        let cache = tempfile::tempdir().unwrap();
+        let thread_id = "T-00000000-0000-0000-0000-000000000001";
+        let (path, guard) = create_admitted_input_workspace(cache.path(), thread_id).unwrap();
+        assert!(path.ends_with(format!("admitted-input-{thread_id}")));
+        assert!(path.join(ryeos_engine::AI_DIR).is_dir());
+        std::fs::write(path.join("scratch"), b"private").unwrap();
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn abandoned_input_cleanup_cannot_cross_its_reserved_namespace() {
+        let cache = tempfile::tempdir().unwrap();
+        let thread_id = "T-00000000-0000-0000-0000-000000000002";
+        let (path, guard) = create_admitted_input_workspace(cache.path(), thread_id).unwrap();
+        std::fs::write(path.join("scratch"), b"abandoned").unwrap();
+        guard.disarm();
+        drop(guard);
+
+        assert!(remove_abandoned_admitted_input_workspace(cache.path(), thread_id).unwrap());
+        assert!(!path.exists());
+        assert!(!remove_abandoned_admitted_input_workspace(cache.path(), thread_id).unwrap());
+        assert!(remove_abandoned_admitted_input_workspace(cache.path(), "not-a-thread").is_err());
+    }
+
+    #[test]
+    fn admitted_input_inventory_finds_unattached_terminal_residue() {
+        let cache = tempfile::tempdir().unwrap();
+        let thread_id = "T-00000000-0000-0000-0000-000000000003";
+        let (path, guard) = create_admitted_input_workspace(cache.path(), thread_id).unwrap();
+        std::fs::write(path.join("terminal-output"), b"settled").unwrap();
+        guard.disarm();
+        drop(guard);
+
+        assert_eq!(
+            admitted_input_workspace_thread_ids(cache.path()).unwrap(),
+            vec![thread_id.to_owned()]
+        );
+        assert!(remove_abandoned_admitted_input_workspace(cache.path(), thread_id).unwrap());
+        assert!(
+            admitted_input_workspace_thread_ids(cache.path())
+                .unwrap()
+                .is_empty()
+        );
     }
 }

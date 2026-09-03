@@ -22,11 +22,10 @@
 //! signed by the bundle author's key during bundle authoring, never
 //! re-signed in place by an operator.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use lillux::crypto::{DecodePrivateKey, SigningKey};
+use lillux::crypto::SigningKey;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::kind_registry::{KindRegistry, KindSchema, validate_metadata_anchoring};
@@ -92,7 +91,6 @@ pub fn run_sign(
     if parsed_target.is_err() && !looks_path_arg(item_ref) {
         return parsed_target.map(|_| unreachable!());
     }
-
     let app_root = match std::env::var("RYEOS_APP_ROOT") {
         Ok(p) => PathBuf::from(p),
         Err(_) => dirs::data_dir()
@@ -117,6 +115,69 @@ pub fn run_sign(
     };
 
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
+    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, isolation)?;
+    let signing_key = load_operator_signing_key(&app_root)?;
+    ensure_operator_key_is_trusted(&trust_store, &signing_key)?;
+    run_sign_prepared(
+        item_ref,
+        project_path,
+        source,
+        &kinds,
+        &parsers,
+        &signing_key,
+    )
+}
+
+/// Sign project items through an already-admitted daemon engine generation.
+///
+/// The daemon handler owns caller authentication and supplies the exact local
+/// operator key. This function publishes only the selected project item bytes;
+/// it never takes the node-wide state lock or writes runtime/CAS state.
+pub fn run_sign_online(
+    item_ref: &str,
+    project_path: &Path,
+    engine: &ryeos_engine::engine::Engine,
+    signing_key: &SigningKey,
+) -> Result<BatchReport> {
+    let trust_store = engine
+        .node_trust_store
+        .with_project_keys(project_path)
+        .map(std::borrow::Cow::into_owned)
+        .context("load project trust")?;
+    ensure_operator_key_is_trusted(&trust_store, signing_key)?;
+    run_sign_prepared(
+        item_ref,
+        Some(project_path),
+        SignSource::Project,
+        &engine.kinds,
+        &engine.parser_dispatcher,
+        signing_key,
+    )
+}
+
+fn ensure_operator_key_is_trusted(
+    trust_store: &TrustStore,
+    signing_key: &SigningKey,
+) -> Result<()> {
+    let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
+    if !trust_store.is_trusted(&fingerprint) {
+        bail!("operator signing key is not trusted for this project");
+    }
+    Ok(())
+}
+
+fn run_sign_prepared(
+    item_ref: &str,
+    project_path: Option<&Path>,
+    source: SignSource,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    signing_key: &SigningKey,
+) -> Result<BatchReport> {
+    let parsed_target = parse_sign_target(item_ref);
+    if parsed_target.is_err() && !looks_path_arg(item_ref) {
+        return parsed_target.map(|_| unreachable!());
+    }
 
     // `sign` canonically takes a ref (`graph:foo/bar`), but operators and LLMs
     // routinely pass the file path they just edited. A path under the project's
@@ -140,8 +201,6 @@ pub fn run_sign(
     let kind_schema = kinds
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
-
-    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, isolation)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
     let ai_root = source_ai_root(source, project_path)?;
@@ -212,7 +271,14 @@ pub fn run_sign(
             .unwrap_or_else(|| file_path.display().to_string());
         let display_ref = format!("{}:{}", target.kind, bare_id);
 
-        match sign_one(&file_path, &target.kind, kind_schema, &ai_root, &parsers) {
+        match sign_one(
+            &file_path,
+            &target.kind,
+            kind_schema,
+            &ai_root,
+            parsers,
+            signing_key,
+        ) {
             Ok(SignOneResult {
                 outcome: SignOutcome::Signed(sig),
                 warnings,
@@ -236,6 +302,7 @@ pub fn run_sign(
                     signer_fingerprint,
                     signature_line: "unchanged — already validly signed".to_string(),
                     updated_at: String::new(),
+                    durability_uncertain: false,
                 }),
                 error: None,
                 warnings,
@@ -264,9 +331,14 @@ fn sign_one(
     kind_schema: &KindSchema,
     ai_root: &Path,
     parsers: &ParserDispatcher,
+    signing_key: &SigningKey,
 ) -> Result<SignOneResult> {
-    let content =
-        fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
+    let content = lillux::read_regular_file_bounded_no_follow(
+        file_path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )
+    .with_context(|| format!("read {}", file_path.display()))?;
+    let content = String::from_utf8(content).context("item source is not UTF-8")?;
     let matched_ext = file_path
         .extension()
         .and_then(|e| e.to_str())
@@ -305,9 +377,45 @@ fn sign_one(
         )
     })?;
 
+    validate_authored_external_content(
+        &parsed,
+        kind_schema,
+        ryeos_engine::external_content::DeclaringAuthority::Project,
+    )
+    .with_context(|| {
+        format!(
+            "strict external-content validation refused {}",
+            file_path.display()
+        )
+    })?;
+
     let warnings = sign_warnings(kind_name, &parsed);
-    let outcome = sign_in_place(file_path, &content, &source_format.signature)?;
+    let outcome = sign_in_place_with_key(
+        file_path,
+        &content,
+        &source_format.signature,
+        signing_key,
+        Some((
+            kind_schema,
+            &derive_bare_id(
+                file_path,
+                &ai_root.join(&kind_schema.directory),
+                kind_schema,
+            )
+            .ok_or_else(|| anyhow!("cannot derive canonical item id before signing"))?,
+        )),
+    )?;
     Ok(SignOneResult { outcome, warnings })
+}
+
+pub(crate) fn validate_authored_external_content(
+    parsed: &serde_json::Value,
+    kind_schema: &KindSchema,
+    declarer: ryeos_engine::external_content::DeclaringAuthority<'_>,
+) -> Result<()> {
+    let contract = kind_schema.external_content_contract();
+    ryeos_engine::external_content::declarations_from_composed(parsed, contract, declarer)?;
+    Ok(())
 }
 
 fn sign_warnings(kind_name: &str, parsed: &serde_json::Value) -> Vec<String> {
@@ -362,12 +470,12 @@ fn looks_graph_shaped(parsed: &serde_json::Value) -> bool {
 }
 
 #[derive(Debug)]
-struct SignTarget {
-    kind: String,
-    bare_id: String,
+pub(crate) struct SignTarget {
+    pub(crate) kind: String,
+    pub(crate) bare_id: String,
 }
 
-fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
+pub(crate) fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
     if !is_glob_ref(item_ref) {
         let canonical = CanonicalRef::parse(item_ref)
             .map_err(|e| anyhow!("malformed canonical ref `{item_ref}`: {e}"))?;
@@ -606,7 +714,10 @@ pub struct ItemOutcome {
     pub warnings: Vec<String>,
 }
 
-fn build_kind_registry(bundle_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
+pub(crate) fn build_kind_registry(
+    bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+) -> Result<KindRegistry> {
     // Kind schemas are node-tier items: they live exclusively under
     // `<bundle-root>/.ai/node/engine/kinds/` in node bundles laid down
     // at the bundle roots. They do NOT participate in the
@@ -630,7 +741,7 @@ fn build_kind_registry(bundle_roots: &[PathBuf], trust_store: &TrustStore) -> Re
 /// kind registry knows about. The native handler registry provides
 /// the in-process parsers (`yaml/yaml`, `markdown/frontmatter`, etc.)
 /// that the descriptors point at.
-fn build_parser_dispatcher(
+pub(crate) fn build_parser_dispatcher(
     bundle_roots: &[PathBuf],
     kinds: &KindRegistry,
     trust_store: &TrustStore,
@@ -660,31 +771,48 @@ fn build_parser_dispatcher(
 /// user key, the file is left untouched and `SignOutcome::Unchanged` is
 /// returned. Otherwise the file is (re-)signed atomically.
 ///
-/// Loads the operator signing key from
-/// `<app_root>/.ai/config/keys/signing/private_key.pem`.
-fn sign_in_place(
-    input: &Path,
-    validated_content: &str,
-    envelope: &SignatureEnvelope,
-) -> Result<SignOutcome> {
-    let signing_key = load_user_signing_key()?;
-    sign_in_place_with_key(input, validated_content, envelope, &signing_key)
-}
-
 fn sign_in_place_with_key(
     input: &Path,
     validated_content: &str,
     envelope: &SignatureEnvelope,
     signing_key: &SigningKey,
+    source_selection: Option<(&KindSchema, &str)>,
 ) -> Result<SignOutcome> {
+    let parent_path = input
+        .parent()
+        .ok_or_else(|| anyhow!("sign target has no parent directory"))?;
+    let name = input
+        .file_name()
+        .ok_or_else(|| anyhow!("sign target has no file name"))?;
+    let parent = lillux::PinnedDirectory::open(parent_path)?
+        .ok_or_else(|| anyhow!("sign target parent is unavailable"))?;
+    let _lock = parent.lock_exclusive()?;
+    let mut incumbent = parent
+        .open_regular(name, false)?
+        .ok_or_else(|| anyhow!("sign target is not a regular file"))?;
+    let observation = lillux::observe_open_regular_file(&incumbent)?;
+    let incumbent_bytes = lillux::read_open_regular_file_stable_bounded(
+        &mut incumbent,
+        &observation,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )?;
+    if incumbent_bytes != validated_content.as_bytes() {
+        bail!("sign target changed after validation; no bytes were modified");
+    }
+    let incumbent_full_mode = observation.full_permission_mode()?;
+    if incumbent_full_mode & 0o7000 != 0 {
+        bail!("sign refuses a source item with set-id or sticky permission bits");
+    }
+    let incumbent_mode = observation.permission_mode()?;
     let verifying_key = signing_key.verifying_key();
     let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
 
-    let stripped = lillux::signature::strip_signature_lines_with_envelope(
+    let (stripped, _) = lillux::signature::strip_canonical_signature_with_envelope(
         validated_content,
         &envelope.prefix,
         envelope.suffix.as_deref(),
-    );
+        envelope.after_shebang,
+    )?;
 
     // Check if already validly signed: hash + fingerprint + sig verification
     if is_already_validly_signed_operator(
@@ -694,6 +822,9 @@ fn sign_in_place_with_key(
         &fingerprint,
         envelope,
     ) {
+        ensure_sign_source_selection(&parent, name, source_selection, true)?;
+        parent.ensure_regular_entry_matches(name, Some(&incumbent))?;
+        parent.ensure_path_binding()?;
         return Ok(SignOutcome::Unchanged {
             file: input.display().to_string(),
             signer_fingerprint: fingerprint,
@@ -707,13 +838,63 @@ fn sign_in_place_with_key(
         envelope.suffix.as_deref(),
         envelope.after_shebang,
     );
+    if signed.len() as u64 > ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES {
+        bail!("signed item exceeds the item source byte limit");
+    }
 
-    // Atomic write
-    let tmp = input.with_extension(format!("signed.tmp.{}", std::process::id()));
-    fs::write(&tmp, &signed).with_context(|| format!("write tmp {}", tmp.display()))?;
-    fs::rename(&tmp, input)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), input.display()))?;
-
+    let expected = incumbent_bytes;
+    let expected_observation = observation.clone();
+    let mut durability_uncertain = false;
+    parent.ensure_path_binding()?;
+    ensure_sign_source_selection(&parent, name, source_selection, true)?;
+    let selection_parent = parent.try_clone()?;
+    let selection_name = name.to_owned();
+    if let Err(error) = parent.replace_bytes_if_matches_atomic(
+        name,
+        Some(&incumbent),
+        move |current| {
+            // The atomic replacement has moved the exact incumbent to its
+            // private quarantine before invoking this callback. Re-prove the
+            // extension-priority negatives here, but let the selected live
+            // name be absent; the quarantined descriptor below is the
+            // positive identity proof at this linearization point.
+            ensure_sign_source_selection(
+                &selection_parent,
+                &selection_name,
+                source_selection,
+                false,
+            )?;
+            let observed = lillux::observe_open_regular_file(current)?;
+            if !observed.matches_quarantined_incumbent(&expected_observation) {
+                bail!("sign target metadata changed before publication");
+            }
+            let mut current = current.try_clone()?;
+            let current = lillux::read_open_regular_file_stable_bounded(
+                &mut current,
+                &observed,
+                ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+            )?;
+            if current != expected {
+                bail!("sign target bytes changed before publication");
+            }
+            Ok(())
+        },
+        signed.as_bytes(),
+        incumbent_mode,
+    ) {
+        if error.namespace_committed() {
+            if let Err(sync_error) = parent.sync() {
+                durability_uncertain = true;
+                tracing::warn!(
+                    error = %error,
+                    sync_error = %sync_error,
+                    "item signature committed but parent durability could not be re-established"
+                );
+            }
+        } else {
+            return Err(anyhow!(error));
+        }
+    }
     let signature_line = extract_signature_line(&signed, &envelope.prefix)
         .unwrap_or_else(|| "signature applied".to_string());
 
@@ -722,7 +903,59 @@ fn sign_in_place_with_key(
         signer_fingerprint: fingerprint,
         signature_line,
         updated_at: lillux::time::iso8601_now(),
+        durability_uncertain,
     }))
+}
+
+fn ensure_sign_source_selection(
+    parent: &lillux::PinnedDirectory,
+    selected_name: &std::ffi::OsStr,
+    source_selection: Option<(&KindSchema, &str)>,
+    selected_must_be_live: bool,
+) -> Result<()> {
+    let Some((schema, bare_id)) = source_selection else {
+        return Ok(());
+    };
+    let selected_name = selected_name
+        .to_str()
+        .ok_or_else(|| anyhow!("sign target name is not UTF-8"))?;
+    let stem = bare_id.rsplit_once('/').map_or(bare_id, |(_, stem)| stem);
+    for extension in &schema.extensions {
+        let candidate = format!("{stem}{}", extension.ext);
+        let entry = parent.entry_no_follow(std::ffi::OsStr::new(&candidate))?;
+        if candidate == selected_name {
+            return if selected_must_be_live {
+                match entry {
+                    Some(entry) if entry.entry_type == lillux::PinnedEntryType::Regular => Ok(()),
+                    _ => bail!("canonical sign source changed before publication"),
+                }
+            } else if entry.is_none() {
+                Ok(())
+            } else {
+                bail!("canonical sign source was replaced during publication")
+            };
+        }
+        if entry.is_some_and(|entry| entry.entry_type == lillux::PinnedEntryType::Regular) {
+            bail!("a higher-priority item source appeared before signature publication");
+        }
+    }
+    bail!("selected sign source extension is no longer registered")
+}
+
+/// Publish an already parser- and kind-validated item through the same
+/// descriptor-pinned conditional authoring boundary used by operator sign.
+/// Bundle authoring runs inside a private staged generation, but still must
+/// not grow a second raw temp-file/rename implementation.
+pub(super) fn sign_validated_in_place_with_key(
+    input: &Path,
+    validated_content: &str,
+    envelope: &SignatureEnvelope,
+    signing_key: &SigningKey,
+) -> Result<bool> {
+    Ok(matches!(
+        sign_in_place_with_key(input, validated_content, envelope, signing_key, None)?,
+        SignOutcome::Signed(_)
+    ))
 }
 
 /// Check whether `existing` (full file content) already carries a valid
@@ -777,16 +1010,35 @@ pub struct SignatureReport {
     pub signer_fingerprint: String,
     pub signature_line: String,
     pub updated_at: String,
+    pub durability_uncertain: bool,
 }
 
 pub fn load_user_signing_key() -> Result<SigningKey> {
-    let path: PathBuf = roots::runtime_root()
-        .context("cannot resolve app root for operator signing key")?
-        .operator_signing_key_path();
+    let runtime_root =
+        roots::runtime_root().context("cannot resolve app root for operator signing key")?;
+    load_operator_signing_key(runtime_root.as_path())
+}
 
-    let pem = fs::read_to_string(&path)
-        .with_context(|| format!("read signing key from {}", path.display()))?;
-    SigningKey::from_pkcs8_pem(&pem).context("parse signing key (Ed25519 PKCS8 PEM)")
+/// Load the exact operator signing key beneath one already-selected node root.
+/// Daemon-owned authoring passes its configured root explicitly rather than
+/// relying on process environment discovery.
+pub fn load_operator_signing_key(runtime_root: &Path) -> Result<SigningKey> {
+    let root = lillux::PinnedDirectory::open(runtime_root)?
+        .ok_or_else(|| anyhow!("operator runtime root is unavailable"))?;
+    let mut parent = root.try_clone()?;
+    for segment in [ryeos_engine::AI_DIR, "config", "keys", "signing"] {
+        parent = parent
+            .open_child_directory(std::ffi::OsStr::new(segment))?
+            .ok_or_else(|| anyhow!("operator signing-key directory is unavailable"))?;
+    }
+    let key = parent
+        .open_pinned_regular(std::ffi::OsStr::new("private_key.pem"), false)?
+        .ok_or_else(|| anyhow!("operator signing key is unavailable"))?;
+    let signing_key = lillux::crypto::load_signing_key_from_pinned_file(&key)
+        .context("load stable operator signing key")?;
+    parent.ensure_path_binding()?;
+    root.ensure_path_binding()?;
+    Ok(signing_key)
 }
 
 fn extract_signature_line(content: &str, prefix: &str) -> Option<String> {
@@ -876,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_place_uses_validated_content_not_reread_bytes() {
+    fn sign_in_place_refuses_bytes_that_moved_after_validation() {
         let tmp = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
 
@@ -889,17 +1141,122 @@ mod tests {
         };
 
         let validated = "name: validated\n";
-        let outcome = sign_in_place_with_key(&item_path, validated, &envelope, &key).unwrap();
-        assert!(matches!(outcome, SignOutcome::Signed(_)));
-
-        let written = std::fs::read_to_string(&item_path).unwrap();
-        let stripped = lillux::signature::strip_signature_lines_with_envelope(
-            &written,
-            &envelope.prefix,
-            envelope.suffix.as_deref(),
+        let error = sign_in_place_with_key(&item_path, validated, &envelope, &key, None)
+            .err()
+            .expect("changed bytes must be refused");
+        assert!(error.to_string().contains("changed after validation"));
+        assert_eq!(
+            std::fs::read_to_string(&item_path).unwrap(),
+            "name: unvalidated\n"
         );
-        assert_eq!(stripped, validated);
-        assert!(!written.contains("unvalidated"));
+    }
+
+    #[test]
+    fn sign_in_place_preserves_crlf_and_verifies_the_exact_resolution_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let item_path = tmp.path().join("item.yaml");
+        let body = "version: \"1.0.0\"\r\nname: fixture\r\n";
+        std::fs::write(&item_path, body.as_bytes()).unwrap();
+        let envelope = SignatureEnvelope {
+            prefix: "#".to_owned(),
+            suffix: None,
+            after_shebang: false,
+        };
+
+        assert!(matches!(
+            sign_in_place_with_key(&item_path, body, &envelope, &key, None).unwrap(),
+            SignOutcome::Signed(_)
+        ));
+        let signed = std::fs::read_to_string(&item_path).unwrap();
+        let (stripped, header) =
+            lillux::signature::strip_canonical_signature_with_envelope(&signed, "#", None, false)
+                .unwrap();
+        assert_eq!(stripped, body);
+        let header = header.unwrap();
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        assert!(lillux::signature::is_valid_signature_for(
+            &header.content_hash,
+            &header.signature_b64,
+            &header.signer_fingerprint,
+            &stripped,
+            &key.verifying_key(),
+            &fingerprint,
+        ));
+        assert!(signed.contains("\r\nversion: \"1.0.0\"\r\n"));
+    }
+
+    #[test]
+    fn sign_in_place_keeps_canonical_source_authority_during_quarantine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let item_path = tmp.path().join("item.yaml");
+        let body = "version: \"1.0.0\"\nname: fixture\n";
+        std::fs::write(&item_path, body).unwrap();
+        let envelope = SignatureEnvelope {
+            prefix: "#".to_owned(),
+            suffix: None,
+            after_shebang: false,
+        };
+        let schema = KindSchema {
+            directory: "items".to_owned(),
+            excluded_directories: Vec::new(),
+            extensions: vec![ryeos_engine::kind_registry::ExtensionSpec {
+                ext: ".yaml".to_owned(),
+                parser: "parser:ryeos/core/yaml".to_owned(),
+                signature: envelope.clone(),
+            }],
+            extraction_rules: Default::default(),
+            resolution: Vec::new(),
+            effective_trust: Default::default(),
+            content: None,
+            execution: None,
+            composed_value_contract: ryeos_engine::contracts::ValueShape::any_mapping(),
+            composer: "handler:ryeos/core/identity".to_owned(),
+            composer_config: serde_json::Value::Null,
+            runtime: None,
+            inventory_kinds: Vec::new(),
+            inventory_schema_keys: Vec::new(),
+            inventory_policy: Default::default(),
+        };
+
+        assert!(matches!(
+            sign_in_place_with_key(&item_path, body, &envelope, &key, Some((&schema, "item")),)
+                .unwrap(),
+            SignOutcome::Signed(_)
+        ));
+        assert!(
+            std::fs::read_to_string(&item_path)
+                .unwrap()
+                .starts_with("# ryeos:signed:")
+        );
+
+        let content_schema = KindSchema {
+            content: Some(ryeos_engine::kind_registry::KindContentSchema {
+                external_content: ryeos_engine::kind_registry::KindExternalContentDecl {
+                    realization_derived: ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                        .to_owned(),
+                    allowed_roots: Vec::new(),
+                    max_declarations: 1,
+                    large_content: None,
+                },
+            }),
+            ..schema.clone()
+        };
+        validate_authored_external_content(
+            &serde_json::json!({
+                "external_content": [{
+                    "id": "runtime",
+                    "kind": "file",
+                    "mode": "pinned",
+                    "digest": "a".repeat(64),
+                    "mount": "runtime"
+                }]
+            }),
+            &content_schema,
+            ryeos_engine::external_content::DeclaringAuthority::Project,
+        )
+        .expect("signing honors a non-executable kind-owned content contract");
     }
 
     #[test]

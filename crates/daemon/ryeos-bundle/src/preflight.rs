@@ -278,10 +278,37 @@ fn preflight_verify_bundle_in_context_inner(
         schema_roots.push(bundle_kinds.clone());
     }
     if schema_roots.is_empty() {
-        bail!(
-            "preflight: no kind schemas in installed bundles or candidate bundle ({})",
-            bundle_kinds.display()
-        );
+        // A bundle may be purely mechanical: a signed executable payload and
+        // a manifest-owned declaration such as an isolation backend. It has
+        // no authored items and therefore no honest kind dependency merely
+        // to make preflight boot. Verify the complete signed manifest first,
+        // then admit only the closed manifest/payload layout. Any authored
+        // item namespace still requires an explicit kind dependency and is
+        // refused here rather than being silently ignored.
+        let trust_store =
+            TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
+        if trust_store.is_empty() {
+            bail!(
+                "preflight: node trust store is empty — run `ryeos init` to \
+                 pin the platform author key, or `ryeos trust pin <fingerprint>` \
+                 to pin a third-party publisher"
+            );
+        }
+        ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
+            .context("preflight: verify node-authorized bundle executables")?;
+        match expected_bundle_name {
+            Some(expected_bundle_name) => verify_manifest_signature_for_bundle_name(
+                &ai_dir,
+                source_path,
+                expected_bundle_name,
+                &trust_store,
+                check_source_mtime,
+            ),
+            None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
+        }
+        .context("preflight: bundle manifest verification")?;
+        validate_manifest_only_control_tree(&ai_dir)?;
+        return Ok(PreflightReport::default());
     }
 
     let trust_store =
@@ -533,6 +560,37 @@ fn preflight_verify_bundle_in_context_inner(
     Ok(PreflightReport { warnings })
 }
 
+/// Refuse an item namespace when no kind schema is in the exact dependency
+/// closure. Manifest-only bundles may contain only their signed manifest and
+/// content-addressed executable payload machinery.
+fn validate_manifest_only_control_tree(ai_dir: &Path) -> Result<()> {
+    const ALLOWED: &[&str] = &[
+        "bin",
+        "manifest.source.yaml",
+        "manifest.yaml",
+        "objects",
+        "refs",
+    ];
+    for entry in
+        fs::read_dir(ai_dir).with_context(|| format!("read control tree {}", ai_dir.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "preflight: manifest-only bundle contains a non-UTF-8 control-tree entry"
+            )
+        })?;
+        if !ALLOWED.contains(&name) {
+            bail!(
+                "preflight: manifest-only bundle contains undeclared item namespace `{name}`; \
+                 declare the owning kind in requires_kinds or uses_kinds"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn verify_manifest_signature(
     ai_dir: &Path,
     source_path: &Path,
@@ -726,9 +784,6 @@ struct PreflightNodeBundleRecord {
     kind: Option<String>,
     #[allow(dead_code)]
     path: PathBuf,
-    #[allow(dead_code)]
-    #[serde(default)]
-    command_registration_caps: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -881,6 +936,9 @@ struct PreflightCommandControlFlag {
     // enum by the command model at load; preflight only checks structure.
     #[allow(dead_code)]
     binding: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    ref_binding_name: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     aliases: Vec<String>,
@@ -1052,6 +1110,8 @@ enum PreflightCommandDispatch {
     DirectExecuteItemRef {
         item_ref_arg: String,
         #[allow(dead_code)]
+        validate_only: bool,
+        #[allow(dead_code)]
         #[serde(default)]
         availability: PreflightCommandAvailability,
     },
@@ -1069,69 +1129,9 @@ enum PreflightCommandAvailability {
     #[default]
     Auto,
     Daemon,
-    Offline,
+    Local,
+    StoppedNode,
     Both,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodePolicyRecord {
-    #[allow(dead_code)]
-    version: String,
-    schema_version: String,
-    #[allow(dead_code)]
-    description: String,
-    transport: PreflightHostedNodeTransportPolicy,
-    admission: PreflightHostedNodeAdmissionPolicy,
-    descriptor: PreflightHostedNodeDescriptorPolicy,
-    authorization: PreflightHostedNodeAuthorizationPolicy,
-    operations: PreflightHostedNodeOperationsPolicy,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeTransportPolicy {
-    public_https_required: bool,
-    #[allow(dead_code)]
-    loopback_http_allowed: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeAdmissionPolicy {
-    mode: String,
-    token_ttl_secs: u64,
-    reject_wildcard_scopes: bool,
-    token_delivery: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeDescriptorPolicy {
-    require_live_identity_match: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    advertised_capabilities: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeAuthorizationPolicy {
-    authority: String,
-    central_bearer_tokens_allowed: bool,
-    implicit_cross_node_authority_allowed: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightHostedNodeOperationsPolicy {
-    #[allow(dead_code)]
-    audit_admission_events: bool,
-    #[allow(dead_code)]
-    audit_grant_changes: bool,
-    #[allow(dead_code)]
-    prefer_isolated_node_per_principal: bool,
-    shared_daemon_multitenancy_enabled: bool,
 }
 
 fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<String> {
@@ -1182,24 +1182,12 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
             continue;
         };
 
-        if matches!(section, "verbs" | "aliases") {
+        if !matches!(section, "routes" | "commands") {
             failures.push(format!(
-                "{}: legacy node config section '.ai/node/{}' is no longer supported; use '.ai/node/commands'",
+                "{}: bundles may contribute only '.ai/node/engine/kinds', '.ai/node/routes', or '.ai/node/commands'; namespace '.ai/node/{}' is node-owned or unsupported",
                 rel.display(),
                 section
             ));
-            continue;
-        }
-
-        if section == "command_registration" {
-            failures.push(format!(
-                "{}: command registration policy is node-owned seed/system config; normal bundles may not ship '.ai/node/command_registration'",
-                rel.display()
-            ));
-            continue;
-        }
-
-        if !matches!(section, "bundles" | "hosted" | "routes" | "commands") {
             continue;
         }
 
@@ -1298,7 +1286,6 @@ fn validate_node_config_item(
 
     match expected_section {
         "bundles" => validate_node_bundle_record(file_path, &body),
-        "hosted" => validate_hosted_node_policy(file_path, &body),
         "routes" => validate_node_route_record(&body),
         "commands" => validate_node_command_record(file_path, section_root, &body),
         _ => Ok(()),
@@ -1440,48 +1427,6 @@ fn validate_node_command_record(
     Ok(())
 }
 
-fn validate_hosted_node_policy(file_path: &Path, body: &serde_json::Value) -> Result<()> {
-    let record: PreflightHostedNodePolicyRecord = serde_json::from_value(body.clone())
-        .context("failed to parse hosted node-config policy")?;
-    if file_path.file_stem().and_then(|stem| stem.to_str()) != Some("policy") {
-        bail!("hosted-node policy filename must be 'policy'");
-    }
-    if record.schema_version != "1.0.0" {
-        bail!("hosted-node policy schema_version must be '1.0.0'");
-    }
-    if !record.transport.public_https_required {
-        bail!("hosted-node policy must require public HTTPS");
-    }
-    if record.admission.mode != "one_time_token" {
-        bail!("hosted-node admission.mode must be 'one_time_token'");
-    }
-    if record.admission.token_ttl_secs == 0 {
-        bail!("hosted-node admission.token_ttl_secs must be greater than zero");
-    }
-    if !record.admission.reject_wildcard_scopes {
-        bail!("hosted-node policy must reject wildcard admission scopes");
-    }
-    if record.admission.token_delivery != "out_of_band" {
-        bail!("hosted-node admission.token_delivery must be 'out_of_band'");
-    }
-    if !record.descriptor.require_live_identity_match {
-        bail!("hosted-node policy must require live descriptor identity matching");
-    }
-    if record.authorization.authority != "target_node_authorized_keys" {
-        bail!("hosted-node authorization.authority must be 'target_node_authorized_keys'");
-    }
-    if record.authorization.central_bearer_tokens_allowed {
-        bail!("hosted-node policy must not allow central bearer tokens");
-    }
-    if record.authorization.implicit_cross_node_authority_allowed {
-        bail!("hosted-node policy must not allow implicit cross-node authority");
-    }
-    if record.operations.shared_daemon_multitenancy_enabled {
-        bail!("hosted-node policy must not enable shared daemon multitenancy");
-    }
-    Ok(())
-}
-
 fn validate_preflight_command_tokens(name: &str, tokens: &[String]) -> Result<()> {
     if tokens.is_empty() {
         bail!("command '{}' has empty tokens list", name);
@@ -1561,7 +1506,7 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.control_flags.len(), 8, "expected 8 control flags");
+        assert_eq!(record.control_flags.len(), 10, "expected 10 control flags");
     }
 
     /// Command preflight must recognize the same sensitive-field metadata as
@@ -1980,6 +1925,49 @@ description: "fixed parser handler for preflight tests"
     }
 
     #[test]
+    fn preflight_accepts_a_closed_manifest_only_bundle_without_kind_dependencies() {
+        let layout = BundleLayout::new("mechanical-payload");
+        layout.write_signed_manifest(
+            "name: mechanical-payload\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
+        )
+        .expect("a signed manifest-only bundle needs no synthetic kind dependency");
+
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn preflight_refuses_an_item_namespace_without_its_kind_dependency() {
+        let layout = BundleLayout::new("undeclared-items");
+        layout.write_signed_manifest(
+            "name: undeclared-items\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        fs::create_dir_all(layout.ai_dir.join("workers")).unwrap();
+        fs::write(layout.ai_dir.join("workers/demo.yaml"), "category: demo\n").unwrap();
+
+        let error = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
+        )
+        .expect_err("an undeclared item namespace must not be silently ignored");
+
+        assert!(
+            error
+                .to_string()
+                .contains("undeclared item namespace `workers`"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn verify_manifest_rejects_provides_kinds_mismatch() {
         let layout = BundleLayout::new("test-bundle");
         layout.add_kind_schema("mykind");
@@ -2151,6 +2139,7 @@ description: Demo command
 dispatch:
   kind: execute_ref
   execute: tool:demo/run
+  availability: local
 aliases:
   - tokens: ["demo", "run"]
     description: Demo command alias
@@ -2165,6 +2154,24 @@ aliases:
             &trust_store,
         )
         .expect("signed valid command should pass node-config preflight");
+    }
+
+    #[test]
+    fn command_preflight_accepts_every_current_availability() {
+        for availability in ["auto", "daemon", "local", "stopped_node", "both"] {
+            let value = serde_json::json!({
+                "tokens": ["demo"],
+                "description": "Demo command",
+                "dispatch": {
+                    "kind": "execute_ref",
+                    "execute": "tool:demo/run",
+                    "availability": availability,
+                }
+            });
+            serde_json::from_value::<PreflightCommandRecord>(value).unwrap_or_else(|error| {
+                panic!("current availability `{availability}` must pass preflight: {error}")
+            });
+        }
     }
 
     #[test]
@@ -2200,15 +2207,11 @@ dispatch:
     }
 
     #[test]
-    fn node_config_preflight_rejects_legacy_verb_section() {
+    fn node_config_preflight_rejects_unregistered_bundle_namespace() {
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
-            "node/verbs/demo.yaml",
-            r#"category: verbs
-section: verbs
-name: demo
-description: Legacy verb
-execute: tool:demo/run
+            "node/arbitrary/demo.yaml",
+            r#"value: unsupported
 "#,
         );
         let trust_store = layout.trust_store();
@@ -2218,34 +2221,29 @@ execute: tool:demo/run
         assert!(
             failures
                 .iter()
-                .any(|failure| failure.contains("legacy node config section")),
-            "expected legacy node/verbs rejection, got: {failures:?}"
+                .any(|failure| failure.contains("bundles may contribute only")),
+            "expected unsupported node namespace rejection, got: {failures:?}"
         );
     }
 
     #[test]
-    fn node_config_preflight_rejects_bundle_authored_command_registration_policy() {
+    fn node_config_preflight_rejects_bundle_authored_policy_generation() {
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
-            "node/command_registration/default.yaml",
-            r#"claim_rules:
-  - claim:
-      kind: command.root
-      value: execute
-    required_caps:
-      - ryeos.register.command.root.execute
-system_source_caps:
-  - ryeos.register.command.root.execute
+            "node/policies/hosted.yaml",
+            r#"schema: 1
+admission_enabled: true
+admission_token_ttl_secs: 600
+allow_loopback_http: true
 "#,
         );
-        let trust_store = layout.trust_store();
-
-        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+        let failures = collect_node_config_failures(&layout.ai_dir, &layout.trust_store());
 
         assert!(
-            failures.iter().any(|failure| failure
-                .contains("command registration policy is node-owned seed/system config")),
-            "expected command_registration rejection, got: {failures:?}"
+            failures
+                .iter()
+                .any(|failure| failure.contains("bundles may contribute only")),
+            "expected bundle policy-generation rejection, got: {failures:?}"
         );
     }
 
@@ -2335,7 +2333,7 @@ optional: {}
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -2368,7 +2366,7 @@ optional: {}
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("non-identity composer should skip pre-composition contract validation");
 
@@ -2396,7 +2394,7 @@ strict_fields: warn
             &layout.source,
             &[],
             &layout.node_config_root,
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("warnings should not fail preflight");
 
@@ -2428,6 +2426,7 @@ strict_fields: warn
             effective_trust: ryeos_engine::kind_registry::EffectiveTrustPolicy {
                 include_references: false,
             },
+            content: None,
             execution: None,
             composed_value_contract: shape_from_yaml(contract_yaml),
             composer: IDENTITY_COMPOSER.to_string(),

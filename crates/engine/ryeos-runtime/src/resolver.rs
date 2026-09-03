@@ -9,6 +9,9 @@ pub struct ResolvedCommand {
     pub command: String,
     /// The canonical ref to execute.
     pub execute_ref: String,
+    /// Whether the command requests the executor's pre-spawn validation
+    /// boundary instead of execution.
+    pub validate_only: bool,
     /// How many tokens were consumed by the command match.
     pub consumed: usize,
     /// Remaining tokens after the command match.
@@ -55,9 +58,13 @@ pub fn resolve_command(
             },
         )?;
 
-    let execute_ref = match &matched.command.dispatch {
-        crate::CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
-        crate::CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => {
+    let (execute_ref, validate_only) = match &matched.command.dispatch {
+        crate::CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
+        crate::CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg,
+            validate_only,
+            ..
+        } => {
             let item_ref = parameters
                 .get(item_ref_arg)
                 .and_then(|v| v.as_str())
@@ -69,7 +76,7 @@ pub fn resolve_command(
             if let Some(obj) = parameters.as_object_mut() {
                 obj.remove(item_ref_arg);
             }
-            item_ref
+            (item_ref, *validate_only)
         }
         crate::CommandDispatch::Group | crate::CommandDispatch::LocalHandler { .. } => {
             return Err(ResolveError::NotExecutable {
@@ -92,6 +99,7 @@ pub fn resolve_command(
     Ok(ResolvedCommand {
         command: matched.command.name,
         execute_ref,
+        validate_only,
         consumed: matched.consumed,
         tail: matched.tail,
         parameters,

@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 pub(super) const SPINNER_TICK_INTERVAL: Duration = Duration::from_millis(100);
-const UNICODE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// A three-dot arc moving clockwise around the complete eight-dot Braille
+// perimeter: 1 → 4 → 5 → 6 → 8 → 7 → 3 → 2.
+const UNICODE_SPINNER: &[&str] = &["⠋", "⠙", "⠸", "⢰", "⣠", "⣄", "⡆", "⠇"];
 const ASCII_SPINNER: &[&str] = &[".", "o", "O", "o"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +19,7 @@ pub enum Tone {
 pub fn glyph(tone: Tone, unicode: bool) -> &'static str {
     match (tone, unicode) {
         (Tone::Success, true) => "◆",
-        (Tone::Active, true) => "⠹",
+        (Tone::Active, true) => "⠋",
         (Tone::Warning, true) => "▲",
         (Tone::Failure, true) => "✕",
         (Tone::Neutral | Tone::Secondary, true) => "•",
@@ -72,5 +74,28 @@ mod tests {
     fn spinner_advances_in_unicode_and_ascii_modes() {
         assert_ne!(spinner(0, true), spinner(1, true));
         assert_ne!(spinner(0, false), spinner(1, false));
+    }
+
+    #[test]
+    fn unicode_spinner_orbits_the_complete_braille_perimeter() {
+        let perimeter = [
+            1 << 0, // dot 1: upper left
+            1 << 3, // dot 4: upper right
+            1 << 4, // dot 5: middle right
+            1 << 5, // dot 6: lower right
+            1 << 7, // dot 8: bottom right
+            1 << 6, // dot 7: bottom left
+            1 << 2, // dot 3: lower left
+            1 << 1, // dot 2: middle left
+        ];
+        for (index, frame) in UNICODE_SPINNER.iter().enumerate() {
+            let cell = frame.chars().next().expect("one Braille cell") as u32;
+            assert_eq!(frame.chars().count(), 1);
+            assert!((0x2800..=0x28ff).contains(&cell));
+            let expected = perimeter[(index + perimeter.len() - 1) % perimeter.len()]
+                | perimeter[index]
+                | perimeter[(index + 1) % perimeter.len()];
+            assert_eq!(cell - 0x2800, expected);
+        }
     }
 }

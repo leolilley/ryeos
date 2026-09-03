@@ -47,6 +47,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve and validate version
         id: release
@@ -64,6 +65,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: refs/tags/v${{ steps.release.outputs.version }}
 
       - name: Resolve and verify source revision
@@ -99,9 +101,22 @@ jobs:
           echo "Tag commit: $TAG_COMMIT"
           echo "Build date: $BUILD_DATE"
 
+  qualify-local-inference:
+    name: Qualify local inference against this release source
+    needs: qualify
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/qualify-local-inference-source.yml
+    with:
+      source_sha: ${{ needs.qualify.outputs.source_sha }}
+      require_promoted_release: true
+
   publish:
     name: Publish release artifacts
-    needs: qualify
+    needs:
+      - qualify
+      - qualify-local-inference
     runs-on: ubuntu-latest
     permissions:
       contents: write # immutable bundle assets on the GitHub release
@@ -111,6 +126,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ needs.qualify.outputs.source_sha }}
 
       - name: Verify release source revision
@@ -334,12 +350,16 @@ jobs:
                 echo "::error::Could not resolve immutable digest for $tag"
                 exit 1
               }
-              echo "${output_prefix}_exists=true" >> "$GITHUB_OUTPUT"
-              echo "${output_prefix}_digest=$digest" >> "$GITHUB_OUTPUT"
+              {
+                echo "${output_prefix}_exists=true"
+                echo "${output_prefix}_digest=$digest"
+              } >> "$GITHUB_OUTPUT"
               echo "Reusing $tag at $digest"
             elif grep -Eqi 'manifest unknown|not found|no such manifest|404' "$error_file"; then
-              echo "${output_prefix}_exists=false" >> "$GITHUB_OUTPUT"
-              echo "${output_prefix}_digest=" >> "$GITHUB_OUTPUT"
+              {
+                echo "${output_prefix}_exists=false"
+                echo "${output_prefix}_digest="
+              } >> "$GITHUB_OUTPUT"
               echo "No immutable tag exists yet: $tag"
             else
               cat "$error_file" >&2
@@ -352,23 +372,41 @@ jobs:
           CANDIDATE_SUFFIX="candidate-${VERSION}-${SOURCE_SHA}-${BUILD_DATE_KEY}"
           STANDARD_VERSION="ghcr.io/leolilley/ryeos-standard:${VERSION}"
           CENTRAL_VERSION="ghcr.io/leolilley/ryeos-central-host:${VERSION}"
+          HOSTED_WORKFLOW_VERSION="ghcr.io/leolilley/ryeos-hosted-workflow:${VERSION}"
           STANDARD_CANDIDATE="ghcr.io/leolilley/ryeos-standard:${CANDIDATE_SUFFIX}"
           CENTRAL_CANDIDATE="ghcr.io/leolilley/ryeos-central-host:${CANDIDATE_SUFFIX}"
-          echo "standard_candidate_tag=$STANDARD_CANDIDATE" >> "$GITHUB_OUTPUT"
-          echo "central_candidate_tag=$CENTRAL_CANDIDATE" >> "$GITHUB_OUTPUT"
+          HOSTED_WORKFLOW_CANDIDATE="ghcr.io/leolilley/ryeos-hosted-workflow:${CANDIDATE_SUFFIX}"
+          {
+            echo "standard_candidate_tag=$STANDARD_CANDIDATE"
+            echo "central_candidate_tag=$CENTRAL_CANDIDATE"
+            echo "hosted_workflow_candidate_tag=$HOSTED_WORKFLOW_CANDIDATE"
+          } >> "$GITHUB_OUTPUT"
           resolve_tag "$STANDARD_VERSION" standard
           resolve_tag "$CENTRAL_VERSION" central
+          resolve_tag "$HOSTED_WORKFLOW_VERSION" hosted_workflow
           if [[ "$(grep '^standard_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
             resolve_tag "$STANDARD_CANDIDATE" standard_candidate
           else
-            echo "standard_candidate_exists=false" >> "$GITHUB_OUTPUT"
-            echo "standard_candidate_digest=" >> "$GITHUB_OUTPUT"
+            {
+              echo "standard_candidate_exists=false"
+              echo "standard_candidate_digest="
+            } >> "$GITHUB_OUTPUT"
           fi
           if [[ "$(grep '^central_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
             resolve_tag "$CENTRAL_CANDIDATE" central_candidate
           else
-            echo "central_candidate_exists=false" >> "$GITHUB_OUTPUT"
-            echo "central_candidate_digest=" >> "$GITHUB_OUTPUT"
+            {
+              echo "central_candidate_exists=false"
+              echo "central_candidate_digest="
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$(grep '^hosted_workflow_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
+            resolve_tag "$HOSTED_WORKFLOW_CANDIDATE" hosted_workflow_candidate
+          else
+            {
+              echo "hosted_workflow_candidate_exists=false"
+              echo "hosted_workflow_candidate_digest="
+            } >> "$GITHUB_OUTPUT"
           fi
 
       # Build once to a source/build-date-scoped candidate. Qualification and
@@ -415,6 +453,27 @@ jobs:
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
+      - name: Build and push attested hosted-workflow candidate
+        id: push-hosted-workflow
+        if: steps.resolve-images.outputs.hosted_workflow_exists != 'true' && steps.resolve-images.outputs.hosted_workflow_candidate_exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile.hosted-workflow
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
+          build-args: |
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+          tags: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+
       - name: Resolve candidate release digests
         id: release-digests
         env:
@@ -424,25 +483,37 @@ jobs:
           EXISTING_CENTRAL: ${{ steps.resolve-images.outputs.central_digest }}
           CANDIDATE_CENTRAL: ${{ steps.resolve-images.outputs.central_candidate_digest }}
           PUSHED_CENTRAL: ${{ steps.push-central-host.outputs.digest }}
+          EXISTING_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_digest }}
+          CANDIDATE_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_digest }}
+          PUSHED_HOSTED_WORKFLOW: ${{ steps.push-hosted-workflow.outputs.digest }}
         run: |
           STANDARD_DIGEST="${EXISTING_STANDARD:-${CANDIDATE_STANDARD:-$PUSHED_STANDARD}}"
           CENTRAL_DIGEST="${EXISTING_CENTRAL:-${CANDIDATE_CENTRAL:-$PUSHED_CENTRAL}}"
+          HOSTED_WORKFLOW_DIGEST="${EXISTING_HOSTED_WORKFLOW:-${CANDIDATE_HOSTED_WORKFLOW:-$PUSHED_HOSTED_WORKFLOW}}"
           [[ "$STANDARD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$CENTRAL_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "standard=$STANDARD_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "central=$CENTRAL_DIGEST" >> "$GITHUB_OUTPUT"
+          [[ "$HOSTED_WORKFLOW_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ -z "$EXISTING_STANDARD" && -z "$CANDIDATE_STANDARD" ]] && STANDARD_CURRENT=true || STANDARD_CURRENT=false
           [[ -z "$EXISTING_CENTRAL" && -z "$CANDIDATE_CENTRAL" ]] && CENTRAL_CURRENT=true || CENTRAL_CURRENT=false
-          echo "standard_current=$STANDARD_CURRENT" >> "$GITHUB_OUTPUT"
-          echo "central_current=$CENTRAL_CURRENT" >> "$GITHUB_OUTPUT"
+          [[ -z "$EXISTING_HOSTED_WORKFLOW" && -z "$CANDIDATE_HOSTED_WORKFLOW" ]] && HOSTED_WORKFLOW_CURRENT=true || HOSTED_WORKFLOW_CURRENT=false
+          {
+            echo "standard=$STANDARD_DIGEST"
+            echo "central=$CENTRAL_DIGEST"
+            echo "hosted_workflow=$HOSTED_WORKFLOW_DIGEST"
+            echo "standard_current=$STANDARD_CURRENT"
+            echo "central_current=$CENTRAL_CURRENT"
+            echo "hosted_workflow_current=$HOSTED_WORKFLOW_CURRENT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate recovered image digests before inspection
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           STANDARD_CURRENT: ${{ steps.release-digests.outputs.standard_current }}
           CENTRAL_CURRENT: ${{ steps.release-digests.outputs.central_current }}
+          HOSTED_WORKFLOW_CURRENT: ${{ steps.release-digests.outputs.hosted_workflow_current }}
           CURRENT_IDENTITY: https://github.com/${{ github.workflow_ref }}
           TAG_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-ryeosd.yml@refs/tags/v${{ needs.qualify.outputs.version }}
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
@@ -468,16 +539,19 @@ jobs:
           }
           authenticate_recovered "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}" "$STANDARD_CURRENT"
           authenticate_recovered "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}" "$CENTRAL_CURRENT"
+          authenticate_recovered "ghcr.io/leolilley/ryeos-hosted-workflow@${HOSTED_WORKFLOW_DIGEST}" "$HOSTED_WORKFLOW_CURRENT"
 
       - name: Verify release image provenance and SBOM attestations
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
         run: |
           for spec in \
             "standard ryeos-standard $STANDARD_DIGEST" \
-            "central ryeos-central-host $CENTRAL_DIGEST"
+            "central ryeos-central-host $CENTRAL_DIGEST" \
+            "hosted-workflow ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r label image digest <<<"$spec"
             immutable="ghcr.io/leolilley/${image}@${digest}"
@@ -505,11 +579,19 @@ jobs:
           DIGEST: ${{ steps.release-digests.outputs.central }}
         run: cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
 
+      - name: Cosign sign newly pushed hosted-workflow image
+        if: steps.release-digests.outputs.hosted_workflow_current == 'true'
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
+        run: cosign sign --yes "ghcr.io/leolilley/ryeos-hosted-workflow@${DIGEST}"
+
       - name: Verify candidate image signatures
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           CURRENT_IDENTITY: https://github.com/${{ github.workflow_ref }}
           TAG_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-ryeosd.yml@refs/tags/v${{ needs.qualify.outputs.version }}
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
@@ -529,7 +611,8 @@ jobs:
           }
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
-            "ryeos-central-host $CENTRAL_DIGEST"
+            "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"
             verify_release_signature "ghcr.io/leolilley/${image}@${digest}"
@@ -545,6 +628,11 @@ jobs:
           DIGEST: ${{ steps.release-digests.outputs.central }}
         run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-central-host@${DIGEST}" central-host
 
+      - name: Qualify exact hosted-workflow image digest
+        env:
+          DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
+        run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-hosted-workflow@${DIGEST}" hosted-workflow
+
       # Re-resolve immediately before each create. GHCR does not expose a
       # conditional create-tag API, so registry-level tag immutability remains
       # the strict cross-workflow guarantee; this closes the long
@@ -555,8 +643,10 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           STANDARD_EXISTED: ${{ steps.resolve-images.outputs.standard_exists }}
           CENTRAL_EXISTED: ${{ steps.resolve-images.outputs.central_exists }}
+          HOSTED_WORKFLOW_EXISTED: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
         run: |
           promote_immutable() {
             local image="$1"
@@ -582,16 +672,19 @@ jobs:
           }
           promote_immutable ryeos-standard "$STANDARD_DIGEST" "$STANDARD_EXISTED"
           promote_immutable ryeos-central-host "$CENTRAL_DIGEST" "$CENTRAL_EXISTED"
+          promote_immutable ryeos-hosted-workflow "$HOSTED_WORKFLOW_DIGEST" "$HOSTED_WORKFLOW_EXISTED"
 
       - name: Verify immutable tag bindings
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
         run: |
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
-            "ryeos-central-host $CENTRAL_DIGEST"
+            "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"
             inspection="$(docker buildx imagetools inspect \
@@ -603,12 +696,13 @@ jobs:
             }
           done
 
-      # Mutable image tags move only after both immutable images and the native
+      # Mutable image tags move only after all immutable images and the native
       # bundle artifact have passed verification and publication.
       - name: Promote verified images to latest
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
         run: |
           resolve_latest() {
             local image="$1"
@@ -633,38 +727,54 @@ jobs:
             echo "::error::Unable to resolve previous latest digest for $image"
             exit 1
           }
+          restore_latest() {
+            local image="$1"
+            local digest="$2"
+            local inspection restored_digest
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::No previous latest digest exists for $image"
+              return 1
+            }
+            docker buildx imagetools create \
+              --tag "ghcr.io/leolilley/${image}:latest" \
+              "ghcr.io/leolilley/${image}@${digest}" || return 1
+            inspection="$(docker buildx imagetools inspect \
+              "ghcr.io/leolilley/${image}:latest")"
+            restored_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
+            [[ "$restored_digest" == "$digest" ]]
+          }
           PREVIOUS_STANDARD="$(resolve_latest ryeos-standard)"
           PREVIOUS_CENTRAL="$(resolve_latest ryeos-central-host)"
+          PREVIOUS_HOSTED_WORKFLOW="$(resolve_latest ryeos-hosted-workflow)"
           docker buildx imagetools create \
             --tag ghcr.io/leolilley/ryeos-standard:latest \
             "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}"
           if ! docker buildx imagetools create \
               --tag ghcr.io/leolilley/ryeos-central-host:latest \
               "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}"; then
-            if [[ "$PREVIOUS_STANDARD" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              if docker buildx imagetools create \
-                  --tag ghcr.io/leolilley/ryeos-standard:latest \
-                  "ghcr.io/leolilley/ryeos-standard@${PREVIOUS_STANDARD}"; then
-                restored="$(docker buildx imagetools inspect \
-                  ghcr.io/leolilley/ryeos-standard:latest)"
-                restored_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$restored")"
-                if [[ "$restored_digest" == "$PREVIOUS_STANDARD" ]]; then
-                  echo "::error::Central-host latest promotion failed; standard latest was restored"
-                else
-                  echo "::error::Central-host latest promotion failed and standard rollback verification failed"
-                fi
-              else
-                echo "::error::Central-host latest promotion failed and standard rollback failed"
-              fi
-            else
-              echo "::error::Central-host latest promotion failed; no previous standard latest existed to restore"
-            fi
+            restore_latest ryeos-standard "$PREVIOUS_STANDARD" || \
+              echo "::error::Central-host latest promotion failed and standard rollback failed"
             echo "::error::Previous central latest digest was ${PREVIOUS_CENTRAL:-absent}"
+            exit 1
+          fi
+          if ! docker buildx imagetools create \
+              --tag ghcr.io/leolilley/ryeos-hosted-workflow:latest \
+              "ghcr.io/leolilley/ryeos-hosted-workflow@${HOSTED_WORKFLOW_DIGEST}"; then
+            ROLLBACK_FAILED=false
+            restore_latest ryeos-standard "$PREVIOUS_STANDARD" || ROLLBACK_FAILED=true
+            restore_latest ryeos-central-host "$PREVIOUS_CENTRAL" || ROLLBACK_FAILED=true
+            if [[ "$ROLLBACK_FAILED" == true ]]; then
+              echo "::error::Hosted-workflow latest promotion failed and prior latest rollback was incomplete"
+            else
+              echo "::error::Hosted-workflow latest promotion failed; prior latest tags were restored"
+            fi
+            echo "::error::Previous hosted-workflow latest digest was ${PREVIOUS_HOSTED_WORKFLOW:-absent}"
             exit 1
           fi
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
-            "ryeos-central-host $CENTRAL_DIGEST"
+            "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"
             inspection="$(docker buildx imagetools inspect \

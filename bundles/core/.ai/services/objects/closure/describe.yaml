@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T05:13:13Z:5b0424b44d373e8c21f553243232b56823cd98b8b03416ef079b5c194cb57e4f:P4mQQiv/PuYiBEhqu9fck/EULugigvJXYmLWqIoVEHtNdNRV2Bbf0/EUJ+OadyPN0h8tA5ssB1NHQM5NTlEdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-03T11:56:15Z:792a03823137e424e196206db006e1ab987b100ac1ea9df2da5ea363b63c5f39:426BBOIyC72qGn6LRqJMhU4kr74ilWYY6osd6DAhghuGn2lW4evsub2zkEbT3SC2u5x9MQx0XhPkcXjCWPC8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.closure.describe
 required_caps: ["ryeos.execute.service.objects/closure/describe"]
@@ -13,4 +13,5 @@ schema:
   max_response_bytes: number?
   max_links_per_object: number?
   allow_incomplete: boolean?
-description: "Describe the schema-defined CAS closure reachable from root object hashes"
+  allow_untransported_large_objects: boolean?
+description: "Describe the schema-defined CAS closure reachable from root object hashes within node object_closure policy"

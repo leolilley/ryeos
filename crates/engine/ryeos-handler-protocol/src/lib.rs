@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 pub const HANDLER_PROTOCOL_JSON_MAX_DEPTH: usize = 32;
+pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 3;
 
 // ── Request / Response envelope ──────────────────────────────────
 
@@ -29,11 +30,13 @@ pub const HANDLER_PROTOCOL_JSON_MAX_DEPTH: usize = 32;
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HandlerRequest {
     Parse(ParseRequest),
+    EditSource(EditSourceRequest),
     ValidateParserConfig(ValidateParserConfigRequest),
     Compose(ComposeRequest),
     ValidateComposerConfig(ValidateComposerConfigRequest),
     LaunchPrepare(LaunchPrepareRequest),
     ValidateLaunchPreparerConfig(ValidateLaunchPreparerConfigRequest),
+    EffectiveValidate(EffectiveValidateRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +46,14 @@ pub enum HandlerResponse {
         value: Value,
     },
     ParseErr {
+        kind: ParseErrKind,
+        message: String,
+    },
+    EditSourceOk {
+        content: String,
+        value: Value,
+    },
+    EditSourceErr {
         kind: ParseErrKind,
         message: String,
     },
@@ -68,6 +79,65 @@ pub enum HandlerResponse {
     ValidateLaunchPreparerConfig {
         response: ValidateLaunchPreparerConfigResponse,
     },
+    EffectiveValidate {
+        response: EffectiveValidateResponse,
+    },
+}
+
+/// Mandatory versioned request envelope. Handler ABI v2 has no decoder for
+/// the unversioned v1 wire shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandlerRequestEnvelope {
+    pub schema_version: u32,
+    pub request: HandlerRequest,
+}
+
+impl HandlerRequestEnvelope {
+    pub fn new(request: HandlerRequest) -> Self {
+        Self {
+            schema_version: HANDLER_PROTOCOL_SCHEMA_VERSION,
+            request,
+        }
+    }
+
+    pub fn into_request(self) -> Result<HandlerRequest, String> {
+        if self.schema_version != HANDLER_PROTOCOL_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported handler request schema {}; expected {}",
+                self.schema_version, HANDLER_PROTOCOL_SCHEMA_VERSION
+            ));
+        }
+        Ok(self.request)
+    }
+}
+
+/// Mandatory versioned response envelope. The engine rejects every other
+/// schema before interpreting a handler result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandlerResponseEnvelope {
+    pub schema_version: u32,
+    pub response: HandlerResponse,
+}
+
+impl HandlerResponseEnvelope {
+    pub fn new(response: HandlerResponse) -> Self {
+        Self {
+            schema_version: HANDLER_PROTOCOL_SCHEMA_VERSION,
+            response,
+        }
+    }
+
+    pub fn into_response(self) -> Result<HandlerResponse, String> {
+        if self.schema_version != HANDLER_PROTOCOL_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported handler response schema {}; expected {}",
+                self.schema_version, HANDLER_PROTOCOL_SCHEMA_VERSION
+            ));
+        }
+        Ok(self.response)
+    }
 }
 
 // ── Parser ───────────────────────────────────────────────────────
@@ -81,6 +151,28 @@ pub struct ParseRequest {
     /// must not assume the file exists at this path on their fs.
     #[serde(default)]
     pub source_path: Option<String>,
+}
+
+/// Parser-owned byte-preserving authoring edit. JSON pointers name values in
+/// the parser's semantic output; `expected` makes the edit conditional and
+/// prevents a source span from being applied to a different document shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditSourceRequest {
+    pub parser_config: Value,
+    pub content: String,
+    pub edits: Vec<SourceScalarEdit>,
+    #[serde(default)]
+    pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceScalarEdit {
+    pub pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Value>,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,7 +251,7 @@ pub struct ValidateComposerConfigRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComposerFieldRequirement {
-    pub field: String,
+    pub path: Vec<String>,
     pub semantics: ComposerFieldSemantics,
 }
 
@@ -193,6 +285,34 @@ pub enum ResolutionStepNameWire {
     PipelineInit,
     ResolveExtendsChain,
     ResolveReferences,
+}
+
+// ── Effective-program semantic validation ──────────────────────
+
+/// Generic, path-free input to a kind-declared effective validator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveValidateRequest {
+    pub validator_config: Value,
+    pub canonical_ref: String,
+    pub composed: LaunchComposedViewWire,
+    /// Deepest ancestor first, preserving the exact identifier authored at
+    /// each `extends` edge. These are provenance identities, not a second
+    /// executable payload channel.
+    pub ancestor_requested_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectiveValidateResponse {
+    Valid {
+        normalized: Value,
+        effect_authorizations: Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
+    },
+    Invalid {
+        code: String,
+        message: String,
+    },
 }
 
 // ── Launch preparation ──────────────────────────────────────────
@@ -279,6 +399,17 @@ pub struct LaunchPrepareSuccess {
     pub runtime_data: BTreeMap<String, Value>,
     pub required_secrets: Vec<LaunchSecretRequirement>,
     pub runtime_facts: BTreeMap<String, Value>,
+    /// Exact executable dependencies selected by the kind-owned launch
+    /// preparer. The generic launch layer resolves and captures each request
+    /// under the signed policy below; handlers cannot supply resolution bytes,
+    /// trust, executable identity, or realization claims.
+    pub execution_dependencies: BTreeMap<String, LaunchExecutionDependencyRequestWire>,
+    /// Exact non-executable bound items selected by the kind-owned preparer
+    /// to contribute retained external realizations to named execution
+    /// dependencies. The generic launch layer resolves only an already
+    /// admitted ref-binding; handlers cannot supply bytes, paths, trust, or
+    /// manifest claims.
+    pub content_dependencies: BTreeMap<String, LaunchContentDependencyRequestWire>,
     /// Financial authority result declared by the runtime launch contract.
     /// Required — an absent field is a protocol error, never a default.
     /// The executor validates the payload strictly against the declared
@@ -286,16 +417,48 @@ pub struct LaunchPrepareSuccess {
     /// launch capsule; the handler protocol treats the payload as bounded
     /// opaque JSON.
     pub financial_authority: FinancialAuthorityResultWire,
+    /// External-effect authority declared by the signed runtime launch
+    /// contract. Required on the wire so a preparer cannot silently omit a
+    /// newly introduced admission boundary. Its family is opaque here.
+    pub external_effect_authority: ExternalEffectAuthorityResultWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchExecutionDependencyRequestWire {
+    pub item_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentDependencyRequestWire {
+    pub binding: String,
+    pub targets: Vec<String>,
+    pub executable_search: Vec<ExecutableSearchPathEntryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableSearchPathEntryWire {
+    pub realization_id: String,
+    pub relative_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalEffectAuthorityResultWire {
+    None,
+    External { authority: Value },
 }
 
 /// Financial authority produced by launch preparation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialAuthorityResultWire {
-    /// The runtime performs no direct paid provider work.
+    /// The runtime exercises no direct financial boundary.
     None,
-    /// A sealed `ProviderAccountingAuthority` (version 1) payload.
-    ProviderAccountingAuthorityV1 { authority: Value },
+    /// A sealed current accounting-contract payload.
+    Accounting { authority: Value },
 }
 
 /// Contract-side declaration of the required financial authority kind.
@@ -303,7 +466,14 @@ pub enum FinancialAuthorityResultWire {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialAuthorityDeclWire {
     None,
-    ProviderAccountingAuthorityV1,
+    Accounting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalEffectAuthorityDeclWire {
+    None,
+    External,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,10 +544,42 @@ pub struct ValidateLaunchPreparerConfigRequest {
     pub secret_policy: LaunchSecretPolicyDeclWire,
     pub required_runtime_data: Vec<String>,
     pub runtime_facts: BTreeMap<String, RuntimeFactDeclWire>,
+    pub execution_dependencies: LaunchExecutionDependencyPolicyWire,
+    /// Signed ceiling for already-bound non-executable content selected by
+    /// the preparer. Kind/space/trust remain owned by `ref_bindings` and are
+    /// deliberately not repeated here.
+    pub content_dependencies: LaunchContentDependencyPolicyWire,
     /// Required financial-authority contract term. A preparer that does not
     /// understand this term fails strict decoding instead of silently
     /// acknowledging a contract it cannot satisfy.
     pub financial_authority: FinancialAuthorityDeclWire,
+    pub external_effect_authority: ExternalEffectAuthorityDeclWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchExecutionDependencyPolicyWire {
+    pub max_dependencies: u16,
+    pub allowed_kinds: Vec<String>,
+    pub allowed_spaces: Vec<ItemSpaceWire>,
+    pub allowed_trust: Vec<TrustClassWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentDependencyPolicyWire {
+    pub max_dependencies: u16,
+    pub allowed_bindings: Vec<String>,
+    pub max_targets_per_dependency: u16,
+    pub max_executable_search_entries: u16,
+    pub external_content: Option<LaunchContentExternalPolicyWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentExternalPolicyWire {
+    pub max_declarations: u16,
+    pub large_content_max_total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,9 +841,44 @@ mod tests {
     }
 
     #[test]
+    fn handler_v3_envelopes_accept_only_the_current_schema() {
+        let request = HandlerRequest::Parse(ParseRequest {
+            parser_config: serde_json::json!({}),
+            content: String::new(),
+            source_path: None,
+        });
+        let encoded = serde_json::to_value(HandlerRequestEnvelope::new(request)).unwrap();
+        let decoded: HandlerRequestEnvelope = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(decoded.into_request().is_ok());
+
+        let mut old_request = encoded;
+        old_request["schema_version"] = serde_json::json!(1);
+        let decoded: HandlerRequestEnvelope = serde_json::from_value(old_request).unwrap();
+        assert!(decoded.into_request().unwrap_err().contains("unsupported"));
+        assert!(
+            serde_json::from_value::<HandlerRequestEnvelope>(serde_json::json!({
+                "command": "parse",
+                "parser_config": {},
+                "content": ""
+            }))
+            .is_err()
+        );
+
+        let response = HandlerResponse::ValidateOk;
+        let encoded = serde_json::to_value(HandlerResponseEnvelope::new(response)).unwrap();
+        let decoded: HandlerResponseEnvelope = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(decoded.into_response().is_ok());
+
+        let mut old_response = encoded;
+        old_response["schema_version"] = serde_json::json!(1);
+        let decoded: HandlerResponseEnvelope = serde_json::from_value(old_response).unwrap();
+        assert!(decoded.into_response().unwrap_err().contains("unsupported"));
+    }
+
+    #[test]
     fn composer_validation_round_trips_exact_field_requirements() {
         let requirements = vec![ComposerFieldRequirement {
-            field: "lifecycle_policy".into(),
+            path: vec!["lifecycle_policy".into()],
             semantics: ComposerFieldSemantics::InheritOrReplace,
         }];
         let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
@@ -649,6 +886,8 @@ mod tests {
             field_requirements: requirements.clone(),
         });
         let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains(r#""path":["lifecycle_policy"]"#));
+        assert!(!encoded.contains(r#""field""#));
         let decoded: HandlerRequest = serde_json::from_str(&encoded).unwrap();
         match decoded {
             HandlerRequest::ValidateComposerConfig(decoded) => {

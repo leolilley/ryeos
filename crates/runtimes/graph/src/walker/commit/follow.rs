@@ -74,7 +74,7 @@ impl Walker {
             success: false,
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id: graph_run_id.to_string(),
             status: GraphRunStatus::Continued,
             steps: step,
@@ -211,7 +211,7 @@ impl Walker {
             success: false,
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id: graph_run_id.to_string(),
             status: GraphRunStatus::Continued,
             steps: step,
@@ -281,9 +281,11 @@ impl Walker {
         } = input;
         let FollowFanoutDoneOutcome {
             results,
+            child_thread_ids,
             statuses,
             errors,
             collect_key,
+            collect_threads_key,
             item_id,
             next,
             next_on_error,
@@ -329,9 +331,25 @@ impl Walker {
                 .unwrap()
                 .insert(key, Value::Array(results.clone()));
         }
+        if commit_candidate && let Some(key) = collect_threads_key {
+            if !state.is_object() {
+                *state = Value::Object(serde_json::Map::new());
+            }
+            state.as_object_mut().unwrap().insert(
+                key,
+                Value::Array(
+                    child_thread_ids
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
         // The fanout variable is lexical, not a temporary state key.
         let result_hash = match hash_json_value(&json!({
             "results": &results,
+            "child_thread_ids": &child_thread_ids,
             "statuses": &statuses,
         })) {
             Ok(hash) => hash,
@@ -356,9 +374,11 @@ impl Walker {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: Some(result_hash),
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: diagnostic.clone(),
             cost: cost.clone(),
@@ -372,6 +392,7 @@ impl Walker {
                 // Results remain represented by result_hash; receipts do not have
                 // an explicit local-content policy permitting raw result persistence.
                 results: None,
+                dispatches: Vec::new(),
             }),
         };
         self.write_node_receipt_or_warn(graph_run_id, receipt).await;

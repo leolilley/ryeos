@@ -34,10 +34,11 @@ fn route_handler_context(
 ) -> crate::handler_context::HandlerContext {
     principal
         .map(|principal| {
-            crate::handler_context::HandlerContext::new_with_origin(
+            crate::handler_context::HandlerContext::new_with_authority(
                 principal.id.clone(),
                 principal.scopes.clone(),
                 principal.verified,
+                principal.authorized_key_class,
                 principal.authenticated_origin_site_id.clone(),
             )
         })
@@ -183,6 +184,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                 usage_subject: usage_subject.as_ref(),
                 usage_subject_asserted_by,
             },
+            None,
             recorded_invocation_id.as_deref(),
             Some(handler_context),
         )
@@ -241,6 +243,7 @@ mod tests {
             scopes: vec!["public.read".to_string()],
             verifier_key: "none",
             verified: false,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
             metadata: BTreeMap::new(),
         };
@@ -259,6 +262,9 @@ mod tests {
             scopes: vec!["threads.read".to_string()],
             verifier_key: "ryeos_signed",
             verified: true,
+            authorized_key_class: Some(
+                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+            ),
             authenticated_origin_site_id: Some("site:remote".to_string()),
             metadata: BTreeMap::new(),
         };

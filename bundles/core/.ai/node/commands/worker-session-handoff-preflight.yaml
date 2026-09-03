@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-03T11:56:15Z:81880920263160135eceee76eef3e59cf9b9bc2c32438d424f4fe905b2cf3442:lrjLuBNqKPjuHP9earrmho680x5yiWCzbVLwwjXWVOOq6dCbRndvNAXhhBtoXz9V9ftB78Edv8LmFmgVqB/XAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, handoff-preflight]
+description: "Preflight one frozen, reaped, checkpoint-published cross-site worker placement"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: remote
+      - field: target_credential_profile_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/handoff-preflight
+  availability: daemon

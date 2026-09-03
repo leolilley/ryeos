@@ -1,21 +1,32 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
 use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use crate::directive::FinishReason;
 use crate::directive::{
-    ExecutionConfig, MalformedArgs, ProtocolFamily, ProviderConfig, ProviderMessage,
-    ReasoningConfig, ReasoningMode, ReasoningSchemaConfig, SamplingConfig, StreamEvent,
-    SystemMessageMode, ToolCall, ToolSchema, UsageUpdate, normalize_finish_reason,
+    ExecutionConfig, MalformedArgs, ProviderMessage, StreamEvent, ToolCall, ToolSchema,
+    UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
+};
+#[cfg(test)]
+use ryeos_directive_definition::{
+    MessageSchemas, ProviderTransportConfig, ReasoningEffortSchemaConfig,
+    ReasoningModeSchemaConfig, ReasoningModeValues, SchemasConfig, StreamMetadataConfig,
+    StreamUsageConfig, StreamingConfig, StreamingMode, SystemMessageConfig, UsageAggregation,
+};
+use ryeos_directive_definition::{
+    OutputLimitConfig, OutputLimitSemantics, ProtocolFamily, ProviderConfig, ReasoningConfig,
+    ReasoningMode, ReasoningSchemaConfig, SamplingConfig, StreamErrorConfig, StreamPaths,
+    SystemMessageMode,
 };
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::events::{MAX_RUNTIME_EVENT_BATCH_ITEMS, RuntimeEventType};
@@ -459,6 +470,29 @@ pub struct CutAttemptState {
     pub observed_output: ObservedOutput,
 }
 
+/// Provider-neutral partial cognition retained when an interrupt cuts a turn.
+/// This is deliberately not a provider message: RyeOS records it as
+/// `cognition_out`, and only the provider rendering boundary assigns the wire
+/// role required by a later request.
+#[derive(Debug, Clone, Default)]
+pub struct InterruptedCognition {
+    pub content: Option<Value>,
+    pub reasoning_content: Option<String>,
+}
+
+impl InterruptedCognition {
+    pub fn into_provider_message(self) -> ProviderMessage {
+        ProviderMessage {
+            // Explicit provider-wire rendering of a RyeOS cognition output.
+            role: "assistant".to_string(),
+            content: self.content,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: self.reasoning_content,
+        }
+    }
+}
+
 /// How the stream loop terminated. Replaces overloading `Ok(AdapterResponse)`
 /// for partial termination: a cancelled or interrupted stream did NOT complete a
 /// cognition, and the runner must treat each distinctly (finalize cancelled /
@@ -470,14 +504,14 @@ pub enum StreamOutcome {
         events: Vec<StreamEvent>,
     },
     /// A live interrupt (SIGUSR1) cut the in-flight cognition. The partial
-    /// assistant message carries accumulated content/reasoning but NO tool_calls
-    /// — an interrupted cognition didn't complete its tool call, so the folded
-    /// wire history stays well-formed. The runner seals this as
+    /// cognition carries accumulated content/reasoning and cannot carry tool
+    /// calls — an interrupted cognition didn't complete its tool call, so the
+    /// folded history stays well-formed. The runner seals this as
     /// `cognition_out{interrupted:true}` then folds the queued input. `events`
     /// is the partial stream (already persisted live during streaming) — carried
     /// so the runner can still surface any provider `Warning`s from the cut turn.
     Interrupted {
-        partial_message: ProviderMessage,
+        partial_cognition: InterruptedCognition,
         events: Vec<StreamEvent>,
         attempt: CutAttemptState,
     },
@@ -522,12 +556,12 @@ fn parse_sse_events(data: &str, mode: Option<&str>) -> Vec<StreamEvent> {
 /// State-preserving variant of `parse_sse_events`. The caller threads
 /// in a `tool_call_state` map that survives across multiple calls so
 /// streaming tool-use arguments fragmented across SSE event blocks
-/// concatenate correctly. Used by `call_provider_streaming` to drain
+/// concatenate correctly. Used by the streaming transport to drain
 /// one event block at a time without losing partial tool_use state.
 pub fn parse_sse_events_with_state(
     data: &str,
     mode: Option<&str>,
-    stream_paths: Option<&crate::directive::StreamPaths>,
+    stream_paths: Option<&StreamPaths>,
     tool_call_state: &mut HashMap<String, String>,
 ) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
@@ -618,7 +652,7 @@ struct ProviderReportedErrorContext<'a> {
 
 fn provider_reported_error(
     block: &str,
-    config: Option<&crate::directive::StreamErrorConfig>,
+    config: Option<&StreamErrorConfig>,
     context: ProviderReportedErrorContext<'_>,
 ) -> Result<Option<ProviderReportedStreamError>> {
     let ProviderReportedErrorContext {
@@ -1067,7 +1101,7 @@ fn parse_delta_merge(
 fn parse_complete_chunks(
     parsed: &Value,
     events: &mut Vec<StreamEvent>,
-    paths: Option<&crate::directive::StreamPaths>,
+    paths: Option<&StreamPaths>,
     tool_call_state: &mut HashMap<String, String>,
 ) {
     use ryeos_runtime::template::resolve_path;
@@ -1296,7 +1330,7 @@ pub struct StreamingCallInput<'a> {
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Optional live-interrupt flag (SIGUSR1). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Interrupted`] with the
-    /// partial assistant message accumulated so far.
+    /// partial cognition accumulated so far.
     pub interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -1310,12 +1344,11 @@ pub struct StreamingCallInput<'a> {
         attempt = input.attempt,
     )
 )]
-#[allow(dead_code)] // legacy prepare-then-send wrapper; adapter tests use it
-pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
-    // Legacy single-call shape (prepare-then-send in one step) for callers
-    // that do not participate in the reservation lifecycle. Ledger routes
-    // must prepare first, reserve against the prepared digest, and only
-    // then call `send_prepared_streaming` with the same object.
+#[cfg(test)]
+async fn call_provider_streaming_for_test(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
+    // Focused adapter tests exercise preparation and transport together. The
+    // runtime path always prepares before reservation and sends that exact
+    // immutable request after admission.
     let prepared = super::prepared::prepare_provider_request(&input)?;
     send_prepared_streaming(&input, &prepared).await
 }
@@ -1361,6 +1394,551 @@ pub async fn send_prepared_streaming(
     };
     crate::startup_timing::finish_provider_call(call_id, completion);
     result
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum LocalWorkerDelta {
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ToolUsePartial {
+        id: Option<String>,
+        name: String,
+        stream_key: String,
+        delta: String,
+        total_len: usize,
+    },
+    ToolUse {
+        id: Option<String>,
+        name: String,
+        stream_key: String,
+        arguments: Value,
+    },
+    Warning {
+        code: String,
+        message: String,
+    },
+}
+
+fn completed_from_retained_local_observation(
+    input: &StreamingCallInput<'_>,
+    terminal: ryeos_provider_contract::AdmittedLocalWorkerFinal,
+    requested_output_tokens: Option<u64>,
+) -> Result<StreamOutcome> {
+    terminal.validate()?;
+    let mut meter = StreamOutputMeter::default();
+    if let Some(text) = terminal
+        .answer
+        .message
+        .content
+        .as_ref()
+        .and_then(Value::as_str)
+    {
+        meter.accept(
+            &StreamEvent::Delta(text.to_owned()),
+            input.execution.max_stream_output_bytes_per_turn,
+            0,
+        )?;
+    }
+    if let Some(reasoning) = terminal.answer.message.reasoning_content.as_deref() {
+        meter.accept(
+            &StreamEvent::ReasoningDelta(reasoning.to_owned()),
+            input.execution.max_stream_output_bytes_per_turn,
+            0,
+        )?;
+    }
+    for (index, call) in terminal
+        .answer
+        .message
+        .tool_calls
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        meter.accept(
+            &StreamEvent::ToolUse {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                stream_key: format!("observation-{index}"),
+                argument_bytes: serde_json::to_vec(&call.arguments)?.len(),
+                arguments: call.arguments.clone(),
+                malformed_args: None,
+            },
+            input.execution.max_stream_output_bytes_per_turn,
+            0,
+        )?;
+    }
+    let message: ProviderMessage =
+        serde_json::from_value(serde_json::to_value(&terminal.answer.message)?)?;
+    let usage = TokenUsage {
+        input_tokens: Some(terminal.usage.input_tokens),
+        output_tokens: Some(terminal.usage.output_tokens),
+        reasoning_tokens: terminal.usage.reasoning_tokens,
+        source: ProviderUsageSource::SignedMetadata,
+        provider_limit_contract: if requested_output_tokens
+            .is_some_and(|limit| terminal.usage.output_tokens > limit)
+        {
+            ProviderLimitContractStatus::ReportedAboveRequestedLimit
+        } else {
+            ProviderLimitContractStatus::WithinRequestedLimit
+        },
+        snapshots_seen: 1,
+        ..Default::default()
+    };
+    Ok(StreamOutcome::Completed {
+        response: AdapterResponse {
+            message,
+            usage: Some(usage),
+            finish_reason: terminal.answer.finish_reason,
+            generation_header_id: None,
+            response_id: terminal.response_id,
+            requested_output_tokens,
+            observed_output: meter.observed_output(0),
+        },
+        // The daemon observation is already the canonical terminal. Replaying
+        // historical deltas here would duplicate cognition events after a
+        // runtime restart; the caller publishes the ordinary final response.
+        events: Vec::new(),
+    })
+}
+
+/// Provider-owned adapter for the daemon's admitted local-worker transport.
+/// The daemon/session pool treats bodies as opaque JSON; only this module
+/// interprets the worker's inference stream and maps it to directive events.
+pub async fn send_prepared_local_streaming(
+    input: &StreamingCallInput<'_>,
+    prepared: &super::prepared::PreparedProviderRequest,
+    attempt_id: &str,
+    request_hash: &str,
+    coordinate: &ryeos_provider_contract::RequestCoordinate,
+) -> Result<StreamOutcome> {
+    let super::prepared::PreparedProviderTransport::AdmittedLocalWorker { execute, .. } =
+        &prepared.transport
+    else {
+        bail!("local worker adapter received a remote provider transport");
+    };
+    let ryeos_provider_contract::TransportCoordinate::AdmittedLocalWorker { worker_ref, .. } =
+        &coordinate.transport
+    else {
+        bail!("local worker adapter received a remote admitted coordinate");
+    };
+    if worker_ref != execute
+        || coordinate.body_sha256 != prepared.body_sha256
+        || coordinate.requested_output_ceiling != prepared.requested_output_ceiling
+    {
+        bail!("local worker transport contradicts the immutable prepared request");
+    }
+    let request_body = String::from_utf8(prepared.body_bytes.clone())
+        .map_err(|_| anyhow!("prepared local provider body is not UTF-8 JSON"))?;
+    let requested_output_tokens = prepared.requested_output_tokens;
+    let pre_start_cut = if flag_set(&input.cancel_flag) {
+        Some(false)
+    } else if flag_set(&input.interrupt_flag) {
+        Some(true)
+    } else {
+        None
+    };
+    if let Some(interrupted) = pre_start_cut {
+        let attempt = CutAttemptState {
+            usage: None,
+            generation_header_id: None,
+            response_id: None,
+            requested_output_tokens,
+            observed_output: ObservedOutput::default(),
+        };
+        return if interrupted {
+            Ok(StreamOutcome::Interrupted {
+                partial_cognition: InterruptedCognition::default(),
+                events: Vec::new(),
+                attempt,
+            })
+        } else {
+            Ok(StreamOutcome::Cancelled { attempt })
+        };
+    }
+    let start = ryeos_accounting::ProviderAttemptLocalStreamStartParams {
+        thread_id: input.callback.thread_id().to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        request_hash: request_hash.to_owned(),
+        coordinate: coordinate.clone(),
+        request_body,
+    };
+    let stream_id = loop {
+        let started = input
+            .callback
+            .provider_attempt_local_stream_start(&start)
+            .await?;
+        match started {
+            ryeos_accounting::ProviderAttemptLocalStreamStartResponse::Stream { stream_id } => {
+                break stream_id;
+            }
+            ryeos_accounting::ProviderAttemptLocalStreamStartResponse::Pending {
+                retry_after_ms,
+            } => {
+                if retry_after_ms == 0 || retry_after_ms > 1_000 {
+                    bail!("daemon returned an invalid local-worker retry interval");
+                }
+                if flag_set(&input.cancel_flag) || flag_set(&input.interrupt_flag) {
+                    bail!("local-worker recovery was cut before its retained terminal arrived");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(retry_after_ms)).await;
+            }
+            ryeos_accounting::ProviderAttemptLocalStreamStartResponse::Replay {
+                terminal, ..
+            } => {
+                return completed_from_retained_local_observation(
+                    input,
+                    terminal,
+                    requested_output_tokens,
+                );
+            }
+        }
+    };
+    let mut after_sequence = 0u64;
+    let mut output_meter = StreamOutputMeter::default();
+    let mut live_output_events_emitted = 0usize;
+    let mut accumulated_text = String::new();
+    let mut accumulated_reasoning = String::new();
+    let mut accumulated_tools = Vec::new();
+    let mut all_events = Vec::new();
+    let mut final_value: Option<Value> = None;
+
+    loop {
+        let cut = if flag_set(&input.cancel_flag) {
+            Some(false)
+        } else if flag_set(&input.interrupt_flag) {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(interrupted) = cut {
+            cancel_local_stream(input.callback, attempt_id, request_hash, &stream_id).await?;
+            let attempt = CutAttemptState {
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens,
+                observed_output: output_meter.observed_output(live_output_events_emitted),
+            };
+            return if interrupted {
+                Ok(StreamOutcome::Interrupted {
+                    partial_cognition: InterruptedCognition {
+                        content: (!accumulated_text.is_empty()).then(|| json!(accumulated_text)),
+                        reasoning_content: (!accumulated_reasoning.is_empty())
+                            .then_some(accumulated_reasoning),
+                    },
+                    events: all_events,
+                    attempt,
+                })
+            } else {
+                Ok(StreamOutcome::Cancelled { attempt })
+            };
+        }
+
+        let page = input
+            .callback
+            .provider_attempt_local_stream_next(
+                &ryeos_accounting::ProviderAttemptLocalStreamNextParams {
+                    thread_id: input.callback.thread_id().to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    request_hash: request_hash.to_owned(),
+                    stream_id: stream_id.clone(),
+                    after_sequence,
+                    wait_ms: 250,
+                    max_events: 64,
+                },
+            )
+            .await?;
+        for event in page.events {
+            if event.sequence != after_sequence.saturating_add(1) {
+                bail!(
+                    "local worker stream sequence discontinuity: expected {}, got {}",
+                    after_sequence.saturating_add(1),
+                    event.sequence
+                );
+            }
+            after_sequence = event.sequence;
+            match event.kind {
+                ryeos_accounting::ProviderAttemptLocalStreamEventKind::Delta => {
+                    let body = event
+                        .body
+                        .ok_or_else(|| anyhow!("local worker delta has no body"))?;
+                    let delta: LocalWorkerDelta = serde_json::from_value(body)
+                        .context("decode admitted local-worker delta")?;
+                    let semantic = match delta {
+                        LocalWorkerDelta::TextDelta { text } => StreamEvent::Delta(text),
+                        LocalWorkerDelta::ReasoningDelta { text } => {
+                            StreamEvent::ReasoningDelta(text)
+                        }
+                        LocalWorkerDelta::ToolUsePartial {
+                            id,
+                            name,
+                            stream_key,
+                            delta,
+                            total_len,
+                        } => StreamEvent::ToolUsePartial {
+                            id,
+                            name,
+                            stream_key,
+                            delta,
+                            total_len,
+                        },
+                        LocalWorkerDelta::ToolUse {
+                            id,
+                            name,
+                            stream_key,
+                            arguments,
+                        } => {
+                            let argument_bytes = serde_json::to_vec(&arguments)?.len();
+                            StreamEvent::ToolUse {
+                                id,
+                                name,
+                                stream_key,
+                                arguments,
+                                argument_bytes,
+                                malformed_args: None,
+                            }
+                        }
+                        LocalWorkerDelta::Warning { code, message } => {
+                            StreamEvent::Warning { code, message }
+                        }
+                    };
+                    output_meter.accept(
+                        &semantic,
+                        input.execution.max_stream_output_bytes_per_turn,
+                        live_output_events_emitted,
+                    )?;
+                    match &semantic {
+                        StreamEvent::Delta(text) => {
+                            accumulated_text.push_str(text);
+                            input
+                                .callback
+                                .append_runtime_event(
+                                    RuntimeEventType::CognitionOut,
+                                    json!({"turn": input.turn, "delta": text}),
+                                )
+                                .await
+                                .map_err(|error| {
+                                    callback_publication_error(
+                                        format!("local worker text publication failed: {error}"),
+                                        &output_meter,
+                                        live_output_events_emitted,
+                                        None,
+                                        None,
+                                        None,
+                                        requested_output_tokens,
+                                    )
+                                })?;
+                            live_output_events_emitted =
+                                live_output_events_emitted.saturating_add(1);
+                        }
+                        StreamEvent::ReasoningDelta(text) => {
+                            accumulated_reasoning.push_str(text);
+                        }
+                        StreamEvent::ToolUse {
+                            id,
+                            name,
+                            arguments,
+                            malformed_args,
+                            ..
+                        } => {
+                            accumulated_tools.push(ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                            });
+                            input
+                                .callback
+                                .append_runtime_event(
+                                    RuntimeEventType::CognitionOut,
+                                    json!({
+                                        "turn": input.turn,
+                                        "tool_use": tool_use_payload(
+                                            id,
+                                            name,
+                                            arguments,
+                                            malformed_args,
+                                        ),
+                                    }),
+                                )
+                                .await?;
+                            live_output_events_emitted =
+                                live_output_events_emitted.saturating_add(1);
+                        }
+                        StreamEvent::ToolUsePartial {
+                            id,
+                            name,
+                            delta,
+                            total_len,
+                            ..
+                        } => {
+                            input
+                                .callback
+                                .append_runtime_event(
+                                    RuntimeEventType::CognitionOut,
+                                    json!({
+                                        "turn": input.turn,
+                                        "tool_use_partial": {
+                                            "id": id,
+                                            "name": name,
+                                            "delta": delta,
+                                            "total_len": total_len,
+                                        },
+                                    }),
+                                )
+                                .await?;
+                            live_output_events_emitted =
+                                live_output_events_emitted.saturating_add(1);
+                        }
+                        StreamEvent::Warning { .. }
+                        | StreamEvent::Usage(_)
+                        | StreamEvent::Finish { .. } => {}
+                    }
+                    all_events.push(semantic);
+                }
+                ryeos_accounting::ProviderAttemptLocalStreamEventKind::Final => {
+                    if final_value
+                        .replace(
+                            event.body.ok_or_else(|| {
+                                anyhow!("local worker terminal result has no body")
+                            })?,
+                        )
+                        .is_some()
+                    {
+                        bail!("local worker stream produced more than one terminal result");
+                    }
+                }
+                ryeos_accounting::ProviderAttemptLocalStreamEventKind::Error => {
+                    bail!(
+                        "admitted local worker failed: {}",
+                        event
+                            .error
+                            .unwrap_or_else(|| "unspecified worker error".to_owned())
+                    );
+                }
+            }
+        }
+        if final_value.is_some() {
+            break;
+        }
+        if page.terminal {
+            bail!("local worker stream terminated without a final result");
+        }
+    }
+
+    let final_result = ryeos_provider_contract::AdmittedLocalWorkerFinal::from_value(
+        &final_value.expect("final value checked above"),
+    )
+    .context("decode admitted local-worker final result")?;
+    let message: ProviderMessage =
+        serde_json::from_value(serde_json::to_value(&final_result.answer.message)?)?;
+    if message.role != "assistant"
+        || message.tool_call_id.is_some()
+        || final_result
+            .answer
+            .message
+            .content
+            .as_ref()
+            .and_then(Value::as_str)
+            != (!accumulated_text.is_empty()).then_some(accumulated_text.as_str())
+        || final_result.answer.message.reasoning_content.as_deref()
+            != (!accumulated_reasoning.is_empty()).then_some(accumulated_reasoning.as_str())
+        || serde_json::to_value(
+            final_result
+                .answer
+                .message
+                .tool_calls
+                .as_deref()
+                .unwrap_or_default(),
+        )? != serde_json::to_value(&accumulated_tools)?
+    {
+        bail!("local worker final answer contradicts its streamed semantic events");
+    }
+    let usage = TokenUsage {
+        input_tokens: Some(final_result.usage.input_tokens),
+        output_tokens: Some(final_result.usage.output_tokens),
+        reasoning_tokens: final_result.usage.reasoning_tokens,
+        source: ProviderUsageSource::SignedMetadata,
+        provider_limit_contract: if requested_output_tokens
+            .is_some_and(|limit| final_result.usage.output_tokens > limit)
+        {
+            ProviderLimitContractStatus::ReportedAboveRequestedLimit
+        } else {
+            ProviderLimitContractStatus::WithinRequestedLimit
+        },
+        snapshots_seen: 1,
+        ..Default::default()
+    };
+    close_local_stream(input.callback, attempt_id, request_hash, &stream_id).await;
+    Ok(StreamOutcome::Completed {
+        response: AdapterResponse {
+            message,
+            usage: Some(usage),
+            finish_reason: final_result.answer.finish_reason,
+            generation_header_id: None,
+            response_id: final_result.response_id,
+            requested_output_tokens,
+            observed_output: output_meter.observed_output(live_output_events_emitted),
+        },
+        events: all_events,
+    })
+}
+
+async fn cancel_local_stream(
+    callback: &CallbackClient,
+    attempt_id: &str,
+    request_hash: &str,
+    stream_id: &str,
+) -> Result<()> {
+    let params = ryeos_accounting::ProviderAttemptLocalStreamControlParams {
+        thread_id: callback.thread_id().to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        request_hash: request_hash.to_owned(),
+        stream_id: stream_id.to_owned(),
+        action: ryeos_accounting::ProviderAttemptLocalStreamControl::Cancel,
+    };
+    let mut last_error = None;
+    for _ in 0..3 {
+        match callback
+            .provider_attempt_local_stream_control(&params)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(anyhow!(
+        "local worker cancellation could not be proven: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no callback outcome".to_owned())
+    ))
+}
+
+async fn close_local_stream(
+    callback: &CallbackClient,
+    attempt_id: &str,
+    request_hash: &str,
+    stream_id: &str,
+) {
+    let params = ryeos_accounting::ProviderAttemptLocalStreamControlParams {
+        thread_id: callback.thread_id().to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        request_hash: request_hash.to_owned(),
+        stream_id: stream_id.to_owned(),
+        action: ryeos_accounting::ProviderAttemptLocalStreamControl::Close,
+    };
+    if let Err(error) = callback
+        .provider_attempt_local_stream_control(&params)
+        .await
+    {
+        tracing::warn!(%error, "failed to retire completed local worker stream; retention reaper will clean it");
+    }
 }
 
 fn provider_usage_from_result(result: &Result<StreamOutcome>) -> Option<&TokenUsage> {
@@ -1414,15 +1992,22 @@ async fn send_prepared_streaming_inner(
 
     let requested_output_tokens = prepared.requested_output_tokens;
     let request_body_sha256 = prepared.body_sha256.clone();
+    let super::prepared::PreparedProviderTransport::RemoteHttp { method, url } =
+        &prepared.transport
+    else {
+        anyhow::bail!(
+            "admitted-worker provider transport must be dispatched by the capability-bound local adapter"
+        );
+    };
     tracing::debug!(
-        url = %prepared.url,
+        url = %url,
         request_digest = %prepared.request_digest,
         body_sha256 = %prepared.body_sha256,
         header_names = ?prepared.header_names,
         "sending immutable prepared provider request"
     );
 
-    let mut req = client.request(prepared.method.clone(), &prepared.url);
+    let mut req = client.request(method.clone(), url);
     if let Some(credential) = &prepared.credential {
         req = req.header(
             credential.header_name.as_str(),
@@ -1447,13 +2032,7 @@ async fn send_prepared_streaming_inner(
     }
     if flag_set(&input.interrupt_flag) {
         return Ok(StreamOutcome::Interrupted {
-            partial_message: ProviderMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            partial_cognition: InterruptedCognition::default(),
             events: Vec::new(),
             attempt: empty_cut_attempt(),
         });
@@ -1479,13 +2058,7 @@ async fn send_prepared_streaming_inner(
         }
         _ = flag_signal(&input.interrupt_flag) => {
             return Ok(StreamOutcome::Interrupted {
-                partial_message: ProviderMessage {
-                    role: "assistant".to_string(),
-                    content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
+                partial_cognition: InterruptedCognition::default(),
                 events: Vec::new(),
                 attempt: empty_cut_attempt(),
             });
@@ -2267,17 +2840,14 @@ async fn send_prepared_streaming_inner(
         Some(accumulated_reasoning)
     };
 
-    // Interrupt cut: seal the partial as an assistant message with content +
-    // reasoning only. NO tool_calls — an interrupted cognition didn't complete
+    // Interrupt cut: seal the partial cognition with content + reasoning only.
+    // NO tool_calls — an interrupted cognition didn't complete
     // its tool call, so the folded wire history has no unpaired tool_call → the
     // runner records `cognition_out{interrupted:true}` from this.
     if exit == LoopExit::Interrupted {
         return Ok(StreamOutcome::Interrupted {
-            partial_message: ProviderMessage {
-                role: "assistant".to_string(),
+            partial_cognition: InterruptedCognition {
                 content,
-                tool_calls: None,
-                tool_call_id: None,
                 reasoning_content,
             },
             events: all_events,
@@ -2677,7 +3247,7 @@ pub fn build_request_body(
 
 pub(crate) fn apply_declared_output_limit(
     body: &mut Value,
-    config: Option<&crate::directive::OutputLimitConfig>,
+    config: Option<&OutputLimitConfig>,
     hard_limit: Option<u64>,
 ) -> Result<()> {
     use ryeos_runtime::template::resolve_path;
@@ -2764,7 +3334,7 @@ pub(crate) fn declared_output_limit_from_body(
         return Ok(None);
     };
     match config.semantics {
-        crate::directive::OutputLimitSemantics::ProviderNativeOutputTokens => resolve_path(
+        OutputLimitSemantics::ProviderNativeOutputTokens => resolve_path(
             body,
             &config.path,
         )
@@ -3119,11 +3689,11 @@ mod tests {
                 "usage": {"prompt_tokens": 100, "completion_tokens": 65_536}
             })
         );
-        let streaming = crate::directive::StreamingConfig {
-            mode: Some(crate::directive::StreamingMode::DeltaMerge),
+        let streaming = StreamingConfig {
+            mode: Some(StreamingMode::DeltaMerge),
             paths: None,
-            metadata: Some(crate::directive::StreamMetadataConfig {
-                usage: Some(crate::directive::StreamUsageConfig {
+            metadata: Some(StreamMetadataConfig {
+                usage: Some(StreamUsageConfig {
                     path: "usage".into(),
                     input_tokens_path: Some("prompt_tokens".into()),
                     output_tokens_path: Some("completion_tokens".into()),
@@ -3137,11 +3707,11 @@ mod tests {
                     cost_details_path: None,
                     is_byok_path: None,
                     reasoning_included_in_output: false,
-                    aggregation: crate::directive::UsageAggregation::LatestSnapshot,
+                    aggregation: UsageAggregation::LatestSnapshot,
                     single_snapshot: true,
                 }),
                 finish_reason_path: Some("choices.0.finish_reason".into()),
-                error: Some(crate::directive::StreamErrorConfig {
+                error: Some(StreamErrorConfig {
                     path: "error".into(),
                     message_path: "message".into(),
                     finish_reasons: vec!["error".into()],
@@ -3214,7 +3784,7 @@ mod tests {
     #[test]
     fn null_declared_error_is_absent() {
         let block = "data: {\"error\":null,\"choices\":[]}\n\n";
-        let config = crate::directive::StreamErrorConfig {
+        let config = StreamErrorConfig {
             path: "error".into(),
             message_path: "message".into(),
             finish_reasons: vec!["error".into()],
@@ -3321,7 +3891,7 @@ mod tests {
             "\"metadata\":{\"provider_name\":\"example\"}},",
             "\"choices\":[{\"finish_reason\":\"error\"}]}\n\n",
         );
-        let config = crate::directive::StreamErrorConfig {
+        let config = StreamErrorConfig {
             path: "error".into(),
             message_path: "message".into(),
             finish_reasons: vec!["error".into()],
@@ -3841,14 +4411,14 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     fn reasoning_schema() -> ReasoningSchemaConfig {
         ReasoningSchemaConfig {
-            mode: Some(crate::directive::ReasoningModeSchemaConfig {
+            mode: Some(ReasoningModeSchemaConfig {
                 path: "thinking.type".to_string(),
-                values: crate::directive::ReasoningModeValues {
+                values: ReasoningModeValues {
                     enabled: json!("on"),
                     disabled: json!("off"),
                 },
             }),
-            effort: Some(crate::directive::ReasoningEffortSchemaConfig {
+            effort: Some(ReasoningEffortSchemaConfig {
                 path: "reasoning_effort".to_string(),
                 values: std::collections::BTreeMap::from([
                     ("high".to_string(), json!("high")),
@@ -3923,8 +4493,10 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_renders_template() {
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -3959,8 +4531,10 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_deep_merges_body_extra() {
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -3989,18 +4563,20 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_exposes_limit_to_authoritative_provider_template() {
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
-            schemas: Some(crate::directive::SchemasConfig {
+            schemas: Some(SchemasConfig {
                 accounting: None,
                 messages: None,
                 tools: None,
                 streaming: None,
-                output_limit: Some(crate::directive::OutputLimitConfig {
+                output_limit: Some(OutputLimitConfig {
                     path: "max_tokens".into(),
-                    semantics: crate::directive::OutputLimitSemantics::ProviderNativeOutputTokens,
+                    semantics: OutputLimitSemantics::ProviderNativeOutputTokens,
                 }),
                 reasoning: None,
             }),
@@ -4089,8 +4665,10 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         // because ProviderConfig::validate catches it at load-time.
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4112,8 +4690,10 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         // "tools" key at all — not even tools: [].
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4146,11 +4726,12 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn inject_system_prompt_body_field_with_explicit_field() {
-        use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: Some(SchemasConfig {
@@ -4180,11 +4761,12 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn inject_system_prompt_body_inject_renders_gemini_shape() {
-        use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://example.com".to_string(),
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "http://example.com".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: Some(SchemasConfig {
@@ -4228,7 +4810,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_extracts_gemini_text_delta() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4258,7 +4839,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_filters_thinking_blocks() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4296,7 +4876,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_emits_done_on_finish_reason() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4334,7 +4913,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_assigns_stable_sequential_tool_call_ids() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4376,7 +4954,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn complete_chunks_cumulative_text_does_not_duplicate() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4416,7 +4993,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn gemini_complete_chunks_multi_part_text_in_one_frame_emits_full_text() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4461,7 +5037,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn gemini_complete_chunks_cumulative_multi_part_does_not_truncate() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4508,7 +5083,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn complete_chunks_repeated_tool_call_emits_once() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4564,7 +5138,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     //
     // If a bundle YAML edit breaks one of these, CI catches it here.
 
-    use ryeos_directive_core::{
+    use ryeos_directive_definition::{
         ProviderConfigSource, ResolvedProviderSnapshot, SnapshotItemSpace, SnapshotTrustClass,
     };
     use ryeos_runtime::verified_loader::VerifiedLoader;
@@ -4864,7 +5438,10 @@ owner = "ryeos-dev"
             Some(32_768),
         );
 
-        assert_eq!(snapshot.provider.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(
+            snapshot.provider.transport.remote_base_url(),
+            Some("https://api.z.ai/api/paas/v4")
+        );
         assert_eq!(
             snapshot.provider.auth.env_var.as_deref(),
             Some("ZAI_API_KEY")
@@ -5009,6 +5586,82 @@ owner = "ryeos-dev"
                 .filter_map(|(_, payload)| payload.get("delta").and_then(Value::as_str))
                 .collect()
         }
+    }
+
+    #[test]
+    fn retained_local_observation_reconstructs_the_complete_terminal_without_delta_replay() {
+        let provider_value: Value = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/local-inference/.ai/config/ryeos-runtime/model-providers/qwen3-0.6b-cpu-4096.yaml"
+        ))
+        .expect("shipped local worker provider YAML");
+        let provider: ProviderConfig =
+            serde_json::from_value(provider_value).expect("shipped local worker provider config");
+        let recorder = std::sync::Arc::new(StreamingEventRecorder::new());
+        let callback =
+            CallbackClient::from_inner(recorder, "T-local-replay", "/project", "tat-test");
+        let client = reqwest::Client::new();
+        let execution = ExecutionConfig {
+            max_stream_output_bytes_per_turn: 4096,
+            ..ExecutionConfig::default()
+        };
+        let terminal = ryeos_provider_contract::AdmittedLocalWorkerFinal {
+            answer: ryeos_provider_contract::ProviderCallAnswer {
+                message: ryeos_provider_contract::RecordedMessage {
+                    role: "assistant".to_owned(),
+                    content: Some(json!("done")),
+                    tool_calls: Some(vec![ryeos_provider_contract::RecordedToolCall {
+                        id: Some("call-1".to_owned()),
+                        name: "inspect".to_owned(),
+                        arguments: json!({"value": 1}),
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: Some("checked".to_owned()),
+                },
+                finish_reason: Some("tool_calls".to_owned()),
+            },
+            usage: ryeos_provider_contract::AdmittedLocalWorkerUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                reasoning_tokens: Some(1),
+            },
+            response_id: Some("local-response-1".to_owned()),
+        };
+        let messages = Vec::new();
+        let input = StreamingCallInput {
+            client: &client,
+            provider: &provider,
+            provider_id: "qwen3-0.6b-cpu-4096",
+            matched_profile: None,
+            config_hash: "fixture",
+            execution: &execution,
+            model: "qwen3-0.6b",
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning: None,
+            provider_request_body_bytes_limit: 0,
+            cancel_flag: None,
+            interrupt_flag: None,
+        };
+
+        let outcome = completed_from_retained_local_observation(&input, terminal, Some(8))
+            .expect("retained terminal must reconstruct");
+        let StreamOutcome::Completed { response, events } = outcome else {
+            panic!("retained local observation must complete the call");
+        };
+        assert!(events.is_empty(), "historical deltas must not republish");
+        assert_eq!(response.message.content, Some(json!("done")));
+        assert_eq!(
+            response.message.reasoning_content.as_deref(),
+            Some("checked")
+        );
+        assert_eq!(response.message.tool_calls.as_deref().unwrap().len(), 1);
+        assert_eq!(response.usage.as_ref().unwrap().input_tokens, Some(11));
+        assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(3));
+        assert_eq!(response.response_id.as_deref(), Some("local-response-1"));
     }
 
     #[async_trait::async_trait]
@@ -5226,7 +5879,9 @@ owner = "ryeos-dev"
         });
 
         let mut snapshot = resolve("openrouter", "anthropic/claude-sonnet-4.6");
-        snapshot.provider.base_url = format!("http://{address}");
+        snapshot.provider.transport = ProviderTransportConfig::RemoteHttp {
+            base_url: format!("http://{address}"),
+        };
         snapshot.provider.auth.env_var = None;
         snapshot
             .provider
@@ -5250,7 +5905,7 @@ owner = "ryeos-dev"
             reasoning_content: None,
         }];
 
-        let outcome = call_provider_streaming(StreamingCallInput {
+        let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
             provider: &snapshot.provider,
             provider_id: "opaque-test-route",
@@ -5357,7 +6012,9 @@ owner = "ryeos-dev"
         });
 
         let mut snapshot = resolve("openrouter", "anthropic/claude-sonnet-4.6");
-        snapshot.provider.base_url = format!("http://{address}");
+        snapshot.provider.transport = ProviderTransportConfig::RemoteHttp {
+            base_url: format!("http://{address}"),
+        };
         snapshot.provider.auth.env_var = None;
         snapshot
             .provider
@@ -5375,7 +6032,7 @@ owner = "ryeos-dev"
             reasoning_content: None,
         }];
 
-        let outcome = call_provider_streaming(StreamingCallInput {
+        let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
             provider: &snapshot.provider,
             provider_id: "opaque-test-route",
@@ -5649,7 +6306,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn gemini_emits_usage_from_usage_metadata() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -5690,7 +6346,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn gemini_emits_reasoning_delta_for_thought_parts() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -5736,7 +6391,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn gemini_uppercase_finish_reason_normalizes_correctly() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),

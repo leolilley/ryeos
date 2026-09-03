@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::adapter::parse_tool_arguments;
-use crate::directive::ToolSchema;
+use crate::directive::{DIRECTIVE_RETURN_TOOL, ToolSchema};
 use crate::provider_adapter::tools::required_cap_for;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +52,7 @@ impl Dispatcher {
         // directive_return is a lifecycle signal, not a tool — the
         // runner intercepts it by name before reaching this path.
         // If we see it here, the runner bypass was missed.
-        if tool_name == "directive_return" {
+        if tool_name == DIRECTIVE_RETURN_TOOL {
             return Err(
                 "directive_return is a lifecycle signal, not a dispatchable tool".to_string(),
             );
@@ -176,7 +176,7 @@ mod tests {
         // intercept by name.
         let d = make_dispatcher(vec![]);
         let err = d
-            .resolve("directive_return", r#"{"answer": "42"}"#, None)
+            .resolve(DIRECTIVE_RETURN_TOOL, r#"{"answer": "42"}"#, None)
             .unwrap_err();
         assert!(
             err.contains("lifecycle signal"),

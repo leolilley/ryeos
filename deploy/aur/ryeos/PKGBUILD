@@ -18,7 +18,7 @@ options=('!strip' '!lto')
 
 # SQLite is bundled (libsqlite3-sys) and TLS uses rustls. Process-confinement
 # launchers are delivered inside signed RyeOS bundles.
-depends=('gcc-libs' 'glibc')
+depends=('gcc-libs' 'glibc' 'python')
 
 # cc needed for bundled libsqlite3-sys C compilation
 makedepends=('rust' 'cargo' 'cc')
@@ -65,8 +65,9 @@ package() {
     install -Dm755 target/release/lillux                "$pkgdir/usr/bin/lillux"
 
     # ── Official signed bundle data ──────────────────────────
-    # Plain `ryeos init` uses /usr/share/ryeos as its default source and
-    # verifies this material against its hardcoded official publisher key.
+    # `ryeos init --node-profile full` uses /usr/share/ryeos as its default
+    # source and verifies this material against its hardcoded official publisher
+    # key. Fresh init deliberately refuses an absent init profile.
     mkdir -p "$pkgdir/usr/share/ryeos"
     cp -a "$bundle_source/.ai" "$pkgdir/usr/share/ryeos/.ai"
     for bundle_dir in "$bundle_source"/*/; do
@@ -84,6 +85,12 @@ package() {
             install -Dm644 "$bundle_dir/README.md" \
                 "$pkgdir/usr/share/doc/$pkgname/$name/README.md"
         fi
+        for pinned_contract in "$bundle_dir"/PINNED-*.md; do
+            [[ -f "$pinned_contract" ]] || continue
+            install -Dm644 "$pinned_contract" \
+                "$pkgdir/usr/share/doc/$pkgname/$name/$(basename "$pinned_contract")"
+            [[ -s "$pkgdir/usr/share/doc/$pkgname/$name/$(basename "$pinned_contract")" ]] || return 1
+        done
     done
 
     # ── License ─────────────────────────────────────────────

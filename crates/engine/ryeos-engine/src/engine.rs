@@ -14,6 +14,7 @@ use crate::contracts::{
     EngineContext, ExecutionCompletion, ExecutionHints, ExecutionPlan, PlanContext, ProjectContext,
     ResolvedItem, SubjectResolutionAuthority, VerifiedItem,
 };
+use crate::effective_validators::EffectiveValidatorRegistry;
 use crate::error::EngineError;
 use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
 use crate::kind_registry::KindRegistry;
@@ -441,7 +442,16 @@ fn emit_immutable_request_cache_metric(
     outcome: ImmutableRequestCacheOutcome,
     reason: ImmutableRequestCacheReason,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "immutable_request_snapshot_cache",
+        namespace: None,
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes: 0,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "immutable_request_snapshot_cache",
         outcome = outcome.as_str(),
@@ -610,7 +620,16 @@ fn emit_static_verification_cache_metric(
     outcome: StaticVerificationCacheOutcome,
     reason: StaticVerificationCacheReason,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "static_verification_cache",
+        namespace: None,
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes: 0,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "static_verification_cache",
         outcome = outcome.as_str(),
@@ -832,6 +851,9 @@ pub struct Engine {
     /// runtime construction sites).
     pub composers: ComposerRegistry,
 
+    /// Boot-bound semantic validators for complete effective programs.
+    pub effective_validators: EffectiveValidatorRegistry,
+
     /// Catalog of verified `kind: runtime` items, scanned at engine
     /// init via `RuntimeRegistry::build_from_bundles`. Empty by
     /// default so test sites that construct an engine directly without
@@ -865,7 +887,7 @@ pub struct Engine {
     /// Operator-owned `.ai/` root. This is intentionally excluded from
     /// ordinary item resolution and is admitted only for signed launch-config
     /// inputs, between an active project and installed bundles.
-    node_config_ai_root: Option<PathBuf>,
+    node_config_root: Option<PathBuf>,
 
     /// Generation guard shared with launch preparation. It is inert for
     /// directly-constructed test engines and active for node engines.
@@ -958,8 +980,10 @@ impl CheckedEngineGeneration<'_> {
         item: &VerifiedItem,
         parameters: &Value,
         hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
-        self.engine.build_plan_current(ctx, item, parameters, hints)
+        self.engine
+            .build_plan_current(ctx, item, parameters, hints, sealed_content)
     }
 
     /// Resolve independent canonical items concurrently while retaining this
@@ -998,14 +1022,17 @@ impl Engine {
             trust_store: TrustStore::empty(),
             node_trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
+            effective_validators: EffectiveValidatorRegistry::default(),
             runtimes: RuntimeRegistry::default(),
             launch_preparers: LaunchPreparerRegistry::default(),
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
             registered_bundle_roots: Vec::new(),
-            node_config_ai_root: None,
-            isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
+            node_config_root: None,
+            isolation_generation: std::sync::Arc::new(
+                crate::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             request_trust_base: None,
             request_trust_overlay_identity: None,
             parser_overlay_cache: std::sync::Arc::new(
@@ -1033,11 +1060,14 @@ impl Engine {
         self
     }
 
-    pub fn registered_bundle_name_for_root(&self, root: &std::path::Path) -> Option<&str> {
+    /// Return the exact retained content root for a named bundle in this
+    /// engine generation. Callers must obtain `name` from typed resolution
+    /// provenance; a matching source pathname is not authority.
+    pub fn registered_bundle_root(&self, name: &str) -> Option<&std::path::Path> {
         self.registered_bundle_roots
             .iter()
-            .find(|bundle| bundle.canonical_root == root)
-            .map(|bundle| bundle.name.as_str())
+            .find(|bundle| bundle.name == name)
+            .map(|bundle| bundle.canonical_root.as_path())
     }
 
     /// Stable identity for this engine's complete admitted installed-bundle
@@ -1077,18 +1107,15 @@ impl Engine {
         );
     }
 
-    pub fn with_node_config_ai_root(mut self, node_config_ai_root: PathBuf) -> Self {
-        self.node_config_ai_root = Some(node_config_ai_root);
+    pub fn with_node_config_root(mut self, node_config_root: PathBuf) -> Self {
+        self.node_config_root = Some(node_config_root);
         self
     }
 
     /// Typed node-local config root. Consumers must use this explicit
     /// authority and never infer node precedence from a display label.
     pub fn node_config_root(&self) -> Option<PathBuf> {
-        self.node_config_ai_root
-            .as_ref()
-            .and_then(|ai_root| ai_root.parent())
-            .map(Path::to_path_buf)
+        self.node_config_root.clone()
     }
 
     fn checked_bundle_generation<T>(
@@ -1639,6 +1666,14 @@ impl Engine {
         self
     }
 
+    pub fn with_effective_validators(
+        mut self,
+        effective_validators: EffectiveValidatorRegistry,
+    ) -> Self {
+        self.effective_validators = effective_validators;
+        self
+    }
+
     /// Install the protocol registry, loaded from base roots at engine
     /// init. Empty by default for test compatibility.
     pub fn with_protocols(mut self, protocols: ProtocolRegistry) -> Self {
@@ -1834,6 +1869,7 @@ impl Engine {
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
             source_space: result.winner_space,
+            source_root: result.winner_root_identity,
             resolved_from: result.winner_label,
             shadowed: result.shadowed,
             probed_absent: result.probed_absent,
@@ -2957,12 +2993,22 @@ impl Engine {
         self.checked_bundle_generation(|| self.effective_item_current(request))
     }
 
-    fn effective_item_current(
+    /// Resolve and compose an exact item closure for a downstream admission
+    /// boundary. Unlike [`EffectiveItem`], this retains the complete verified
+    /// root/ancestor/reference bytes and provenance required to seal and later
+    /// finalize the same program without re-resolving its canonical name.
+    pub fn effective_resolution_output(
         &self,
         request: EffectiveItemRequest,
-    ) -> Result<EffectiveItem, EngineError> {
-        let ref_str = request.item_ref.to_string();
+    ) -> Result<crate::resolution::ResolutionOutput, EngineError> {
+        self.checked_bundle_generation(|| self.effective_resolution_output_current(&request))
+    }
 
+    fn effective_resolution_output_current(
+        &self,
+        request: &EffectiveItemRequest,
+    ) -> Result<crate::resolution::ResolutionOutput, EngineError> {
+        let ref_str = request.item_ref.to_string();
         if let Some(expected) = &request.expected_kind
             && expected != &request.item_ref.kind
         {
@@ -2972,14 +3018,12 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-
         let roots = self.resolution_roots(request.project_root.clone());
-        let project_root = request.project_root.as_deref();
         let request_snapshot = self.effective_request_snapshot_current(
-            project_root,
+            request.project_root.as_deref(),
             &request.subject_resolution_authority,
         )?;
-        let output = crate::resolution::run_effective_item_pipeline(
+        crate::resolution::run_effective_item_pipeline(
             &request.item_ref,
             &self.kinds,
             &request_snapshot.parser_dispatcher,
@@ -2987,7 +3031,14 @@ impl Engine {
             &request_snapshot.trust_store,
             &self.composers,
         )
-        .map_err(|error| resolution_error_to_engine(error, &request.item_ref))?;
+        .map_err(|error| resolution_error_to_engine(error, &request.item_ref))
+    }
+
+    fn effective_item_current(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<EffectiveItem, EngineError> {
+        let output = self.effective_resolution_output_current(&request)?;
 
         let trust_class = output.effective_trust_class;
         let trusted = matches!(
@@ -2997,14 +3048,20 @@ impl Engine {
         );
         let provenance = output.provenance();
 
-        // Determine bundle_root: check if the source path falls under
-        // one of the bundle roots (installed bundle spaces). The bundle
-        // root is the parent of the `.ai/` directory.
-        let bundle_root = self
-            .bundle_roots
-            .iter()
-            .find(|root| output.root.source_path.starts_with(root))
-            .cloned();
+        let bundle_root = match &output.root.source_root {
+            crate::contracts::ItemSourceRoot::Bundle { name } => Some(
+                self.registered_bundle_root(name)
+                    .ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "effective item names bundle root {name}, but that root is absent from the admitted generation"
+                        ))
+                    })?
+                    .to_path_buf(),
+            ),
+            crate::contracts::ItemSourceRoot::Project
+            | crate::contracts::ItemSourceRoot::Node
+            | crate::contracts::ItemSourceRoot::Search { .. } => None,
+        };
 
         // Build diagnostics from the resolution output.
         let mut diagnostics = Vec::new();
@@ -3051,14 +3108,19 @@ impl Engine {
     ///
     /// Checks execution scope on the principal before building.
     /// Uses system-only kind schemas and system+user trust.
+    /// `sealed_content`, when present, answers dependency verification for
+    /// paths an admitted realization covers; live bytes answer the rest.
     pub fn build_plan(
         &self,
         ctx: &PlanContext,
         item: &VerifiedItem,
         parameters: &Value,
         hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
-        self.checked_bundle_generation(|| self.build_plan_current(ctx, item, parameters, hints))
+        self.checked_bundle_generation(|| {
+            self.build_plan_current(ctx, item, parameters, hints, sealed_content)
+        })
     }
 
     fn build_plan_current(
@@ -3067,6 +3129,7 @@ impl Engine {
         item: &VerifiedItem,
         parameters: &Value,
         hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
         crate::scope::check_execution_scope(&ctx.requested_by)?;
 
@@ -3087,6 +3150,7 @@ impl Engine {
 
         crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
             item,
+            root_source: None,
             parameters,
             hints,
             ctx,
@@ -3098,12 +3162,58 @@ impl Engine {
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
             project_authority: None,
+            sealed_content,
+        })
+    }
+
+    /// Compile a direct plan from an engine-verified subject carrier while
+    /// reading the root program only from already-captured bytes. Executor
+    /// chain artifacts are still resolved and sealed under the current
+    /// installed bundle generation; the captured root pathname is audit data,
+    /// not a recovery input.
+    pub fn build_plan_from_captured_root(
+        &self,
+        ctx: &PlanContext,
+        item: &VerifiedItem,
+        root_source: &str,
+        parameters: &Value,
+        hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+    ) -> Result<ExecutionPlan, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::scope::check_execution_scope(&ctx.requested_by)?;
+            let project_root = match &ctx.project_context {
+                crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
+                _ => None,
+            };
+            let roots = self.resolution_roots(project_root.clone());
+            let request_snapshot = self.effective_request_snapshot_current(
+                project_root.as_deref(),
+                &ctx.subject_resolution_authority,
+            )?;
+            crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
+                item,
+                root_source: Some(root_source),
+                parameters,
+                hints,
+                ctx,
+                kinds: &self.kinds,
+                parsers: &request_snapshot.parser_dispatcher,
+                roots: &roots,
+                registry_fingerprint: &request_snapshot.registry_fingerprint,
+                trust_store: &request_snapshot.trust_store,
+                node_trust_store: &self.node_trust_store,
+                host_env: &self.host_env,
+                project_authority: None,
+                sealed_content,
+            })
         })
     }
 
     /// Build an execution plan whose root, executor chain, project config, and
     /// precedence probes are all sourced from one admitted project-content
-    /// authority.
+    /// authority. `sealed_content`, when present, overrides that authority for
+    /// dependency paths an admitted realization covers.
     pub fn build_plan_under_admitted_authority(
         &self,
         ctx: &PlanContext,
@@ -3112,6 +3222,7 @@ impl Engine {
         hints: &ExecutionHints,
         project_root: &Path,
         admitted: &AdmittedRequestAuthoritySnapshot,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -3151,6 +3262,7 @@ impl Engine {
             let project_content = admitted.project_content_for_root(project_root)?;
             crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
+                root_source: None,
                 parameters,
                 hints,
                 ctx,
@@ -3162,6 +3274,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 project_authority: Some((project_root, project_content)),
+                sealed_content,
             })
         })
     }
@@ -3288,12 +3401,13 @@ impl Engine {
     /// separate prevents mutable node state from becoming a general item root.
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
-        let Some(node_config_ai_root) = &self.node_config_ai_root else {
+        let Some(node_config_root) = &self.node_config_root else {
             return ResolutionRoots { ordered };
         };
+        let node_config_ai_root = node_config_root.join(crate::AI_DIR);
         if ordered
             .iter()
-            .any(|root| root.ai_root == *node_config_ai_root)
+            .any(|root| root.ai_root == node_config_ai_root)
         {
             return ResolutionRoots { ordered };
         }
@@ -3305,8 +3419,10 @@ impl Engine {
             position,
             ResolutionRoot {
                 space: crate::contracts::ItemSpace::Node,
+                identity: crate::contracts::ItemSourceRoot::Node,
                 label: "node-config".to_string(),
-                ai_root: node_config_ai_root.clone(),
+                ai_root: node_config_ai_root,
+                content_root: Some(node_config_root.clone()),
             },
         );
         ResolutionRoots { ordered }
@@ -3758,7 +3874,7 @@ formats:
 
     #[test]
     fn node_config_root_is_added_only_to_launch_config_precedence() {
-        let engine = test_engine().with_node_config_ai_root(PathBuf::from("/node-config/.ai"));
+        let engine = test_engine().with_node_config_root(PathBuf::from("/node-config"));
         let ordinary = engine.resolution_roots(Some(PathBuf::from("/project")));
         assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
         assert!(
@@ -3783,11 +3899,8 @@ formats:
     #[test]
     fn checked_generation_batches_multiple_resolutions_under_one_guard() {
         let lifeline = std::sync::Arc::new(CountingGenerationLifeline::default());
-        let isolation = crate::isolation::IsolationRuntime::default().retain_registered_generation(
-            lifeline.clone(),
-            TrustStore::empty(),
-            vec![],
-        );
+        let isolation = crate::isolation::IsolationRuntime::disabled_for_authoring()
+            .retain_registered_generation(lifeline.clone(), TrustStore::empty(), vec![]);
         let engine = test_engine().with_isolation_generation(std::sync::Arc::new(isolation));
         let ctx = test_plan_context();
         let item_ref = CanonicalRef::parse("tool:missing").unwrap();
@@ -3811,16 +3924,18 @@ formats:
             name: "same-name".to_string(),
             canonical_root: PathBuf::from("/same/canonical/root"),
         }];
-        let first = crate::isolation::IsolationRuntime::default().retain_registered_generation(
-            std::sync::Arc::new(CountingGenerationLifeline::default()),
-            TrustStore::empty(),
-            roots.clone(),
-        );
-        let second = crate::isolation::IsolationRuntime::default().retain_registered_generation(
-            std::sync::Arc::new(CountingGenerationLifeline::default()),
-            TrustStore::empty(),
-            roots.clone(),
-        );
+        let first = crate::isolation::IsolationRuntime::disabled_for_authoring()
+            .retain_registered_generation(
+                std::sync::Arc::new(CountingGenerationLifeline::default()),
+                TrustStore::empty(),
+                roots.clone(),
+            );
+        let second = crate::isolation::IsolationRuntime::disabled_for_authoring()
+            .retain_registered_generation(
+                std::sync::Arc::new(CountingGenerationLifeline::default()),
+                TrustStore::empty(),
+                roots.clone(),
+            );
         let first = test_engine()
             .with_registered_bundle_roots(roots.clone())
             .with_isolation_generation(std::sync::Arc::new(first));

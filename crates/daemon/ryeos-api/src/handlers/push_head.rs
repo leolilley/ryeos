@@ -30,11 +30,21 @@ pub struct Request {
     /// Exact principal HEAD observed when the server minted `staging_id`.
     /// The field is mandatory and nullable for a first publication.
     pub expected_previous_hash: ExplicitExpectedHash,
+    /// Signed assertion made by a forwarding RyeOS node. It cannot create an
+    /// origin: the target requires an exact match with its verified
+    /// source-node co-signature and target-signed grant constraints.
+    #[serde(default)]
+    pub required_origin_site_id: Option<String>,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Caller identity used for principal-scoped storage — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ryeos_app::identity::validate_forwarding_origin_assertion(
+        req.required_origin_site_id.as_deref(),
+        ctx.authorized_key_class,
+        ctx.authenticated_origin_site_id.as_deref(),
+    )?;
 
     // Compute principal-scoped project key before acquiring mutation locks.
     //
@@ -70,7 +80,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     stage.ensure_publication_contract(&publication_key, expected_previous_hash)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
 
     if let Some(admitted_target) = stage.admitted_target_hash() {
@@ -161,11 +171,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     // If a HEAD already exists for this principal+project, advance it with CAS.
     // Otherwise, write a new ref.
-    state.state_store.with_state_db(|db| {
-        let current = db.read_project_head(principal_key, &project_hash)?;
-        if current.as_deref() == Some(req.snapshot_hash.as_str()) {
-            return Ok(());
-        }
+    let current = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+    if current.as_deref() != Some(req.snapshot_hash.as_str()) {
         if current.as_deref() != expected_previous_hash {
             anyhow::bail!(
                 "push-head conflict: upload expected {:?}, current HEAD is {:?}",
@@ -174,7 +183,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             );
         }
         match expected_previous_hash {
-            Some(expected) => db.advance_project_head_ref(
+            Some(expected) => state.state_store.advance_project_head_ref(
                 principal_key,
                 &project_hash,
                 &req.snapshot_hash,
@@ -182,15 +191,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &signer,
                 &cas_guard,
             ),
-            None => db.write_project_head_ref(
+            None => state.state_store.write_project_head_ref(
                 principal_key,
                 &project_hash,
                 &req.snapshot_hash,
                 &signer,
                 &cas_guard,
             ),
-        }
-    })?;
+        }?;
+    }
     if let Err(error) = stage.finish_admitted(&cas_guard, &req.snapshot_hash) {
         tracing::warn!(%error, staging_id = %req.staging_id, "HEAD published but the durable upload receipt was not persisted; the active stage remains retryable");
     }

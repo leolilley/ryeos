@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-21T05:26:03Z:2bfc63e29b5c5feb42d30b2e7b65c92d3e3604b6fde631dba866f52e3f05008f:dWGhSOLExuGI3MFzSXKlLNMRWnu92wZ+PXdLET7dQWPS/utwc38XNgrKDos6+Mq/Fgn57RLzS4Ge7CJuasGZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:46Z:319433266a6e9d1204e2169988256ac971cbc25a4e98a41d81aba2c85fb4e004:zXYhmqLbg+bBsUF9FwaaCmoWsQkNZpnI+NQPfpIMRtQPkchA6wV2+RqYDrrB/TfjdL7y3unwQaVu3O1rzXxpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.publish
-availability: offline
-offline_execute: tool:ryeos/core/bundle/publish
+availability: local
+local_execute: tool:ryeos/core/bundle/publish
 required_caps: []
 schema:
   source: string

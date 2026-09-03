@@ -3,7 +3,7 @@
 //! Provides `atomic_write` which writes through a temporary file, fsyncs,
 //! and renames to the target path — same filesystem guaranteed.
 //!
-//! Used by `node_config::writer` for daemon-issued mutations to
+//! Used by `node_document` for daemon-issued mutations to
 //! `kind: node` items.
 
 use std::path::Path;

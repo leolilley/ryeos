@@ -155,18 +155,11 @@ pub(super) fn install_bundle(
     Ok(canonical)
 }
 
-pub(super) fn bundle_registration_value(
-    path: &Path,
-    command_registration_caps: &[String],
-) -> serde_json::Value {
-    let mut value = serde_json::json!({
+pub(super) fn bundle_registration_value(path: &Path) -> serde_json::Value {
+    serde_json::json!({
         "kind": "node",
         "path": path,
-    });
-    if !command_registration_caps.is_empty() {
-        value["command_registration_caps"] = serde_json::json!(command_registration_caps);
-    }
-    value
+    })
 }
 
 /// Recursive directory copy with symlink preservation (Unix only).

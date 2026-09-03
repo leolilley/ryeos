@@ -826,8 +826,8 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
 fn local_detail(tokens: &str, description: &str) -> String {
     let (usage, options) = match tokens {
         "init" => (
-            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--source <DIR>] [--trust-file <FILE>]...",
-            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)",
+            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME>]",
+            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes",
         ),
         "setup" => (
             "ryeos setup [--app-root <DIR>]",
@@ -853,9 +853,25 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
             "--json            emit structured diagnostics\n--no-bundles      skip bundle diagnostics\n--app-root <DIR>  application root",
         ),
-        "node gc" => (
-            "ryeos node gc [--dry-run] [--sweep-cas] [--app-root <DIR>]",
-            "--dry-run         report without mutation\n--sweep-cas       sweep newly unreachable CAS objects\n--app-root <DIR>  application root",
+        "node reset execution-history" => (
+            "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--app-root <DIR>]",
+            "--dry-run               report without mutation\n--confirm               confirm execution-history retirement\n--include-project-heads also retire project HEADs\n--confirm-project-heads confirm project-HEAD retirement\n--app-root <DIR>        application root",
+        ),
+        "node reset authorization" => (
+            "ryeos node reset authorization --confirm [--app-root <DIR>]",
+            "--confirm         confirm retirement of all grants\n--app-root <DIR>  application root",
+        ),
+        "node reset replay-indexes" => (
+            "ryeos node reset replay-indexes --confirm [--app-root <DIR>]",
+            "--confirm         confirm replay-index retirement\n--app-root <DIR>  application root",
+        ),
+        "node reset external-content-bindings" => (
+            "ryeos node reset external-content-bindings [--dry-run | --confirm] [--app-root <DIR>]",
+            "--dry-run         report without mutation\n--confirm         confirm binding retirement\n--app-root <DIR>  application root",
+        ),
+        "node reset policy-generation" => (
+            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
+            "--node-profile <NAME> trusted publisher profile\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
         ),
         "help" => (
             "ryeos help [<tokens>...] [--plain]",
@@ -956,8 +972,9 @@ fn availability_label(availability: CommandAvailability) -> &'static str {
     match availability {
         CommandAvailability::Auto => "resolved automatically",
         CommandAvailability::Daemon => "daemon required",
-        CommandAvailability::Offline => "offline",
-        CommandAvailability::Both => "offline or daemon",
+        CommandAvailability::Local => "local",
+        CommandAvailability::StoppedNode => "stopped node required",
+        CommandAvailability::Both => "daemon or stopped-node standalone",
     }
 }
 

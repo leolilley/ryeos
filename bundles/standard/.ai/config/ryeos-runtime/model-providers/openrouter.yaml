@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-26T07:44:18Z:9d50f8a93db36d45173611e9ff7a4361ff138bc05ec90b53e254aa12d76805b7:ilEg6WLeD//GS3yuQ29OyS/CldpBx+Us2wm9GaM3ofOLR+Q7Dl8gJAHP21KMLtYmyq/rtehnDP1vojc4AVXDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:27Z:7de314ecf22491706fdfc9c24fca9986605d3c7d791781ed073d42f49f7df668:koIInz6gXMqZ6HoIxjch/zJjQ4eYE7e339c7emc7ZC2rzCZByKNwpVzUMYbDDuUPQpT8l20CUFR/LEI6nzDQDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
-base_url: "https://openrouter.ai/api/v1"
+transport:
+  kind: remote_http
+  base_url: "https://openrouter.ai/api/v1"
 auth:
   env_var: OPENROUTER_API_KEY
   header_name: Authorization

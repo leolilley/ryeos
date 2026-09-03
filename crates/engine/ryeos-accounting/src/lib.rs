@@ -6,12 +6,17 @@
 //! `provider_attempt_budget_transition_v1` audit event. Presentation `f64`
 //! values are one-way derived and never parse back into authority.
 
+pub mod admission;
 pub mod authority;
 pub mod event;
 pub mod money;
 pub mod rpc;
 pub mod state;
 
+pub use admission::{
+    AdmittedFinancialAuthority, FINANCIAL_AUTHORITY_KIND, SpendBoundClass,
+    admit_financial_authority,
+};
 pub use authority::{
     BillableDimension, CREDENTIAL_BINDING_MAC_CONTRACT, ChargeReconciliationAuthority,
     ClosedBillableDimensionSet, Currency, FinalityContract, HexDigest,
@@ -25,12 +30,19 @@ pub use event::{
 pub use money::{MoneyError, NANOS_PER_USD, UsdNanos, reported_decimal_scale};
 pub use rpc::{
     MAX_DIAGNOSTIC_LEN, MAX_RAW_DECIMAL_LEN, ProviderAttemptBudgetRecord, ProviderAttemptGetParams,
+    ProviderAttemptLocalStreamControl, ProviderAttemptLocalStreamControlParams,
+    ProviderAttemptLocalStreamEvent, ProviderAttemptLocalStreamEventKind,
+    ProviderAttemptLocalStreamNextParams, ProviderAttemptLocalStreamNextResponse,
+    ProviderAttemptLocalStreamStartParams, ProviderAttemptLocalStreamStartResponse,
     ProviderAttemptMarkIssuedParams, ProviderAttemptMarkIssuedResponse,
+    ProviderAttemptPrepareParams, ProviderAttemptPrepareResponse,
     ProviderAttemptReleaseUnissuedParams, ProviderAttemptReleaseUnissuedResponse,
-    ProviderAttemptReserveParams, ProviderAttemptReserveResponse, ProviderAttemptSettleParams,
-    ProviderAttemptSettleResponse, RUNTIME_PROVIDER_ATTEMPT_GET,
-    RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED, RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED,
-    RUNTIME_PROVIDER_ATTEMPT_RESERVE, RUNTIME_PROVIDER_ATTEMPT_SETTLE, SpendAccounting,
+    ProviderAttemptSettleParams, ProviderAttemptSettleResponse, ProviderCallPublication,
+    ProviderCallPublicationProof, ProviderRetryAdvance, ProviderRetryDecision, ProviderRetryReason,
+    RUNTIME_PROVIDER_ATTEMPT_GET, RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_CONTROL,
+    RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_NEXT, RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_START,
+    RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED, RUNTIME_PROVIDER_ATTEMPT_PREPARE,
+    RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED, RUNTIME_PROVIDER_ATTEMPT_SETTLE, SpendAccounting,
     SpendBoundCommitments, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
 };
 pub use state::{

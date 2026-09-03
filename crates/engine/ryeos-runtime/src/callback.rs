@@ -39,6 +39,9 @@ pub enum CallbackError {
     Transport(#[from] anyhow::Error),
 }
 
+pub const RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE: &str = "runtime_action_outcome_unknown";
+pub const RUNTIME_ACTION_RESULT_UNAVAILABLE_CODE: &str = "runtime_action_result_unavailable";
+
 impl CallbackError {
     pub fn retryable(&self) -> bool {
         match self {
@@ -50,66 +53,167 @@ impl CallbackError {
             Self::Transport(_) => false,
         }
     }
+
+    /// The request may have crossed the daemon's action boundary, but the
+    /// caller did not receive authoritative settlement. Kind runtimes must
+    /// leave the owning thread unfinished and re-drive the same operation ID;
+    /// converting this into an authored retry or ordinary failure could
+    /// duplicate an effect or discard a retained result.
+    pub fn runtime_action_outcome_unknown(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            Self::ActionFailed { code, .. } => {
+                code == RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE
+                    || code == RUNTIME_ACTION_RESULT_UNAVAILABLE_CODE
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchActionRequest {
     pub thread_id: String,
-    pub project_path: String,
     pub action: ActionPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_dispatch: Option<HookDispatchIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_dispatch: Option<EffectDispatchRequest>,
+}
+
+/// Opaque authorization selected by a kind runtime for one dispatch.
+///
+/// The callback capability contains the complete admitted authorization. The
+/// runtime can select an ID but cannot assert a class, policy digest, source
+/// identity, cache key, or callee coordinate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectDispatchRequest {
+    pub authorization_id: String,
+}
+
+/// Runtime-to-daemon request for one source-scoped project observation. The
+/// runtime owns only the graph occurrence and the bounded source request; the
+/// daemon derives chain and admitted source identity from callback authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectObservationPublishParams {
+    pub thread_id: String,
+    pub graph_run_id: String,
+    pub node: String,
+    pub step: u32,
+    pub observation: crate::ProjectObservationRequest,
+}
+
+/// Canonical digest of the behavior-bearing action admitted for dispatch.
+///
+/// `operation_id` names one runtime-asserted occurrence. It is deliberately
+/// excluded here so recorded-effect identity remains reusable across two
+/// behaviorally identical admitted occurrences. The daemon binds the opaque
+/// occurrence to this independently derived digest in its runtime-action
+/// intent before child contact.
+pub fn dispatch_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
+    let mut behavior = action.clone();
+    behavior.operation_id = None;
+    let value = serde_json::to_value(behavior)?;
+    let canonical = lillux::cas::canonical_json(&value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
+}
+
+/// Whether a runtime action occurrence uses the one canonical wire spelling:
+/// exactly 32 bytes rendered as 64 lowercase hexadecimal characters.
+///
+/// Keep this with [`ActionPayload`] rather than borrowing the CAS path helper:
+/// CAS lookup accepts case-insensitive hexadecimal input, while action
+/// occurrence identity is compared and persisted as an exact protocol value.
+pub fn valid_action_operation_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// One scalar coordinate in a runtime-owned hook occurrence.
+///
+/// Occurrence coordinates are deliberately bounded to strings and counters:
+/// they identify a lifecycle boundary but cannot smuggle an unbounded nested
+/// document across the callback authority boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HookDispatchCoordinate {
+    Text(String),
+    Counter(u32),
 }
 
 /// Stable logical occurrence of one runtime-hook event.
 ///
-/// The daemon namespaces this caller-supplied coordinate under authoritative
-/// chain and execution identity before using it for idempotency. Keeping the
-/// finite event vocabulary typed prevents an arbitrary string from silently
-/// creating a second ledger namespace for the same lifecycle boundary.
+/// The signed kind contract and launch-captured hook authorization own the
+/// `(owner_kind, event)` vocabulary. The generic callback substrate binds that
+/// pair to the admitted effective definition and opaque scalar coordinates;
+/// adding a hook-capable kind or event therefore requires no executor wire
+/// change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HookDispatchOccurrence {
-    GraphStarted {
-        graph_run_id: String,
-        definition_ref: String,
-        definition_hash: String,
-    },
-    GraphStepCompleted {
-        graph_run_id: String,
-        definition_ref: String,
-        definition_hash: String,
-        step: u32,
-        node: String,
-    },
-    GraphCompleted {
-        graph_run_id: String,
-        definition_ref: String,
-        definition_hash: String,
-        steps: u32,
-    },
-    DirectiveAfterStep {
-        definition_ref: String,
-        definition_hash: String,
-        turn: u32,
-    },
-    DirectiveContinuation {
-        definition_ref: String,
-        definition_hash: String,
-        turn: u32,
-    },
+#[serde(deny_unknown_fields)]
+pub struct HookDispatchOccurrence {
+    pub owner_kind: String,
+    pub event: String,
+    pub definition_ref: String,
+    pub root_raw_content_digest: String,
+    pub effective_definition_digest: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coordinates: BTreeMap<String, HookDispatchCoordinate>,
 }
 
 impl HookDispatchOccurrence {
-    pub const fn event(&self) -> &'static str {
-        match self {
-            Self::GraphStarted { .. } => "graph_started",
-            Self::GraphStepCompleted { .. } => "graph_step_completed",
-            Self::GraphCompleted { .. } => "graph_completed",
-            Self::DirectiveAfterStep { .. } => "after_step",
-            Self::DirectiveContinuation { .. } => "continuation",
+    pub fn new(
+        owner_kind: impl Into<String>,
+        event: impl Into<String>,
+        definition_ref: impl Into<String>,
+        root_raw_content_digest: impl Into<String>,
+        effective_definition_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner_kind: owner_kind.into(),
+            event: event.into(),
+            definition_ref: definition_ref.into(),
+            root_raw_content_digest: root_raw_content_digest.into(),
+            effective_definition_digest: effective_definition_digest.into(),
+            coordinates: BTreeMap::new(),
         }
+    }
+
+    pub fn with_text_coordinate(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.coordinates
+            .insert(key.into(), HookDispatchCoordinate::Text(value.into()));
+        self
+    }
+
+    pub fn with_counter_coordinate(mut self, key: impl Into<String>, value: u32) -> Self {
+        self.coordinates
+            .insert(key.into(), HookDispatchCoordinate::Counter(value));
+        self
+    }
+
+    pub fn text_coordinate(&self, key: &str) -> Option<&str> {
+        match self.coordinates.get(key) {
+            Some(HookDispatchCoordinate::Text(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn counter_coordinate(&self, key: &str) -> Option<u32> {
+        match self.coordinates.get(key) {
+            Some(HookDispatchCoordinate::Counter(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn event(&self) -> &str {
+        &self.event
     }
 }
 
@@ -122,6 +226,7 @@ pub struct HookDispatchIdentity {
     pub hook_id: String,
     pub layer: crate::hooks_loader::HookLayer,
     pub result_mode: crate::hooks_loader::HookResultMode,
+    pub context_contract: ryeos_engine::hooks::HookContextContract,
     pub context_hash: String,
 }
 
@@ -140,11 +245,13 @@ pub struct SpawnFollowChildRequest {
     /// `thread_id` to match the callback wire convention (the caller's thread),
     /// where "parent" is just its follow-semantics role.
     pub thread_id: String,
-    /// Project path the parent runs in, for callback-token validation.
-    pub project_path: String,
     pub graph_run_id: String,
     pub follow_node: String,
     pub step_count: i64,
+    /// Closed result shape selected by the graph operation. A cohort remains a
+    /// cohort when filtering leaves exactly one child; cardinality never
+    /// rewrites the checkpoint wire contract.
+    pub result_shape: FollowResultShape,
     /// Required non-empty cohort. Single-child callers emit one element.
     pub children: Vec<FollowChildSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +262,13 @@ pub struct SpawnFollowChildRequest {
     /// Exact `continued` terminal payload the graph will emit on stdout after
     /// the daemon atomically records the follow handoff.
     pub completion: TerminalCompletion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowResultShape {
+    Single,
+    Cohort,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,8 +448,10 @@ impl<'de> Deserialize<'de> for TerminalCompletion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
-    /// Stable runtime-occurrence identity. Required for detached actions so a
-    /// daemon crash/retry cannot mint the same logical child twice.
+    /// Stable opaque identity asserted by the admitted runtime for one logical
+    /// action occurrence. Ordinary inline and detached callbacks require it so
+    /// daemon crash/retry cannot execute the occurrence through a second child.
+    /// Admitted hook callbacks use their separate hook occurrence ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
     pub item_id: String,
@@ -451,6 +567,7 @@ pub struct LaunchWindow {
 /// accepts templates inside it — a literal that drifts from the struct is how
 /// `facets` once shipped unresolved.
 pub mod action_keys {
+    pub const OPERATION_ID: &str = "operation_id";
     pub const ITEM_ID: &str = "item_id";
     pub const REF_BINDINGS: &str = "ref_bindings";
     pub const PARAMS: &str = "params";
@@ -484,12 +601,141 @@ pub const RESERVED_CONTROL_KEYS: &[&str] = &[
     PARAM_CONTINUATION,
 ];
 
+/// Request to bind one already-admitted exclusive subprocess dependency to
+/// the calling runtime's durable root and workspace. Integration-specific
+/// runtimes name the dependency and environment slots; the daemon derives all
+/// paths and authority from retained launch/profile state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionStartRequest {
+    pub thread_id: String,
+    pub dependency_ref: String,
+    pub credential_profile_id: String,
+    pub required_credential_state: String,
+    /// Exact signed route set selected by the root execution. The worker
+    /// profile admits the route IDs; callers cannot widen this after launch.
+    pub route_set: String,
+    /// Sorted, unique effect-class ceiling admitted by the root launch.
+    pub allowed_effect_classes: Vec<String>,
+    pub credential_home_env: String,
+    pub workspace_env: String,
+    pub require_pinned_cow: bool,
+    pub required_terminal_publication: String,
+    /// Whether this execution may recover a retained upstream session after a
+    /// worker restart. The daemon verifies this against the signed protocol
+    /// profile before launching the worker.
+    pub recover_upstream_session: bool,
+}
+
+/// One opaque command issued by the integration runtime that owns a dedicated
+/// session root. The daemon supplies the durable at-most-once boundary; the
+/// signed runtime and worker protocol own the payload meaning.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionCommandRequest {
+    pub thread_id: String,
+    pub idempotency_key: String,
+    pub command_kind: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionTerminateRequest {
+    pub thread_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionWaitRequest {
+    pub thread_id: String,
+    pub observed_updated_at_ms: i64,
+    pub timeout_ms: u64,
+}
+
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
     -> Result<Value, CallbackError>;
 
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
+
+    /// Feature-gated daemon crash-qualification seam.
+    ///
+    /// Production daemons do not serve this method. A runtime calls it only
+    /// when an explicit test-only phase selection is present; the qualifying
+    /// daemon reports that exact boundary to its parent and deliberately never
+    /// answers. Keeping the vocabulary opaque here prevents the callback
+    /// substrate from learning runtime- or kind-specific phases.
+    #[doc(hidden)]
+    async fn reach_test_phase_cut(
+        &self,
+        _thread_id: &str,
+        _phase: &str,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "runtime phase cuts require an explicit daemon test-support build".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn start_dedicated_session(
+        &self,
+        request: DedicatedSessionStartRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn dedicated_session_status(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn wait_dedicated_session(
+        &self,
+        request: DedicatedSessionWaitRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn dedicated_session_command(
+        &self,
+        request: DedicatedSessionCommandRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn terminate_dedicated_session(
+        &self,
+        request: DedicatedSessionTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
@@ -644,6 +890,17 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         )))
     }
 
+    /// Publish an idempotent, daemon-authored project observation. This is a
+    /// settlement-significant graph-commit boundary, not advisory telemetry.
+    async fn publish_project_observation(
+        &self,
+        _params: ProjectObservationPublishParams,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.publish_project_observation callback is not implemented by this client"
+        )))
+    }
+
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Drain-and-persist operator inputs staged for this RUNNING thread,
@@ -663,14 +920,14 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     ///
     /// Defaults refuse: a directive test must provide explicit accounting
     /// behavior — a missing method never silently degrades into settled mode.
-    async fn provider_attempt_reserve(
+    async fn provider_attempt_prepare(
         &self,
         _thread_id: &str,
         _params: Value,
     ) -> Result<Value, CallbackError> {
         Err(CallbackError::ActionFailed {
             code: "unsupported".to_string(),
-            message: "provider_attempt_reserve is only supported by the daemon UDS client"
+            message: "provider_attempt_prepare is only supported by the daemon UDS client"
                 .to_string(),
             retryable: false,
         })
@@ -723,6 +980,48 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         Err(CallbackError::ActionFailed {
             code: "unsupported".to_string(),
             message: "provider_attempt_get is only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_local_stream_start(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_local_stream_start is only supported by the daemon UDS client"
+                    .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_local_stream_next(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_local_stream_next is only supported by the daemon UDS client"
+                    .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_local_stream_control(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_local_stream_control is only supported by the daemon UDS client"
+                    .to_string(),
             retryable: false,
         })
     }
@@ -858,33 +1157,42 @@ mod tests {
     }
 
     #[test]
-    fn hook_dispatch_occurrence_uses_closed_tagged_wire() {
-        let occurrence = HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id: "graph-run-1".to_string(),
-            definition_ref: "graph:test/workflow".to_string(),
-            definition_hash: "definition-hash".to_string(),
-            step: 9,
-            node: "work".to_string(),
-        };
+    fn hook_dispatch_occurrence_uses_generic_scalar_coordinate_wire() {
+        let occurrence = HookDispatchOccurrence::new(
+            "graph",
+            "graph_step_completed",
+            "graph:test/workflow",
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+        .with_text_coordinate("graph_run_id", "graph-run-1")
+        .with_counter_coordinate("step", 9)
+        .with_text_coordinate("node", "work");
         let wire = serde_json::to_value(&occurrence).unwrap();
-        assert_eq!(wire["kind"], "graph_step_completed");
-        assert_eq!(wire["graph_run_id"], "graph-run-1");
-        assert_eq!(wire["step"], 9);
+        assert_eq!(wire["owner_kind"], "graph");
+        assert_eq!(wire["event"], "graph_step_completed");
+        assert_eq!(wire["coordinates"]["graph_run_id"], "graph-run-1");
+        assert_eq!(wire["coordinates"]["step"], 9);
         assert_eq!(occurrence.event(), "graph_step_completed");
 
+        let future = serde_json::from_value::<HookDispatchOccurrence>(json!({
+            "owner_kind": "future_runtime",
+            "event": "phase_settled",
+            "definition_ref": "future_runtime:test/item",
+            "root_raw_content_digest": "a".repeat(64),
+            "effective_definition_digest": "b".repeat(64),
+            "coordinates": {"phase": 9}
+        }))
+        .unwrap();
+        assert_eq!(future.event(), "phase_settled");
         assert!(
             serde_json::from_value::<HookDispatchOccurrence>(json!({
-                "kind": "graph_step_finished",
-                "graph_run_id": "graph-run-1",
-                "step": 9,
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<HookDispatchOccurrence>(json!({
-                "kind": "directive_after_step",
-                "turn": 2,
-                "legacy_event": "after_step",
+                "owner_kind": "graph",
+                "event": "graph_step_completed",
+                "definition_ref": "graph:test/workflow",
+                "root_raw_content_digest": "a".repeat(64),
+                "effective_definition_digest": "b".repeat(64),
+                "coordinates": {"nested": {"not": "a scalar"}},
             }))
             .is_err()
         );
@@ -894,7 +1202,6 @@ mod tests {
     fn dispatch_action_hook_identity_round_trips_exactly() {
         let request = DispatchActionRequest {
             thread_id: "T-hook".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
                 operation_id: None,
                 item_id: "tool:test/hook".to_string(),
@@ -906,21 +1213,115 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: Some(HookDispatchIdentity {
-                occurrence: HookDispatchOccurrence::DirectiveContinuation {
-                    definition_ref: "directive:test/runner".to_string(),
-                    definition_hash: "definition-hash".to_string(),
-                    turn: 3,
-                },
+                occurrence: HookDispatchOccurrence::new(
+                    "directive",
+                    "continuation",
+                    "directive:test/runner",
+                    "a".repeat(64),
+                    "b".repeat(64),
+                )
+                .with_counter_coordinate("turn", 3),
                 hook_id: "continuation-audit".to_string(),
                 layer: crate::hooks_loader::HookLayer::Operator,
                 result_mode: crate::hooks_loader::HookResultMode::Control,
+                context_contract: ryeos_engine::hooks::HookContextContract {
+                    schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                    allowed_roots: std::collections::BTreeSet::from(["event".to_string()]),
+                },
                 context_hash: "context-digest".to_string(),
             }),
+            effect_dispatch: None,
         };
 
         let wire = serde_json::to_value(&request).unwrap();
         let round_trip: DispatchActionRequest = serde_json::from_value(wire).unwrap();
         assert_eq!(round_trip.hook_dispatch, request.hook_dispatch);
+    }
+
+    #[test]
+    fn action_digest_excludes_occurrence_but_binds_behavior() {
+        let action = ActionPayload {
+            operation_id: Some("1".repeat(64)),
+            item_id: "tool:test/mutate".to_string(),
+            ref_bindings: BTreeMap::new(),
+            params: json!({"value": 1}),
+            thread: "inline".to_string(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        };
+        let original = dispatch_action_digest(&action).unwrap();
+
+        let mut different_occurrence = action.clone();
+        different_occurrence.operation_id = Some("2".repeat(64));
+        assert_eq!(
+            dispatch_action_digest(&different_occurrence).unwrap(),
+            original
+        );
+
+        let mut different_behavior = action;
+        different_behavior.params = json!({"value": 2});
+        assert_ne!(
+            dispatch_action_digest(&different_behavior).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn action_operation_id_has_one_canonical_wire_spelling() {
+        assert!(valid_action_operation_id(&"0".repeat(64)));
+        assert!(valid_action_operation_id(&("abcdef".repeat(10) + "abcd")));
+        assert!(!valid_action_operation_id(&"A".repeat(64)));
+        assert!(!valid_action_operation_id(&"g".repeat(64)));
+        assert!(!valid_action_operation_id(&"0".repeat(63)));
+    }
+
+    #[test]
+    fn unavailable_runtime_action_result_requires_recovery() {
+        let error = CallbackError::ActionFailed {
+            code: RUNTIME_ACTION_RESULT_UNAVAILABLE_CODE.to_owned(),
+            message: "the retained body was intentionally discarded".to_owned(),
+            retryable: false,
+        };
+        assert!(error.runtime_action_outcome_unknown());
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn callback_requests_reject_caller_supplied_project_path_authority() {
+        let request = json!({
+            "thread_id": "T-test",
+            "project_path": "/host/project",
+            "action": {
+                "item_id": "tool:test/echo",
+                "ref_bindings": {},
+                "params": {},
+                "thread": "inline"
+            }
+        });
+        assert!(serde_json::from_value::<DispatchActionRequest>(request).is_err());
+
+        let follow = json!({
+            "thread_id": "T-test",
+            "project_path": "/host/project",
+            "graph_run_id": "gr-test",
+            "follow_node": "child",
+            "step_count": 0,
+            "result_shape": "single",
+            "children": [{
+                "item_ref": "graph:test/child",
+                "ref_bindings": {},
+                "parameters": {}
+            }],
+            "completion": {
+                "status": "continued",
+                "outcome_code": "continued",
+                "result": null,
+                "error": null,
+                "cost": null
+            }
+        });
+        assert!(serde_json::from_value::<SpawnFollowChildRequest>(follow).is_err());
     }
 
     #[test]

@@ -226,6 +226,24 @@ fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
                 "event append refused: `state_anchor` milestones are daemon-authored through runtime.publish_state_anchor"
             );
         }
+        if matches!(
+            event.event_type.as_str(),
+            ryeos_state::event_types::TOOL_CALL_START | ryeos_state::event_types::TOOL_CALL_RESULT
+        ) {
+            let operation_id = event
+                .payload
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("event '{}' requires operation_id", event.event_type)
+                })?;
+            if !ryeos_runtime::callback::valid_action_operation_id(operation_id) {
+                bail!(
+                    "event '{}' operation_id must be a canonical lowercase SHA-256 digest",
+                    event.event_type
+                );
+            }
+        }
         let payload_bytes = serde_json::to_vec(&event.payload)?.len();
         if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
             bail!(
@@ -278,6 +296,8 @@ fn validate_event_type(event_type: &str) -> Result<()> {
         ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1
             | ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
             | ryeos_state::event_types::HOOK_FAILED
+            | ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED
+            | ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
     ) {
         bail!(
             "event append refused: `{event_type}` is daemon-authored and cannot be appended by a runtime"
@@ -368,6 +388,47 @@ mod tests {
     }
 
     #[test]
+    fn tool_lifecycle_events_require_one_canonical_operation_identity() {
+        for event_type in [
+            ryeos_state::event_types::TOOL_CALL_START,
+            ryeos_state::event_types::TOOL_CALL_RESULT,
+        ] {
+            let event = |payload| EventAppendItem {
+                event_type: event_type.to_string(),
+                storage_class: "indexed".to_string(),
+                payload,
+            };
+            assert!(
+                validate_runtime_event_batch(&[event(json!({
+                    "operation_id": "a".repeat(64),
+                    "tool": "tool:test/echo",
+                    "call_id": "call-1"
+                }))])
+                .is_ok()
+            );
+            assert!(
+                validate_runtime_event_batch(&[event(json!({
+                    "tool": "tool:test/echo",
+                    "call_id": "call-1"
+                }))])
+                .unwrap_err()
+                .to_string()
+                .contains("requires operation_id")
+            );
+            assert!(
+                validate_runtime_event_batch(&[event(json!({
+                    "operation_id": "NOT-A-HASH",
+                    "tool": "tool:test/echo",
+                    "call_id": "call-1"
+                }))])
+                .unwrap_err()
+                .to_string()
+                .contains("canonical lowercase")
+            );
+        }
+    }
+
+    #[test]
     fn always_ephemeral_types_come_from_the_enum() {
         for et in ["token_delta", "stream_snapshot", "cognition_reasoning"] {
             assert!(is_ephemeral_allowed(et, &json!({})));
@@ -375,10 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_cannot_forge_daemon_authored_hook_evidence() {
+    fn runtime_cannot_forge_daemon_authored_evidence() {
         for event_type in [
             ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
             ryeos_state::event_types::HOOK_FAILED,
+            ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+            ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED,
         ] {
             let error = validate_event_type(event_type).unwrap_err();
             assert!(
@@ -387,7 +450,7 @@ mod tests {
             );
             assert!(
                 ryeos_runtime::RuntimeEventType::parse(event_type).is_ok(),
-                "hook evidence remains part of the indexed event vocabulary"
+                "daemon evidence remains part of the indexed event vocabulary"
             );
         }
     }

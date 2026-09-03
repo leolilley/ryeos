@@ -13,7 +13,7 @@
 
 use serde_json::{Value, json};
 
-use ryeos_engine::contracts::{ExecutionHints, PlanContext, PlanNode, VerifiedItem};
+use ryeos_engine::contracts::{ExecutionHints, PlanArgument, PlanContext, PlanNode, VerifiedItem};
 use ryeos_engine::engine::Engine;
 use ryeos_engine::isolation::{IsolationLaunchContext, IsolationRuntime};
 
@@ -94,7 +94,13 @@ pub fn import_dry_run(
     isolation: &IsolationRuntime,
     isolation_context: IsolationLaunchContext<'_>,
 ) -> Value {
-    let plan = match engine.build_plan(plan_ctx, verified, &json!({}), &ExecutionHints::default()) {
+    let plan = match engine.build_plan(
+        plan_ctx,
+        verified,
+        &json!({}),
+        &ExecutionHints::default(),
+        None,
+    ) {
         Ok(p) => p,
         Err(e) => {
             return json!({
@@ -114,11 +120,15 @@ pub fn import_dry_run(
     // Detect the python-function runtime by its bootstrap signature, which
     // fixes the arg layout `[-I, -u, -c, <script>, tool_path, runtime_lib,
     // project_path]`. Anything else is out of scope for the import probe.
-    let dash_c = spec.args.iter().position(|a| a == "-c");
+    let dash_c = spec
+        .args
+        .iter()
+        .position(|argument| argument.literal_value() == Some("-c"));
     let is_python_function = dash_c.is_some_and(|i| {
         spec.args
             .get(i + 1)
-            .is_some_and(|s| s.contains("spec_from_file_location"))
+            .and_then(PlanArgument::literal_value)
+            .is_some_and(|value| value.contains("spec_from_file_location"))
     });
     if !is_python_function {
         return json!({
@@ -133,7 +143,24 @@ pub fn import_dry_run(
     // trailing tool_path / runtime_lib / project_path args are preserved so the
     // probe's `sys.path` matches the real launch exactly.
     let mut args = spec.args.clone();
-    args[dash_c + 1] = IMPORT_PROBE.to_string();
+    args[dash_c + 1] = PlanArgument::literal(IMPORT_PROBE);
+    let args = match args
+        .into_iter()
+        .map(|argument| match argument {
+            PlanArgument::Literal { value } => Ok(value),
+            PlanArgument::AdmittedSourceEntry => Err(()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(args) => args,
+        Err(()) => {
+            return json!({
+                "import_check": "n/a",
+                "interpreter": spec.cmd,
+                "note": "import dry-run cannot bind an admitted source entry outside launch admission",
+            });
+        }
+    };
 
     let envs: Vec<(String, String)> = spec
         .env
@@ -306,7 +333,7 @@ mod tests {
         envs: Vec<(String, String)>,
         project: &std::path::Path,
     ) -> Value {
-        let isolation = IsolationRuntime::default();
+        let isolation = IsolationRuntime::disabled_for_authoring();
         run_probe(
             interpreter,
             args,
@@ -316,14 +343,21 @@ mod tests {
             IsolationLaunchContext {
                 project_path: project,
                 project_authority: IsolationProjectAuthority::ReadOnly,
+                filesystem_authority_ceiling:
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
+                external_read_only_mounts: &[],
+                target_channel: None,
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
             },

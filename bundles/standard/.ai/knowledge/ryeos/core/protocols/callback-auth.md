@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-15T07:49:19Z:9d8336c3e12436c838c9228d0cf1f5cbcdf8d9c0e68a94f9616dd243e152bccb:kjacWFQ5gPJ7mH0AoKSdSyOBbmsWQL5aEzEfaGY+3zlQ8PAPMDJzwTTEToRFUG3fOg6JoqFeQcbyD0bmTCZyAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:50Z:90c203c7f402ceaedc06d07721a36b0ed45216cc4f062d362e7f2e5a9da2e9fa:gUIyJwCPzOYe4DuN5j/ALbCrgsWi4C+9uVXlJ2rxAQ8xdaHI9U/hOwGYhrqd0b1tLAh5PSpB5mSDRWoSEKT9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Daemon-runtime callback authentication contract: callback capability
   tokens, thread-auth tokens, env injection, TTLs, caps enforcement, and
@@ -13,7 +13,7 @@ description: >
 
 Invariant: callback authentication is selected by the UDS method's access
 class. Callback-token methods validate the capability token and its exact
-thread/project/capability context. Thread-auth methods validate the per-thread
+thread/provenance/capability context. Thread-auth methods validate the per-thread
 auth token and then apply their handler-specific capability/provenance checks.
 Two-proof methods such as `runtime.poll_input` and `runtime.author_item` require
 both. Exact-thread lifecycle methods are bound to the attached thread identity.
@@ -23,17 +23,16 @@ both. Exact-thread lifecycle methods are bound to the attached thread identity.
 The daemon mints two independent per-thread tokens in
 `crates/daemon/ryeos-app/src/callback_token.rs`:
 
-- `CallbackCapability` (`cbt-...`) carries thread id, callback
-  authorization/state anchor,
+- `CallbackCapability` (`cbt-...`) carries thread id, server-retained
+  project/state provenance,
   composed `effective_caps`, expiry, and required `ExecutionProvenance`.
 - `ThreadAuthState` (`tat-...`) carries the server-side acting principal
   and caller scopes.
 
 Both token stores validate thread id and expiry. Callback capability validation
-also checks the callback authorization/state anchor for dispatch calls. It is
-the deliberate state-root override when present, otherwise the effective
-project root; it can intentionally differ from source-oriented
-`RYE_PROJECT_PATH`.
+uses the retained provenance captured when the token was minted; callback
+requests cannot supply or replace a host project path. `RYE_PROJECT_PATH` is
+only the subprocess's selected execution workspace.
 
 ## Environment injection
 
@@ -46,9 +45,13 @@ composition as typed protocol bindings. `runtime`, `method_runtime`, and
 - `RYEOSD_SOCKET_PATH`
 - `RYEOSD_CALLBACK_TOKEN`
 - `RYEOSD_THREAD_ID`
-- `RYEOSD_PROJECT_PATH` — callback authorization/state anchor, which may differ
-  from `RYE_PROJECT_PATH`
+- `RYEOSD_PROJECT_STATE_SCOPE` — opaque logical-project namespace identity;
+  stable across pinned COW successors and not itself an authority
 - `RYEOSD_THREAD_AUTH_TOKEN`
+
+The callback token and thread identity bind the durable project/state
+authority server-side. A subprocess does not receive or submit the canonical
+host project path as callback authority.
 
 Callback capability authority is minted only when the verified descriptor's
 callback channel/injections require it. Thread-auth authority is minted only

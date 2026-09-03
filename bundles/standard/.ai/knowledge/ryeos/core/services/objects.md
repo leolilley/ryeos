@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T23:18:43Z:af33c8d652281da34b4fa042dcdbf11f790b62eb25df3fa093ba75d53a830f1f:lUlblOz5wWFINE2AXnSLy3XFY45StHMTXiY9NJjGTWvCURL+e5/qDgSmmLEpXfwUL/F3kASTCmzXYLIH3co3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:35Z:af33c8d652281da34b4fa042dcdbf11f790b62eb25df3fa093ba75d53a830f1f:lUlblOz5wWFINE2AXnSLy3XFY45StHMTXiY9NJjGTWvCURL+e5/qDgSmmLEpXfwUL/F3kASTCmzXYLIH3co3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, objects, cas]

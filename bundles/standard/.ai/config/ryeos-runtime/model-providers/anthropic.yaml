@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-23T15:25:30Z:342bdf398244bcde990dc065027c7a2c4461f5163ae4b87fd5531355d2aee3ca:jpxzluw9dXeQ2+BOkb7lmOV9I2K6uHBLdLCew18RujDZFzPdMLklMDrby1lxlMIxYB8xYxmOadXDUyiK8wpJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:26Z:68955c0ce9e7c86046f30c5d8e6b2f0e0b4b7d686265d67b128a586421ed0115:DQmRA7IIs5tw9rx33eISqw9u/nvfe4w9V4K6+6rQhNYnVlw8NSDhENoxaEZydCq4KnydLtU8QPs7krEfIgKeAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: anthropic_messages
-base_url: "https://api.anthropic.com/v1/messages"
+transport:
+  kind: remote_http
+  base_url: "https://api.anthropic.com/v1/messages"
 auth:
   env_var: ANTHROPIC_API_KEY
   header_name: x-api-key

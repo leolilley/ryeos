@@ -5,13 +5,15 @@
 //! closure, stage every entry with attribution, then promote the verified set
 //! to `mirrored`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
+use serde_json::Value;
 
 use crate::remote::client::{
-    AdmissionAttestationRemoteRecord, ObjectsClosureRequestOptions, RemoteClient,
+    AdmissionAttestationRemoteRecord, NodeAdmittedObjectsClosureRequestOptions, RemoteClient,
 };
 use ryeos_app::state::AppState;
 use ryeos_state::object_closure::ObjectClosureLimits;
@@ -30,7 +32,7 @@ pub struct VerifiedRemoteImportRequest {
     pub expected_attestation_hash: Option<String>,
     pub source_peer: Option<String>,
     pub job_id: Option<String>,
-    pub closure_options: ObjectsClosureRequestOptions,
+    pub closure_options: NodeAdmittedObjectsClosureRequestOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,40 @@ pub struct VerifiedRemoteImportJobResult {
     pub import: VerifiedRemoteImportResult,
 }
 
+/// Require every large-object dependency advertised by a CAS closure to be
+/// present under this node's own pinned large-object authority.
+///
+/// CAS/object sync deliberately does not copy this distinct storage tier.
+/// Worker placement uses the returned hashes as local realization
+/// requirements, then normal capsule admission checks each sidecar against
+/// the signed external-content manifest before any process can run.
+pub fn require_local_large_object_dependencies(state: &AppState, hashes: &[String]) -> Result<()> {
+    let unique = hashes.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    state.state_store.with_state_db(|db| {
+        let authority = db.pinned_authority()?;
+        let store = authority.large_object_store()?;
+        for hash in unique {
+            let size = store.object_size(hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "required large-object realization {hash} is not resident on this node"
+                )
+            })?;
+            let sidecar = store.sidecar(hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "required large-object realization {hash} has no integrity sidecar"
+                )
+            })?;
+            if sidecar.size != size {
+                anyhow::bail!(
+                    "required large-object realization {hash} size contradicts its integrity sidecar"
+                );
+            }
+            store.verify_resident_object(hash, size)?;
+        }
+        Ok(())
+    })
+}
+
 pub async fn import_admitted_root_with_job(
     state: &Arc<AppState>,
     client: &RemoteClient,
@@ -67,6 +103,15 @@ pub async fn import_admitted_root_with_job(
         db.create_sync_job(&NewSyncJob {
             job_id: job_id.clone(),
             operation_type: "remote_import_admitted_root".to_string(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "remote_import_admitted_root",
+                "subject_hash": req.subject_hash,
+                "policy": req.policy,
+                "expected_issuer": req.expected_issuer,
+                "expected_attestation_hash": req.expected_attestation_hash,
+                "source_peer": peer,
+            }),
             peer: Some(peer.clone()),
             roots: vec![req.subject_hash.clone()],
             heads: Vec::new(),
@@ -223,10 +268,16 @@ pub async fn import_admitted_root(
     )?;
 
     let closure_options = req.closure_options.clone();
+    let attestation_entry = attestation_sync_entry(attestation)?;
+    let fetch_options = closure_options.reserving_supplemental_entry(&attestation_entry)?;
     let closure = client
-        .objects_closure_get(std::slice::from_ref(&req.subject_hash), req.closure_options)
+        .objects_closure_get(std::slice::from_ref(&req.subject_hash), fetch_options)
         .await?;
-    let mut payload = closure_response_to_payload(&req.subject_hash, &closure.entries)?;
+    let mut payload = closure_response_to_export_payload(
+        &format!("remote-admission:{}", req.subject_hash),
+        &req.subject_hash,
+        &closure.entries,
+    )?;
     if !payload
         .entries
         .iter()
@@ -237,7 +288,7 @@ pub async fn import_admitted_root(
             req.subject_hash
         );
     }
-    append_attestation_entry(&mut payload, attestation)?;
+    append_admitted_supplemental_entry(&mut payload, attestation_entry, closure_options.limits())?;
 
     let attribution = ImportAttribution {
         source_principal: Some(req.expected_issuer.clone()),
@@ -251,7 +302,7 @@ pub async fn import_admitted_root(
     let cas = authority.cas_store()?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
     let import = state.state_store.with_state_db(|db| {
         ryeos_state::sync::import_objects_staged(db, &payload, &attribution, &cas_guard)
@@ -301,22 +352,17 @@ pub async fn import_admitted_root(
 fn verify_local_imported_closure(
     cas: &lillux::CasStore,
     subject_hash: &str,
-    options: &ObjectsClosureRequestOptions,
+    options: &NodeAdmittedObjectsClosureRequestOptions,
 ) -> Result<()> {
-    let defaults = ObjectClosureLimits::default();
+    let admitted = options.limits();
     let limits = ObjectClosureLimits {
-        max_objects: options.max_objects.unwrap_or(defaults.max_objects),
-        max_blobs: options.max_blobs.unwrap_or(defaults.max_blobs),
-        max_object_bytes: options
-            .max_object_bytes
-            .unwrap_or(defaults.max_object_bytes),
-        max_blob_bytes: options.max_blob_bytes.unwrap_or(defaults.max_blob_bytes),
-        max_total_blob_bytes: options
-            .max_total_blob_bytes
-            .unwrap_or(defaults.max_total_blob_bytes),
-        max_links_per_object: options
-            .max_links_per_object
-            .unwrap_or(defaults.max_links_per_object),
+        max_objects: admitted.max_objects,
+        max_blobs: admitted.max_blobs,
+        max_object_bytes: admitted.max_object_bytes,
+        max_total_object_bytes: admitted.max_total_object_bytes,
+        max_blob_bytes: admitted.max_blob_bytes,
+        max_total_blob_bytes: admitted.max_total_blob_bytes,
+        max_links_per_object: admitted.max_links_per_object,
     };
     let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         cas,
@@ -332,11 +378,11 @@ fn verify_local_imported_closure(
             report.unsupported_objects.len(),
         );
     }
-    if report.blob_hashes.len() > options.max_blobs.unwrap_or(defaults.max_blobs) {
+    if report.blob_hashes.len() > admitted.max_blobs {
         anyhow::bail!(
             "imported remote closure exceeds max_blobs after local verification: {} > {}",
             report.blob_hashes.len(),
-            options.max_blobs.unwrap_or(defaults.max_blobs),
+            admitted.max_blobs,
         );
     }
     Ok(())
@@ -385,10 +431,24 @@ pub fn verify_remote_attestation_record(
     Ok(attestation)
 }
 
-fn closure_response_to_payload(
-    subject_hash: &str,
+/// Convert one already shape-validated remote closure response into RyeOS's
+/// ordinary sync payload while retaining the caller's exact chain coordinate.
+///
+/// This helper is deliberately authority-neutral: it verifies every encoded
+/// entry digest, but it does not publish a head or decide whether the named
+/// root is an admission subject, an execution chain, or another typed object.
+/// The importing authority performs that decision after staging.
+pub fn closure_response_to_export_payload(
+    chain_root_id: &str,
+    chain_head_hash: &str,
     entries: &[crate::remote::client::CasEntry],
 ) -> Result<ExportPayload> {
+    if chain_root_id.trim().is_empty() {
+        anyhow::bail!("remote closure sync payload requires a chain root id");
+    }
+    if !is_canonical_hash(chain_head_hash) {
+        anyhow::bail!("remote closure sync payload has an invalid chain head hash");
+    }
     let mut sync_entries = Vec::with_capacity(entries.len());
     let mut total_bytes = 0usize;
     for entry in entries {
@@ -443,24 +503,14 @@ fn closure_response_to_payload(
         }
     }
     Ok(ExportPayload {
-        chain_root_id: format!("remote-admission:{subject_hash}"),
-        chain_head_hash: subject_hash.to_string(),
+        chain_root_id: chain_root_id.to_owned(),
+        chain_head_hash: chain_head_hash.to_owned(),
         entries: sync_entries,
         total_bytes,
     })
 }
 
-fn append_attestation_entry(
-    payload: &mut ExportPayload,
-    attestation: &AdmissionAttestationRemoteRecord,
-) -> Result<()> {
-    if payload
-        .entries
-        .iter()
-        .any(|entry| !entry.is_blob && entry.hash == attestation.attestation_hash)
-    {
-        return Ok(());
-    }
+fn attestation_sync_entry(attestation: &AdmissionAttestationRemoteRecord) -> Result<SyncEntry> {
     let data = lillux::canonical_json(&attestation.attestation)?.into_bytes();
     let actual = lillux::sha256_hex(&data);
     if actual != attestation.attestation_hash {
@@ -470,12 +520,97 @@ fn append_attestation_entry(
             actual
         );
     }
-    payload.total_bytes = payload.total_bytes.saturating_add(data.len());
-    payload.entries.push(SyncEntry {
+    Ok(SyncEntry {
         hash: attestation.attestation_hash.clone(),
         is_blob: false,
         data,
-    });
+    })
+}
+
+/// Add one already semantically verified supplemental object/blob to a staged
+/// remote payload without stepping outside the same node-admitted resource
+/// contract as the fetched closure.
+pub(crate) fn append_admitted_supplemental_entry(
+    payload: &mut ExportPayload,
+    entry: SyncEntry,
+    limits: &ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
+) -> Result<()> {
+    if let Some(existing) = payload
+        .entries
+        .iter()
+        .find(|candidate| candidate.hash == entry.hash)
+    {
+        if existing.is_blob != entry.is_blob || existing.data != entry.data {
+            anyhow::bail!("supplemental entry contradicts an existing staged hash");
+        }
+        return Ok(());
+    }
+    if !is_canonical_hash(&entry.hash) || lillux::sha256_hex(&entry.data) != entry.hash {
+        anyhow::bail!("supplemental entry has an invalid content identity");
+    }
+    let entry_bytes = u64::try_from(entry.data.len()).context("supplemental size exceeds u64")?;
+    let same_kind_count = payload
+        .entries
+        .iter()
+        .filter(|candidate| candidate.is_blob == entry.is_blob)
+        .count();
+    let (max_count, max_entry_bytes, max_total_bytes, label) = if entry.is_blob {
+        (
+            limits.max_blobs,
+            limits.max_blob_bytes,
+            limits.max_total_blob_bytes,
+            "blob",
+        )
+    } else {
+        let value: Value =
+            serde_json::from_slice(&entry.data).context("supplemental object is not JSON")?;
+        if lillux::canonical_json(&value)?.as_bytes() != entry.data.as_slice() {
+            anyhow::bail!("supplemental object is not canonical JSON");
+        }
+        let link_count = ryeos_state::object_closure::object_link_count(&value)
+            .map_err(|error| anyhow::anyhow!("invalid supplemental object: {error}"))?;
+        let Some(link_count) = link_count else {
+            anyhow::bail!("unsupported supplemental object kind");
+        };
+        if link_count > limits.max_links_per_object {
+            anyhow::bail!("supplemental object exceeds admitted link count");
+        }
+        (
+            limits.max_objects,
+            limits.max_object_bytes,
+            limits.max_total_object_bytes,
+            "object",
+        )
+    };
+    if same_kind_count >= max_count {
+        anyhow::bail!("supplemental {label} exceeds admitted count");
+    }
+    if entry_bytes > max_entry_bytes {
+        anyhow::bail!("supplemental {label} exceeds admitted per-entry bytes");
+    }
+    let existing_kind_bytes = payload
+        .entries
+        .iter()
+        .filter(|candidate| candidate.is_blob == entry.is_blob)
+        .try_fold(0_u64, |total, candidate| {
+            total
+                .checked_add(
+                    u64::try_from(candidate.data.len()).context("staged size exceeds u64")?,
+                )
+                .context("staged supplemental byte count overflow")
+        })?;
+    if existing_kind_bytes
+        .checked_add(entry_bytes)
+        .context("staged supplemental byte count overflow")?
+        > max_total_bytes
+    {
+        anyhow::bail!("supplemental {label} exceeds admitted aggregate bytes");
+    }
+    payload.total_bytes = payload
+        .total_bytes
+        .checked_add(entry.data.len())
+        .context("staged payload byte count overflow")?;
+    payload.entries.push(entry);
     Ok(())
 }
 
@@ -606,5 +741,53 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn remote_closure_conversion_retains_exact_chain_coordinate() {
+        let value = serde_json::json!({"kind":"fixture","schema":1});
+        let object_bytes = lillux::canonical_json(&value).unwrap().into_bytes();
+        let object_hash = lillux::sha256_hex(&object_bytes);
+        let blob = b"portable-placement-ledger";
+        let blob_hash = lillux::sha256_hex(blob);
+        let payload = closure_response_to_export_payload(
+            "T-chain-root",
+            &object_hash,
+            &[
+                crate::remote::client::CasEntry {
+                    hash: object_hash.clone(),
+                    kind: "object".to_owned(),
+                    data: None,
+                    value: Some(value),
+                },
+                crate::remote::client::CasEntry {
+                    hash: blob_hash.clone(),
+                    kind: "blob".to_owned(),
+                    data: Some(base64::engine::general_purpose::STANDARD.encode(blob)),
+                    value: None,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(payload.chain_root_id, "T-chain-root");
+        assert_eq!(payload.chain_head_hash, object_hash);
+        assert_eq!(payload.entries.len(), 2);
+        assert_eq!(payload.total_bytes, object_bytes.len() + blob.len());
+    }
+
+    #[test]
+    fn remote_closure_conversion_refuses_corrupt_entries() {
+        let error = closure_response_to_export_payload(
+            "T-chain-root",
+            &"1".repeat(64),
+            &[crate::remote::client::CasEntry {
+                hash: "2".repeat(64),
+                kind: "blob".to_owned(),
+                data: Some(base64::engine::general_purpose::STANDARD.encode(b"wrong")),
+                value: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hash mismatch"));
     }
 }

@@ -107,15 +107,11 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     // generation is exchanged into the public bundle path, so a late failure
     // cannot expose a half-cleaned CAS or a mixture of old and new signatures.
     let live_root = opts.bundle_source.clone();
-    let canonical_live_root = fs::canonicalize(&live_root).with_context(|| {
-        format!(
-            "canonicalize bundle source before publication {}",
-            live_root.display()
-        )
-    })?;
-    let declared_name = declared_manifest_name(&canonical_live_root)?;
-    let effective_bundle_name = opts.name.as_deref().unwrap_or(&declared_name).to_string();
     super::publisher_transaction::with_staged_bundle_generation(&live_root, |staging| {
+        let effective_bundle_name = match opts.name.as_deref() {
+            Some(name) => name.to_owned(),
+            None => declared_manifest_name(staging)?,
+        };
         let registry_roots = super::publisher_transaction::roots_for_staged_generation(
             &live_root,
             staging,
@@ -132,17 +128,9 @@ pub(super) fn declared_manifest_name(bundle_source: &Path) -> Result<String> {
     let source_path = bundle_source
         .join(ryeos_engine::AI_DIR)
         .join("manifest.source.yaml");
-    let metadata = fs::symlink_metadata(&source_path)
-        .with_context(|| format!("inspect required manifest source {}", source_path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        bail!(
-            "required manifest source {} must be a regular non-symlink file",
-            source_path.display()
-        );
-    }
-    let raw = fs::read_to_string(&source_path)
-        .with_context(|| format!("read manifest source {}", source_path.display()))?;
-    let source: BundleManifestSource = serde_yaml::from_str(&raw)
+    let raw = lillux::read_regular_file_bounded_no_follow(&source_path, 1024 * 1024)
+        .with_context(|| format!("read exact manifest source {}", source_path.display()))?;
+    let source: BundleManifestSource = serde_yaml::from_slice(&raw)
         .with_context(|| format!("parse manifest source {}", source_path.display()))?;
     Ok(source.name)
 }
@@ -175,32 +163,16 @@ fn run_publish_in_place(
     let (bootstrap_validated, bootstrap_signed) =
         bootstrap_sign_kinds_and_parsers(bundle_source, &opts.signing_key)?;
 
-    // ── Phase 2: rebuild CAS manifest ──
-    let bin_root = ai_dir.join("bin");
-    let (rebuild_report, binary_rebuild_skipped, binary_rebuild_skip_reason) = if bin_root.is_dir()
-    {
-        (
-            Some(
-                build_bundle::rebuild_bundle_manifest_in_place(bundle_source, &opts.signing_key)
-                    .context("rebuild-manifest phase failed")?,
-            ),
-            false,
-            None,
-        )
-    } else {
-        tracing::info!(
-            path = %bin_root.display(),
-            "no .ai/bin directory; skipping binary CAS manifest rebuild for declarative bundle"
-        );
-        (
-            None,
-            true,
-            Some(format!(
-                "no .ai/bin directory at {} — declarative bundle has no binary CAS manifest",
-                bin_root.display()
-            )),
-        )
-    };
+    // ── Phase 2: rebuild the closed executor manifest ──
+    // Declarative bundles publish the same signed closure with an empty
+    // SourceManifest. Installation and resolution therefore have one closed
+    // bundle contract instead of a special "no binaries" dialect.
+    let rebuild_report = Some(
+        build_bundle::rebuild_bundle_manifest_in_place(bundle_source, &opts.signing_key)
+            .context("rebuild-manifest phase failed")?,
+    );
+    let binary_rebuild_skipped = false;
+    let binary_rebuild_skip_reason = None;
 
     // ── Phase 3: sign every other signable item ──
     let mut sign_report = sign_bundle::sign_bundle_items_with_trust_in_place(
@@ -441,29 +413,20 @@ fn sign_raw_in_place(
     prefix: &str,
     suffix: Option<&str>,
 ) -> Result<bool> {
-    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let stripped = lillux::signature::strip_signature_lines_with_envelope(&content, prefix, suffix);
-
-    // Check if the file already has a valid signature for this body and key.
-    if already_signed_for_body(&content, &stripped, signing_key, prefix, suffix) {
-        return Ok(false);
-    }
-
-    let signed = lillux::signature::sign_content(&stripped, signing_key, prefix, suffix);
-    let tmp = path.with_extension(format!("publish.tmp.{}", std::process::id()));
-    fs::write(&tmp, &signed).with_context(|| format!("write tmp {}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(true)
+    let bytes = lillux::read_regular_file_bounded_no_follow(
+        path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )?;
+    let content = std::str::from_utf8(&bytes)
+        .with_context(|| format!("decode {} as UTF-8", path.display()))?;
+    let envelope = ryeos_engine::contracts::SignatureEnvelope {
+        prefix: prefix.to_owned(),
+        suffix: suffix.map(str::to_owned),
+        after_shebang: false,
+    };
+    super::sign::sign_validated_in_place_with_key(path, content, &envelope, signing_key)
 }
 
-/// Check whether `existing` (full file content) already carries a valid
-/// signature for `body` (stripped content) signed by `signing_key`.
-///
-/// Returns true only when all three conditions hold:
-///   1. Parsed header's content hash matches the body
-///   2. Signer fingerprint matches the current key
-///   3. Signature verifies against the hash
 fn already_signed_for_body(
     existing: &str,
     body: &str,
@@ -477,7 +440,6 @@ fn already_signed_for_body(
     let Some(header) = lillux::signature::parse_signature_line(first_line, prefix, suffix) else {
         return false;
     };
-
     let verifying_key = signing_key.verifying_key();
     let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
     lillux::signature::is_valid_signature_for(
@@ -490,13 +452,69 @@ fn already_signed_for_body(
     )
 }
 
-/// Atomic write: stage to a temp file, then rename over the target.
-/// Ensures readers never see a partially-written file.
+/// Publish generated bytes through the same descriptor-pinned boundary used
+/// by item authoring. Publisher work happens in a private generation, but it
+/// still does not own raw predictable temp-file and rename mechanics.
 fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, content.as_bytes()).with_context(|| format!("write tmp {}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    write_publisher_bytes(path, content.as_bytes(), 0o644)
+}
+
+fn write_publisher_bytes(path: &Path, bytes: &[u8], create_mode: u32) -> Result<()> {
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("publisher target has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("publisher target has no file name"))?;
+    let parent = lillux::PinnedDirectory::open(parent_path)?
+        .ok_or_else(|| anyhow::anyhow!("publisher target parent is unavailable"))?;
+    let expected = parent.open_regular(name, false)?;
+    if let Some(expected) = expected {
+        let observed = lillux::observe_open_regular_file(&expected)?;
+        let mode = observed.permission_mode()?;
+        let mut incumbent = expected.try_clone()?;
+        let max = ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES.max(bytes.len() as u64);
+        let incumbent =
+            lillux::read_open_regular_file_stable_bounded(&mut incumbent, &observed, max)?;
+        if incumbent == bytes {
+            parent.ensure_regular_entry_matches(name, Some(&expected))?;
+            parent.ensure_path_binding()?;
+            return Ok(());
+        }
+        let expected_bytes = incumbent;
+        let expected_observation = observed.clone();
+        if let Err(error) = parent.replace_bytes_if_matches_atomic(
+            name,
+            Some(&expected),
+            move |current| {
+                let now = lillux::observe_open_regular_file(current)?;
+                anyhow::ensure!(
+                    now.matches_quarantined_incumbent(&expected_observation),
+                    "publisher target metadata changed"
+                );
+                let mut current = current.try_clone()?;
+                let current =
+                    lillux::read_open_regular_file_stable_bounded(&mut current, &now, max)?;
+                anyhow::ensure!(current == expected_bytes, "publisher target changed");
+                Ok(())
+            },
+            bytes,
+            mode,
+        ) {
+            if error.namespace_committed() {
+                parent.sync().with_context(|| {
+                    format!(
+                        "publisher target committed but parent durability could not be re-established: {error}"
+                    )
+                })?;
+            } else {
+                return Err(anyhow::anyhow!(error));
+            }
+        }
+    } else {
+        parent.atomic_write_if_same(name, None, bytes, create_mode)?;
+    }
+    parent.ensure_path_binding()?;
     Ok(())
 }
 
@@ -842,18 +860,9 @@ pub(super) fn generate_and_sign_manifest_in_place(
 ) -> Result<(PathBuf, bool)> {
     let ai_dir = bundle_source.join(ryeos_engine::AI_DIR);
     let source_path = ai_dir.join("manifest.source.yaml");
-    let source_metadata = fs::symlink_metadata(&source_path)
-        .with_context(|| format!("inspect required manifest source {}", source_path.display()))?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_file() {
-        bail!(
-            "required manifest source {} must be a regular non-symlink file",
-            source_path.display()
-        );
-    }
-
-    let raw = fs::read_to_string(&source_path)
-        .with_context(|| format!("read manifest source {}", source_path.display()))?;
-    let src: BundleManifestSource = serde_yaml::from_str(&raw)
+    let raw = lillux::read_regular_file_bounded_no_follow(&source_path, 1024 * 1024)
+        .with_context(|| format!("read exact manifest source {}", source_path.display()))?;
+    let src: BundleManifestSource = serde_yaml::from_slice(&raw)
         .with_context(|| format!("parse manifest source {}", source_path.display()))?;
 
     let manifest = materialize_manifest(src, &ai_dir, effective_bundle_name)
@@ -919,16 +928,13 @@ fn write_publisher_trust_doc(
     let target = bundle_source.join("PUBLISHER_TRUST.toml");
 
     // Idempotent: skip write when existing content matches.
-    if let Ok(existing) = fs::read_to_string(&target)
-        && existing == body
+    if let Ok(existing) = lillux::read_regular_file_bounded_no_follow(&target, 64 * 1024)
+        && existing == body.as_bytes()
     {
         return Ok((target, false));
     }
 
-    let tmp = target.with_extension(format!("trust-doc.tmp.{}", std::process::id()));
-    fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
-    fs::rename(&tmp, &target)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
+    write_publisher_bytes(&target, body.as_bytes(), 0o644)?;
     Ok((target, true))
 }
 

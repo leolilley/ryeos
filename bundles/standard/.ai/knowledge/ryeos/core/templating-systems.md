@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-27T23:40:19Z:59c364588166774104f39759d08b4ee8120b8fd6034800fc8126f309555d321c:+tn7ix5fqcUpS8ydghDQNCo10Yr/GweIRj4N8RVZrDK5CZq9xUNHdUVXS+5wRKWqvuXMU3uNsE4noL0aEa9KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:52Z:0d3faf1dbc8b1108a2ca6a0900ed7afdf2989571e46e836ed0d0cded4f7db0cf:dw9+QG3fuV27Ns6faR5bOIPmUcPtccpHCAe548o9HirSI/EGDjAUW/pHFd0GMQZkwFvpSutxpUeOsYr71ApjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [reference, templating, interpolation, substitution]
-version: "1.0.0"
+version: "1.2.0"
 description: >
   The interpolation/template surfaces in Rye OS — where each runs, which
   use rye-expr/1, and what context each surface exposes.
@@ -52,7 +52,7 @@ evaluator as graph/directive runtime bodies.
 | `${tool_path}`       | Absolute path to the tool source file        |
 | `${tool_dir}`        | Parent directory of the tool source file     |
 | `${tool_parent}`     | Grandparent of the tool source file          |
-| `${project_path}`    | Absolute path to the project root            |
+| `${project_path}`    | Absolute path to the selected execution workspace; it may be a sparse ephemeral admitted-input view |
 | `${params_json}`     | Full parameters as JSON string               |
 | `${interpreter}`     | Resolved Python binary (from env config)     |
 | `${runtime_dir}`     | Current chain element's directory            |
@@ -107,7 +107,7 @@ env_config:
   env:
     PATH: "${PATH}"                         # allowlisted host value
     PYTHONUNBUFFERED: "1"                   # literal
-    PROJECT_VENV_PYTHON: "${interpreter}"   # runtime context
+    TOOL_PYTHON: "${interpreter}"           # runtime context
   env_paths:
     PATH:
       prepend: ["${runtime_dir}/bin"]
@@ -226,9 +226,12 @@ a second template.
 
 - Directive bodies expose only `inputs`, and direct references must name one
   exact input so unreferenced inputs can still be appended once.
-- Graph fields expose `state` and `inputs`; `_execution` and `_run` are present
-  only when supplied by the launch context. A declared foreach/fanout variable
-  is available in that node's per-item fields.
+- Graph fields expose `state`, `inputs`, `execution`, and `run`. `run` carries
+  the exact graph-run identity and current step. `dispatch` becomes available
+  only after an action returns daemon-owned dispatch evidence. A declared
+  foreach/fanout variable is available in that node's per-item fields; the
+  runtime roots `execution`, `run`, and `dispatch` are reserved names.
+  Underscored spellings are not aliases and fail graph admission.
 - `result` is available after an action for that node's `assign` and conditional
   `next`. It is not a store of prior-node results; persist values needed later
   into `state`.

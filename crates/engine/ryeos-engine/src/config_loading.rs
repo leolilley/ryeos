@@ -120,11 +120,33 @@ pub fn load_and_verify_config_file(
     load_and_verify_config_file_with_hash(path, ctx).map(|(value, _)| value)
 }
 
+/// Load one config contributor only when its signature is valid under the
+/// node trust store.
+///
+/// Ordinary authored config resolution deliberately supports unsigned layers
+/// and classifies their trust later. Node-wide admission limits cannot use
+/// that permissive contract: an existing untrusted layer must stop startup
+/// rather than silently weakening or replacing the valve.
+pub fn load_and_verify_trusted_config_file(
+    path: &Path,
+    ctx: &ConfigLoadContext<'_>,
+) -> Result<Value, EngineError> {
+    load_and_verify_config_file_with_policy(path, ctx, true).map(|(value, _)| value)
+}
+
 /// Load, verify, and parse one config from a single securely-opened source
 /// observation, returning the whole-file digest of the exact parsed bytes.
 pub fn load_and_verify_config_file_with_hash(
     path: &Path,
     ctx: &ConfigLoadContext<'_>,
+) -> Result<(Value, String), EngineError> {
+    load_and_verify_config_file_with_policy(path, ctx, false)
+}
+
+fn load_and_verify_config_file_with_policy(
+    path: &Path,
+    ctx: &ConfigLoadContext<'_>,
+    require_trusted_signature: bool,
 ) -> Result<(Value, String), EngineError> {
     let content = match ctx.project_authority {
         Some((project_root, project_content)) if path.starts_with(project_root) => {
@@ -182,6 +204,12 @@ pub fn load_and_verify_config_file_with_hash(
     let envelope = &ext_spec.signature;
 
     match parse_signature_header(&content, envelope) {
+        None if require_trusted_signature => {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: path.display().to_string(),
+                reason: "config must carry a signature trusted by this node".to_string(),
+            });
+        }
         None => tracing::warn!(
             config_path = %path.display(),
             "config file is unsigned (allow_unsigned=true)"
@@ -197,6 +225,16 @@ pub fn load_and_verify_config_file_with_hash(
             // surfaces as the hard ContentHashMismatch arm below while
             // other trust failures only warn (allow_unsigned policy).
             match verify_item_signature_with_hash(&recomputed, &header, ctx.trust_store) {
+                Ok((crate::contracts::TrustClass::Trusted, _fp)) => tracing::debug!(
+                    config_path = %path.display(),
+                    "config file signature verified"
+                ),
+                Ok((trust, _fp)) if require_trusted_signature => {
+                    return Err(EngineError::InvalidRuntimeConfig {
+                        path: path.display().to_string(),
+                        reason: format!("config signature is not trusted by this node: {trust:?}"),
+                    });
+                }
                 Ok((trust, _fp)) => tracing::debug!(
                     config_path = %path.display(),
                     ?trust,
@@ -211,9 +249,10 @@ pub fn load_and_verify_config_file_with_hash(
                         actual,
                     });
                 }
-                Err(e) => tracing::warn!(
+                Err(error) if require_trusted_signature => return Err(error),
+                Err(error) => tracing::warn!(
                     config_path = %path.display(),
-                    error = %e,
+                    error = %error,
                     "config file signature trust check failed (allow_unsigned=true)"
                 ),
             }

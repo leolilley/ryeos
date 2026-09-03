@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use crate::object_closure::collect_object_closure;
 use crate::refs::{
@@ -21,6 +21,8 @@ pub struct ReachableSet {
     pub object_hashes: HashSet<String>,
     /// All reachable blob hashes (raw binary content).
     pub blob_hashes: HashSet<String>,
+    /// All reachable hashes in the distinct large-object store.
+    pub large_object_hashes: HashSet<String>,
     /// Number of distinct signed head records walked. This deliberately
     /// counts namespace-neutral heads and separately-owned heads even when
     /// multiple records target the same CAS object or project identity.
@@ -209,6 +211,11 @@ pub(crate) fn collect_chain_reachable_from_head_with_cas(
 fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut ReachableSet) -> Result<()> {
     let closure = collect_object_closure(cas_root, roots)?;
     if !closure.is_complete() {
+        if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
+            return Err(anyhow::anyhow!(incompatible.clone())).context(
+                "authoritative reachable closure contains an incompatible object contract",
+            );
+        }
         anyhow::bail!(
             "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
             closure.missing_objects.len(),
@@ -219,6 +226,7 @@ fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut Reachable
     }
     set.object_hashes.extend(closure.object_hashes);
     set.blob_hashes.extend(closure.blob_hashes);
+    set.large_object_hashes.extend(closure.large_object_hashes);
     Ok(())
 }
 
@@ -229,6 +237,11 @@ fn merge_object_closure_with_cas(
 ) -> Result<()> {
     let closure = crate::object_closure::collect_object_closure_with_cas(cas, roots)?;
     if !closure.is_complete() {
+        if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
+            return Err(anyhow::anyhow!(incompatible.clone())).context(
+                "authoritative reachable closure contains an incompatible object contract",
+            );
+        }
         anyhow::bail!(
             "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
             closure.missing_objects.len(),
@@ -239,6 +252,7 @@ fn merge_object_closure_with_cas(
     }
     set.object_hashes.extend(closure.object_hashes);
     set.blob_hashes.extend(closure.blob_hashes);
+    set.large_object_hashes.extend(closure.large_object_hashes);
     Ok(())
 }
 
@@ -335,7 +349,12 @@ mod tests {
             "item_trust_class": "trusted",
             "kind_schema_content_hash": "33".repeat(32),
             "resolved_from": {
-                "node_default": { "node_policy": "missing_config" }
+                "node_default": { "node_policy": {
+                    "path": ".ai/node/policies/thread_history.yaml",
+                    "space": "node",
+                    "content_hash": "44".repeat(32),
+                    "signer_fingerprint": "55".repeat(32)
+                } }
             },
         })
     }
@@ -378,6 +397,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -562,6 +582,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": event_hash,
             "last_chain_seq": 2,
@@ -810,6 +831,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -845,6 +867,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -940,6 +963,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,

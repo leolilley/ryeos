@@ -49,12 +49,14 @@ fn build_test_state_with_engine(
         app_root: tmpdir.path().to_path_buf(),
         node_signing_key_path: key_path.clone(),
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-        require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
-        tool_env_passthrough: Vec::new(),
-        accounting_issue_acceptance_window_ms: 60_000,
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    // Admission classifies the configured operator separately from remote
+    // node claimants. Keep that authority real in the shared fixture so tests
+    // exercise the production identity check instead of failing before the
+    // claim contract is reached.
+    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -144,56 +146,31 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
 
 #[allow(dead_code)]
 pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::TempDir, AppState) {
+    build_test_state_with_hosted_policy_choices(true, token_ttl_secs)
+}
+
+#[allow(dead_code)]
+pub fn build_test_state_with_disabled_hosted_admission() -> (tempfile::TempDir, AppState) {
+    build_test_state_with_hosted_policy_choices(false, 600)
+}
+
+fn build_test_state_with_hosted_policy_choices(
+    admission_enabled: bool,
+    token_ttl_secs: u64,
+) -> (tempfile::TempDir, AppState) {
     let (tmpdir, mut state) = build_test_state();
-    state.node_config = Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
-        bundles: vec![],
-        routes: vec![],
-        commands: vec![],
-        hosted_node_policies: vec![
-            ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord {
-                version: "0.1.0".into(),
-                schema_version: "1.0.0".into(),
-                description: "test hosted policy".into(),
-                transport:
-                    ryeos_app::node_config::sections::hosted_node::HostedNodeTransportPolicy {
-                        public_https_required: true,
-                        loopback_http_allowed: true,
-                    },
-                admission:
-                    ryeos_app::node_config::sections::hosted_node::HostedNodeAdmissionPolicy {
-                        mode: "one_time_token".into(),
-                        token_ttl_secs,
-                        reject_wildcard_scopes: true,
-                        token_delivery: "out_of_band".into(),
-                    },
-                descriptor:
-                    ryeos_app::node_config::sections::hosted_node::HostedNodeDescriptorPolicy {
-                        require_live_identity_match: true,
-                        advertised_capabilities: vec![
-                            "remote-execute".into(),
-                            "bundle-install".into(),
-                        ],
-                    },
-                authorization:
-                    ryeos_app::node_config::sections::hosted_node::HostedNodeAuthorizationPolicy {
-                        authority: "target_node_authorized_keys".into(),
-                        central_bearer_tokens_allowed: false,
-                        implicit_cross_node_authority_allowed: false,
-                    },
-                operations:
-                    ryeos_app::node_config::sections::hosted_node::HostedNodeOperationsPolicy {
-                        audit_admission_events: true,
-                        audit_grant_changes: true,
-                        prefer_isolated_node_per_principal: true,
-                        shared_daemon_multitenancy_enabled: false,
-                    },
-                source_file: tmpdir
-                    .path()
-                    .join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml"),
-            },
-        ],
-        command_registration_policy: Default::default(),
-    });
+    state.node_policy = Arc::new(
+        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+            Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
+            Arc::new(test_object_closure_policy()),
+            Arc::new(ryeos_app::node_policy::sections::hosted::HostedNodePolicy {
+                schema: 1,
+                admission_enabled,
+                admission_token_ttl_secs: admission_enabled.then_some(token_ttl_secs),
+                allow_loopback_http: true,
+            }),
+        ]),
+    );
     (tmpdir, state)
 }
 
@@ -215,8 +192,6 @@ fn build_app_state(
         bundles: vec![],
         routes: vec![],
         commands: vec![],
-        hosted_node_policies: vec![],
-        command_registration_policy: Default::default(),
     };
     let test_command_registry =
         Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
@@ -225,7 +200,7 @@ fn build_app_state(
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),
-        isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+        isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         state_store,
         engine,
         resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(
@@ -253,8 +228,13 @@ fn build_app_state(
         services: Arc::new(ryeos_api::registry::build_service_registry()),
         service_descriptors: ryeos_api::handlers::ALL,
         node_config: Arc::new(snapshot),
-        node_history_policy: Arc::new(
-            ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+        node_policy: Arc::new(
+            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+                Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                ),
+                Arc::new(test_object_closure_policy()),
+            ]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: test_command_registry,
@@ -265,7 +245,24 @@ fn build_app_state(
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         vault_fingerprint: None,
         accounting: None,
+        persistent_sessions: Arc::new(ryeos_app::persistent_session::PersistentSessionPool::new()),
     };
 
     (tmpdir, state)
+}
+
+fn test_object_closure_policy()
+-> ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+    ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+        schema: 1,
+        max_roots: 256,
+        max_objects: 32_768,
+        max_blobs: 32_768,
+        max_object_bytes: 32 * 1024 * 1024,
+        max_total_object_bytes: 64 * 1024 * 1024,
+        max_blob_bytes: 128 * 1024 * 1024,
+        max_total_blob_bytes: 128 * 1024 * 1024,
+        max_response_bytes: 256 * 1024 * 1024,
+        max_links_per_object: 100_000,
+    }
 }

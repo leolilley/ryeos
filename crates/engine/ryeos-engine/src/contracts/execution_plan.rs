@@ -182,9 +182,17 @@ pub struct EngineContext {
     pub app_root: PathBuf,
     pub isolation: Arc<crate::isolation::IsolationRuntime>,
     pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
+    pub isolation_filesystem_authority_ceiling:
+        crate::isolation::IsolationFilesystemAuthorityCeiling,
+    pub isolation_network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     pub isolation_live_access_authority: Option<crate::isolation::IsolationLiveAccessAuthority>,
     pub isolation_state_root: Option<PathBuf>,
     pub isolation_checkpoint_dir: Option<PathBuf>,
+    /// Exact daemon-created checkpoint directory paired with
+    /// `isolation_checkpoint_dir`. Isolation validates this descriptor against
+    /// the app-root-relative authority and mounts this inode, never a reopened
+    /// pathname substitute.
+    pub isolation_checkpoint_authority: Option<Arc<lillux::PinnedDirectory>>,
     /// Typed callback-socket fact paired with this plan's daemon callback env.
     pub isolation_daemon_socket_path: Option<PathBuf>,
     pub isolation_bundle_roots: Vec<PathBuf>,
@@ -194,6 +202,25 @@ pub struct EngineContext {
     /// When present it must match the plan's serialized verified-command
     /// identity; dispatch never reopens that command by pathname.
     pub isolation_verified_command: Option<crate::isolation::IsolationDescriptorBoundCommand>,
+    pub isolation_external_read_only_mounts: Vec<crate::isolation::IsolationReadOnlyMountAuthority>,
+    /// One daemon-created connected duplex channel with a signed target
+    /// environment binding. This is deliberately distinct from generic
+    /// inherited descriptors and cannot be supplied as a raw fd.
+    pub isolation_target_channel: Option<crate::isolation::IsolationTargetChannelAuthority>,
+    /// Explicit daemon-owned execution workspace used only by isolation.
+    /// This does not change item-resolution authority or project semantics;
+    /// it gives projectless admitted mechanics (for example a persistent
+    /// session) one bounded mount namespace for retained read-only content.
+    pub isolation_workspace: Option<PathBuf>,
+    /// Daemon-owned mechanical limits applied to this exact subprocess tree.
+    /// Kind semantics stay outside the engine; the admitted capsule supplies
+    /// these generic kernel ceilings for reusable sessions.
+    pub subprocess_limits: Option<lillux::SubprocessLimits>,
+    /// Already-open descriptors deliberately inherited by the child.  The
+    /// descriptor numbers are paired with signed protocol environment
+    /// bindings before this context is constructed; no ambient descriptor is
+    /// inherited.
+    pub inherited_fds: Vec<Arc<std::fs::File>>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,
@@ -258,6 +285,7 @@ pub struct PlanTrustAuthority {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub signer_fingerprint: Option<String>,
     pub content_hash: String,
+    pub raw_content_digest: String,
 }
 
 /// Signed executor-manifest identity of the installed bundle that supplied a
@@ -347,7 +375,7 @@ pub struct PlanSubprocessSpec {
     /// plan. System executables and project-local interpreters use `None`.
     pub verified_command: Option<PlanVerifiedCommand>,
     #[serde(default)]
-    pub args: Vec<String>,
+    pub args: Vec<PlanArgument>,
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -366,6 +394,40 @@ pub struct PlanSubprocessSpec {
     pub execution: ExecutionDecorations,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlanArgument {
+    Literal { value: String },
+    AdmittedSourceEntry,
+}
+
+impl PlanArgument {
+    pub fn literal(value: impl Into<String>) -> Self {
+        Self::Literal {
+            value: value.into(),
+        }
+    }
+
+    pub fn literal_value(&self) -> Option<&str> {
+        match self {
+            Self::Literal { value } => Some(value),
+            Self::AdmittedSourceEntry => None,
+        }
+    }
+}
+
+impl From<String> for PlanArgument {
+    fn from(value: String) -> Self {
+        Self::literal(value)
+    }
+}
+
+impl From<&str> for PlanArgument {
+    fn from(value: &str) -> Self {
+        Self::literal(value)
+    }
+}
+
 fn default_timeout_secs() -> u64 {
     300
 }
@@ -379,7 +441,12 @@ pub enum PlanNode {
         /// The fully resolved subprocess specification.
         spec: Box<PlanSubprocessSpec>,
         /// Audit: the root item's source path.
-        #[serde(default)]
+        ///
+        /// This is live diagnostic state, not executable plan state. It is
+        /// deliberately excluded from the admitted plan wire identity: the
+        /// source bytes/root identity are committed elsewhere, while this
+        /// host installation path is inert after compilation.
+        #[serde(skip)]
         tool_path: Option<PathBuf>,
         /// Audit: executor IDs traversed during chain resolution.
         #[serde(default)]

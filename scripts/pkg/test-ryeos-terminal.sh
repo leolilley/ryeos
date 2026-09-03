@@ -56,6 +56,8 @@ NO_COLOR=1 TERM=xterm RYEOS_TTY=always RYEOS_TERM_SPINNER_INTERVAL=0.05 bash -c 
     _ "$helper" 2>"$tmp/animated"
 grep -q '⠋' "$tmp/animated"
 grep -q '⠙' "$tmp/animated"
+grep -q '⣠' "$tmp/animated"
+grep -q '⣄' "$tmp/animated"
 grep -q '·  1s' "$tmp/animated"
 
 status=0

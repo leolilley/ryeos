@@ -16,7 +16,7 @@
 //! Security: signed-required, trusted-signer-required, symlinks rejected,
 //! regular files only, deterministic traversal order.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 #[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,12 +29,11 @@ use ryeos_engine::trust::TrustStore;
 
 use super::sections::bundle::BundleSection;
 use super::sections::command::CommandRecord;
-use super::sections::command_registration::CommandRegistrationPolicyRecord;
-use super::sections::hosted_node::HostedNodePolicyRecord;
 use super::{
-    BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeItemContext, SectionSourcePolicy,
-    SectionTable,
+    BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeConfigSourceScope, NodeConfigTable,
+    NodeItemContext, SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
+use crate::node_policy::sections::command_registration::CommandRegistrationAuthority;
 use crate::route_raw::RawRouteSpec;
 
 /// Bootstrap loader for node-config items.
@@ -57,7 +56,112 @@ struct VerifiedItem {
 #[derive(Debug, Clone)]
 struct NodeConfigScanRoot {
     path: PathBuf,
-    command_provenance: ryeos_runtime::CommandProvenance,
+    source: NodeConfigSource,
+}
+
+#[derive(Debug, Clone)]
+enum NodeConfigSource {
+    Node {
+        command_registration_caps: Vec<String>,
+    },
+    Bundle {
+        name: String,
+        command_registration_caps: Vec<String>,
+    },
+}
+
+impl NodeConfigSource {
+    fn command_provenance(&self) -> Result<ryeos_runtime::CommandProvenance> {
+        match self {
+            Self::Node {
+                command_registration_caps,
+            } => Ok(ryeos_runtime::CommandProvenance {
+                origin: ryeos_runtime::CommandOrigin::SystemSpace,
+                command_registration_caps: command_registration_caps.clone(),
+            }),
+            Self::Bundle {
+                name,
+                command_registration_caps,
+            } => {
+                if name.is_empty() {
+                    bail!("bundle source coordinate has an empty name");
+                }
+                Ok(ryeos_runtime::CommandProvenance {
+                    origin: ryeos_runtime::CommandOrigin::InstalledBundle,
+                    command_registration_caps: command_registration_caps.clone(),
+                })
+            }
+        }
+    }
+}
+
+pub(crate) struct NodeConfigAdmission {
+    pub(crate) source_file: PathBuf,
+    pub(crate) command_provenance: ryeos_runtime::CommandProvenance,
+}
+
+pub(crate) struct NodeConfigSnapshotBuilder {
+    bundles: Vec<BundleRecord>,
+    routes: Vec<RawRouteSpec>,
+    commands: Vec<CommandRecord>,
+    command_registration_authority: CommandRegistrationAuthority,
+}
+
+impl NodeConfigSnapshotBuilder {
+    fn new(
+        bundles: &[BundleRecord],
+        command_registration_authority: CommandRegistrationAuthority,
+    ) -> Result<Self> {
+        Ok(Self {
+            bundles: validate_prospective_bundle_records(bundles)?,
+            routes: Vec::new(),
+            commands: Vec::new(),
+            command_registration_authority,
+        })
+    }
+
+    fn admit(
+        &mut self,
+        record: Box<dyn super::CompiledNodeConfigItem>,
+        context: &NodeItemContext,
+        source: &NodeConfigSource,
+    ) -> Result<()> {
+        if record.section_name() != context.section {
+            bail!(
+                "node-config compiler `{}` returned record for section `{}`",
+                context.section,
+                record.section_name()
+            );
+        }
+        let admission = NodeConfigAdmission {
+            source_file: context.source_file.clone(),
+            command_provenance: source.command_provenance()?,
+        };
+        record.admit(self, &admission)
+    }
+
+    pub(crate) fn push_route(&mut self, record: RawRouteSpec) {
+        self.routes.push(record);
+    }
+
+    pub(crate) fn push_command(&mut self, record: CommandRecord) {
+        self.commands.push(record);
+    }
+
+    fn finish(self) -> Result<NodeConfigSnapshot> {
+        check_bundle_collisions(&self.bundles)?;
+        ryeos_runtime::CommandRegistry::from_records(
+            &self.commands,
+            &self.command_registration_authority.runtime_policy(),
+        )
+        .context("validate loaded command registry")?;
+
+        Ok(NodeConfigSnapshot {
+            bundles: self.bundles,
+            routes: self.routes,
+            commands: self.commands,
+        })
+    }
 }
 
 /// Signature envelope used for all node-config items.
@@ -69,64 +173,30 @@ fn node_config_envelope() -> SignatureEnvelope {
     }
 }
 
-/// Load one standalone node YAML item through the same strict trust boundary
-/// used by registered node-config sections. This is for typed control-plane
-/// declarations that have not yet become a full [`NodeConfigSection`]: regular
-/// YAML files only, symlinks rejected, trusted signature required, legacy
-/// structural fields rejected.
-pub fn load_verified_node_yaml(file: &Path, trust_store: &TrustStore) -> Result<Value> {
-    let ext = file.extension().and_then(|extension| extension.to_str());
-    if !matches!(ext, Some("yaml" | "yml")) {
-        bail!(
-            "node config item at {} is not a .yaml or .yml file",
-            file.display()
-        );
-    }
-    let content = lillux::read_regular_file_to_string_no_follow(file)
-        .with_context(|| format!("failed to securely read {}", file.display()))?;
-    let envelope = node_config_envelope();
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-        .with_context(|| {
-            format!(
-                "node config item at {} has no valid signature line",
-                file.display()
-            )
-        })?;
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
-    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-        bail!(
-            "node config item at {} is not trusted (trust_class: {:?}); only trusted items are allowed in node config",
-            file.display(),
-            trust_class
-        );
-    }
-    let body: Value = serde_yaml::from_str(&strip_signature(&content))
-        .with_context(|| format!("failed to parse YAML body of {}", file.display()))?;
-    for forbidden in ["category", "section"] {
-        if body.get(forbidden).is_some() {
-            bail!(
-                "node config item at {} declares legacy structural field '{}' (section/category are path-owned)",
-                file.display(),
-                forbidden
-            );
-        }
-    }
-    Ok(body)
-}
+const MAX_NODE_CONFIG_ENTRIES_PER_ROOT: usize = 512;
+const MAX_NODE_CONFIG_DEPTH: usize = 32;
 
 /// Recursively collect all `.yaml`/`.yml` regular files under a directory.
 ///
 /// Returns files in deterministic depth-first order, with entries sorted
 /// alphabetically at each directory level. Rejects symlinks at every level
 /// (both files and directories).
-fn scan_yaml_files_recursive(dir: &Path) -> Result<Vec<PathBuf>> {
+fn scan_yaml_files_recursive(dir: &Path) -> Result<Vec<lillux::PinnedRegularFile>> {
     scan_yaml_files(dir, true)
 }
 
-fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
-    let files = lillux::collect_regular_files_no_follow(dir, recursive)?.unwrap_or_default();
-    for path in &files {
+fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<lillux::PinnedRegularFile>> {
+    let files = lillux::collect_pinned_regular_files_no_follow_bounded(
+        dir,
+        recursive,
+        lillux::DirectoryTraversalBudget::new(
+            MAX_NODE_CONFIG_ENTRIES_PER_ROOT,
+            MAX_NODE_CONFIG_DEPTH,
+        ),
+    )?
+    .unwrap_or_default();
+    for file in &files {
+        let path = file.path();
         let ext = path.extension().and_then(|extension| extension.to_str());
         if !matches!(ext, Some("yaml" | "yml")) {
             bail!(
@@ -144,26 +214,28 @@ fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
 /// `routes/` dir). The invariant checks that:
 /// 1. `file` lives under `section_root` (at any depth)
 fn verify_and_parse(
-    file: &Path,
+    file: &lillux::PinnedRegularFile,
     section_root: &Path,
     expected_section: &str,
     trust_store: &TrustStore,
 ) -> Result<VerifiedItem> {
-    let ext = file.extension().and_then(|e| e.to_str());
+    let path = file.path();
+    let ext = path.extension().and_then(|e| e.to_str());
     if ext != Some("yaml") && ext != Some("yml") {
         bail!(
             "node config item at {} is not a .yaml or .yml file",
-            file.display()
+            path.display()
         );
     }
 
-    let stem = file.file_stem().and_then(|s| s.to_str()).context(format!(
+    let stem = path.file_stem().and_then(|s| s.to_str()).context(format!(
         "node config item at {} has no filename stem",
-        file.display()
+        path.display()
     ))?;
 
-    let content = lillux::read_regular_file_to_string_no_follow(file)
-        .with_context(|| format!("failed to securely read {}", file.display()))?;
+    let content = file.read_bounded(crate::node_document::MAX_ITEM_BYTES)?;
+    let content = std::str::from_utf8(&content)
+        .with_context(|| format!("node config item at {} is not UTF-8", path.display()))?;
 
     let envelope = node_config_envelope();
 
@@ -171,7 +243,7 @@ fn verify_and_parse(
         .with_context(|| {
             format!(
                 "node config item at {} has no valid signature line",
-                file.display()
+                path.display()
             )
         })?;
     let signer_fingerprint = header.signer_fingerprint.clone();
@@ -183,22 +255,22 @@ fn verify_and_parse(
         bail!(
             "node config item at {} is not trusted (trust_class: {:?}); \
              only trusted items are allowed in node config",
-            file.display(),
+            path.display(),
             trust_class
         );
     }
 
     let body_str = strip_signature(&content);
     let body: Value = serde_yaml::from_str(&body_str)
-        .with_context(|| format!("failed to parse YAML body of {}", file.display()))?;
+        .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
 
     // Check section invariant: file must live under section_root. Section is
     // selected by path, not duplicated in the body.
-    if !file.starts_with(section_root) {
+    if !path.starts_with(section_root) {
         bail!(
             "node config item at {} is not under expected section directory '{}' \
              (section containment invariant violated)",
-            file.display(),
+            path.display(),
             section_root.display()
         );
     }
@@ -206,18 +278,18 @@ fn verify_and_parse(
     for forbidden in ["category", "section"] {
         if body.get(forbidden).is_some() {
             bail!(
-                "node config item at {} declares legacy structural field '{}' \
+                "node config item at {} declares path-owned structural field '{}' \
                  (section/category are derived from path and must not be in node YAML)",
-                file.display(),
+                path.display(),
                 forbidden
             );
         }
     }
 
-    let rel_path = file.strip_prefix(section_root).with_context(|| {
+    let rel_path = path.strip_prefix(section_root).with_context(|| {
         format!(
             "node config item at {} is not under expected section directory {}",
-            file.display(),
+            path.display(),
             section_root.display()
         )
     })?;
@@ -238,7 +310,7 @@ fn verify_and_parse(
     if id.is_empty() {
         bail!(
             "node config item at {} has empty path-derived id",
-            file.display()
+            path.display()
         );
     }
 
@@ -247,12 +319,12 @@ fn verify_and_parse(
         id,
         stem: stem.to_string(),
         rel_path: rel_path.to_path_buf(),
-        source_file: file.to_path_buf(),
+        source_file: path.to_path_buf(),
         signer_fingerprint: signer_fingerprint.clone(),
     };
 
     Ok(VerifiedItem {
-        path: file.to_path_buf(),
+        path: path.to_path_buf(),
         ctx,
         signer_fingerprint,
         body,
@@ -268,22 +340,21 @@ impl<'a> BootstrapLoader<'a> {
         let section = BundleSection;
         let mut records: Vec<BundleRecord> = Vec::new();
 
-        let node_dir = self.app_root.join(".ai").join("node").join("bundles");
+        let node_dir = self
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join(section.name());
         // Bundles use one exact flat YAML namespace. Missing is empty; any
         // directory, symlink, special file, or non-YAML entry is an error.
         for path in scan_yaml_files(&node_dir, false)? {
-            let verified = verify_and_parse(&path, &node_dir, "bundles", self.trust_store)?;
+            let verified = verify_and_parse(&path, &node_dir, section.name(), self.trust_store)?;
 
-            let record = section
-                .parse(&verified.ctx, &verified.body)
+            let mut record = section
+                .parse_bundle(&verified.ctx, &verified.body)
                 .with_context(|| {
                     format!("failed to parse bundle record {}", verified.path.display())
                 })?;
-            let mut record: BundleRecord = record
-                .as_any()
-                .downcast_ref::<BundleRecord>()
-                .context("BundleSection::parse returned wrong type")?
-                .clone();
             record.source_file = verified.path.clone();
 
             // Validate path: canonicalize, must exist as directory
@@ -310,306 +381,92 @@ impl<'a> BootstrapLoader<'a> {
 
         // Collision detection: by canonical path AND by name (fail-closed)
         check_bundle_collisions(&records)?;
+        validate_section_cardinality(&section, records.len())?;
 
         Ok(records)
     }
 
     /// Phase 2: full node-config scan across all sections and sources.
     ///
-    /// For sections with `EffectiveBundleRootsAndState` policy (routes, commands),
-    /// scans recursively into subdirectories. For `SystemAndState` (bundles), scans flat.
+    /// Sections explicitly select app-root-only or app-root-plus-bundle scan scope.
     pub fn load_full(
         &self,
-        section_table: &SectionTable,
+        config_table: &NodeConfigTable,
         bundles: &[BundleRecord],
+        command_registration_authority: &CommandRegistrationAuthority,
+        policy_table: &crate::node_policy::NodePolicyTable,
     ) -> Result<NodeConfigSnapshot> {
-        self.load_full_inner(section_table, bundles, false)
-    }
+        let node_fingerprint = node_identity_fingerprint(self.app_root)?;
+        validate_bundle_command_authority(bundles, command_registration_authority)?;
+        let mut builder =
+            NodeConfigSnapshotBuilder::new(bundles, command_registration_authority.clone())?;
+        reject_disallowed_bundle_section_contributions(config_table, policy_table, bundles)?;
 
-    /// Load the full node-config graph against an authoritative prospective
-    /// bundle registry.
-    ///
-    /// Bundle registration files on disk still describe the live generation
-    /// during pre-activation admission, so the normal full pass cannot model a
-    /// replacement or removal exactly. This variant substitutes `bundles` for
-    /// the `bundles` section while scanning every other system and bundle
-    /// section normally.
-    pub fn load_full_prospective(
-        &self,
-        section_table: &SectionTable,
-        bundles: &[BundleRecord],
-    ) -> Result<NodeConfigSnapshot> {
-        self.load_full_inner(section_table, bundles, true)
-    }
-
-    fn load_full_inner(
-        &self,
-        section_table: &SectionTable,
-        bundles: &[BundleRecord],
-        prospective_bundle_registry: bool,
-    ) -> Result<NodeConfigSnapshot> {
-        let command_registration_policy = self.load_command_registration_policy(section_table)?;
-        let mut loaded_bundles = if prospective_bundle_registry {
-            validate_prospective_bundle_records(bundles)?
-        } else {
-            Vec::new()
-        };
-        let mut routes: Vec<RawRouteSpec> = Vec::new();
-        let mut commands: Vec<CommandRecord> = Vec::new();
-        let mut hosted_node_policies: Vec<HostedNodePolicyRecord> = Vec::new();
-
-        for section_name in section_table.section_names() {
-            if section_name == "command_registration" {
+        for section in config_table.sections() {
+            let section_name = section.name();
+            let spec = section.load_spec();
+            if spec.phase != SectionLoadPhase::Full {
                 continue;
             }
-            if prospective_bundle_registry && section_name == "bundles" {
-                continue;
-            }
-            let section = section_table.get(section_name).context(format!(
-                "section '{}' registered but handler missing",
-                section_name
-            ))?;
-
-            let scan_roots = match section.source_policy() {
-                SectionSourcePolicy::SystemAndState => {
-                    vec![system_scan_root(
-                        self.app_root,
-                        &command_registration_policy.policy,
-                    )]
-                }
-                SectionSourcePolicy::EffectiveBundleRootsAndState => {
-                    let mut roots = vec![system_scan_root(
-                        self.app_root,
-                        &command_registration_policy.policy,
-                    )];
-                    for b in bundles {
-                        if !roots.iter().any(|r| r.path == b.path) {
-                            roots.push(bundle_scan_root(b));
-                        }
-                    }
-                    roots
-                }
-            };
-
-            for scan_root in &scan_roots {
-                let section_dir = scan_root.path.join(".ai").join("node").join(section_name);
-
-                // Routes and commands: recursive scan.
-                // Bundles: flat scan (enforced by policy type, but we handle
-                // both for correctness — bundles don't actually reach here
-                // with subdirectories).
-                let use_recursive = section_name != "bundles";
-                let yaml_files = if use_recursive {
-                    scan_yaml_files_recursive(&section_dir).with_context(|| {
-                        format!(
-                            "failed to scan node config section '{}' recursively in {}",
-                            section_name,
-                            section_dir.display()
-                        )
-                    })?
-                } else {
-                    scan_yaml_files(&section_dir, false)?
+            let mut count = 0usize;
+            let scan_roots = section_scan_roots(
+                section,
+                self.app_root,
+                bundles,
+                command_registration_authority,
+            )?;
+            for scan_root in scan_roots {
+                let section_dir = scan_root
+                    .path
+                    .join(ryeos_engine::AI_DIR)
+                    .join("node")
+                    .join(section_name);
+                let yaml_files = match spec.traversal {
+                    SectionTraversal::Recursive => scan_yaml_files_recursive(&section_dir)
+                        .with_context(|| {
+                            format!(
+                                "failed to scan node config section '{}' recursively in {}",
+                                section_name,
+                                section_dir.display()
+                            )
+                        })?,
+                    SectionTraversal::Flat => scan_yaml_files(&section_dir, false)?,
                 };
-
                 for path in yaml_files {
                     let verified =
                         verify_and_parse(&path, &section_dir, section_name, self.trust_store)
                             .with_context(|| {
                                 format!(
                                     "failed to verify node config item {} in section '{}'",
-                                    path.display(),
+                                    path.path().display(),
                                     section_name
                                 )
                             })?;
-
-                    if section_name == "bundles" {
-                        let record =
-                            section
-                                .parse(&verified.ctx, &verified.body)
-                                .with_context(|| {
-                                    format!(
-                                        "failed to parse bundle record {}",
-                                        verified.path.display()
-                                    )
-                                })?;
-                        let mut record: BundleRecord = record
-                            .as_any()
-                            .downcast_ref::<BundleRecord>()
-                            .context("BundleSection::parse returned wrong type")?
-                            .clone();
-                        record.source_file = verified.path.clone();
-                        if !record.path.is_dir() {
-                            bail!(
-                                "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
-                                record.name,
-                                record.path.display(),
-                                record.source_file.display()
-                            );
-                        }
-                        let canonical = record.path.canonicalize().with_context(|| {
-                            format!(
-                                "failed to canonicalize bundle '{}' path '{}'",
-                                record.name,
-                                record.path.display()
-                            )
-                        })?;
-                        record.path = canonical;
-                        loaded_bundles.push(record);
-                    } else if section_name == "routes" {
-                        let record =
-                            section
-                                .parse(&verified.ctx, &verified.body)
-                                .with_context(|| {
-                                    format!(
-                                        "failed to parse route record {}",
-                                        verified.path.display()
-                                    )
-                                })?;
-                        let mut record: RawRouteSpec = record
-                            .as_any()
-                            .downcast_ref::<RawRouteSpec>()
-                            .context("RouteSection::parse returned wrong type")?
-                            .clone();
-                        record.source_file = verified.path.clone();
-                        routes.push(record);
-                    } else if section_name == "commands" {
-                        let record =
-                            section
-                                .parse(&verified.ctx, &verified.body)
-                                .with_context(|| {
-                                    format!(
-                                        "failed to parse command record {}",
-                                        verified.path.display()
-                                    )
-                                })?;
-                        let mut record: CommandRecord = record
-                            .as_any()
-                            .downcast_ref::<CommandRecord>()
-                            .context("CommandSection::parse returned wrong type")?
-                            .clone();
-                        record.source_file = verified.path.clone();
-                        record.provenance = scan_root.command_provenance.clone();
-                        commands.push(record);
-                    } else if section_name == "hosted" {
-                        let record =
-                            section
-                                .parse(&verified.ctx, &verified.body)
-                                .with_context(|| {
-                                    format!(
-                                        "failed to parse hosted-node policy record {}",
-                                        verified.path.display()
-                                    )
-                                })?;
-                        let mut record: HostedNodePolicyRecord = record
-                            .as_any()
-                            .downcast_ref::<HostedNodePolicyRecord>()
-                            .context("HostedNodePolicySection::parse returned wrong type")?
-                            .clone();
-                        record.source_file = verified.path.clone();
-                        hosted_node_policies.push(record);
-                    }
+                    verify_section_signer(section, &verified, &node_fingerprint)?;
+                    let record =
+                        section
+                            .parse(&verified.ctx, &verified.body)
+                            .with_context(|| {
+                                format!(
+                                    "failed to parse node config item {} in section '{}'",
+                                    verified.path.display(),
+                                    section_name
+                                )
+                            })?;
+                    builder.admit(record, &verified.ctx, &scan_root.source)?;
+                    count = count.saturating_add(1);
                 }
             }
-
-            if section_name == "bundles" {
-                check_bundle_collisions(&loaded_bundles)?;
-            }
+            validate_section_cardinality(section, count)?;
         }
 
-        ryeos_runtime::CommandRegistry::from_records(
-            &commands,
-            &command_registration_policy.policy,
-        )
-        .context("validate loaded command registry")?;
-        check_hosted_policy_uniqueness(&hosted_node_policies)?;
-
-        Ok(NodeConfigSnapshot {
-            bundles: loaded_bundles,
-            routes,
-            commands,
-            hosted_node_policies,
-            command_registration_policy,
-        })
-    }
-
-    fn load_command_registration_policy(
-        &self,
-        section_table: &SectionTable,
-    ) -> Result<CommandRegistrationPolicyRecord> {
-        let section_name = "command_registration";
-        let node_fingerprint = node_identity_fingerprint(self.app_root)?;
-        let section = section_table
-            .get(section_name)
-            .context("command_registration section handler missing")?;
-        let section_dir = self.app_root.join(".ai").join("node").join(section_name);
-        if !section_dir.is_dir() {
-            bail!(
-                "missing required node config section '{}' at {}",
-                section_name,
-                section_dir.display()
-            );
-        }
-
-        let yaml_files = scan_yaml_files_recursive(&section_dir).with_context(|| {
-            format!(
-                "failed to scan node config section '{}' recursively in {}",
-                section_name,
-                section_dir.display()
-            )
-        })?;
-
-        let mut records = Vec::new();
-        for path in yaml_files {
-            let verified = verify_and_parse(&path, &section_dir, section_name, self.trust_store)
-                .with_context(|| {
-                    format!(
-                        "failed to verify node config item {} in section '{}'",
-                        path.display(),
-                        section_name
-                    )
-                })?;
-            if verified.signer_fingerprint != node_fingerprint {
-                bail!(
-                    "command registration policy {} must be signed by node identity {}; got signer {}",
-                    verified.path.display(),
-                    node_fingerprint,
-                    verified.signer_fingerprint
-                );
-            }
-            let record = section
-                .parse(&verified.ctx, &verified.body)
-                .with_context(|| {
-                    format!(
-                        "failed to parse command registration policy {}",
-                        verified.path.display()
-                    )
-                })?;
-            let mut record: CommandRegistrationPolicyRecord = record
-                .as_any()
-                .downcast_ref::<CommandRegistrationPolicyRecord>()
-                .context("CommandRegistrationSection::parse returned wrong type")?
-                .clone();
-            record.source_file = verified.path.clone();
-            records.push(record);
-        }
-
-        match records.len() {
-            1 => Ok(records.remove(0)),
-            0 => bail!(
-                "node config section '{}' must contain exactly one policy record",
-                section_name
-            ),
-            _ => bail!(
-                "node config section '{}' has multiple policy records; refusing ambiguous command registration policy",
-                section_name
-            ),
-        }
+        builder.finish()
     }
 }
 
-fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
+pub(crate) fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
     let key_path = app_root
-        .join(".ai")
+        .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("identity")
         .join("private_key.pem");
@@ -622,43 +479,150 @@ fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
     Ok(identity.fingerprint().to_string())
 }
 
-fn check_hosted_policy_uniqueness(records: &[HostedNodePolicyRecord]) -> Result<()> {
-    if records.len() <= 1 {
-        return Ok(());
-    }
-
-    let sources = records
-        .iter()
-        .map(|record| record.source_file.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    bail!(
-        "multiple hosted-node policies loaded; refusing ambiguous hosted policy set: {}",
-        sources
-    )
-}
-
-fn system_scan_root(
-    app_root: &Path,
-    policy: &ryeos_runtime::CommandRegistrationPolicy,
-) -> NodeConfigScanRoot {
+fn system_scan_root(app_root: &Path, policy: &CommandRegistrationAuthority) -> NodeConfigScanRoot {
     NodeConfigScanRoot {
         path: app_root.to_path_buf(),
-        command_provenance: ryeos_runtime::CommandProvenance {
-            origin: ryeos_runtime::CommandOrigin::SystemSpace,
+        source: NodeConfigSource::Node {
             command_registration_caps: policy.system_source_caps.clone(),
         },
     }
 }
 
-fn bundle_scan_root(bundle: &BundleRecord) -> NodeConfigScanRoot {
-    NodeConfigScanRoot {
+fn bundle_scan_root(
+    bundle: &BundleRecord,
+    policy: &CommandRegistrationAuthority,
+) -> Result<NodeConfigScanRoot> {
+    let command_registration_caps = policy
+        .bundle_source_caps
+        .get(&bundle.name)
+        .with_context(|| {
+            format!(
+                "command registration policy has no explicit authority for active bundle `{}`",
+                bundle.name
+            )
+        })?
+        .clone();
+    Ok(NodeConfigScanRoot {
         path: bundle.path.clone(),
-        command_provenance: ryeos_runtime::CommandProvenance {
-            origin: ryeos_runtime::CommandOrigin::InstalledBundle,
-            command_registration_caps: bundle.command_registration_caps.clone(),
+        source: NodeConfigSource::Bundle {
+            name: bundle.name.clone(),
+            command_registration_caps,
         },
+    })
+}
+
+fn section_scan_roots(
+    section: &dyn NodeConfigSection,
+    app_root: &Path,
+    bundles: &[BundleRecord],
+    policy: &CommandRegistrationAuthority,
+) -> Result<Vec<NodeConfigScanRoot>> {
+    let mut roots = vec![system_scan_root(app_root, policy)];
+    if section.source_scope() == NodeConfigSourceScope::AppRootAndBundleRoots {
+        roots.extend(
+            bundles
+                .iter()
+                .map(|bundle| bundle_scan_root(bundle, policy))
+                .collect::<Result<Vec<_>>>()?,
+        );
     }
+    Ok(roots)
+}
+
+fn validate_bundle_command_authority(
+    bundles: &[BundleRecord],
+    policy: &CommandRegistrationAuthority,
+) -> Result<()> {
+    for bundle in bundles {
+        if !policy.bundle_source_caps.contains_key(&bundle.name) {
+            bail!(
+                "command registration policy has no explicit authority for active bundle `{}`",
+                bundle.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_section_signer(
+    section: &dyn NodeConfigSection,
+    item: &VerifiedItem,
+    node_fingerprint: &str,
+) -> Result<()> {
+    if section.load_spec().signer == SectionSignerPolicy::CurrentNode
+        && item.signer_fingerprint != node_fingerprint
+    {
+        bail!(
+            "node-config item {} in section `{}` must be signed by current node {}; got {}",
+            item.path.display(),
+            section.name(),
+            node_fingerprint,
+            item.signer_fingerprint
+        );
+    }
+    Ok(())
+}
+
+fn validate_section_cardinality(section: &dyn NodeConfigSection, count: usize) -> Result<()> {
+    let valid = match section.load_spec().cardinality {
+        SectionCardinality::Any => true,
+        SectionCardinality::AtLeastOne => count >= 1,
+        SectionCardinality::AtMostOne => count <= 1,
+        SectionCardinality::ExactlyOne => count == 1,
+    };
+    if !valid {
+        bail!(
+            "node-config section `{}` violates {:?} cardinality with {count} record(s)",
+            section.name(),
+            section.load_spec().cardinality
+        );
+    }
+    Ok(())
+}
+
+fn reject_disallowed_bundle_section_contributions(
+    config_table: &NodeConfigTable,
+    policy_table: &crate::node_policy::NodePolicyTable,
+    bundles: &[BundleRecord],
+) -> Result<()> {
+    let mut forbidden_directories = BTreeSet::new();
+    for section in config_table.sections() {
+        if section.source_scope() != NodeConfigSourceScope::AppRootOnly {
+            continue;
+        }
+        forbidden_directories.insert(section.name());
+    }
+    forbidden_directories.insert(crate::node_policy::generation::POLICIES_DIRECTORY);
+    for section in policy_table.sections() {
+        forbidden_directories.insert(section.name());
+    }
+
+    for bundle in bundles {
+        let bundle_root = lillux::PinnedDirectory::open(&bundle.path)?
+            .with_context(|| format!("bundle root disappeared: {}", bundle.path.display()))?;
+        let Some(ai_root) =
+            bundle_root.open_child_directory(std::ffi::OsStr::new(ryeos_engine::AI_DIR))?
+        else {
+            continue;
+        };
+        let Some(node_root) = ai_root.open_child_directory(std::ffi::OsStr::new("node"))? else {
+            continue;
+        };
+        for directory in &forbidden_directories {
+            if node_root
+                .entry_no_follow(std::ffi::OsStr::new(directory))?
+                .is_some()
+            {
+                bail!(
+                    "bundle `{}` contributes forbidden node-owned namespace `{}` at {}",
+                    bundle.name,
+                    directory,
+                    node_root.path().join(directory).display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Strip the signature line(s) from the top of a file.
@@ -747,10 +711,6 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_config::sections::hosted_node::{
-        HostedNodeAdmissionPolicy, HostedNodeAuthorizationPolicy, HostedNodeDescriptorPolicy,
-        HostedNodeOperationsPolicy, HostedNodeTransportPolicy,
-    };
 
     #[test]
     fn strip_signature_removes_signed_line() {
@@ -772,7 +732,6 @@ mod tests {
         BundleRecord {
             name: name.into(),
             path: std::path::PathBuf::from(path),
-            command_registration_caps: Vec::new(),
             source_file: std::path::PathBuf::from(source),
         }
     }
@@ -867,7 +826,7 @@ mod tests {
         let files = scan_yaml_files_recursive(&routes_dir).unwrap();
         let names: Vec<String> = files
             .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .map(|f| f.path().file_name().unwrap().to_string_lossy().to_string())
             .collect();
 
         // Sorted: .hidden.yaml, health.yaml, then ui/index.yaml, ui/ryeos-ui/dimension-get.yaml
@@ -949,7 +908,7 @@ mod tests {
         let files = scan_yaml_files_recursive(&routes_dir).unwrap();
         let names: Vec<String> = files
             .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .map(|f| f.path().file_name().unwrap().to_string_lossy().to_string())
             .collect();
 
         assert_eq!(names, vec!["alpha.yaml", "middle.yaml", "zebra.yaml"]);
@@ -976,7 +935,8 @@ mod tests {
         let relative: Vec<String> = files
             .iter()
             .map(|f| {
-                f.strip_prefix(&routes_dir)
+                f.path()
+                    .strip_prefix(&routes_dir)
                     .unwrap()
                     .to_string_lossy()
                     .to_string()
@@ -1051,16 +1011,21 @@ mod tests {
         let bundles = vec![BundleRecord {
             name: "ryeos-ui".into(),
             path: ryeos_ui.path().to_path_buf(),
-            command_registration_caps: Vec::new(),
             source_file: workspace.join("bundles/core/.ai/node/bundles/ryeos-ui.yaml"),
         }];
+        let command_policy = command_policy([("ryeos-ui", Vec::new())]);
 
         let loader = BootstrapLoader {
             app_root: system.path(),
             trust_store: &trust_store,
         };
         let snapshot = loader
-            .load_full(&SectionTable::new(), &bundles)
+            .load_full(
+                &NodeConfigTable::new(),
+                &bundles,
+                &command_policy,
+                &crate::node_policy::NodePolicyTable::new(),
+            )
             .expect("load full node config with RyeOS UI bundle");
 
         let ryeos_dimension_route = snapshot
@@ -1095,53 +1060,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn load_full_loads_hosted_node_policy_from_bundle() {
-        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .find(|p| p.join("bundles").is_dir())
-            .expect("workspace root with bundles/ directory")
-            .to_path_buf();
-        let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
-        let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
-
-        let system = temp_system_with_command_registration_policy(&workspace);
-        let hosted_node = workspace
-            .join("bundles/hosted-node")
-            .canonicalize()
-            .unwrap();
-        let bundles = vec![BundleRecord {
-            name: "hosted-node".into(),
-            path: hosted_node,
-            command_registration_caps: Vec::new(),
-            source_file: workspace.join("bundles/core/.ai/node/bundles/hosted-node.yaml"),
-        }];
-
-        let loader = BootstrapLoader {
-            app_root: system.path(),
-            trust_store: &trust_store,
-        };
-        let snapshot = loader
-            .load_full(&SectionTable::new(), &bundles)
-            .expect("load full node config with hosted-node bundle");
-
-        assert_eq!(snapshot.hosted_node_policies.len(), 1);
-        let policy = &snapshot.hosted_node_policies[0];
-        assert!(policy.transport.public_https_required);
-        assert_eq!(policy.admission.mode, "one_time_token");
-        assert_eq!(
-            policy.authorization.authority,
-            "target_node_authorized_keys"
-        );
-        assert!(!policy.authorization.central_bearer_tokens_allowed);
-        assert!(!policy.operations.shared_daemon_multitenancy_enabled);
-        assert!(
-            policy.source_file.ends_with(".ai/node/hosted/policy.yaml"),
-            "policy source should be the hosted node section, got {}",
-            policy.source_file.display()
-        );
-    }
-
     fn temp_system_with_command_registration_policy(
         workspace: &std::path::Path,
     ) -> tempfile::TempDir {
@@ -1153,14 +1071,20 @@ mod tests {
             identity_dir.join("private_key.pem"),
         )
         .unwrap();
-        let target = dir.path().join(".ai/node/command_registration");
-        fs::create_dir_all(&target).unwrap();
-        fs::copy(
-            workspace.join("bundles/.ai/node/init/command-registration/default.yaml"),
-            target.join("default.yaml"),
-        )
-        .unwrap();
         dir
+    }
+
+    fn command_policy<const N: usize>(
+        bundles: [(&str, Vec<String>); N],
+    ) -> CommandRegistrationAuthority {
+        CommandRegistrationAuthority {
+            claim_rules: Vec::new(),
+            system_source_caps: Vec::new(),
+            bundle_source_caps: bundles
+                .into_iter()
+                .map(|(name, caps)| (name.to_owned(), caps))
+                .collect(),
+        }
     }
 
     fn temp_bundle_with_node_section(bundle: &std::path::Path, section: &str) -> tempfile::TempDir {
@@ -1186,92 +1110,50 @@ mod tests {
     }
 
     #[test]
-    fn hosted_policy_uniqueness_rejects_multiple_policies() {
-        let mk_record = |source_file: &str| HostedNodePolicyRecord {
-            version: "0.1.0".into(),
-            schema_version: "1.0.0".into(),
-            description: "test".into(),
-            transport: HostedNodeTransportPolicy {
-                public_https_required: true,
-                loopback_http_allowed: true,
-            },
-            admission: HostedNodeAdmissionPolicy {
-                mode: "one_time_token".into(),
-                token_ttl_secs: 600,
-                reject_wildcard_scopes: true,
-                token_delivery: "out_of_band".into(),
-            },
-            descriptor: HostedNodeDescriptorPolicy {
-                require_live_identity_match: true,
-                advertised_capabilities: vec![],
-            },
-            authorization: HostedNodeAuthorizationPolicy {
-                authority: "target_node_authorized_keys".into(),
-                central_bearer_tokens_allowed: false,
-                implicit_cross_node_authority_allowed: false,
-            },
-            operations: HostedNodeOperationsPolicy {
-                audit_admission_events: true,
-                audit_grant_changes: true,
-                prefer_isolated_node_per_principal: true,
-                shared_daemon_multitenancy_enabled: false,
-            },
-            source_file: std::path::PathBuf::from(source_file),
-        };
-
-        let err = check_hosted_policy_uniqueness(&[
-            mk_record("/bundle/.ai/node/hosted/policy.yaml"),
-            mk_record("/state/.ai/node/hosted/policy.yaml"),
-        ])
-        .unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("multiple hosted-node policies"), "got: {msg}");
-        assert!(
-            msg.contains("/bundle/.ai/node/hosted/policy.yaml"),
-            "got: {msg}"
-        );
-        assert!(
-            msg.contains("/state/.ai/node/hosted/policy.yaml"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
     fn command_registration_caps_follow_policy_and_registration_not_bundle_name() {
         let system = std::path::PathBuf::from("/system");
-        let policy = ryeos_runtime::CommandRegistrationPolicy {
-            claim_rules: Vec::new(),
-            system_source_caps: vec!["ryeos.register.command.root.execute".into()],
-        };
+        let mut policy = command_policy([
+            ("core", Vec::new()),
+            (
+                "standard",
+                vec!["ryeos.register.command.root.standard".into()],
+            ),
+        ]);
+        policy.system_source_caps = vec!["ryeos.register.command.root.execute".into()];
         let core = BundleRecord {
             name: "core".into(),
             path: std::path::PathBuf::from("/system/.ai/bundles/core"),
-            command_registration_caps: Vec::new(),
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/core.yaml"),
         };
         let standard = BundleRecord {
             name: "standard".into(),
             path: std::path::PathBuf::from("/system/.ai/bundles/standard"),
-            command_registration_caps: vec!["ryeos.register.command.root.standard".into()],
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/standard.yaml"),
         };
 
         assert_eq!(
             system_scan_root(&system, &policy)
-                .command_provenance
+                .source
+                .command_provenance()
+                .unwrap()
                 .command_registration_caps,
             vec!["ryeos.register.command.root.execute"]
         );
         assert_eq!(
-            bundle_scan_root(&core)
-                .command_provenance
+            bundle_scan_root(&core, &policy)
+                .unwrap()
+                .source
+                .command_provenance()
+                .unwrap()
                 .command_registration_caps,
             Vec::<String>::new()
         );
         assert_eq!(
-            bundle_scan_root(&standard)
-                .command_provenance
+            bundle_scan_root(&standard, &policy)
+                .unwrap()
+                .source
+                .command_provenance()
+                .unwrap()
                 .command_registration_caps,
             vec!["ryeos.register.command.root.standard"]
         );

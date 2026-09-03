@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:e7acddc6cafb3edad95b7044339ac4b9258ee9024b89a382a2ec498ee5727775:Mzf4/wOnRGC0fOAAPIzGzHCHzHuXDC2scZMKVxJzAw3R1yjHGp8LmKvwlKnBmJ/HgLuj14nQd91rJN2HFgHWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T10:47:09Z:290d14133715db870bcbf9e15b0088aff7be4840fb344c70ecf1cb0873d0f3c2:lc4ghSRe4q2hLF1oMvy4Y1oUSJ/VaDvhTUnWRBUoGaFvjK5hx2Du3Mgml9Am7wJtC6/j9XFXYWmh3WNTvg8BDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -28,8 +28,8 @@ System-space artifacts installed or registered by `ryeos init`:
 - `<system>/.ai/node/bundles/<name>.yaml` — signed registrations.
 - `<system>/.ai/node/identity/private_key.pem` — node key.
 - `<system>/.ai/node/vault/private_key.pem` — vault X25519 key.
-- `<system>/.ai/node/ingest/ignore.yaml` — ingest-ignore config.
-- `<system>/.ai/node/isolation.yaml` — create-once strict subprocess policy.
+- `<system>/.ai/node/policies/` — one complete node-signed semantic policy
+  generation, seeded from the selected init profile on first publication.
 
 Daemon-local artifacts `ryeosd` may repair after init verification:
 
@@ -45,13 +45,18 @@ The daemon must not write user trust docs or regenerate the node key.
 
 - `.ai/bundles/` — installed bundles.
 - `.ai/node/config.yaml` — daemon config.
-- `.ai/node/isolation.yaml` — immutable-at-runtime isolation policy source.
+- `.ai/node/policies/` — atomic node-owned policy generation, including
+  isolation, execution, ingest, retention, maintenance, and hosted authority.
 - `.ai/node/identity/` — node key and public identity.
 - `.ai/node/auth/authorized_keys/` — node-signed authorized callers.
 - `.ai/node/vault/` — vault key material.
 - `.ai/node/bundles/` — signed bundle registrations.
-- `.ai/node/ingest/ignore.yaml` — ingest-ignore rules.
-- `.ai/state/runtime.sqlite3` — thread, event, and projection database.
+- `.ai/state/runtime.sqlite3` — exact-current execution/session state and the
+  live credential-profile lease projection.
+- `.ai/state/operational.sqlite3` — retained source-of-truth operational state,
+  including provider-neutral credential-profile lifecycle authority.
+- `.ai/state/private-artifact-homes/` — daemon-owned opaque workload homes;
+  credential bytes remain here and are never copied into profile metadata.
 - `.ai/state/scheduler.sqlite3` — scheduler database.
 - `.ai/state/objects/` and `.ai/state/refs/` — CAS.
 - `.ai/state/cache/executions/` — request-owned pushed-head and no-project

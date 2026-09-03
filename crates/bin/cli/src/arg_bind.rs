@@ -49,6 +49,16 @@ pub fn bind_declared_shortcuts(
         } else {
             input
         };
+        if !command.forms.is_empty() {
+            let residual = tail_without_input(tail);
+            let value = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
+                &residual,
+                Some(command),
+                &input,
+            )
+            .map_err(|detail| command_binding_error(command, detail))?;
+            return Ok(Some(value));
+        }
         return Ok(Some(input));
     }
     if binding.is_some_and(|binding| binding.single_json_object_arg)
@@ -56,9 +66,42 @@ pub fn bind_declared_shortcuts(
         && let Ok(value) = serde_json::from_str::<Value>(&tail[0])
         && value.is_object()
     {
+        if !command.forms.is_empty() {
+            let value = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
+                &[],
+                Some(command),
+                &value,
+            )
+            .map_err(|detail| command_binding_error(command, detail))?;
+            return Ok(Some(value));
+        }
         return Ok(Some(value));
     }
     Ok(None)
+}
+
+fn tail_without_input(tail: &[String]) -> Vec<String> {
+    let mut residual = Vec::with_capacity(tail.len());
+    let mut index = 0usize;
+    while index < tail.len() {
+        if tail[index] == "--input" {
+            index = index.saturating_add(2);
+        } else if tail[index].starts_with("--input=") {
+            index += 1;
+        } else {
+            residual.push(tail[index].clone());
+            index += 1;
+        }
+    }
+    residual
+}
+
+fn command_binding_error(command: &ryeos_runtime::CommandDef, detail: String) -> CliDispatchError {
+    CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
+        path: command.source_file.display().to_string(),
+        item_ref: command.tokens.join(" "),
+        detail,
+    })
 }
 
 fn merge_project_control_flags(

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-24T03:55:19Z:37ec1f563545535cda56115ad829c5db8348980ab09a7b287c9890ebf2fbb348:MbjCm2lUcip3JnF9rZ+vhjDNG+M9Uyp3yQweAXeQq26L1KJwggbfcFLfHlXobdWBDebLl5dO9oSpjHqYrnqPBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, profile, revoke]
+description: "Fence a Codex credential generation, stop its worker, and remove local credentials"
+forms:
+  - slots:
+      - field: profile_id
+      - field: credential_generation
+dispatch:
+  kind: execute_ref
+  execute: service:credential-profiles/revoke
+  availability: daemon

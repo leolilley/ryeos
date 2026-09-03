@@ -1,0 +1,15 @@
+# ryeos:signed:2026-08-13T05:00:11Z:e25e16173991ba37d18ddc38bd0221d2902d83b5d5f52fe3395604ce6957cdc5:mcMerISBApHC12Sp6sU1RMfw1+nlgKtQEc39tk8XAnX4dz+ph/yZhK/1KCfmwZfgOjnktBtH5k9lea/T+v1hCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/launch-status
+path: /launches/{launch_id}
+methods:
+  - GET
+auth: ryeos_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:launch/status
+  source_config:
+    launch_id: "${path.launch_id}"

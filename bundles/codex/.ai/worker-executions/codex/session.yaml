@@ -1,0 +1,29 @@
+# ryeos:signed:2026-09-03T14:48:16Z:095962de9ed8c95e5f670353f7995db8a6bee50b538904452c7e593bb86e71d5:KYUOdM2louWGa1v5b1+91xTOgyZx01+xBcTrlfxxTdamGkrsh7qfgvsQzQxbbH14pRo7F1LOAiZcnHW52b7fBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: codex
+description: Open one RyeOS-owned Codex session against an immutable project generation.
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: session
+  allowed_effect_classes:
+    - credential_read
+    - external_effect
+    - pure_read
+    - session_mutation
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 603600
+  recover_upstream_session: true
+limits:
+  duration_seconds: 604200
+  spend_usd: "100"
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

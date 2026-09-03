@@ -154,6 +154,7 @@ fn build_and_extract_cancellation(
             &verified,
             &serde_json::Value::Null,
             &ctx.execution_hints,
+            None,
         )
         .map_err(|e| e.to_string())?;
 

@@ -66,6 +66,30 @@ expect_rejected validate_source_publisher_trust "$root_trust" 0 "$official_finge
 validate_source_publisher_trust "$root_trust" 1 "$official_fingerprint"
 expect_rejected validate_source_publisher_trust "$tmp/missing.toml" 1 "$official_fingerprint"
 
+# The direct installer proposes its mapped profile only for first publication.
+# Any present occupant—including a malformed file—must instead reach RyeOS's
+# signed complete-generation validator without a profile fallback.
+install_policy_root="$tmp/install-policy-root"
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full 0
+[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile full" ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 1 ]]
+mkdir -p "$install_policy_root/.ai/node/policies"
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full 0
+[[ ${#INSTALL_INIT_PROFILE_ARGS[@]} -eq 0 ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
+rm -rf "$install_policy_root/.ai/node/policies"
+: > "$install_policy_root/.ai/node/policies"
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full 0
+[[ ${#INSTALL_INIT_PROFILE_ARGS[@]} -eq 0 ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
+build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" hosted-workflow 1
+[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+[[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
+
 # Repeated documents from one selected publisher are all validated but produce
 # one operator-facing trust decision instead of one line per bundle.
 trust_output="$(
@@ -96,6 +120,31 @@ collect_selected_source_trust_args "$installed_share" core
 [[ "${SELECTED_SOURCE_TRUST_ARGS[1]}" == "$installed_share/.ai/PUBLISHER_TRUST.toml" ]]
 [[ "${SELECTED_SOURCE_TRUST_ARGS[2]}" == "--trust-file" ]]
 [[ "${SELECTED_SOURCE_TRUST_ARGS[3]}" == "$installed_share/core/PUBLISHER_TRUST.toml" ]]
+
+# Shared-root model: a bundle without a per-bundle doc collects only the root
+# document, and the collector still succeeds (its exit status must not leak
+# from the optional per-bundle test — regression for the 2026-08-06 install
+# failure).
+rm "$installed_share/core/PUBLISHER_TRUST.toml"
+collect_selected_source_trust_args "$installed_share" core
+[[ ${#SELECTED_SOURCE_TRUST_ARGS[@]} -eq 2 ]]
+[[ "${SELECTED_SOURCE_TRUST_ARGS[0]}" == "--trust-file" ]]
+[[ "${SELECTED_SOURCE_TRUST_ARGS[1]}" == "$installed_share/.ai/PUBLISHER_TRUST.toml" ]]
 [[ " ${SELECTED_SOURCE_TRUST_ARGS[*]} " != *" $installed_share/residual/PUBLISHER_TRUST.toml "* ]]
+
+# Incremental installation may copy only a complete publisher-built payload.
+# Authored source left behind by an interrupted population must be rejected
+# before it can replace a bootable installed bundle.
+payload_root="$tmp/payload-root"
+mkdir -p \
+    "$payload_root/bundles/core/.ai/refs/bundles" \
+    "$payload_root/bundles/core/.ai/objects" \
+    "$payload_root/bundles/browser/.ai"
+printf 'manifest-object-ref\n' \
+    >"$payload_root/bundles/core/.ai/refs/bundles/manifest"
+require_closed_source_bundle_payloads "$payload_root" core
+expect_rejected require_closed_source_bundle_payloads "$payload_root" core browser
+rm "$payload_root/bundles/core/.ai/refs/bundles/manifest"
+expect_rejected require_closed_source_bundle_payloads "$payload_root" core
 
 echo "publisher trust policy cases passed"

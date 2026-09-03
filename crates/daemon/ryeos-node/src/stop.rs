@@ -107,7 +107,12 @@ pub async fn stop_with_progress(
                 // so this can neither miss the old process nor hit a replacement.
                 target.signal(libc::SIGKILL)?;
                 forced = true;
-                deadline = Instant::now() + Duration::from_secs(2);
+                // SIGKILL is definitive process authority, but a task leaving
+                // uninterruptible filesystem I/O may not become pidfd-readable
+                // within an arbitrary two-second grace. Reuse the caller's
+                // already-bounded stop timeout for the exact pinned process;
+                // this changes neither the target nor the escalation policy.
+                deadline = Instant::now() + opts.timeout;
                 continue;
             }
             if forced {

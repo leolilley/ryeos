@@ -11,8 +11,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::node_config::{
-    BundleRecord, NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy,
+    BundleRecord, CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope,
+    NodeItemContext, SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy,
+    SectionTraversal,
 };
+
+pub const SECTION_NAME: &str = "bundles";
 
 /// Section handler for `bundles` node-config items.
 pub struct BundleSection;
@@ -22,17 +26,14 @@ pub struct BundleSection;
 struct RawBundleRecord {
     kind: String,
     path: std::path::PathBuf,
-    #[serde(default)]
-    command_registration_caps: Vec<String>,
 }
 
-impl NodeConfigSection for BundleSection {
-    fn source_policy(&self) -> SectionSourcePolicy {
-        // Bundles cannot self-register — only the app root.
-        SectionSourcePolicy::SystemAndState
-    }
-
-    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
+impl BundleSection {
+    pub(crate) fn parse_bundle(
+        &self,
+        ctx: &NodeItemContext,
+        body: &Value,
+    ) -> anyhow::Result<BundleRecord> {
         let raw: RawBundleRecord =
             serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
         if raw.kind != "node" {
@@ -51,12 +52,52 @@ impl NodeConfigSection for BundleSection {
             );
         }
 
-        let record = BundleRecord {
+        Ok(BundleRecord {
             name: ctx.id.clone(),
             path: raw.path,
-            command_registration_caps: raw.command_registration_caps,
             source_file: std::path::PathBuf::new(),
-        };
-        Ok(Box::new(record))
+        })
+    }
+}
+
+impl CompiledNodeConfigItem for BundleRecord {
+    fn section_name(&self) -> &'static str {
+        SECTION_NAME
+    }
+
+    fn admit(
+        self: Box<Self>,
+        _target: &mut crate::node_config::loader::NodeConfigSnapshotBuilder,
+        _admission: &crate::node_config::loader::NodeConfigAdmission,
+    ) -> anyhow::Result<()> {
+        bail!("bundle records may only enter through phase-one bootstrap")
+    }
+}
+
+impl NodeConfigSection for BundleSection {
+    fn name(&self) -> &'static str {
+        SECTION_NAME
+    }
+
+    fn source_scope(&self) -> NodeConfigSourceScope {
+        // Bundles cannot self-register — only the app root.
+        NodeConfigSourceScope::AppRootOnly
+    }
+
+    fn load_spec(&self) -> SectionLoadSpec {
+        SectionLoadSpec {
+            phase: SectionLoadPhase::BundleBootstrap,
+            traversal: SectionTraversal::Flat,
+            signer: SectionSignerPolicy::Trusted,
+            cardinality: SectionCardinality::AtLeastOne,
+        }
+    }
+
+    fn parse(
+        &self,
+        ctx: &NodeItemContext,
+        body: &Value,
+    ) -> anyhow::Result<Box<dyn CompiledNodeConfigItem>> {
+        Ok(Box::new(self.parse_bundle(ctx, body)?))
     }
 }

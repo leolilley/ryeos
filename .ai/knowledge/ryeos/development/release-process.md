@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-29T01:43:10Z:b943fe533b82461f7a1c4f38a06fc6a652c4a4d6eb0aa24897791edc27a18bb9:x+6bEhkAIK1mvaS3YmnJpiTGri4YEommNUurU7DnOd6/blr+Z1YtiwXBWtRMc0e5RBxlgd34jC4cUqK99f/gDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-03T23:01:15Z:40379b24f8c7aba96226dd1944d3a2259cb35d26aa3099f8128e77aa722f66c6:BHWcW7jnT3yEcXKz1MYa6jV1RxoG/p4MzMUYCZVWwx0gaxDKYq5tFS2cbbM2IneQIItsDs+gFqeYi7oJD++6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -126,6 +126,7 @@ crates/kernel/lillux/Cargo.toml
 crates/kernel/lillux/pyproject.toml
 crates/engine/ryeos-runtime/Cargo.toml
 crates/tools/core-tools/Cargo.toml
+crates/tools/session-exec/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
@@ -144,6 +145,7 @@ files=(
   crates/kernel/lillux/pyproject.toml
   crates/engine/ryeos-runtime/Cargo.toml
   crates/tools/core-tools/Cargo.toml
+  crates/tools/session-exec/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -166,6 +168,7 @@ rg "$old" \
   crates/kernel/lillux/pyproject.toml \
   crates/engine/ryeos-runtime/Cargo.toml \
   crates/tools/core-tools/Cargo.toml \
+  crates/tools/session-exec/Cargo.toml \
   crates/bin/cli/Cargo.toml \
   crates/bin/daemon/Cargo.toml \
   Cargo.lock
@@ -199,9 +202,10 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 
 `--all` is REQUIRED: `populate-bundles.sh` refuses to rebuild the whole bundle
 set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
-`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-core-tools`
-for core-tools). `--jobs N` caps cargo parallelism if a full release build
-exhausts memory. The release Dockerfiles already pass `--all`.
+`--crates "<Cargo package ...>"` for a focused development rebuild (e.g.
+`--crates ryeosd` for a daemon-only correction). `--jobs N` caps Cargo
+parallelism if a full release build exhausts memory. The release Dockerfiles
+already pass `--all`.
 
 Do not manually copy binaries into bundle trees or hand-edit signed bundle YAML
 as a release fix.
@@ -355,6 +359,7 @@ GitHub release assets:
 GHCR image tags:
   ghcr.io/leolilley/ryeos-standard:$new
   ghcr.io/leolilley/ryeos-central-host:$new
+  ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
 The workflow qualifies the exact image digests, checks provenance and SBOM
@@ -396,6 +401,19 @@ Default behavior:
 ./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
+For an existing stopped development node when the release deliberately changes
+the complete node-policy schema or selected bundle-set profile, perform the
+explicit one-time cut in the same install:
+
+```bash
+./scripts/pkg/install-local-direct.sh \
+  --trust-source-publishers --reset-node-policy-generation
+```
+
+Do not pass that flag for a fresh node. It replaces only the signed policy
+generation; the following init aligns the trusted profile's prospective exact
+bundle inventory and preserves all non-policy state.
+
 The script will:
 
 1. reuse already-built binaries and populated bundle sources by default;
@@ -403,7 +421,10 @@ The script will:
 3. install `ryeos` and `ryeosd` into `/usr/bin`;
 4. optionally install `lillux` if it was built;
 5. install the selected bundle sources under `/usr/share/ryeos`;
-6. move stale PATH shadows from `/usr/local/bin` and `~/.local/bin`;
+6. move stale PATH shadows of installed user-facing binaries from
+   `/usr/local/bin`, `~/.local/bin`, and the invoking user's configured Cargo
+   home `bin` directory, preserving the user-local entries in timestamped
+   backups;
 7. run `ryeos init --source /usr/share/ryeos ...`;
 8. restart the daemon only if it was running before the install.
 
@@ -414,8 +435,10 @@ Bundle rebuilding/republishing is opt-in and expensive:
   --populate --all --trust-source-publishers
 ```
 
-Use `--populate --crates "<crate ...>"` for an explicit subset. The publisher
-key defaults to `.dev-keys/PUBLISHER_DEV.pem` only when population is requested.
+Use `--populate --crates "<Cargo package ...>"` for an explicit development
+subset. The selected packages are rebuilt; unselected bundle payloads retain
+their exact existing artifact generations. The publisher key defaults to
+`.dev-keys/PUBLISHER_DEV.pem` only when population is requested.
 
 Important caveats:
 
@@ -440,9 +463,10 @@ Important caveats:
   ryeos node status
   ```
 
-- The default can preserve stale bundle binaries/signatures if the checkout
-  artifacts were not refreshed first. Pass `--populate --all` or
-  `--populate --crates "<crate ...>"` when regeneration is required.
+- The default deliberately installs the checkout's exact closed bundle
+  generation without comparing it to mutable source mtimes. Pass
+  `--populate --crates "<Cargo package ...>"` for focused regeneration;
+  release/E2E qualification uses `--populate --all`.
 - `--no-init` leaves initialized user state unchanged.
 - `--no-daemon-restart` leaves any daemon restart to you.
 - `--bundle-set hosted-node` intentionally installs only `core`,
@@ -463,8 +487,8 @@ refresh/sign bundles as bundles:
 
 This builds release binaries, stages bundle bin trees, signs signable bundle
 items, rebuilds CAS manifests, and emits trust documents. `--all` is required
-(or `--crates "<crate ...>"` to rebuild a subset) — populate refuses an implicit
-full build.
+(or `--crates "<Cargo package ...>"` for a development subset) — populate
+refuses an implicit full build.
 
 Do not:
 
@@ -566,6 +590,7 @@ Before tagging:
   - [ ] `crates/kernel/lillux/pyproject.toml`
   - [ ] `crates/engine/ryeos-runtime/Cargo.toml`
   - [ ] `crates/tools/core-tools/Cargo.toml`
+  - [ ] `crates/tools/session-exec/Cargo.toml`
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`
@@ -587,7 +612,9 @@ Before tagging:
 
 After local install validation:
 
-- [ ] `./scripts/pkg/install-local-direct.sh --trust-source-publishers` completes.
+- [ ] The applicable local install completes: a fresh/current-policy node uses
+      `./scripts/pkg/install-local-direct.sh --trust-source-publishers`; an
+      existing predecessor-policy node adds `--reset-node-policy-generation`.
 - [ ] `ryeos node status` checked explicitly.
 - [ ] If daemon was not running before install, `ryeos start` run manually if
   startup validation is needed.

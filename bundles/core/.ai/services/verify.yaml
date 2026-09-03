@@ -1,8 +1,8 @@
-# ryeos:signed:2026-07-22T02:33:45Z:760d150d377fca8c67d7ca6bf7b2dbdff738954da3efa6779c33b80135f53779:abvI4DUcmVRhpuGJYXcQIlegia9/jfzscE6JNqgqqncftdANfFRN84idWXgPErHrmh7gKBL5KJmR1QZZ+JUsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:50Z:c687d29b122829f40bfc8eea58eb30723698b663fd54df1c2c2c2401e1d8462a:VL4XAzeT57Kv4tV3IWSfCUTrZ4CRO8eX1YlagOamDTEyz/c0GIQ3ASg8XahWy4jzCyb/OzcyvPBk0YJRKlQBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: verify
-availability: offline
-offline_execute: tool:ryeos/core/verify
+availability: local
+local_execute: tool:ryeos/core/verify
 required_caps: ["ryeos.execute.service.verify"]
 schema:
   item_ref: string?

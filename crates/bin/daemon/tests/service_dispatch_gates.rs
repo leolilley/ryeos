@@ -335,18 +335,17 @@ fn gate_service_count_matches_expected() {
     let services = service_refs();
     assert_eq!(
         services.len(),
-        92,
-        "service descriptor table count drifted from expected 92"
+        98,
+        "service descriptor table count drifted from expected 98"
     );
 }
 
 /// Gate 8: Rust descriptors and bundle service YAMLs agree on
-/// `required_caps`, and every service cap follows the slash-form
-/// canonical convention: `ryeos.<verb>.service.<subject>` where the
-/// subject preserves `/` and contains NO `.` (dot is reserved for the
-/// capability envelope). Catches drift like a YAML left empty while
-/// the Rust descriptor requires a cap, or a dot-form cap sneaking back
-/// in.
+/// `required_caps`, every capability is canonical, and service-envelope caps
+/// preserve `/` in the subject. A service may additionally require a
+/// cross-cutting policy capability such as `ryeos.write.project.live`.
+/// Catches drift like a YAML left empty while the Rust descriptor requires a
+/// cap, or a dot-form service cap sneaking back in.
 #[test]
 fn gate_yaml_caps_match_descriptor_caps() {
     let engine = build_test_engine();
@@ -378,15 +377,16 @@ fn gate_yaml_caps_match_descriptor_caps() {
         }
 
         for cap in yaml_caps.iter().chain(rust_caps.iter()) {
-            let Some(subject) = cap.strip_prefix("ryeos.execute.service.") else {
-                malformed.push((desc.service_ref, cap.clone(), "unexpected envelope"));
-                continue;
-            };
-            if subject.contains('.') {
+            if let Err(error) = ryeos_runtime::authorizer::validate_scope_pattern(cap) {
+                malformed.push((desc.service_ref, cap.clone(), error));
+            } else if cap
+                .strip_prefix("ryeos.execute.service.")
+                .is_some_and(|subject| subject.contains('.'))
+            {
                 malformed.push((
                     desc.service_ref,
                     cap.clone(),
-                    "dot in subject — service cap subjects are slash-form bare ids",
+                    "dot in subject — service cap subjects are slash-form bare ids".to_string(),
                 ));
             }
         }
@@ -399,7 +399,6 @@ fn gate_yaml_caps_match_descriptor_caps() {
     );
     assert!(
         malformed.is_empty(),
-        "service caps must be `ryeos.execute.service.<bare_id>` with no dot in the subject; \
-         violations: {malformed:#?}"
+        "required capabilities must be canonical and service-envelope subjects must be slash-form; violations: {malformed:#?}"
     );
 }

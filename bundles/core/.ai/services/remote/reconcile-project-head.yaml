@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-29T09:08:38Z:0b95ab001a4d4f0050d7a41e431530562c70047b8de4c56212f08550bd12f35c:fF+bRikePbev34nPlvDH9ojTwV7MhL4rnUzHxkfasriDSeysTsZnBMpt8o39ri19ojbR9PAi5FcL+t3u54W6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.reconcile-project-head
+required_caps: ["ryeos.execute.service.remote/reconcile-project-head"]
+schema:
+  remote: string?
+  project: string
+  expected_local_head: string
+  expected_remote_head: string
+  winner: string
+description: "Explicitly converge divergent configured-operator project HEADs through a durable two-parent generation"

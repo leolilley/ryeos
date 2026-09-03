@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-26T07:01:19Z:a65fcba69b96969f5a9a2c3a95232f05f3db2c4b9d166e8780f7757f380975ab:X0ubQl21FJavjxGdQNadewuwnrsJdNT/Cs/oV8nrFB+guha9NB0P6WGDAYB8ZYghk7YJqvnKQIKctxDeuEXwDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:27Z:b0a09e6d14c894dcf82c8ecf52d315642785335db3def858bb238041831f509b:OEofvUVbypcQO5O4oMi3RtBLNJEaWHXawbvEwg1TMO3UAunMVsMHPtecZLmH2DPsG0GRtPsFzXbN2Nz7+ptdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
-base_url: "https://api.z.ai/api/paas/v4"
+transport:
+  kind: remote_http
+  base_url: "https://api.z.ai/api/paas/v4"
 auth:
   env_var: ZAI_API_KEY
   header_name: Authorization

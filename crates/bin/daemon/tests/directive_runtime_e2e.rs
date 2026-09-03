@@ -33,8 +33,10 @@ fn plant_mock_provider(
     let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"
@@ -151,9 +153,9 @@ model:
 /// directive-runtime's `bootstrap::scan_tools` walks
 /// `<root>/.ai/tools/`, picks the file up via the loader's `tool` kind,
 /// and registers it as `tool:<rel>.py` with the bare filename as the
-/// LLM-visible tool name. Unsigned is fine — `verified_loader` accepts
-/// missing signatures and returns the content as-is.
-fn plant_python_echo_tool(root: &Path, rel: &str) -> anyhow::Result<()> {
+/// LLM-visible tool name. Project-owned executable source is signed by the
+/// fixture publisher so source-closure admission can retain its exact owner.
+fn plant_python_echo_tool(root: &Path, rel: &str, signer: &SigningKey) -> anyhow::Result<()> {
     let dir_relative = Path::new(rel)
         .parent()
         .and_then(|p| p.to_str())
@@ -181,7 +183,8 @@ print(json.dumps({"echoed": "ok"}))
 sys.exit(0)
 "#
     .replace("{dir_relative}", dir_relative);
-    std::fs::write(&path, body)?;
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(&path, signed)?;
     Ok(())
 }
 
@@ -456,7 +459,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
-    plant_python_echo_tool(project.path(), "echo").expect("plant echo tool");
+    plant_python_echo_tool(project.path(), "echo", &fixture.publisher).expect("plant echo tool");
     plant_directive(
         project.path(),
         "test/round_trip",
@@ -564,7 +567,7 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
-    plant_python_echo_tool(project.path(), "echo").expect("plant echo tool");
+    plant_python_echo_tool(project.path(), "echo", &fixture.publisher).expect("plant echo tool");
     plant_directive(
         project.path(),
         "test/denied",
@@ -818,8 +821,10 @@ fn plant_hard_budget_mock_provider(
     let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"
@@ -1083,6 +1088,7 @@ fn plant_sleepy_marker_tool(
     index: u32,
     sleep_secs: f64,
     marker_dir: &Path,
+    signer: &SigningKey,
 ) -> anyhow::Result<()> {
     let dir = root.join(".ai/tools").join(name);
     std::fs::create_dir_all(&dir)?;
@@ -1112,7 +1118,8 @@ print(json.dumps({{"idx": INDEX}}))
         sleep_secs = sleep_secs,
         marker_dir = marker_dir.to_str().expect("utf-8 marker dir"),
     );
-    std::fs::write(dir.join(format!("{name}.py")), body)?;
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(dir.join(format!("{name}.py")), signed)?;
     Ok(())
 }
 
@@ -1228,6 +1235,7 @@ async fn run_sleepy_batch(
             (i + 1) as u32,
             *sleep,
             marker_dir,
+            &fixture.publisher,
         )
         .expect("plant sleepy tool");
     }

@@ -1753,7 +1753,12 @@ struct CreateChainWithEventsRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct AuthoritativeThreadSnapshotWithLastEventReadback {
+    /// Exact verified signed-head target from which both values were read.
+    pub chain_head_hash: String,
     pub snapshot: ThreadSnapshot,
+    /// Exact event selected by the current `ChainThreadEntry`. This can be
+    /// newer than `snapshot.last_event_hash` when appends leave lifecycle
+    /// state unchanged.
     pub last_event: Option<(String, ThreadEvent)>,
 }
 
@@ -1937,6 +1942,14 @@ impl PinnedStateAuthority {
         Ok(lillux::CasStore::from_pinned_root(
             self.cas_directory.try_clone()?,
         ))
+    }
+
+    /// The large-content-tier large-object store, rooted beside the CAS under this
+    /// exact pinned runtime generation.
+    pub fn large_object_store(
+        &self,
+    ) -> anyhow::Result<crate::large_object_store::LargeObjectStore> {
+        crate::large_object_store::LargeObjectStore::open_or_create_under(&self.runtime_directory)
     }
 
     pub fn cas_directory(&self) -> &lillux::PinnedDirectory {
@@ -2300,7 +2313,7 @@ impl StateDb {
         )?;
         if recovery.thread_history_discard_in_progress()? {
             anyhow::bail!(
-                "offline thread-history discard is incomplete; rerun `ryeos node gc --discard-thread-history --confirm-discard-thread-history` while the daemon is stopped"
+                "offline execution-history reset is incomplete; rerun `ryeos node reset execution-history --confirm` while the daemon is stopped"
             );
         }
 
@@ -4267,7 +4280,33 @@ impl StateDb {
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
-        self.publish_external_chain_head(chain_root_id, target_hash, signer, cas_mutation_guard)
+        self.publish_external_chain_head(
+            chain_root_id,
+            target_hash,
+            signer,
+            cas_mutation_guard,
+            None,
+        )
+    }
+
+    /// Publish the one successor head authorized by a source-node writer
+    /// transition. Unlike ordinary import this may establish a chain on a new
+    /// node, but only after the signed grant, target placement attestation,
+    /// continuation event, snapshots, and exact source anchor agree.
+    pub fn write_transferred_chain_head_admitted(
+        &self,
+        transition: &crate::sync::AdmittedChainWriterTransition,
+        signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        transition.validate()?;
+        self.publish_external_chain_head(
+            &transition.evidence.chain_root_id,
+            &transition.target_chain_head_hash,
+            signer,
+            cas_mutation_guard,
+            Some(transition),
+        )
     }
 
     /// Read and verify a namespace-neutral signed head from `refs/generic`.
@@ -4328,6 +4367,56 @@ impl StateDb {
         )
     }
 
+    /// Verify, under the exact chain lock, that the current trusted head is
+    /// signed by `required_signer` and is an ancestor of `candidate_head`.
+    /// The returned hash is the precise local anchor observed by the caller.
+    pub fn verify_current_chain_anchor_for_candidate(
+        &self,
+        chain_root_id: &str,
+        candidate_head: &str,
+        required_signer: &str,
+        required_owner: &str,
+        required_origin_site_id: &str,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<String> {
+        let authority = self.pinned_authority()?;
+        authority.ensure_guard(cas_mutation_guard)?;
+        let chain_lock = self.acquire_existing_chain_lock(chain_root_id)?;
+        let current = chain_lock
+            .read_verified_head(self.trust_store.as_ref())?
+            .ok_or_else(|| anyhow::anyhow!("chain has no current trusted head"))?;
+        if current.signer != required_signer {
+            anyhow::bail!("current chain head is not signed by the required authority");
+        }
+        let root = {
+            let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+            chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                chain_root_id,
+                self.trust_store.as_ref(),
+                &mut head_cache,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("chain has no authoritative root snapshot"))?
+        };
+        if root.chain_root_id != chain_root_id
+            || root.thread_id != chain_root_id
+            || root.requested_by.as_deref() != Some(required_owner)
+            || root.origin_site_id != required_origin_site_id
+        {
+            anyhow::bail!("chain has no exact target-authored owner anchor");
+        }
+        crate::sync::verify_chain_closure_anchored_pinned(
+            &authority.cas_store()?,
+            chain_root_id,
+            candidate_head,
+            &current.target_hash,
+        )?;
+        Ok(current.target_hash)
+    }
+
     /// Read the current authoritative snapshot through a trust-verified chain
     /// head and the verified in-memory head cache. This never consults the
     /// rebuildable projection. `None` means that the chain head or requested
@@ -4356,8 +4445,9 @@ impl StateDb {
         )
     }
 
-    /// Read one current snapshot and its exact last event under the same
-    /// trust-verified chain authority without consulting the projection.
+    /// Read one current snapshot, its exact thread-entry tip, and their signed
+    /// head under the same trust-verified chain authority without consulting
+    /// the projection.
     pub fn read_authoritative_thread_snapshot_with_last_event(
         &self,
         chain_root_id: &str,
@@ -4369,9 +4459,9 @@ impl StateDb {
             &self.recovery,
             chain_root_id,
         )?;
-        let snapshot = {
+        let readback = {
             let mut head_cache = self.head_cache.lock().expect("head_cache lock");
-            chain::read_thread_snapshot_with_trust(
+            chain::read_thread_snapshot_with_entry_last_event_with_trust(
                 &self.cas_root,
                 &self.refs_root,
                 &chain_lock,
@@ -4381,12 +4471,11 @@ impl StateDb {
                 &mut head_cache,
             )?
         };
-        let Some(snapshot) = snapshot else {
+        let Some((chain_head_hash, snapshot, last_event)) = readback else {
             return Ok(None);
         };
-        let last_event =
-            chain::read_snapshot_last_event_object(&self.cas_root, Some(&chain_lock), &snapshot)?;
         Ok(Some(AuthoritativeThreadSnapshotWithLastEventReadback {
+            chain_head_hash,
             snapshot,
             last_event,
         }))
@@ -5089,6 +5178,7 @@ impl StateDb {
         target_hash: &str,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        writer_transition: Option<&crate::sync::AdmittedChainWriterTransition>,
     ) -> anyhow::Result<()> {
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         cas_mutation_guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
@@ -5101,6 +5191,38 @@ impl StateDb {
         )?;
         let current = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         let current_hash = current.as_ref().map(|head| head.target_hash.as_str());
+        let required_anchor = if let Some(transition) = writer_transition {
+            verify_chain_writer_transition_adoption(&cas, transition, signer.fingerprint())?;
+            if chain_root_id != transition.evidence.chain_root_id
+                || target_hash != transition.target_chain_head_hash
+            {
+                anyhow::bail!("chain writer transition changed its publication coordinate");
+            }
+            match current.as_ref() {
+                None => {}
+                Some(head) if head.target_hash == transition.evidence.source_chain_head_hash => {}
+                Some(head)
+                    if head.target_hash == transition.target_chain_head_hash
+                        && head.signer == transition.evidence.target_node_signer_fingerprint => {}
+                Some(head) => {
+                    // A returning placement may have a locally signed mirror
+                    // from an earlier visit. It may advance only if that exact
+                    // local head is an ancestor of the newly granted source
+                    // frontier; the scoped grant still authorizes only the
+                    // immediate source->target successor.
+                    crate::rebuild::verify_repair_closure_anchored_with_cas(
+                        &cas,
+                        chain_root_id,
+                        &transition.evidence.source_chain_head_hash,
+                        true,
+                        Some(&head.target_hash),
+                    )?;
+                }
+            }
+            Some(transition.evidence.source_chain_head_hash.as_str())
+        } else {
+            current_hash
+        };
         // The exact trusted current target is the import anchor. An equal
         // target is idempotent; a different target must prove that current is
         // an ancestor, so import can advance but never fork or roll back a
@@ -5110,7 +5232,7 @@ impl StateDb {
             chain_root_id,
             target_hash,
             true,
-            current_hash,
+            required_anchor,
         )?;
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
@@ -5243,6 +5365,152 @@ impl StateDb {
         )
     }
 
+    /// Explicit clean-cut retirement of every external-content binding head.
+    ///
+    /// This is intentionally not a generic namespace-deletion surface. A
+    /// manifest schema cut changes every binding coordinate, so the stopped
+    /// node must retire predecessor heads before v2 content is imported and
+    /// rebound. The operation is idempotent after a crash: each head is
+    /// locked, re-read, and unlinked through its pinned directory authority.
+    pub fn discard_external_content_binding_heads(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        dry_run: bool,
+    ) -> anyhow::Result<usize> {
+        guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
+        if !guard.is_exclusive() {
+            anyhow::bail!("external-content binding reset requires exclusive state authority");
+        }
+        let namespace = crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
+        let heads = self.list_generic_head_refs(namespace)?;
+        if dry_run {
+            return Ok(heads.len());
+        }
+        let mut removed = 0usize;
+        for expected in heads {
+            if expected.namespace != namespace {
+                anyhow::bail!("external-content binding enumeration escaped its namespace");
+            }
+            let head_lock = crate::refs::GenericHeadLock::acquire_in_refs_directory(
+                &self._refs_directory,
+                namespace,
+                &expected.name,
+            )?;
+            let current = crate::refs::read_verified_generic_head_ref_in_directory(
+                &self._refs_directory,
+                namespace,
+                &expected.name,
+                self.trust_store.as_ref(),
+            )?;
+            let Some(current) = current else {
+                continue;
+            };
+            if current.target_hash != expected.target_hash {
+                anyhow::bail!("external-content binding head changed during stopped-node reset");
+            }
+            if crate::refs::remove_generic_head_ref_in_directory(
+                &self._refs_directory,
+                namespace,
+                &expected.name,
+                &head_lock,
+            )? {
+                removed = removed.saturating_add(1);
+            }
+        }
+        self.activate_external_content_binding_epoch_after_reset(guard)?;
+        Ok(removed)
+    }
+
+    /// Read the clean-cut epoch for external-content binding heads. Absence is
+    /// allowed only for a fresh namespace with no heads; callers decide that
+    /// distinction explicitly.
+    pub fn external_content_binding_schema_epoch(&self) -> anyhow::Result<Option<u32>> {
+        let name = std::ffi::OsStr::new("external-content-bindings.epoch");
+        let Some(file) = self._runtime_state_directory.open_regular(name, false)? else {
+            return Ok(None);
+        };
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        file.take(32).read_to_end(&mut bytes)?;
+        let text =
+            std::str::from_utf8(&bytes).context("external-content binding epoch is not UTF-8")?;
+        let epoch = text
+            .strip_suffix('\n')
+            .unwrap_or(text)
+            .parse::<u32>()
+            .context("external-content binding epoch is malformed")?;
+        if epoch == 0 {
+            anyhow::bail!("external-content binding epoch cannot be zero");
+        }
+        Ok(Some(epoch))
+    }
+
+    /// Initialize a fresh binding namespace, or prove an existing namespace
+    /// is current. Ordinary bind paths may never advance a predecessor epoch.
+    pub fn ensure_current_external_content_binding_epoch(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        self.write_external_content_binding_epoch(guard, false)
+    }
+
+    fn activate_external_content_binding_epoch_after_reset(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        self.write_external_content_binding_epoch(guard, true)
+    }
+
+    fn write_external_content_binding_epoch(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        explicit_reset: bool,
+    ) -> anyhow::Result<()> {
+        guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
+        let current = crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH;
+        let name = std::ffi::OsStr::new("external-content-bindings.epoch");
+        let expected = self._runtime_state_directory.open_regular(name, false)?;
+        if let Some(stored) = self.external_content_binding_schema_epoch()? {
+            if stored == current {
+                return Ok(());
+            }
+            if !explicit_reset {
+                anyhow::bail!(
+                    "external-content binding epoch is {stored}, expected {current}; explicit reset is required"
+                );
+            }
+            if stored > current {
+                anyhow::bail!(
+                    "external-content binding epoch {stored} is newer than this binary's epoch {current}"
+                );
+            }
+        }
+        if !explicit_reset
+            && !self
+                .list_generic_head_refs(crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE)?
+                .is_empty()
+        {
+            anyhow::bail!(
+                "external-content binding epoch is absent while binding heads exist; explicit reset is required"
+            );
+        }
+        if !guard.is_exclusive() {
+            anyhow::bail!(
+                "external-content binding epoch publication requires exclusive state authority"
+            );
+        }
+        self._runtime_state_directory.atomic_write_if_same(
+            name,
+            expected.as_ref(),
+            format!("{current}\n").as_bytes(),
+            0o600,
+        )?;
+        if self.external_content_binding_schema_epoch()? != Some(current) {
+            anyhow::bail!("external-content binding epoch publication did not verify");
+        }
+        Ok(())
+    }
+
     // ── Bundle event chains ────────────────────────────────
 
     pub fn append_bundle_event_admitted(
@@ -5370,6 +5638,20 @@ impl StateDb {
         queries::get_thread(&self.projection, thread_id)
     }
 
+    pub fn latest_state_anchor_event(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<queries::EventRow>> {
+        queries::latest_state_anchor_event(&self.projection, thread_id)
+    }
+
+    pub fn latest_chain_state_anchor_event(
+        &self,
+        chain_root_id: &str,
+    ) -> anyhow::Result<Option<queries::EventRow>> {
+        queries::latest_chain_state_anchor_event(&self.projection, chain_root_id)
+    }
+
     pub fn list_threads_by_chain(
         &self,
         chain_root_id: &str,
@@ -5410,6 +5692,66 @@ impl StateDb {
         self.operational()?.cas_entries_by_state_summary()
     }
 
+    pub fn lookup_replay_record(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        cache_key: &str,
+        verify: impl FnMut(&crate::ReplayIndexRecord) -> crate::ReplayRecordVerification,
+    ) -> anyhow::Result<crate::ReplayLookupOutcome> {
+        self.operational()?
+            .lookup_replay_record(namespace, cache_key, verify)
+    }
+
+    pub fn lookup_replay_index(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        cache_key: &str,
+    ) -> anyhow::Result<crate::ReplayLookupOutcome> {
+        self.operational()?
+            .lookup_replay_index(namespace, cache_key)
+    }
+
+    pub fn touch_replay_record_if_same(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        indexed: &crate::ReplayIndexRecord,
+    ) -> anyhow::Result<bool> {
+        self.operational()?
+            .touch_replay_record_if_same(namespace, indexed)
+    }
+
+    pub fn publish_replay_record(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        candidate: &crate::ReplayIndexRecord,
+        verify: impl FnMut(&crate::ReplayIndexRecord) -> crate::ReplayRecordVerification,
+    ) -> anyhow::Result<crate::ReplayPublishOutcome> {
+        self.operational()?
+            .publish_replay_record(namespace, candidate, verify)
+    }
+
+    pub fn list_replay_record_hashes(&self) -> anyhow::Result<Vec<String>> {
+        self.operational()?.list_replay_record_hashes()
+    }
+
+    pub fn delete_replay_records(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        cache_keys: &[String],
+    ) -> anyhow::Result<usize> {
+        self.operational()?
+            .delete_replay_records(namespace, cache_keys)
+    }
+
+    pub fn prune_replay_records(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        max_rows: usize,
+    ) -> anyhow::Result<usize> {
+        self.operational()?
+            .prune_replay_records(namespace, max_rows)
+    }
+
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,
@@ -5430,8 +5772,24 @@ impl StateDb {
         self.operational()?.create_sync_job(job)
     }
 
+    pub fn create_sync_job_with_initial_progress(
+        &self,
+        job: &NewSyncJob,
+        state: SyncJobState,
+        phase: &str,
+        result: Option<&serde_json::Value>,
+    ) -> anyhow::Result<SyncJobRecord> {
+        self.operational()?
+            .create_sync_job_with_initial_progress(job, state, phase, result)
+    }
+
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
         self.operational()?.update_sync_job(job_id, update)
+    }
+
+    pub fn reconcile_interrupted_sync_job_attempts(&self) -> anyhow::Result<usize> {
+        self.operational()?
+            .reconcile_interrupted_sync_job_attempts()
     }
 
     pub fn create_sync_job_attempt(
@@ -5487,6 +5845,56 @@ impl StateDb {
         self.operational()?.list_sync_jobs_by_state(state, limit)
     }
 
+    pub fn list_sync_jobs_by_operation_type_before(
+        &self,
+        operation_type: &str,
+        before: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_sync_jobs_by_operation_type_before(operation_type, before, limit)
+    }
+
+    pub fn list_active_sync_jobs_by_operation_type(
+        &self,
+        operation_type: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_active_sync_jobs_by_operation_type(operation_type, limit)
+    }
+
+    pub fn list_active_sync_jobs_by_operation_type_after(
+        &self,
+        operation_type: &str,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_active_sync_jobs_by_operation_type_after(operation_type, after, limit)
+    }
+
+    pub fn list_sync_jobs_by_operation_type_and_state(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_sync_jobs_by_operation_type_and_state(operation_type, state, limit)
+    }
+
+    pub fn list_sync_jobs_by_operation_type_and_state_after(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_sync_jobs_by_operation_type_and_state_after(operation_type, state, after, limit)
+    }
+
     pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
         self.operational()?.count_active_sync_jobs()
     }
@@ -5501,6 +5909,19 @@ impl StateDb {
             .delete_terminal_sync_jobs_before(cutoff_iso)
     }
 
+    pub fn operational_credential_profiles(
+        &self,
+    ) -> anyhow::Result<Vec<crate::OperationalCredentialProfileRecord>> {
+        self.operational()?.credential_profiles()
+    }
+
+    pub fn merge_operational_credential_profile(
+        &self,
+        profile: &crate::OperationalCredentialProfileRecord,
+    ) -> anyhow::Result<crate::OperationalCredentialProfileRecord> {
+        self.operational()?.merge_credential_profile(profile)
+    }
+
     fn operational(&self) -> anyhow::Result<&OperationalDb> {
         match &self.operational {
             OperationalAccess::Available(db) => Ok(db),
@@ -5509,6 +5930,179 @@ impl StateDb {
             }
         }
     }
+}
+
+fn verify_chain_writer_transition_adoption(
+    cas: &lillux::CasStore,
+    transition: &crate::sync::AdmittedChainWriterTransition,
+    publishing_signer: &str,
+) -> anyhow::Result<()> {
+    use crate::objects::{
+        AdmittedLaunchCapsule, Attestation, ChainState, ChainWriterTransitionEvidence,
+        PlacementRuntimeSeed, RemoteContinuationAuthority, StateManifest, ThreadEvent,
+        ThreadSnapshot, ThreadStatus,
+    };
+
+    transition.validate()?;
+    let evidence = &transition.evidence;
+    if publishing_signer != evidence.target_node_signer_fingerprint {
+        anyhow::bail!("transferred chain head is not signed by its granted target writer");
+    }
+
+    let writer_value = cas
+        .get_object(&transition.writer_grant_hash)?
+        .ok_or_else(|| anyhow::anyhow!("chain writer grant is absent"))?;
+    let writer_attestation = Attestation::from_value(&writer_value)?;
+    writer_attestation.verify_with_key(&transition.source_node_verifying_key)?;
+    let observed_writer = ChainWriterTransitionEvidence::from_attestation(&writer_attestation)?;
+    if &observed_writer != evidence {
+        anyhow::bail!("chain writer grant differs from admitted transition operands");
+    }
+
+    let placement_value = cas
+        .get_object(&evidence.placement_attestation_hash)?
+        .ok_or_else(|| anyhow::anyhow!("target placement attestation is absent"))?;
+    let placement = Attestation::from_value(&placement_value)?;
+    placement.verify_with_key(&transition.target_node_verifying_key)?;
+    if placement.issuer_fingerprint()? != evidence.target_node_signer_fingerprint
+        || placement.subject_hash != evidence.transition_subject_hash
+    {
+        anyhow::bail!("target placement attestation contradicts the writer grant");
+    }
+
+    let capsule_value = cas
+        .get_object(&evidence.transition_subject_hash)?
+        .ok_or_else(|| anyhow::anyhow!("target launch capsule is absent"))?;
+    AdmittedLaunchCapsule::from_current_value(capsule_value)?;
+
+    let source_value = cas
+        .get_object(&evidence.source_chain_head_hash)?
+        .ok_or_else(|| anyhow::anyhow!("writer transition source chain head is absent"))?;
+    let source: ChainState = serde_json::from_value(source_value)?;
+    source.validate()?;
+    if source.chain_root_id != evidence.chain_root_id {
+        anyhow::bail!("writer transition source head belongs to another chain");
+    }
+    let source_entry_before = source
+        .threads
+        .get(&evidence.source_placement_thread_id)
+        .ok_or_else(|| anyhow::anyhow!("writer transition source placement is absent"))?;
+    if source_entry_before.last_event_hash.as_deref()
+        != Some(evidence.source_last_event_hash.as_str())
+    {
+        anyhow::bail!("writer transition source event is not the source head frontier");
+    }
+
+    let target_value = cas
+        .get_object(&transition.target_chain_head_hash)?
+        .ok_or_else(|| anyhow::anyhow!("transferred target chain head is absent"))?;
+    let target: ChainState = serde_json::from_value(target_value)?;
+    target.validate()?;
+    if target.chain_root_id != evidence.chain_root_id
+        || target.prev_chain_state_hash.as_deref() != Some(evidence.source_chain_head_hash.as_str())
+    {
+        anyhow::bail!("transferred chain head is not the immediate granted successor");
+    }
+    let source_entry_after = target
+        .threads
+        .get(&evidence.source_placement_thread_id)
+        .ok_or_else(|| anyhow::anyhow!("transferred source placement disappeared"))?;
+    if source_entry_after.status != ThreadStatus::Continued {
+        anyhow::bail!("transferred source placement was not terminalized as continued");
+    }
+    let continuation_hash = source_entry_after
+        .last_event_hash
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("transferred source has no continuation event"))?;
+    let continuation_value = cas
+        .get_object(continuation_hash)?
+        .ok_or_else(|| anyhow::anyhow!("transferred continuation event is absent"))?;
+    let continuation: ThreadEvent = serde_json::from_value(continuation_value)?;
+    continuation.validate()?;
+    if continuation.event_type != "thread_continued"
+        || continuation.thread_id != evidence.source_placement_thread_id
+        || continuation.chain_root_id != evidence.chain_root_id
+        || continuation.prev_thread_event_hash.as_deref()
+            != Some(evidence.source_last_event_hash.as_str())
+    {
+        anyhow::bail!("transferred continuation event is not the granted source edge");
+    }
+    let remote: RemoteContinuationAuthority = serde_json::from_value(
+        continuation
+            .payload
+            .get("remote_adoption")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("continuation has no remote-adoption authority"))?,
+    )?;
+    remote.validate()?;
+    if remote.operation_id != evidence.operation_id
+        || remote.source_chain_head_hash != evidence.source_chain_head_hash
+        || remote.source_last_event_hash != evidence.source_last_event_hash
+        || remote.target_placement_attestation_hash != evidence.placement_attestation_hash
+        || remote.chain_writer_grant_hash != transition.writer_grant_hash
+        || remote.target_launch_capsule_hash != evidence.transition_subject_hash
+        || remote.source_accounting_transfer_hash != evidence.source_accounting_transfer_hash
+        || remote.source_site_id != evidence.source_site_id
+        || remote.target_site_id != evidence.target_site_id
+        || remote.target_node_signer_fingerprint != evidence.target_node_signer_fingerprint
+        || remote.successor_thread_id != evidence.successor_placement_thread_id
+    {
+        anyhow::bail!("remote continuation event differs from its writer grant");
+    }
+    if let Some(hash) = &remote.source_accounting_transfer_hash {
+        let value = cas
+            .get_object(hash)?
+            .ok_or_else(|| anyhow::anyhow!("accounting allowance transfer is absent"))?;
+        let transfer: crate::objects::AccountingAllowanceTransfer = serde_json::from_value(value)?;
+        if transfer.content_hash()? != *hash
+            || transfer.operation_id != evidence.operation_id
+            || transfer.source_chain_root_id != evidence.chain_root_id
+            || transfer.source_placement_thread_id != evidence.source_placement_thread_id
+        {
+            anyhow::bail!("accounting allowance transfer contradicts its writer grant");
+        }
+    }
+    let runtime_seed_value = cas
+        .get_object(&remote.target_runtime_seed_hash)?
+        .ok_or_else(|| anyhow::anyhow!("remote continuation runtime seed is absent"))?;
+    let runtime_seed = PlacementRuntimeSeed::from_current_value(runtime_seed_value)?;
+    if runtime_seed.content_hash()? != remote.target_runtime_seed_hash
+        || runtime_seed.operation_id != evidence.operation_id
+        || runtime_seed.chain_root_id != evidence.chain_root_id
+        || runtime_seed.source_placement_thread_id != evidence.source_placement_thread_id
+        || runtime_seed.successor_placement_thread_id != evidence.successor_placement_thread_id
+        || runtime_seed.target_site_id != evidence.target_site_id
+        || runtime_seed.owner_principal != evidence.owner_principal
+        || runtime_seed.target_launch_capsule_hash != evidence.transition_subject_hash
+    {
+        anyhow::bail!("remote continuation runtime seed contradicts its writer grant");
+    }
+    let checkpoint_value = cas
+        .get_object(&remote.checkpoint_manifest_hash)?
+        .ok_or_else(|| anyhow::anyhow!("remote continuation checkpoint is absent"))?;
+    StateManifest::from_current_value(checkpoint_value)?;
+
+    let successor_entry = target
+        .threads
+        .get(&evidence.successor_placement_thread_id)
+        .ok_or_else(|| anyhow::anyhow!("transferred successor placement is absent"))?;
+    let successor_value = cas
+        .get_object(&successor_entry.snapshot_hash)?
+        .ok_or_else(|| anyhow::anyhow!("transferred successor snapshot is absent"))?;
+    let successor = ThreadSnapshot::from_current_value(successor_value)?;
+    if successor.chain_root_id != evidence.chain_root_id
+        || successor.thread_id != evidence.successor_placement_thread_id
+        || successor.upstream_thread_id.as_deref()
+            != Some(evidence.source_placement_thread_id.as_str())
+        || successor.current_site_id != evidence.target_site_id
+        || successor.origin_site_id != evidence.origin_site_id
+        || successor.requested_by.as_deref() != Some(evidence.owner_principal.as_str())
+        || successor.admitted_launch_capsule_hash.as_deref()
+            != Some(evidence.transition_subject_hash.as_str())
+    {
+        anyhow::bail!("transferred successor snapshot contradicts its writer grant");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5580,7 +6174,7 @@ mod tests {
             item_trust_class: CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: "33".repeat(32),
             resolved_from: CapturedPolicyProvenance::NodeDefault {
-                node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
             },
         }))
         .build()
@@ -5708,7 +6302,8 @@ mod tests {
         assert!(
             startup_error
                 .to_string()
-                .contains("thread-history discard is incomplete")
+                .contains("offline execution-history reset is incomplete"),
+            "unexpected startup error: {startup_error:#}"
         );
 
         let report = db
@@ -5777,6 +6372,101 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn explicit_external_content_cutover_retires_only_binding_heads() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        let namespace = crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        db.write_generic_head_ref(namespace, &first, &"c".repeat(64), &signer, &guard)
+            .unwrap();
+        db.write_generic_head_ref(namespace, &second, &"d".repeat(64), &signer, &guard)
+            .unwrap();
+        db.write_generic_head_ref("unrelated", "retained", &"e".repeat(64), &signer, &guard)
+            .unwrap();
+
+        assert_eq!(
+            db.discard_external_content_binding_heads(&guard, true)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.discard_external_content_binding_heads(&guard, false)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.external_content_binding_schema_epoch().unwrap(),
+            Some(crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH)
+        );
+        assert!(db.list_generic_head_refs(namespace).unwrap().is_empty());
+        assert!(
+            db.read_generic_head_ref("unrelated", "retained")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.discard_external_content_binding_heads(&guard, false)
+                .unwrap(),
+            0
+        );
+
+        drop(guard);
+        let guard = authority.acquire_shared_guard().unwrap();
+        db.ensure_current_external_content_binding_epoch(&guard)
+            .expect("ordinary online binding may validate an already-current epoch");
+    }
+
+    #[test]
+    fn fresh_external_content_epoch_requires_exclusive_authority_and_no_heads() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+
+        let shared = authority.acquire_shared_guard().unwrap();
+        let error = db
+            .ensure_current_external_content_binding_epoch(&shared)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires exclusive state authority")
+        );
+        drop(shared);
+
+        let exclusive = authority.acquire_exclusive_guard(true).unwrap();
+        db.ensure_current_external_content_binding_epoch(&exclusive)
+            .unwrap();
+        assert_eq!(
+            db.external_content_binding_schema_epoch().unwrap(),
+            Some(crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH)
+        );
+    }
+
+    #[test]
+    fn missing_external_content_epoch_with_heads_requires_explicit_reset() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        db.write_generic_head_ref(
+            crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &signer,
+            &guard,
+        )
+        .unwrap();
+
+        let error = db
+            .ensure_current_external_content_binding_epoch(&guard)
+            .unwrap_err();
+        assert!(error.to_string().contains("while binding heads exist"));
     }
 
     #[test]
@@ -6324,6 +7014,41 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn authoritative_snapshot_last_event_uses_the_thread_entry_tip() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let snapshot = test_root_snapshot("directive:system/test");
+        assert!(snapshot.last_event_hash.is_none());
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+
+        let event = crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            "T-root",
+            "observation_without_snapshot_transition",
+        )
+        .payload(serde_json::json!({"observed": true}))
+        .build();
+        let appended = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap();
+        let committed_event = appended.value.events.last().unwrap();
+
+        let readback = db
+            .read_authoritative_thread_snapshot_with_last_event("T-root", "T-root")
+            .unwrap()
+            .expect("authoritative root");
+        assert!(readback.snapshot.last_event_hash.is_none());
+        assert_eq!(readback.chain_head_hash, appended.value.chain_state_hash);
+        let (event_hash, event) = readback.last_event.expect("thread-entry tip");
+        assert_eq!(
+            event_hash,
+            crate::objects::canonical_value_digest(&committed_event.to_value()).unwrap()
+        );
+        assert_eq!(event.event_type, "observation_without_snapshot_transition");
+        assert_eq!(event.thread_seq, 1);
     }
 
     #[test]

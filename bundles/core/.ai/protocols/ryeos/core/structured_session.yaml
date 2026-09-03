@@ -1,0 +1,37 @@
+# ryeos:signed:2026-08-19T08:24:44Z:6fb36c01889dc7de1d09e9ab56d4c82e941438f19670d361a13271f1f4671b81:C/gfBgtwsHOUg7/9MGlhQ2H1MQFgJ+eGWDE1M4BE8igOcTc82bDhaq57NYqxh8tixgaf4PejIrhPz8qH/9HNCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: structured_session
+category: ryeos/core
+abi_version: v1
+description: Session-bound structured subprocess with bounded full-duplex frames over a daemon-owned inherited socket.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: none
+session:
+  process_mode: exclusive_session
+  workspace_authority: runtime_workspace
+  network_authority: node_policy
+  runtime_env_allowlist:
+    - RYEOS_WORKLOAD_HOME
+    - RYEOS_WORKLOAD_EXECUTABLE
+    - RYEOS_WORKSPACE
+    - RYEOS_STRUCTURED_SESSION_ROUTE_SET
+    - RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES
+    - RYEOS_STRUCTURED_SESSION_PROFILE_HASH
+  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: ryeos.structured-session
+  wire_version: 1
+  max_frame_bytes: 16777216

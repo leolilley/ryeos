@@ -1,0 +1,32 @@
+# ryeos:signed:2026-08-26T10:41:54Z:a030ff543cb458774107895b818a3d87ef9748fa4582fe5284ce9825627f259c:bxXx65ahGPjPX36C7Utt77RVafAvLCdFoG90O7USp2Iuo9Am8YgQh1xvMui7HNXQ0ja9YbJaBfwEiXyWAogFDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, start]
+description: "Start a Codex session from the principal's pushed project HEAD and a signed portable environment; --current-head is required and --async is recommended"
+help:
+  usage: "ryeos --project <path> codex session start <credential-profile-id> --environment <config-ref> --async --current-head"
+  examples:
+    - "ryeos --project . codex session start personal --environment config:codex/environments/default --async --current-head"
+forms:
+  - slots:
+      - field: credential_profile_id
+project:
+  resolution: required
+  default: discover_upward_ai
+  request_project_path: true
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+control_flags:
+  - flag: async
+    help: "Return after durable accepted launch"
+    binding: launch_mode_accepted
+  - flag: current-head
+    help: "Resolve the principal's pushed project HEAD into a retained copy-on-write generation"
+    binding: pin_current_head_at_admission
+  - flag: environment
+    help: "Bind the signed portable worker environment"
+    binding: ref_binding
+    ref_binding_name: environment
+dispatch:
+  kind: execute_ref
+  execute: worker_execution:codex/session
+  availability: daemon

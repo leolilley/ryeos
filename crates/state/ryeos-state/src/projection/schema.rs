@@ -251,6 +251,51 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_attempt_budget_once_coordinate
 CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_attempt_budget_once_fingerprint
     ON provider_attempt_budget_transition_once(payload_fingerprint);
 
+-- Exact source-scoped identity for daemon-authored project observations.
+-- This is a rebuildable index over chain history, not an operational ledger;
+-- its lifetime therefore exactly matches the durable evidence it identifies.
+CREATE TABLE IF NOT EXISTS project_observation_once (
+    observation_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    source_definition_ref TEXT NOT NULL,
+    source_effective_definition_digest TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    stable_id TEXT NOT NULL,
+    payload_fingerprint TEXT NOT NULL,
+    event_hash TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_observation_coordinate
+    ON project_observation_once(
+        chain_root_id, source_definition_ref,
+        source_effective_definition_digest, namespace, stable_id
+    );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_observation_event_hash
+    ON project_observation_once(event_hash);
+
+-- Exact daemon-authored provider publication/replay facts. The primary key
+-- folds one exact outcome while allowing an executed call and a later exact
+-- replay of that same logical attempt to remain distinct evidence.
+CREATE TABLE IF NOT EXISTS provider_call_observation_once (
+    observation_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    turn INTEGER NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    effect_coordinate_digest TEXT NOT NULL,
+    source TEXT NOT NULL,
+    answer_digest TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    publication TEXT NOT NULL,
+    event_hash TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_call_observation_event_hash
+    ON provider_call_observation_once(event_hash);
+
 -- App-level usage attribution asserted by an authorized RyeOS principal at
 -- root launch time. Keyed by chain root so child/continuation usage can join
 -- back to the root app subject.
@@ -1123,6 +1168,148 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "project_observation_once",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "source_definition_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "source_effective_definition_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "namespace",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stable_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "payload_fingerprint",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "event_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "provider_call_observation_once",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_number",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "effect_coordinate_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "source",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "answer_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "record_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "publication",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "event_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "thread_usage_subjects",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -1331,6 +1518,30 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_provider_attempt_budget_once_fingerprint",
                 table: "provider_attempt_budget_transition_once",
                 columns: &["payload_fingerprint"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_project_observation_coordinate",
+                table: "project_observation_once",
+                columns: &[
+                    "chain_root_id",
+                    "source_definition_ref",
+                    "source_effective_definition_digest",
+                    "namespace",
+                    "stable_id",
+                ],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_project_observation_event_hash",
+                table: "project_observation_once",
+                columns: &["event_hash"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_call_observation_event_hash",
+                table: "provider_call_observation_once",
+                columns: &["event_hash"],
                 unique: true,
             },
             sqlite_schema::IndexSpec {

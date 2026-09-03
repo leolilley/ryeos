@@ -16,6 +16,9 @@ use crate::process::{
     validate_execution_process_identity_shape,
 };
 
+const MAX_DEDICATED_SESSION_COMMANDS: i64 = 100_000;
+const MAX_DEDICATED_SESSION_COMMAND_SPOOL_BYTES: i64 = 512 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
     Cancel,
@@ -36,6 +39,10 @@ pub struct LaunchPlanningRecord {
 #[derive(Debug, thiserror::Error)]
 #[error("pending launch planning admission reached its bounded capacity")]
 pub struct LaunchPlanningCapacityExceeded;
+
+#[derive(Debug, thiserror::Error)]
+#[error("launch planning coordinate is already reserved")]
+pub struct LaunchPlanningAlreadyReserved;
 
 /// Result of recording one operational parent/child lineage edge.
 ///
@@ -139,7 +146,7 @@ pub struct RuntimeThreadHistoryDiscardReport {
     pub in_process_handler_reservations: usize,
     pub thread_commands: usize,
     pub hook_dispatch_ledger: usize,
-    pub detached_spawn_intents: usize,
+    pub runtime_action_intents: usize,
     pub recovery_waits: usize,
     pub thread_launch_claims: usize,
     pub thread_launch_epochs: usize,
@@ -158,7 +165,7 @@ impl RuntimeThreadHistoryDiscardReport {
             + self.in_process_handler_reservations
             + self.thread_commands
             + self.hook_dispatch_ledger
-            + self.detached_spawn_intents
+            + self.runtime_action_intents
             + self.recovery_waits
             + self.thread_launch_claims
             + self.thread_launch_epochs
@@ -312,7 +319,7 @@ pub const MAX_OPEN_COMMAND_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 /// from becoming an unbounded response store.
 pub const MAX_HOOK_DISPATCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Exact dispatch-identity seed admitted by this runtime-store epoch.
-pub const HOOK_DISPATCH_SEED_VERSION: u32 = 2;
+pub const HOOK_DISPATCH_SEED_VERSION: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct NewHookDispatch {
@@ -367,10 +374,35 @@ pub struct CompletedHookDispatch {
     pub response_hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeActionMode {
+    Inline,
+    Detached,
+}
+
+impl RuntimeActionMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Detached => "detached",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "inline" => Ok(Self::Inline),
+            "detached" => Ok(Self::Detached),
+            other => bail!("invalid runtime action mode `{other}`"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct DetachedSpawnIntent {
+pub struct RuntimeActionIntent {
     pub operation_id: String,
-    pub parent_thread_id: String,
+    pub chain_root_id: String,
+    pub first_caller_thread_id: String,
+    pub mode: RuntimeActionMode,
     pub request_hash: String,
     pub child_thread_id: String,
     pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
@@ -389,34 +421,38 @@ pub struct RecoveryWaitDisposition {
     pub deadline_at_ms: i64,
 }
 
-fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<DetachedSpawnIntent> {
-    Ok(DetachedSpawnIntent {
+fn decode_runtime_action_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeActionIntent> {
+    Ok(RuntimeActionIntent {
         operation_id: row.get(0)?,
-        parent_thread_id: row.get(1)?,
-        request_hash: row.get(2)?,
-        child_thread_id: row.get(3)?,
+        chain_root_id: row.get(1)?,
+        first_caller_thread_id: row.get(2)?,
+        mode: RuntimeActionMode::parse(row.get::<_, String>(3)?.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
+        })?,
+        request_hash: row.get(4)?,
+        child_thread_id: row.get(5)?,
         child_project_authority: row
-            .get::<_, Option<String>>(4)?
-            .map(|raw| decode_current_project_authority_column(4, &raw))
-            .transpose()?,
-        admitted_launch_capsule_hash: row.get(5)?,
-        launch_metadata: row
             .get::<_, Option<String>>(6)?
-            .map(|raw| decode_stored_launch_metadata_column(6, &raw))
+            .map(|raw| decode_current_project_authority_column(6, &raw))
+            .transpose()?,
+        admitted_launch_capsule_hash: row.get(7)?,
+        launch_metadata: row
+            .get::<_, Option<String>>(8)?
+            .map(|raw| decode_stored_launch_metadata_column(8, &raw))
             .transpose()?
             .and_then(StoredLaunchMetadata::current),
         incompatible_launch_metadata: row
-            .get::<_, Option<String>>(6)?
-            .map(|raw| decode_stored_launch_metadata_column(6, &raw))
+            .get::<_, Option<String>>(8)?
+            .map(|raw| decode_stored_launch_metadata_column(8, &raw))
             .transpose()?
             .and_then(StoredLaunchMetadata::incompatible),
         initial_events: row
-            .get::<_, Option<String>>(7)?
+            .get::<_, Option<String>>(9)?
             .map(|raw| serde_json::from_str(&raw))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    7,
+                    9,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
@@ -482,6 +518,18 @@ pub enum LaunchClaimOutcome {
     AlreadyClaimed,
 }
 
+/// One dead-generation launch claim removed by the startup sweep.
+#[derive(Debug, Clone)]
+pub struct StaleLaunchClaimCleared {
+    pub thread_id: String,
+    pub claim_id: String,
+    pub dead_generation: String,
+    /// The dead owner had reserved a native-resume attempt but never reached
+    /// durable process attachment. Clearing that uncontacted reservation also
+    /// re-arms the retry counter atomically.
+    pub resume_budget_rearmed: bool,
+}
+
 /// A live launch claim, as read back for reconcile/inspection.
 #[derive(Debug, Clone)]
 pub struct LaunchClaim {
@@ -491,6 +539,18 @@ pub struct LaunchClaim {
     pub lease_expires_at_ms: i64,
     pub claimed_by: String,
     pub owner: LaunchOwner,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeRecoveryClaimRotation {
+    Rotated {
+        claim: LaunchClaim,
+        next_attempt: u32,
+    },
+    Exhausted {
+        attempts: u32,
+    },
+    LostOwner,
 }
 
 /// Canonical durable fencing identity for one launch attempt. The JSON form is
@@ -525,7 +585,7 @@ pub struct WorkspaceRecord {
     pub backend_version: Option<String>,
     pub pinned_root_identities: Option<String>,
     pub mount_identity: Option<String>,
-    pub lower_snapshot: String,
+    pub base_snapshot: String,
     /// Post-freeze snapshot bound atomically with the owning thread's
     /// ResumeContext. Present only once a `freezing` workspace has a durable
     /// generation from which recovery may continue.
@@ -801,7 +861,7 @@ CREATE INDEX IF NOT EXISTS idx_thread_commands_thread_status
 
 CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
     dispatch_key TEXT PRIMARY KEY,
-    seed_version INTEGER NOT NULL CHECK (seed_version = 2),
+    seed_version INTEGER NOT NULL CHECK (seed_version = 3),
     chain_root_id TEXT NOT NULL,
     caller_thread_id TEXT NOT NULL,
     event TEXT NOT NULL,
@@ -822,17 +882,31 @@ CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
 CREATE INDEX IF NOT EXISTS idx_hook_dispatch_ledger_chain_root
     ON hook_dispatch_ledger(chain_root_id);
 
-CREATE TABLE IF NOT EXISTS detached_spawn_intent (
+CREATE TABLE IF NOT EXISTS runtime_action_intent (
     operation_id TEXT PRIMARY KEY,
-    parent_thread_id TEXT NOT NULL,
+    chain_root_id TEXT NOT NULL,
+    first_caller_thread_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('inline', 'detached')),
     request_hash TEXT NOT NULL,
     child_thread_id TEXT NOT NULL UNIQUE,
     child_project_authority TEXT,
     admitted_launch_capsule_hash TEXT,
     launch_metadata TEXT,
     initial_events TEXT,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL,
+    CHECK (
+        mode = 'detached'
+        OR (
+            child_project_authority IS NULL
+            AND admitted_launch_capsule_hash IS NULL
+            AND launch_metadata IS NULL
+            AND initial_events IS NULL
+        )
+    )
 );
+
+CREATE INDEX IF NOT EXISTS idx_runtime_action_intent_chain_root
+    ON runtime_action_intent(chain_root_id);
 
 CREATE TABLE IF NOT EXISTS thread_recovery_wait (
     thread_id TEXT PRIMARY KEY,
@@ -848,7 +922,8 @@ CREATE TABLE IF NOT EXISTS thread_launch_claim (
     claim_id TEXT NOT NULL,
     claimed_at_ms INTEGER NOT NULL,
     lease_expires_at_ms INTEGER NOT NULL,
-    claimed_by TEXT NOT NULL
+    claimed_by TEXT NOT NULL,
+    rearm_resume_budget_if_stale INTEGER NOT NULL CHECK (rearm_resume_budget_if_stale IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS thread_launch_epoch (
@@ -861,7 +936,7 @@ CREATE TABLE IF NOT EXISTS execution_workspace (
     thread_id TEXT,
     launch_owner TEXT,
     backend_id TEXT,
-    lower_snapshot TEXT NOT NULL,
+    base_snapshot TEXT NOT NULL,
     frozen_snapshot_hash TEXT,
     root_path TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('reserved', 'constructing', 'ready', 'active', 'freezing', 'destroying', 'closing', 'closed', 'orphaned')),
@@ -974,6 +1049,164 @@ CREATE INDEX IF NOT EXISTS idx_launch_planning_state_updated
 
 CREATE INDEX IF NOT EXISTS idx_launch_planning_generation_state
     ON launch_planning(daemon_generation_id, state);
+
+CREATE TABLE IF NOT EXISTS worker_process (
+    worker_instance_id TEXT PRIMARY KEY,
+    boot_identity_hash TEXT NOT NULL,
+    session_capsule_hash TEXT NOT NULL,
+    boot_epoch INTEGER NOT NULL CHECK (boot_epoch > 0),
+    lifecycle_generation INTEGER NOT NULL CHECK (lifecycle_generation > 0),
+    process_identity TEXT NOT NULL,
+    control_channel_identity TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('starting', 'attached', 'live', 'draining', 'dead')),
+    daemon_generation_id TEXT NOT NULL,
+    placement_thread_id TEXT NOT NULL,
+    cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('owned', 'draining', 'reaped', 'unproved')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_process_daemon_state
+    ON worker_process(daemon_generation_id, state);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_process_placement_epoch
+    ON worker_process(placement_thread_id, boot_epoch);
+
+CREATE TABLE IF NOT EXISTS dedicated_session (
+    placement_thread_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    owner_principal TEXT NOT NULL,
+    admitted_capsule_hash TEXT NOT NULL,
+    worker_instance_id TEXT,
+    worker_boot_epoch INTEGER,
+    workspace_id TEXT NOT NULL,
+    candidate_required INTEGER NOT NULL CHECK (candidate_required IN (0, 1)),
+    credential_profile_id TEXT NOT NULL,
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    remote_thread_id TEXT,
+    current_turn_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('admitted', 'binding', 'idle', 'turn_running', 'awaiting_approval', 'recovering', 'outcome_unknown', 'draining', 'freezing', 'frozen', 'verifying', 'publish_ready', 'publishing', 'discarding', 'terminal')),
+    send_boundary TEXT NOT NULL CHECK (send_boundary IN ('none', 'committed', 'contacted', 'settled', 'outcome_unknown')),
+    candidate_snapshot_hash TEXT,
+    candidate_validation_hash TEXT,
+    publication_result TEXT,
+    disposition_resume_state TEXT,
+    terminal_reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_owner_state
+    ON dedicated_session(owner_principal, state);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_chain
+    ON dedicated_session(chain_root_id, placement_thread_id);
+
+CREATE TABLE IF NOT EXISTS dedicated_session_command (
+    placement_thread_id TEXT NOT NULL,
+    command_sequence INTEGER NOT NULL CHECK (command_sequence > 0),
+    idempotency_key TEXT NOT NULL,
+    worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
+    command_kind TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('committed', 'dispatched', 'completed', 'failed', 'outcome_unknown')),
+    result_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (placement_thread_id, command_sequence),
+    UNIQUE (placement_thread_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_command_state
+    ON dedicated_session_command(placement_thread_id, state);
+
+CREATE TABLE IF NOT EXISTS dedicated_session_observation_batch (
+    placement_thread_id TEXT NOT NULL,
+    worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
+    first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+    through_sequence INTEGER NOT NULL CHECK (through_sequence >= first_sequence),
+    previous_digest TEXT,
+    batch_digest TEXT NOT NULL,
+    cumulative_event_count INTEGER NOT NULL CHECK (cumulative_event_count > 0),
+    canonical_batch_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('append_contacting', 'settled', 'append_unknown')),
+    created_at_ms INTEGER NOT NULL,
+    settled_at_ms INTEGER,
+    PRIMARY KEY (placement_thread_id, worker_boot_epoch, first_sequence)
+);
+
+CREATE TABLE IF NOT EXISTS dedicated_session_approval (
+    placement_thread_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL,
+    worker_instance_id TEXT NOT NULL,
+    worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
+    request_digest TEXT NOT NULL,
+    operation_class TEXT NOT NULL,
+    requested_authority_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'decision_reserved', 'delivery_contacting', 'delivery_settled', 'delivery_unknown', 'expired', 'stale_epoch')),
+    decision_principal TEXT,
+    decision_json TEXT,
+    decision_digest TEXT,
+    reservation_token TEXT,
+    expires_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    resolved_at_ms INTEGER,
+    delivery_contacted_at_ms INTEGER,
+    delivery_settled_at_ms INTEGER,
+    PRIMARY KEY (placement_thread_id, approval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_approval_pending
+    ON dedicated_session_approval(placement_thread_id, state, expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS credential_profile (
+    profile_id TEXT PRIMARY KEY,
+    owner_principal TEXT NOT NULL,
+    home_id TEXT NOT NULL UNIQUE,
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    state TEXT NOT NULL CHECK (state IN ('unauthenticated', 'enrolling', 'confirming', 'active', 'revoking', 'revoked', 'deleting', 'deleted')),
+    active_login_id TEXT,
+    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
+    login_expires_at_ms INTEGER,
+    sanitized_account_json TEXT,
+    lock_owner TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_credential_profile_owner_state
+    ON credential_profile(owner_principal, state);
+
+CREATE TABLE IF NOT EXISTS credential_profile_reservation (
+    reservation_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    successor_thread_id TEXT NOT NULL UNIQUE,
+    profile_id TEXT NOT NULL,
+    owner_principal TEXT NOT NULL,
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    subject_contract_digest TEXT NOT NULL,
+    subject_digest TEXT NOT NULL,
+    checkpoint_manifest_hash TEXT NOT NULL,
+    upstream_session_id TEXT NOT NULL,
+    project_principal_key TEXT NOT NULL,
+    project_hash TEXT NOT NULL,
+    target_project_head_hash TEXT NOT NULL,
+    project_fence_state TEXT NOT NULL CHECK (project_fence_state IN ('active', 'released')),
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'consumed', 'released')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credential_profile_reservation_operation
+    ON credential_profile_reservation(operation_id);
+
+CREATE INDEX IF NOT EXISTS idx_credential_profile_reservation_profile_state
+    ON credential_profile_reservation(profile_id, state);
+
+CREATE INDEX IF NOT EXISTS idx_credential_profile_reservation_project_fence
+    ON credential_profile_reservation(project_principal_key, project_hash, project_fence_state);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -990,11 +1223,65 @@ const PREDECESSOR_RUNTIME_APP_ID: i32 = 0x5259_4541;
 const RUNTIME_OPERATOR_APP_ID_PREFIX: u32 = 0x5259_0000;
 const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
-// Epoch 2 is the clean v2 hook-dispatch activation barrier. An epoch-1 store
-// may contain resumable v1-keyed occurrences and is deliberately refused by
-// ordinary open; the explicit runtime-history reset is permitted only after
-// admission has stopped and resumable work has been drained/terminalized.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 2;
+// Epoch 3 is the clean effective-program/hook-dispatch activation barrier. An
+// older store may contain resumable occurrences under superseded identity and
+// is deliberately refused by ordinary open; the explicit runtime-history
+// reset is permitted only after admission has stopped and resumable work has
+// been drained/terminalized.
+// Epoch 5 stores only the daemon-projected action result in follow waiter
+// terminal envelopes. Predecessor rows retained complete runtime results and
+// cannot be reinterpreted as the compact parent-resume contract.
+// Epoch 6 atomically introduces durable exclusive-process ownership, its
+// dedicated session command/approval ledgers, and opaque credential-profile
+// metadata. It deliberately has no open-time migration.
+// Epoch 7 adds the durable pre-contact boundary for worker-pushed observation
+// batches. It deliberately has no open-time migration.
+// Epoch 8 retains every worker boot as immutable process-history evidence and
+// uniquely identifies an epoch within its session. Predecessor epoch 7's
+// single-row-per-session constraint cannot represent a recovered worker.
+// Epoch 9 embeds the exact retained-current-HEAD destination in every durable
+// execution-project authority envelope. A predecessor row cannot authorize
+// publication under this contract.
+// Epoch 10 retains the exact canonical observation batch before root-chain
+// contact, so startup can complete an accepted append without worker replay.
+// Epoch 11 replaces the overlay-shaped execution-workspace authority with a
+// canonical RyeOS-owned project root plus, only under enforced isolation, one
+// opaque backend-state root. Predecessor journals cannot prove either the new
+// root identity set or the v3 signed-adapter lifecycle contract.
+// Epoch 12 makes credential_profile an explicitly revisioned live projection
+// of stable operational authority. The revision permits deterministic repair
+// while this exact runtime schema is open. An explicit predecessor-schema
+// cutover preserves only OperationalDb authority and never decodes this table.
+// Epoch 13 separates stable worker chain addressing from exact placement and
+// boot-epoch fences throughout the hosted-worker projection.
+// Epoch 14 admits only the portable outer exact-program/capsule contract and
+// launch-metadata epoch that seal resolved ref-binding identities.
+// Epoch 15 retains cross-site credential-generation reservations until the
+// exact successor dedicated session atomically consumes them. A predecessor
+// lock_owner alone cannot distinguish a crashed handoff reservation from an
+// abandoned pre-attachment worker start.
+// Epoch 16 admits launch-metadata epoch 20, including the exact durable
+// runtime-state bootstrap for every machine continuation.
+// Epoch 17 clean-cuts retained managed launches at persistent-session capsule
+// schema 5 and the runtime launch contract that requires an explicit signed
+// content-dependency policy. Predecessor descriptors omit that authority and
+// must not be reinterpreted as the current empty policy during recovery.
+// Epoch 18 replaces the detached-only action reservation with one chain-bound
+// runtime-action intent shared by inline and detached callbacks. Epoch 17 rows
+// cannot prove the new action mode or authoritative chain scope.
+// Epoch 19 admits launch-metadata epoch 21 and sealed-request schema 11, which
+// retain optional ingress-authenticated handler authority without reconstructing
+// it from a principal string during callbacks or recovery.
+// Epoch 20 admits sealed-request schema 12, thread-snapshot schema 11,
+// admitted-launch-capsule schema 17, and launch-metadata epoch 22. Their
+// captured node-history policy provenance is the flat exact policy-item
+// identity; predecessor tagged signed_config/missing_config wrappers are not
+// decoded as current authority.
+// Epoch 21 admits sealed-request schema 13, admitted-launch-capsule schema 18,
+// and launch-metadata epoch 23. It also makes each handoff credential
+// reservation the durable owner of the exact target project-HEAD fence until
+// authoritative adoption. Predecessor reservations cannot prove that fence.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 21;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -1250,7 +1537,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
-                name: "detached_spawn_intent",
+                name: "runtime_action_intent",
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -1259,7 +1546,19 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "parent_thread_id",
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_caller_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "mode",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -1376,6 +1675,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "rearm_resume_budget_if_stale",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -1423,7 +1728,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "lower_snapshot",
+                        name: "base_snapshot",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -1826,6 +2131,659 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "worker_process",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_instance_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "boot_identity_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "session_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lifecycle_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "control_channel_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "daemon_generation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cleanup_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "admitted_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_instance_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "workspace_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "candidate_required",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_profile_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "remote_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "current_turn_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "send_boundary",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "candidate_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "candidate_validation_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "publication_result",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "disposition_resume_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_reason",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session_command",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "command_sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "idempotency_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "command_kind",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "payload_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session_approval",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "approval_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_instance_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_class",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "requested_authority_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "decision_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "decision_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "decision_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation_token",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "resolved_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delivery_contacted_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delivery_settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session_observation_batch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "through_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "previous_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "batch_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cumulative_event_count",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "canonical_batch_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "credential_profile",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "profile_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "home_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "active_login_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sanitized_account_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lock_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "authority_revision",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "credential_profile_reservation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "successor_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "profile_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject_contract_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "checkpoint_manifest_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "upstream_session_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_principal_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "target_project_head_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_fence_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -1855,6 +2813,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::IndexSpec {
                 name: "idx_hook_dispatch_ledger_chain_root",
                 table: "hook_dispatch_ledger",
+                columns: &["chain_root_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_runtime_action_intent_chain_root",
+                table: "runtime_action_intent",
                 columns: &["chain_root_id"],
                 unique: false,
             },
@@ -1900,26 +2864,79 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["daemon_generation_id", "state"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_worker_process_daemon_state",
+                table: "worker_process",
+                columns: &["daemon_generation_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_worker_process_placement_epoch",
+                table: "worker_process",
+                columns: &["placement_thread_id", "boot_epoch"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_owner_state",
+                table: "dedicated_session",
+                columns: &["owner_principal", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_chain",
+                table: "dedicated_session",
+                columns: &["chain_root_id", "placement_thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_command_state",
+                table: "dedicated_session_command",
+                columns: &["placement_thread_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_approval_pending",
+                table: "dedicated_session_approval",
+                columns: &["placement_thread_id", "state", "expires_at_ms"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_owner_state",
+                table: "credential_profile",
+                columns: &["owner_principal", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_reservation_operation",
+                table: "credential_profile_reservation",
+                columns: &["operation_id"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_reservation_profile_state",
+                table: "credential_profile_reservation",
+                columns: &["profile_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_reservation_project_fence",
+                table: "credential_profile_reservation",
+                columns: &[
+                    "project_principal_key",
+                    "project_hash",
+                    "project_fence_state",
+                ],
+                unique: false,
+            },
         ],
     }
 }
 
-fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
-    let mut statement = conn.prepare(
-        "SELECT name FROM sqlite_master
-         WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-    )?;
-    let tables = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    Ok(tables)
-}
-
 const PROJECT_AUTHORITY_ENVELOPE_KIND: &str = "execution_project_authority";
-// Epoch 2 adds the independently durable base snapshot identity to pinned
-// generations. There is deliberately no compatibility reader: a row admitted
-// under the predecessor authority shape must be restarted under this contract.
-const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 2;
+// Epoch 3 adds the exact principal/project/base destination for explicit
+// retained-current-HEAD publication. There is deliberately no compatibility
+// reader: a predecessor authority cannot be upgraded into publication rights.
+const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncompatibleRuntimeExecutionSchema {
@@ -1939,7 +2956,7 @@ fn incompatible_runtime_execution_schema(reason: String, predecessor: bool) -> a
     let guidance = predecessor.then(|| {
         format!(
             "{reason}; stop the daemon and run `{}` before restarting",
-            crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
         )
     });
     let error = anyhow::Error::new(IncompatibleRuntimeExecutionSchema {
@@ -1952,6 +2969,7 @@ fn incompatible_runtime_execution_schema(reason: String, predecessor: bool) -> a
     }
 }
 
+#[cfg(test)]
 fn requires_execution_schema_cutover(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -1963,6 +2981,7 @@ fn requires_execution_schema_cutover(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(test)]
 fn is_newer_execution_schema(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -2164,178 +3183,6 @@ fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<St
     lillux::canonical_json(&value).context("canonicalize current launch metadata")
 }
 
-fn optional_runtime_text_rows(
-    conn: &Connection,
-    table: &'static str,
-    identity_column: &'static str,
-    value_column: &'static str,
-) -> Result<Vec<(String, String)>> {
-    let object_type = conn
-        .query_row(
-            "SELECT type FROM sqlite_master WHERE name=?1",
-            [table],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .with_context(|| format!("inspect runtime schema object `{table}`"))?;
-    let Some(object_type) = object_type else {
-        return Ok(Vec::new());
-    };
-    if object_type != "table" {
-        bail!(
-            "runtime schema object `{table}` is {object_type:?}, not a table; refusing destructive reset"
-        );
-    }
-
-    let columns = {
-        let mut statement = conn
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .with_context(|| format!("inspect runtime table `{table}`"))?;
-        statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?
-    };
-    if !columns.contains(value_column) {
-        return Ok(Vec::new());
-    }
-    if !columns.contains(identity_column) {
-        bail!(
-            "runtime table `{table}` contains `{value_column}` without `{identity_column}`; refusing destructive reset"
-        );
-    }
-
-    let mut statement = conn
-        .prepare(&format!(
-            "SELECT {identity_column}, {value_column}
-               FROM {table}
-              WHERE {value_column} IS NOT NULL
-              ORDER BY {identity_column}"
-        ))
-        .with_context(|| format!("inspect runtime authority rows in `{table}`"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .with_context(|| format!("read runtime authority rows from `{table}`"))?;
-    Ok(rows)
-}
-
-fn reject_newer_runtime_execution_epochs(conn: &Connection) -> Result<()> {
-    let mut launch_rows = Vec::new();
-    launch_rows.extend(
-        optional_runtime_text_rows(conn, "thread_runtime", "thread_id", "launch_metadata")?
-            .into_iter()
-            .map(|(owner_id, raw)| ("thread_runtime", owner_id, raw)),
-    );
-    launch_rows.extend(
-        optional_runtime_text_rows(
-            conn,
-            "detached_spawn_intent",
-            "operation_id",
-            "launch_metadata",
-        )?
-        .into_iter()
-        .map(|(owner_id, raw)| ("detached_spawn_intent", owner_id, raw)),
-    );
-    launch_rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    for (owner, owner_id, raw) in launch_rows {
-        let value: Value = serde_json::from_str(&raw)
-            .with_context(|| format!("inspect launch schema for {owner} row `{owner_id}`"))?;
-        let object = value.as_object().ok_or_else(|| {
-            anyhow!("launch metadata for {owner} row `{owner_id}` must be an object")
-        })?;
-        let schema_version = object
-            .get("schema_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                anyhow!(
-                    "launch metadata for {owner} row `{owner_id}` has no numeric schema_version"
-                )
-            })?;
-        if schema_version > u64::from(LAUNCH_METADATA_SCHEMA_VERSION) {
-            return Err(incompatible_runtime_execution_schema(
-                format!(
-                    "launch metadata for {owner} row `{owner_id}` is newer than the exact current contract: stored schema_version={schema_version}, current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
-                ),
-                false,
-            ));
-        }
-        if let Some(capsule_schema) = object
-            .get("admitted_launch_capsule_schema")
-            .and_then(Value::as_u64)
-        {
-            let current = u64::from(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
-            if capsule_schema > current {
-                return Err(incompatible_runtime_execution_schema(
-                    format!(
-                        "launch metadata for {owner} row `{owner_id}` carries a newer admitted launch capsule: stored schema={capsule_schema}, current schema={current}"
-                    ),
-                    false,
-                ));
-            }
-        }
-    }
-
-    let mut authority_rows = Vec::new();
-    authority_rows.extend(
-        optional_runtime_text_rows(
-            conn,
-            "detached_spawn_intent",
-            "operation_id",
-            "child_project_authority",
-        )?
-        .into_iter()
-        .map(|(owner_id, raw)| ("detached_spawn_intent", owner_id, raw)),
-    );
-    authority_rows.extend(
-        optional_runtime_text_rows(
-            conn,
-            "follow_waiter",
-            "follow_key",
-            "child_project_authority",
-        )?
-        .into_iter()
-        .map(|(owner_id, raw)| ("follow_waiter", owner_id, raw)),
-    );
-    authority_rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    for (owner, owner_id, raw) in authority_rows {
-        let value: Value = serde_json::from_str(&raw)
-            .with_context(|| format!("inspect project authority for {owner} row `{owner_id}`"))?;
-        let object = value.as_object().ok_or_else(|| {
-            anyhow!("project authority for {owner} row `{owner_id}` must be an object")
-        })?;
-        let kind = object.get("kind").and_then(Value::as_str).ok_or_else(|| {
-            anyhow!("project authority for {owner} row `{owner_id}` has no string kind")
-        })?;
-        if matches!(kind, "projectless" | "live_project" | "pinned_generation") {
-            continue;
-        }
-        if kind != PROJECT_AUTHORITY_ENVELOPE_KIND {
-            bail!(
-                "project authority for {owner} row `{owner_id}` has an unrecognized outer kind {kind:?}; refusing destructive reset"
-            );
-        }
-        let schema_epoch = object
-            .get("schema_epoch")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                anyhow!(
-                    "project authority for {owner} row `{owner_id}` has no numeric schema_epoch"
-                )
-            })?;
-        if schema_epoch > u64::from(PROJECT_AUTHORITY_SCHEMA_EPOCH) {
-            return Err(incompatible_runtime_execution_schema(
-                format!(
-                    "project authority for {owner} row `{owner_id}` is newer than the exact current contract: stored schema_epoch={schema_epoch}, current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
-                ),
-                false,
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn initialize_current_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .context("begin atomic runtime schema initialization")?;
@@ -2350,14 +3197,6 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
         .unchecked_transaction()
         .context("begin atomic runtime schema/data validation")?;
     let stored_epoch = runtime_operator_schema_epoch(&tx, path)?;
-    if stored_epoch > RUNTIME_OPERATOR_SCHEMA_EPOCH {
-        return Err(incompatible_runtime_operator_schema(stored_epoch));
-    }
-    // A predecessor store becomes destructive-reset eligible only after every
-    // recognized authority-bearing column has been checked for a future epoch.
-    // Missing predecessor tables/columns prove absence at that known location;
-    // malformed or unrecognized authority fails closed.
-    reject_newer_runtime_execution_epochs(&tx)?;
     if stored_epoch != RUNTIME_OPERATOR_SCHEMA_EPOCH {
         return Err(incompatible_runtime_operator_schema(stored_epoch));
     }
@@ -2367,8 +3206,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
             "SELECT 'thread_runtime', thread_id, launch_metadata
                FROM thread_runtime WHERE launch_metadata IS NOT NULL
              UNION ALL
-             SELECT 'detached_spawn_intent', operation_id, launch_metadata
-               FROM detached_spawn_intent WHERE launch_metadata IS NOT NULL",
+             SELECT 'runtime_action_intent', operation_id, launch_metadata
+               FROM runtime_action_intent WHERE launch_metadata IS NOT NULL",
         )?;
         // Preserve statement/query temporary drop order under Edition 2024.
         #[allow(clippy::let_and_return)]
@@ -2438,8 +3277,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     }
     let authorities = {
         let mut statement = tx.prepare(
-            "SELECT 'detached_spawn_intent', operation_id, child_project_authority
-               FROM detached_spawn_intent WHERE child_project_authority IS NOT NULL
+            "SELECT 'runtime_action_intent', operation_id, child_project_authority
+               FROM runtime_action_intent WHERE child_project_authority IS NOT NULL
              UNION ALL
              SELECT 'follow_waiter', follow_key, child_project_authority
                FROM follow_waiter WHERE child_project_authority IS NOT NULL",
@@ -2465,10 +3304,66 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
         .context("finish atomic runtime schema/data validation")
 }
 
+fn quote_sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn discard_predecessor_runtime_schema(tx: &Transaction<'_>) -> Result<()> {
+    let objects = {
+        let mut statement = tx.prepare(
+            "SELECT type, name
+               FROM sqlite_master
+              WHERE name NOT LIKE 'sqlite_%'
+                AND type IN ('trigger', 'view', 'index', 'table')
+              ORDER BY CASE type
+                         WHEN 'trigger' THEN 0
+                         WHEN 'view' THEN 1
+                         WHEN 'index' THEN 2
+                         WHEN 'table' THEN 3
+                         ELSE 4
+                       END,
+                       name",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (object_type, name) in objects {
+        let keyword = match object_type.as_str() {
+            "trigger" => "TRIGGER",
+            "view" => "VIEW",
+            "index" => "INDEX",
+            "table" => "TABLE",
+            _ => unreachable!("schema query admits only known object types"),
+        };
+        tx.execute_batch(&format!(
+            "DROP {keyword} IF EXISTS {};",
+            quote_sqlite_identifier(&name)
+        ))
+        .with_context(|| {
+            format!("drop predecessor runtime {object_type} `{name}` during explicit reset")
+        })?;
+    }
+    let remaining: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+          WHERE name NOT LIKE 'sqlite_%'
+            AND type IN ('trigger', 'view', 'index', 'table')",
+        [],
+        |row| row.get(0),
+    )?;
+    if remaining != 0 {
+        bail!("predecessor runtime schema was not completely discarded");
+    }
+    Ok(())
+}
+
 /// Destructively replace an owned predecessor runtime schema with the exact
 /// current empty schema. This is not an open-time migration: the only caller is
-/// the explicitly confirmed offline all-thread-history reset. No predecessor
-/// row or continuation fact is interpreted or carried forward.
+/// the explicitly confirmed offline all-thread-history reset. Ownership and
+/// the outer epoch are proven before mutation; no predecessor schema object,
+/// row, or embedded authority is interpreted or carried forward.
 fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
     let operator_epoch = runtime_operator_schema_epoch(conn, path)?;
     if operator_epoch >= RUNTIME_OPERATOR_SCHEMA_EPOCH {
@@ -2487,37 +3382,33 @@ fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
         );
     }
 
-    let spec = runtime_schema_spec();
-    let expected_tables = spec
-        .tables
-        .iter()
-        .map(|table| table.name.to_string())
-        .collect::<BTreeSet<_>>();
-    let actual_tables = runtime_user_tables(conn)?;
-    let unexpected_tables = actual_tables
-        .difference(&expected_tables)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if !unexpected_tables.is_empty() {
-        bail!(
-            "owned runtime database contains unexpected tables {:?}; refusing destructive reset of {}",
-            unexpected_tables,
-            path.display()
-        );
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .context("disable predecessor foreign-key enforcement during explicit reset")?;
+    let reset = (|| {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+            .context("begin atomic explicit runtime reset")?;
+        discard_predecessor_runtime_schema(&tx)?;
+        sqlite_schema::init_owned(&tx, &runtime_schema_spec(), SCHEMA_SQL, path)?;
+        tx.execute("DELETE FROM sqlite_sequence", [])
+            .context("clear runtime sequence state during explicit reset")?;
+        assert_current_runtime_schema(&tx, path)?;
+        tx.commit()
+            .context("commit atomic explicit runtime reset")?;
+        Ok(())
+    })();
+    let restore_foreign_keys = conn
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .context("restore runtime foreign-key enforcement after explicit reset");
+    match (reset, restore_foreign_keys) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(error)) => return Err(error),
+        (Err(error), Err(restore_error)) => {
+            return Err(error.context(format!(
+                "also failed to restore runtime foreign-key enforcement: {restore_error:#}"
+            )));
+        }
     }
-
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
-        .context("begin atomic explicit runtime reset")?;
-    for table in actual_tables.iter().rev() {
-        tx.execute_batch(&format!("DROP TABLE \"{table}\";"))
-            .with_context(|| format!("drop owned runtime table `{table}` during explicit reset"))?;
-    }
-    sqlite_schema::init_owned(&tx, &spec, SCHEMA_SQL, path)?;
-    tx.execute("DELETE FROM sqlite_sequence", [])
-        .context("clear runtime sequence state during explicit reset")?;
-    assert_current_runtime_schema(&tx, path)?;
-    tx.commit()
-        .context("commit atomic explicit runtime reset")?;
     tracing::warn!(database = %path.display(), "explicitly reset incompatible runtime history without migration");
     Ok(())
 }
@@ -2534,6 +3425,289 @@ pub struct RuntimeDb {
     _inspection_copy: Option<crate::temp_dir_guard::TempDirGuard>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerProcessState {
+    Starting,
+    Attached,
+    Live,
+    Draining,
+    Dead,
+}
+
+impl WorkerProcessState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Attached => "attached",
+            Self::Live => "live",
+            Self::Draining => "draining",
+            Self::Dead => "dead",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "starting" => Ok(Self::Starting),
+            "attached" => Ok(Self::Attached),
+            "live" => Ok(Self::Live),
+            "draining" => Ok(Self::Draining),
+            "dead" => Ok(Self::Dead),
+            other => bail!("invalid worker process state `{other}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerProcessRecord {
+    pub worker_instance_id: String,
+    pub boot_identity_hash: String,
+    pub session_capsule_hash: String,
+    pub boot_epoch: u64,
+    pub lifecycle_generation: u64,
+    pub process_identity: ExecutionProcessIdentity,
+    pub control_channel_identity: String,
+    pub state: WorkerProcessState,
+    pub daemon_generation_id: String,
+    pub placement_thread_id: String,
+    pub cleanup_state: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDedicatedSession<'a> {
+    pub placement_thread_id: &'a str,
+    pub chain_root_id: &'a str,
+    pub owner_principal: &'a str,
+    pub admitted_capsule_hash: &'a str,
+    pub workspace_id: &'a str,
+    pub candidate_required: bool,
+    pub credential_profile_id: &'a str,
+    pub credential_generation: u64,
+    pub credential_lock_owner: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCredentialProfileReservation<'a> {
+    pub reservation_id: &'a str,
+    pub operation_id: &'a str,
+    pub successor_thread_id: &'a str,
+    pub profile_id: &'a str,
+    pub owner_principal: &'a str,
+    pub credential_generation: u64,
+    pub subject_contract_digest: &'a str,
+    pub subject_digest: &'a str,
+    pub checkpoint_manifest_hash: &'a str,
+    pub upstream_session_id: &'a str,
+    pub project_principal_key: &'a str,
+    pub project_hash: &'a str,
+    pub target_project_head_hash: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProfileReservationRecord {
+    pub reservation_id: String,
+    pub operation_id: String,
+    pub successor_thread_id: String,
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub credential_generation: u64,
+    pub subject_contract_digest: String,
+    pub subject_digest: String,
+    pub checkpoint_manifest_hash: String,
+    pub upstream_session_id: String,
+    pub project_principal_key: String,
+    pub project_hash: String,
+    pub target_project_head_hash: String,
+    pub project_fence_state: String,
+    pub state: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionRecord {
+    pub placement_thread_id: String,
+    pub chain_root_id: String,
+    pub owner_principal: String,
+    pub admitted_capsule_hash: String,
+    pub worker_instance_id: Option<String>,
+    pub worker_boot_epoch: Option<u64>,
+    pub workspace_id: String,
+    pub candidate_required: bool,
+    pub credential_profile_id: String,
+    pub credential_generation: u64,
+    pub remote_thread_id: Option<String>,
+    pub current_turn_id: Option<String>,
+    pub state: String,
+    pub send_boundary: String,
+    pub candidate_snapshot_hash: Option<String>,
+    pub candidate_validation_hash: Option<String>,
+    pub publication_result: Option<String>,
+    pub terminal_reason: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCredentialProfile<'a> {
+    pub profile_id: &'a str,
+    pub owner_principal: &'a str,
+    pub home_id: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProfileRecord {
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub home_id: String,
+    pub authority_revision: u64,
+    pub credential_generation: u64,
+    pub state: String,
+    pub active_login_id: Option<String>,
+    pub login_epoch: u64,
+    pub login_expires_at_ms: Option<i64>,
+    pub sanitized_account: Option<serde_json::Value>,
+    pub lock_owner: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDedicatedSessionCommand<'a> {
+    pub placement_thread_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub worker_boot_epoch: u64,
+    pub command_kind: &'a str,
+    pub request_digest: &'a str,
+    pub payload: &'a serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionCommandRecord {
+    pub placement_thread_id: String,
+    pub command_sequence: u64,
+    pub idempotency_key: String,
+    pub worker_boot_epoch: u64,
+    pub command_kind: String,
+    pub request_digest: String,
+    pub payload: serde_json::Value,
+    pub state: String,
+    pub result: Option<serde_json::Value>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationBatchReservation {
+    ContactAppend,
+    AlreadySettled,
+    RebuildProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedObservationBatchRecord {
+    pub placement_thread_id: String,
+    pub worker_boot_epoch: u64,
+    pub first_sequence: u64,
+    pub through_sequence: u64,
+    pub batch_digest: String,
+    pub canonical_batch: serde_json::Value,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDedicatedSessionApproval<'a> {
+    pub placement_thread_id: &'a str,
+    pub approval_id: &'a str,
+    pub worker_instance_id: &'a str,
+    pub worker_boot_epoch: u64,
+    pub request_digest: &'a str,
+    pub operation_class: &'a str,
+    pub requested_authority: &'a serde_json::Value,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionApprovalRecord {
+    pub placement_thread_id: String,
+    pub approval_id: String,
+    pub worker_instance_id: String,
+    pub worker_boot_epoch: u64,
+    pub request_digest: String,
+    pub operation_class: String,
+    pub requested_authority: serde_json::Value,
+    pub state: String,
+    pub decision_principal: Option<String>,
+    pub decision: Option<serde_json::Value>,
+    pub decision_digest: Option<String>,
+    pub reservation_token: Option<String>,
+    pub expires_at_ms: i64,
+    pub created_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+    pub delivery_contacted_at_ms: Option<i64>,
+    pub delivery_settled_at_ms: Option<i64>,
+}
+
+fn validate_worker_process_record(record: &WorkerProcessRecord) -> Result<()> {
+    for (label, value, max) in [
+        (
+            "worker instance id",
+            record.worker_instance_id.as_str(),
+            256,
+        ),
+        (
+            "worker boot identity",
+            record.boot_identity_hash.as_str(),
+            128,
+        ),
+        (
+            "worker session capsule",
+            record.session_capsule_hash.as_str(),
+            128,
+        ),
+        (
+            "worker control channel",
+            record.control_channel_identity.as_str(),
+            1024,
+        ),
+        (
+            "worker daemon generation",
+            record.daemon_generation_id.as_str(),
+            256,
+        ),
+        (
+            "worker placement thread id",
+            record.placement_thread_id.as_str(),
+            256,
+        ),
+        ("worker cleanup state", record.cleanup_state.as_str(), 32),
+    ] {
+        validate_bounded_runtime_text(label, value, max)?;
+    }
+    validate_execution_process_identity_shape(&record.process_identity)
+        .context("invalid worker process identity")?;
+    if record.boot_epoch == 0
+        || record.lifecycle_generation == 0
+        || record.created_at_ms <= 0
+        || record.updated_at_ms < record.created_at_ms
+        || !matches!(
+            record.cleanup_state.as_str(),
+            "owned" | "draining" | "reaped" | "unproved"
+        )
+    {
+        bail!("worker process record is internally inconsistent");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncompatibleRuntimeOperatorSchema {
     stored: u32,
@@ -2541,6 +3715,7 @@ struct IncompatibleRuntimeOperatorSchema {
 }
 
 impl IncompatibleRuntimeOperatorSchema {
+    #[cfg(test)]
     fn is_predecessor(&self) -> bool {
         self.stored < self.current
     }
@@ -2896,47 +4071,81 @@ fn validate_new_hook_dispatch(seed: &NewHookDispatch) -> Result<()> {
     Ok(())
 }
 
-fn validate_detached_spawn_intent(
+fn validate_runtime_action_intent(
     operation_id: &str,
-    parent_thread_id: &str,
+    chain_root_id: &str,
+    first_caller_thread_id: &str,
+    mode: &RuntimeActionMode,
     request_hash: &str,
     child_thread_id: &str,
 ) -> Result<()> {
-    validate_sha256("detached operation_id", operation_id)?;
-    validate_sha256("detached request_hash", request_hash)?;
+    validate_sha256("runtime action operation_id", operation_id)?;
+    validate_sha256("runtime action request_hash", request_hash)?;
     for (field, value) in [
-        ("parent_thread_id", parent_thread_id),
+        ("chain_root_id", chain_root_id),
+        ("first_caller_thread_id", first_caller_thread_id),
         ("child_thread_id", child_thread_id),
     ] {
         if value.is_empty() {
-            bail!("detached spawn {field} cannot be empty");
+            bail!("runtime action {field} cannot be empty");
         }
         if value.len() > 4 * 1024 {
-            bail!("detached spawn {field} exceeds 4096 byte limit");
+            bail!("runtime action {field} exceeds 4096 byte limit");
         }
     }
+    RuntimeActionMode::parse(mode.as_str())?;
     Ok(())
 }
 
-fn validate_detached_spawn_intent_record(intent: &DetachedSpawnIntent) -> Result<()> {
-    validate_detached_spawn_intent(
+fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result<()> {
+    validate_runtime_action_intent(
         &intent.operation_id,
-        &intent.parent_thread_id,
+        &intent.chain_root_id,
+        &intent.first_caller_thread_id,
+        &intent.mode,
         &intent.request_hash,
         &intent.child_thread_id,
     )?;
+    if matches!(intent.mode, RuntimeActionMode::Inline)
+        && (intent.child_project_authority.is_some()
+            || intent.admitted_launch_capsule_hash.is_some()
+            || intent.launch_metadata.is_some()
+            || intent.incompatible_launch_metadata.is_some()
+            || intent.initial_events.is_some())
+    {
+        bail!(
+            "inline runtime action `{}` contains detached launch authority",
+            intent.operation_id
+        );
+    }
     if let Some(authority) = &intent.child_project_authority {
         authority.validate()?;
     }
-    let sealed = intent.launch_metadata.is_some();
-    let sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
+    if intent.launch_metadata.is_some() && intent.incompatible_launch_metadata.is_some() {
+        bail!(
+            "detached operation `{}` has both current and incompatible launch authority",
+            intent.operation_id
+        );
+    }
+    let current_sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
         && intent.launch_metadata.is_some()
+        && intent.incompatible_launch_metadata.is_none()
+        && intent.initial_events.is_some()
+        && intent.child_project_authority.is_some();
+    let incompatible_sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
+        && intent.launch_metadata.is_none()
+        && intent.incompatible_launch_metadata.is_some()
         && intent.initial_events.is_some()
         && intent.child_project_authority.is_some();
     let unsealed_fields_empty = intent.admitted_launch_capsule_hash.is_none()
         && intent.launch_metadata.is_none()
+        && intent.incompatible_launch_metadata.is_none()
         && intent.initial_events.is_none();
-    if (sealed && !sealed_fields_complete) || (!sealed && !unsealed_fields_empty) {
+    if matches!(intent.mode, RuntimeActionMode::Detached)
+        && !current_sealed_fields_complete
+        && !incompatible_sealed_fields_complete
+        && !unsealed_fields_empty
+    {
         bail!(
             "detached operation `{}` has an incomplete sealed authority",
             intent.operation_id
@@ -3044,20 +4253,93 @@ fn prune_launch_planning(conn: &Connection, now_ms: i64) -> Result<()> {
     const MAX_TERMINAL_ROWS: i64 = 4_096;
     conn.execute(
         "DELETE FROM launch_planning
-          WHERE state <> 'planning' AND finished_at_ms < ?1",
+          WHERE state IN ('cancelled', 'failed', 'expired')
+            AND finished_at_ms < ?1",
         params![now_ms.saturating_sub(TERMINAL_RETENTION_MS)],
     )?;
     conn.execute(
         "DELETE FROM launch_planning
           WHERE launch_id IN (
               SELECT launch_id FROM launch_planning
-               WHERE state <> 'planning'
+               WHERE state IN ('cancelled', 'failed', 'expired')
                ORDER BY finished_at_ms DESC, launch_id DESC
                LIMIT -1 OFFSET ?1
           )",
         params![MAX_TERMINAL_ROWS],
     )?;
     Ok(())
+}
+
+fn read_dedicated_command_by_key(
+    conn: &Connection,
+    placement_thread_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<DedicatedSessionCommandRecord>> {
+    let row = conn
+        .query_row(
+            "SELECT placement_thread_id, command_sequence, idempotency_key, worker_boot_epoch,
+                command_kind, request_digest, payload_json, state, result_json,
+                created_at_ms, updated_at_ms
+           FROM dedicated_session_command
+          WHERE placement_thread_id=?1 AND idempotency_key=?2",
+            params![placement_thread_id, idempotency_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|row| {
+        Ok(DedicatedSessionCommandRecord {
+            placement_thread_id: row.0,
+            command_sequence: u64::try_from(row.1).context("negative command sequence")?,
+            idempotency_key: row.2,
+            worker_boot_epoch: u64::try_from(row.3).context("negative command worker epoch")?,
+            command_kind: row.4,
+            request_digest: row.5,
+            payload: serde_json::from_str(&row.6).context("decode command payload")?,
+            state: row.7,
+            result: row
+                .8
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()
+                .context("decode command result")?,
+            created_at_ms: row.9,
+            updated_at_ms: row.10,
+        })
+    })
+    .transpose()
+}
+
+fn validate_dedicated_session_command_authority(
+    placement_thread_id: &str,
+    idempotency_key: &str,
+    command_kind: &str,
+    request_digest: &str,
+    payload: &serde_json::Value,
+) -> Result<String> {
+    for (label, value, max) in [
+        ("command session id", placement_thread_id, 256),
+        ("command idempotency key", idempotency_key, 256),
+        ("command kind", command_kind, 128),
+        ("command request digest", request_digest, 128),
+    ] {
+        validate_bounded_runtime_text(label, value, max)?;
+    }
+    let payload_json = serde_json::to_string(payload)?;
+    validate_bounded_runtime_text("command payload", &payload_json, 256 * 1024)?;
+    Ok(payload_json)
 }
 
 impl RuntimeDb {
@@ -3077,6 +4359,3989 @@ impl RuntimeDb {
             _shm_file: None,
             _inspection_copy: None,
         })
+    }
+
+    pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
+        self.admit_dedicated_session_with_remote(session, None)
+    }
+
+    pub fn admit_dedicated_session_with_remote(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+    ) -> Result<()> {
+        self.admit_dedicated_session_transaction(session, remote_thread_id, None)
+    }
+
+    /// Atomically convert a durable cross-site credential-generation
+    /// reservation into the ordinary dedicated-session lock owner and row.
+    /// No process is released at this boundary; the existing held worker path
+    /// still attaches its exact process identity before release.
+    pub fn admit_dedicated_session_from_reservation(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+        reservation_id: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        self.admit_dedicated_session_transaction(session, remote_thread_id, Some(reservation_id))
+    }
+
+    fn admit_dedicated_session_transaction(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+        reservation_id: Option<&str>,
+    ) -> Result<()> {
+        for (label, value) in [
+            ("dedicated placement thread id", session.placement_thread_id),
+            ("dedicated root thread id", session.chain_root_id),
+            ("dedicated owner principal", session.owner_principal),
+            ("dedicated admitted capsule", session.admitted_capsule_hash),
+            ("dedicated workspace id", session.workspace_id),
+            (
+                "dedicated credential profile id",
+                session.credential_profile_id,
+            ),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        if session.credential_generation == 0 {
+            bail!("dedicated credential generation must be positive");
+        }
+        if let Some(remote_thread_id) = remote_thread_id {
+            validate_bounded_runtime_text("dedicated remote thread id", remote_thread_id, 256)?;
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let generation = i64::try_from(session.credential_generation)
+            .context("credential generation exceeds SQLite integer range")?;
+        let acquired = match reservation_id {
+            Some(reservation_id) => tx.execute(
+                "UPDATE credential_profile
+                    SET lock_owner=?4, updated_at_ms=?6
+                  WHERE profile_id=?1 AND owner_principal=?2
+                    AND credential_generation=?3 AND lock_owner=?5
+                    AND state='active'
+                    AND EXISTS(SELECT 1 FROM credential_profile_reservation
+                        WHERE reservation_id=?5 AND successor_thread_id=?7
+                          AND profile_id=?1 AND owner_principal=?2
+                          AND credential_generation=?3 AND state='reserved'
+                          AND project_fence_state='released'
+                          AND upstream_session_id=?8)",
+                params![
+                    session.credential_profile_id,
+                    session.owner_principal,
+                    generation,
+                    session.credential_lock_owner,
+                    reservation_id,
+                    now,
+                    session.placement_thread_id,
+                    remote_thread_id,
+                ],
+            )?,
+            None => tx.execute(
+                "UPDATE credential_profile
+                    SET lock_owner=?3, updated_at_ms=?5
+                  WHERE profile_id=?1 AND owner_principal=?2
+                    AND credential_generation=?4
+                    AND (lock_owner IS NULL OR lock_owner=?3)
+                    AND state IN ('unauthenticated','enrolling','confirming','active')",
+                params![
+                    session.credential_profile_id,
+                    session.owner_principal,
+                    session.credential_lock_owner,
+                    generation,
+                    now,
+                ],
+            )?,
+        };
+        if acquired != 1 {
+            bail!("dedicated admission could not atomically acquire its credential profile");
+        }
+        let changed = tx.execute(
+            "INSERT INTO dedicated_session (
+                placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
+                worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
+                credential_profile_id, credential_generation, remote_thread_id,
+                current_turn_id, state, send_boundary, candidate_snapshot_hash,
+                candidate_validation_hash, publication_result, terminal_reason,
+                created_at_ms, updated_at_ms
+             ) SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, ?11, NULL,
+                       'admitted', 'none', NULL, NULL, NULL, NULL, ?10, ?10
+               WHERE EXISTS(SELECT 1 FROM credential_profile
+                 WHERE profile_id=?7 AND owner_principal=?3 AND credential_generation=?8
+                   AND lock_owner=?9 AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![
+                session.placement_thread_id,
+                session.chain_root_id,
+                session.owner_principal,
+                session.admitted_capsule_hash,
+                session.workspace_id,
+                i64::from(session.candidate_required),
+                session.credential_profile_id,
+                i64::try_from(session.credential_generation)
+                    .context("credential generation exceeds SQLite integer range")?,
+                session.credential_lock_owner,
+                now,
+                remote_thread_id,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated admission lost its credential generation/lock fence");
+        }
+        if let Some(reservation_id) = reservation_id {
+            let consumed = tx.execute(
+                "UPDATE credential_profile_reservation
+                    SET state='consumed', updated_at_ms=?2
+                  WHERE reservation_id=?1 AND state='reserved'
+                    AND project_fence_state='released'
+                    AND successor_thread_id=?3 AND upstream_session_id=?4",
+                params![
+                    reservation_id,
+                    now,
+                    session.placement_thread_id,
+                    remote_thread_id
+                ],
+            )?;
+            if consumed != 1 {
+                bail!("dedicated admission lost its credential reservation CAS");
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Recover only profile reservations that provably never crossed the
+    /// durable worker-attachment boundary. `attach_worker_process` writes the
+    /// worker row and placement identity atomically before releasing the held
+    /// child, so an owner absent from both tables has no process authority.
+    /// Any retained identity—including cleanup-unproved evidence—keeps the
+    /// credential profile fenced.
+    pub fn reconcile_unattached_credential_profile_locks(&self) -> Result<(usize, usize)> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let sessions_recovered = tx.execute(
+            "UPDATE dedicated_session
+                SET state='recovering', send_boundary='none', updated_at_ms=?1
+              WHERE state='admitted'
+                AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process
+                      WHERE worker_process.placement_thread_id=dedicated_session.placement_thread_id)",
+            [now],
+        )?;
+        let locks_released = tx.execute(
+            "UPDATE credential_profile
+                SET lock_owner=NULL, updated_at_ms=?1
+              WHERE lock_owner IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process
+                      WHERE worker_process.worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session
+                      WHERE dedicated_session.worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
+                      WHERE credential_profile_reservation.reservation_id=credential_profile.lock_owner
+                        AND credential_profile_reservation.state='reserved')",
+            [now],
+        )?;
+        tx.commit()?;
+        Ok((sessions_recovered, locks_released))
+    }
+
+    pub fn dedicated_session(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
+                    worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
+                    credential_profile_id, credential_generation, remote_thread_id,
+                    current_turn_id, state, send_boundary, candidate_snapshot_hash,
+                    candidate_validation_hash, publication_result, terminal_reason,
+                    created_at_ms, updated_at_ms
+               FROM dedicated_session WHERE placement_thread_id=?1",
+                [placement_thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, Option<String>>(14)?,
+                        row.get::<_, Option<String>>(15)?,
+                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, Option<String>>(17)?,
+                        row.get::<_, i64>(18)?,
+                        row.get::<_, i64>(19)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|row| {
+            Ok(DedicatedSessionRecord {
+                placement_thread_id: row.0,
+                chain_root_id: row.1,
+                owner_principal: row.2,
+                admitted_capsule_hash: row.3,
+                worker_instance_id: row.4,
+                worker_boot_epoch: row
+                    .5
+                    .map(u64::try_from)
+                    .transpose()
+                    .context("negative worker boot epoch")?,
+                workspace_id: row.6,
+                candidate_required: row.7 != 0,
+                credential_profile_id: row.8,
+                credential_generation: u64::try_from(row.9)
+                    .context("negative credential generation")?,
+                remote_thread_id: row.10,
+                current_turn_id: row.11,
+                state: row.12,
+                send_boundary: row.13,
+                candidate_snapshot_hash: row.14,
+                candidate_validation_hash: row.15,
+                publication_result: row.16,
+                terminal_reason: row.17,
+                created_at_ms: row.18,
+                updated_at_ms: row.19,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn dedicated_sessions_for_credential_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id FROM dedicated_session
+              WHERE credential_profile_id=?1
+              ORDER BY placement_thread_id",
+        )?;
+        let ids = statement
+            .query_map([profile_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|placement_thread_id| {
+                self.dedicated_session(&placement_thread_id)?
+                    .ok_or_else(|| anyhow!("listed dedicated session disappeared"))
+            })
+            .collect()
+    }
+
+    pub fn dedicated_sessions_in_state(&self, state: &str) -> Result<Vec<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("dedicated session state", state, 32)?;
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id FROM dedicated_session WHERE state=?1 ORDER BY placement_thread_id",
+        )?;
+        let ids = statement
+            .query_map([state], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|placement_thread_id| {
+                self.dedicated_session(&placement_thread_id)?
+                    .ok_or_else(|| anyhow!("listed dedicated session disappeared"))
+            })
+            .collect()
+    }
+
+    pub fn terminalize_unattached_dedicated_session(
+        &self,
+        placement_thread_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session SET state='terminal', terminal_reason=?2,
+                    current_turn_id=NULL, send_boundary='none', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+                AND state IN ('admitted','recovering','outcome_unknown')",
+            params![placement_thread_id, reason, now],
+        )?;
+        if changed != 1 {
+            bail!("unattached dedicated terminal settlement lost its session CAS");
+        }
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?2
+              WHERE placement_thread_id=?1 AND state='delivery_contacting'",
+            params![placement_thread_id, now],
+        )?;
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?2
+              WHERE placement_thread_id=?1 AND state IN ('pending', 'decision_reserved')",
+            params![placement_thread_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_dedicated_session_start(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        reason: &str,
+        cleanup_proved: bool,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated terminal reason", reason, 4096)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let next_state = if cleanup_proved {
+            "terminal"
+        } else {
+            "outcome_unknown"
+        };
+        let changed = tx.execute(
+            "UPDATE dedicated_session
+                SET state=?5, terminal_reason=?3,
+                    send_boundary=CASE WHEN ?5='outcome_unknown' THEN 'outcome_unknown' ELSE send_boundary END,
+                    updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND state IN ('admitted','binding','recovering')",
+            params![placement_thread_id, worker_instance_id, reason, now, next_state],
+        )?;
+        if changed != 1 {
+            bail!("dedicated start failure lost its session-state CAS");
+        }
+        if cleanup_proved {
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+              WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                  WHERE placement_thread_id=?1)
+                AND lock_owner=?2
+                AND (NOT EXISTS(SELECT 1 FROM worker_process WHERE worker_instance_id=?2)
+                     OR EXISTS(SELECT 1 FROM worker_process
+                         WHERE worker_instance_id=?2 AND cleanup_state='reaped'))",
+                params![placement_thread_id, worker_instance_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn bind_dedicated_remote_thread(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        for (label, value) in [
+            ("dedicated placement thread id", placement_thread_id),
+            ("worker instance id", worker_instance_id),
+            ("remote thread id", remote_thread_id),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET remote_thread_id=?4, updated_at_ms=?5
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='idle' AND remote_thread_id IS NULL",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                i64::try_from(worker_boot_epoch)
+                    .context("worker boot epoch exceeds SQLite range")?,
+                remote_thread_id,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let matched: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND remote_thread_id=?4)",
+                params![
+                    placement_thread_id,
+                    worker_instance_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    remote_thread_id
+                ],
+                |row| row.get(0),
+            )?;
+            if !matched {
+                bail!("dedicated remote-thread bind lost its worker/session CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn observe_dedicated_remote_reattach(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("remote thread id", remote_thread_id, 256)?;
+        let matched: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                AND state IN ('recovering','idle','outcome_unknown'))",
+            params![
+                placement_thread_id,
+                i64::try_from(worker_boot_epoch)?,
+                remote_thread_id
+            ],
+            |row| row.get(0),
+        )?;
+        if !matched {
+            bail!("dedicated remote reattach lost its session/thread/epoch CAS");
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_remote_recovery_status(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+        recovery_outcome: &str,
+    ) -> Result<()> {
+        if !matches!(recovery_outcome, "safe_idle" | "uncertain") {
+            bail!("upstream recovery outcome is outside the generic vocabulary");
+        }
+        let next = if recovery_outcome == "safe_idle" {
+            "idle"
+        } else {
+            "outcome_unknown"
+        };
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state=?4, updated_at_ms=?5
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                AND state='recovering'",
+            params![
+                placement_thread_id,
+                i64::try_from(worker_boot_epoch)?,
+                remote_thread_id,
+                next,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let matched: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                    AND state=?4)",
+                params![
+                    placement_thread_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    remote_thread_id,
+                    next
+                ],
+                |row| row.get(0),
+            )?;
+            if !matched {
+                bail!("dedicated remote recovery status lost its session/thread/epoch CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_dedicated_session_recovery(
+        &self,
+        placement_thread_id: &str,
+        credential_generation: u64,
+        credential_lock_owner: &str,
+    ) -> Result<u64> {
+        let next_epoch: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(boot_epoch), 0) + 1 FROM worker_process WHERE placement_thread_id=?1",
+            [placement_thread_id],
+            |row| row.get(0),
+        )?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET state='admitted', credential_generation=?2, updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND state='recovering'
+                AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+                AND send_boundary='none'
+                AND EXISTS(SELECT 1 FROM credential_profile
+                  WHERE profile_id=dedicated_session.credential_profile_id
+                    AND owner_principal=dedicated_session.owner_principal
+                    AND credential_generation=?2 AND lock_owner=?4
+                    AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![
+                placement_thread_id,
+                i64::try_from(credential_generation)?,
+                lillux::time::timestamp_millis() as i64,
+                credential_lock_owner
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated recovery preparation lost its session CAS");
+        }
+        u64::try_from(next_epoch).context("negative dedicated recovery epoch")
+    }
+
+    pub fn observe_dedicated_session_state(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        expected: &str,
+        next: &str,
+        expected_turn_id: Option<&str>,
+        next_turn_id: Option<&str>,
+    ) -> Result<()> {
+        let allowed = matches!(
+            (expected, next),
+            ("idle", "turn_running")
+                | ("turn_running", "idle")
+                | ("turn_running", "recovering")
+                | ("awaiting_approval", "recovering")
+        );
+        if !allowed {
+            bail!("dedicated worker observation requested an invalid lifecycle edge");
+        }
+        for turn_id in [expected_turn_id, next_turn_id].into_iter().flatten() {
+            validate_bounded_runtime_text("dedicated current turn id", turn_id, 256)?;
+        }
+        if next == "turn_running" && next_turn_id.is_none() {
+            bail!("turn-running observation requires a remote turn id");
+        }
+        if next == "idle" && (expected_turn_id.is_none() || next_turn_id.is_some()) {
+            bail!("idle observation must clear its remote turn id");
+        }
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state=?4, current_turn_id=?6, updated_at_ms=?7
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state=?3
+                AND ((?5 IS NULL AND current_turn_id IS NULL) OR current_turn_id=?5)",
+            params![
+                placement_thread_id,
+                i64::try_from(worker_boot_epoch)?,
+                expected,
+                next,
+                expected_turn_id,
+                next_turn_id,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let matched: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state=?3
+                    AND ((?4 IS NULL AND current_turn_id IS NULL) OR current_turn_id=?4))",
+                params![
+                    placement_thread_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    next,
+                    next_turn_id
+                ],
+                |row| row.get(0),
+            )?;
+            if !matched {
+                bail!("dedicated worker observation lost its session-epoch/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn create_credential_profile(&self, profile: NewCredentialProfile<'_>) -> Result<()> {
+        for (label, value) in [
+            ("credential profile id", profile.profile_id),
+            ("credential profile owner", profile.owner_principal),
+            ("credential profile home id", profile.home_id),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "INSERT INTO credential_profile (
+                profile_id, owner_principal, home_id, credential_generation, state,
+                active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                lock_owner, created_at_ms, updated_at_ms, authority_revision
+             ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4, 1)",
+            params![
+                profile.profile_id,
+                profile.owner_principal,
+                profile.home_id,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile insertion did not create exactly one row");
+        }
+        Ok(())
+    }
+
+    pub fn credential_profile(&self, profile_id: &str) -> Result<Option<CredentialProfileRecord>> {
+        Ok(self
+            .credential_profile_projection(profile_id)?
+            .filter(|profile| profile.state != "deleted"))
+    }
+
+    fn credential_profile_projection(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<CredentialProfileRecord>> {
+        validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT profile_id, owner_principal, home_id, credential_generation, state,
+                    active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision
+               FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|row| {
+            let sanitized_account = row
+                .8
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()
+                .context("decode sanitized credential account")?;
+            Ok(CredentialProfileRecord {
+                profile_id: row.0,
+                owner_principal: row.1,
+                home_id: row.2,
+                authority_revision: u64::try_from(row.12)
+                    .context("negative credential authority revision")?,
+                credential_generation: u64::try_from(row.3)
+                    .context("negative credential generation")?,
+                state: row.4,
+                active_login_id: row.5,
+                login_epoch: u64::try_from(row.6).context("negative login epoch")?,
+                login_expires_at_ms: row.7,
+                sanitized_account,
+                lock_owner: row.9,
+                created_at_ms: row.10,
+                updated_at_ms: row.11,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn credential_profile_projections(&self) -> Result<Vec<CredentialProfileRecord>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT profile_id FROM credential_profile ORDER BY profile_id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|profile_id| {
+                self.credential_profile_projection(&profile_id)?
+                    .ok_or_else(|| anyhow!("credential profile projection disappeared"))
+            })
+            .collect()
+    }
+
+    /// Reconcile the live session/lease projection with stable operational
+    /// authority. The higher monotonic authority revision wins; equal
+    /// revisions must contain the same stable facts. Runtime-only lock
+    /// ownership is retained when stable authority advances.
+    pub fn reconcile_credential_profile_projection(
+        &self,
+        stable: &ryeos_state::OperationalCredentialProfileRecord,
+    ) -> Result<CredentialProfileRecord> {
+        let existing = self.credential_profile_projection(&stable.profile_id)?;
+        if let Some(existing) = existing.as_ref() {
+            if existing.owner_principal != stable.owner_principal
+                || existing.home_id != stable.home_id
+            {
+                bail!("credential profile projection identity changed");
+            }
+            if existing.authority_revision > stable.authority_revision {
+                return Ok(existing.clone());
+            }
+            if existing.authority_revision == stable.authority_revision {
+                let projected_account = existing
+                    .sanitized_account
+                    .as_ref()
+                    .map(ryeos_state::objects::canonical_value_digest)
+                    .transpose()?;
+                let stable_account = stable
+                    .sanitized_account
+                    .as_ref()
+                    .map(ryeos_state::objects::canonical_value_digest)
+                    .transpose()?;
+                if existing.credential_generation != stable.credential_generation
+                    || existing.state != stable.state
+                    || existing.active_login_id != stable.active_login_id
+                    || existing.login_epoch != stable.login_epoch
+                    || existing.login_expires_at_ms != stable.login_expires_at_ms
+                    || projected_account != stable_account
+                    || existing.created_at_ms != stable.created_at_ms
+                {
+                    bail!(
+                        "credential profile revision {} has divergent runtime and operational content",
+                        stable.authority_revision
+                    );
+                }
+                return Ok(existing.clone());
+            }
+        }
+
+        let account_json = stable
+            .sanitized_account
+            .as_ref()
+            .map(lillux::canonical_json)
+            .transpose()?;
+        let lock_owner = existing
+            .as_ref()
+            .and_then(|profile| profile.lock_owner.clone());
+        self.conn.execute(
+            "INSERT INTO credential_profile (
+                profile_id, owner_principal, home_id, credential_generation, state,
+                active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                lock_owner, created_at_ms, updated_at_ms, authority_revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                credential_generation=excluded.credential_generation,
+                state=excluded.state,
+                active_login_id=excluded.active_login_id,
+                login_epoch=excluded.login_epoch,
+                login_expires_at_ms=excluded.login_expires_at_ms,
+                sanitized_account_json=excluded.sanitized_account_json,
+                updated_at_ms=excluded.updated_at_ms,
+                authority_revision=excluded.authority_revision",
+            params![
+                &stable.profile_id,
+                &stable.owner_principal,
+                &stable.home_id,
+                i64::try_from(stable.credential_generation)?,
+                &stable.state,
+                &stable.active_login_id,
+                i64::try_from(stable.login_epoch)?,
+                stable.login_expires_at_ms,
+                account_json,
+                lock_owner,
+                stable.created_at_ms,
+                stable.updated_at_ms,
+                i64::try_from(stable.authority_revision)?,
+            ],
+        )?;
+        self.credential_profile_projection(&stable.profile_id)?
+            .ok_or_else(|| anyhow!("reconciled credential profile projection disappeared"))
+    }
+
+    pub fn acquire_credential_profile(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        lock_owner: &str,
+    ) -> Result<u64> {
+        for (label, value) in [
+            ("credential profile id", profile_id),
+            ("credential profile owner", owner_principal),
+            ("credential profile lock owner", lock_owner),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile SET lock_owner=?3, updated_at_ms=?4
+              WHERE profile_id=?1 AND owner_principal=?2 AND lock_owner IS NULL
+                AND state IN ('unauthenticated','enrolling','active')",
+            params![profile_id, owner_principal, lock_owner, now],
+        )?;
+        if changed != 1 {
+            bail!("credential profile is absent, not owned, locked, or deleting");
+        }
+        self.conn
+            .query_row(
+                "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+            .and_then(|value| u64::try_from(value).context("negative credential generation"))
+    }
+
+    pub fn reserve_credential_profile_generation(
+        &self,
+        reservation: NewCredentialProfileReservation<'_>,
+    ) -> Result<CredentialProfileReservationRecord> {
+        for (label, value) in [
+            ("credential reservation id", reservation.reservation_id),
+            ("credential reservation operation", reservation.operation_id),
+            (
+                "credential reservation successor",
+                reservation.successor_thread_id,
+            ),
+            ("credential reservation profile", reservation.profile_id),
+            ("credential reservation owner", reservation.owner_principal),
+            (
+                "credential reservation upstream session",
+                reservation.upstream_session_id,
+            ),
+            (
+                "credential reservation project principal",
+                reservation.project_principal_key,
+            ),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        for (label, digest) in [
+            (
+                "credential reservation subject contract",
+                reservation.subject_contract_digest,
+            ),
+            ("credential reservation subject", reservation.subject_digest),
+            (
+                "credential reservation checkpoint",
+                reservation.checkpoint_manifest_hash,
+            ),
+            ("credential reservation project", reservation.project_hash),
+            (
+                "credential reservation project head",
+                reservation.target_project_head_hash,
+            ),
+        ] {
+            if !lillux::valid_hash(digest) {
+                bail!("{label} is not a canonical digest");
+            }
+        }
+        if reservation.credential_generation == 0 {
+            bail!("credential reservation generation must be positive");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let generation = i64::try_from(reservation.credential_generation)
+            .context("credential reservation generation exceeds SQLite range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let existing = Self::credential_profile_reservation_from_connection(
+            &tx,
+            "reservation_id=?1",
+            reservation.reservation_id,
+        )?;
+        if let Some(existing) = existing {
+            let expected = CredentialProfileReservationRecord {
+                reservation_id: reservation.reservation_id.to_owned(),
+                operation_id: reservation.operation_id.to_owned(),
+                successor_thread_id: reservation.successor_thread_id.to_owned(),
+                profile_id: reservation.profile_id.to_owned(),
+                owner_principal: reservation.owner_principal.to_owned(),
+                credential_generation: reservation.credential_generation,
+                subject_contract_digest: reservation.subject_contract_digest.to_owned(),
+                subject_digest: reservation.subject_digest.to_owned(),
+                checkpoint_manifest_hash: reservation.checkpoint_manifest_hash.to_owned(),
+                upstream_session_id: reservation.upstream_session_id.to_owned(),
+                project_principal_key: reservation.project_principal_key.to_owned(),
+                project_hash: reservation.project_hash.to_owned(),
+                target_project_head_hash: reservation.target_project_head_hash.to_owned(),
+                project_fence_state: existing.project_fence_state.clone(),
+                state: existing.state.clone(),
+                created_at_ms: existing.created_at_ms,
+                updated_at_ms: existing.updated_at_ms,
+            };
+            if existing != expected || existing.state == "released" {
+                bail!("credential reservation replay differs from its durable operands");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        if let Some(existing) = Self::credential_profile_reservation_from_connection(
+            &tx,
+            "successor_thread_id=?1",
+            reservation.successor_thread_id,
+        )? {
+            if existing.state != "released" {
+                bail!(
+                    "credential reservation successor is already owned by another live operation"
+                );
+            }
+            let deleted = tx.execute(
+                "DELETE FROM credential_profile_reservation
+                  WHERE reservation_id=?1 AND successor_thread_id=?2 AND state='released'",
+                params![existing.reservation_id, reservation.successor_thread_id],
+            )?;
+            if deleted != 1 {
+                bail!("released credential reservation changed during replacement");
+            }
+        }
+        let conflicting_project_fence: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM credential_profile_reservation
+                 WHERE project_principal_key=?1 AND project_hash=?2
+                   AND project_fence_state='active')",
+            params![reservation.project_principal_key, reservation.project_hash],
+            |row| row.get(0),
+        )?;
+        if conflicting_project_fence {
+            bail!("target project HEAD is already fenced by another handoff");
+        }
+        let acquired = tx.execute(
+            "UPDATE credential_profile SET lock_owner=?4, updated_at_ms=?5
+              WHERE profile_id=?1 AND owner_principal=?2
+                AND credential_generation=?3 AND state='active'
+                AND (lock_owner IS NULL OR lock_owner=?4)",
+            params![
+                reservation.profile_id,
+                reservation.owner_principal,
+                generation,
+                reservation.reservation_id,
+                now,
+            ],
+        )?;
+        if acquired != 1 {
+            bail!("credential profile generation is unavailable for handoff reservation");
+        }
+        tx.execute(
+            "INSERT INTO credential_profile_reservation (
+                reservation_id, operation_id, successor_thread_id, profile_id,
+                owner_principal, credential_generation, subject_contract_digest,
+                subject_digest, checkpoint_manifest_hash, upstream_session_id,
+                project_principal_key, project_hash, target_project_head_hash,
+                project_fence_state, state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                       'active', 'reserved', ?14, ?14)",
+            params![
+                reservation.reservation_id,
+                reservation.operation_id,
+                reservation.successor_thread_id,
+                reservation.profile_id,
+                reservation.owner_principal,
+                generation,
+                reservation.subject_contract_digest,
+                reservation.subject_digest,
+                reservation.checkpoint_manifest_hash,
+                reservation.upstream_session_id,
+                reservation.project_principal_key,
+                reservation.project_hash,
+                reservation.target_project_head_hash,
+                now,
+            ],
+        )?;
+        tx.commit()?;
+        self.credential_profile_reservation(reservation.reservation_id)?
+            .ok_or_else(|| anyhow!("credential reservation disappeared after commit"))
+    }
+
+    pub fn credential_profile_reservation(
+        &self,
+        reservation_id: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        Self::credential_profile_reservation_from_connection(
+            &self.conn,
+            "reservation_id=?1",
+            reservation_id,
+        )
+    }
+
+    pub fn credential_profile_reservation_for_successor(
+        &self,
+        successor_thread_id: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        validate_bounded_runtime_text(
+            "credential reservation successor",
+            successor_thread_id,
+            256,
+        )?;
+        Self::credential_profile_reservation_from_connection(
+            &self.conn,
+            "successor_thread_id=?1",
+            successor_thread_id,
+        )
+    }
+
+    pub fn release_credential_profile_reservation(&self, reservation_id: &str) -> Result<()> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let record = Self::credential_profile_reservation_from_connection(
+            &tx,
+            "reservation_id=?1",
+            reservation_id,
+        )?
+        .ok_or_else(|| anyhow!("credential reservation does not exist"))?;
+        if record.state == "consumed" {
+            bail!("consumed credential reservation cannot be released");
+        }
+        if record.state == "released" {
+            tx.commit()?;
+            return Ok(());
+        }
+        let unlocked = tx.execute(
+            "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+              WHERE profile_id=?1 AND lock_owner=?2
+                AND credential_generation=?4",
+            params![
+                record.profile_id,
+                reservation_id,
+                now,
+                i64::try_from(record.credential_generation)?,
+            ],
+        )?;
+        if unlocked != 1 {
+            bail!("credential reservation release lost its profile-generation CAS");
+        }
+        tx.execute(
+            "UPDATE credential_profile_reservation
+                SET state='released', project_fence_state='released', updated_at_ms=?2
+              WHERE reservation_id=?1 AND state='reserved'",
+            params![reservation_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn release_project_head_fence(&self, reservation_id: &str) -> Result<()> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile_reservation
+                SET project_fence_state='released', updated_at_ms=?2
+              WHERE reservation_id=?1 AND project_fence_state='active'",
+            params![reservation_id, lillux::time::timestamp_millis() as i64],
+        )?;
+        if changed == 0 {
+            let retained = self
+                .credential_profile_reservation(reservation_id)?
+                .ok_or_else(|| anyhow!("project HEAD fence reservation does not exist"))?;
+            if retained.project_fence_state != "released" {
+                bail!("project HEAD fence has an invalid durable state");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn require_project_head_mutation_unfenced(
+        &self,
+        principal_key: &str,
+        project_hash: &str,
+    ) -> Result<()> {
+        let reservation = self
+            .conn
+            .query_row(
+                "SELECT reservation_id FROM credential_profile_reservation
+                  WHERE project_principal_key=?1 AND project_hash=?2
+                    AND project_fence_state='active'
+                  ORDER BY created_at_ms, reservation_id LIMIT 1",
+                params![principal_key, project_hash],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(reservation_id) = reservation {
+            bail!("project HEAD is fenced by worker handoff reservation {reservation_id}");
+        }
+        Ok(())
+    }
+
+    pub fn require_no_active_project_head_fences(&self) -> Result<()> {
+        let active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM credential_profile_reservation
+              WHERE project_fence_state='active'",
+            [],
+            |row| row.get(0),
+        )?;
+        if active != 0 {
+            bail!("project compaction is fenced by {active} active worker handoff(s)");
+        }
+        Ok(())
+    }
+
+    fn credential_profile_reservation_from_connection(
+        conn: &Connection,
+        predicate: &str,
+        value: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        let column = match predicate {
+            "reservation_id=?1" => "reservation_id",
+            "successor_thread_id=?1" => "successor_thread_id",
+            _ => bail!("invalid internal credential reservation lookup"),
+        };
+        let sql = format!(
+            "SELECT reservation_id, operation_id, successor_thread_id, profile_id,
+                    owner_principal, credential_generation, subject_contract_digest,
+                    subject_digest, checkpoint_manifest_hash, upstream_session_id,
+                    project_principal_key, project_hash, target_project_head_hash,
+                    project_fence_state, state, created_at_ms, updated_at_ms
+               FROM credential_profile_reservation WHERE {column}=?1"
+        );
+        conn.query_row(&sql, [value], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, i64>(15)?,
+                row.get::<_, i64>(16)?,
+            ))
+        })
+        .optional()?
+        .map(|row| {
+            Ok(CredentialProfileReservationRecord {
+                reservation_id: row.0,
+                operation_id: row.1,
+                successor_thread_id: row.2,
+                profile_id: row.3,
+                owner_principal: row.4,
+                credential_generation: u64::try_from(row.5)
+                    .context("negative credential reservation generation")?,
+                subject_contract_digest: row.6,
+                subject_digest: row.7,
+                checkpoint_manifest_hash: row.8,
+                upstream_session_id: row.9,
+                project_principal_key: row.10,
+                project_hash: row.11,
+                target_project_head_hash: row.12,
+                project_fence_state: row.13,
+                state: row.14,
+                created_at_ms: row.15,
+                updated_at_ms: row.16,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn release_credential_profile(&self, profile_id: &str, lock_owner: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+              WHERE profile_id=?1 AND lock_owner=?2",
+            params![
+                profile_id,
+                lock_owner,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile lock release lost its CAS");
+        }
+        Ok(())
+    }
+
+    pub fn begin_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        expires_at_ms: i64,
+    ) -> Result<u64> {
+        validate_bounded_runtime_text("credential login id", login_id, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        if expires_at_ms <= now {
+            bail!("credential enrollment expiry must be in the future");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let epoch: i64 = tx
+            .query_row(
+                "SELECT login_epoch FROM credential_profile
+              WHERE profile_id=?1 AND lock_owner=?2 AND state='unauthenticated'",
+                params![profile_id, lock_owner],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("credential profile cannot begin enrollment"))?;
+        let next = epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("credential login epoch overflow"))?;
+        tx.execute(
+            "UPDATE credential_profile SET state='enrolling', active_login_id=?3,
+                    login_epoch=?4, login_expires_at_ms=?5, sanitized_account_json=NULL,
+                    updated_at_ms=?6, authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND lock_owner=?2 AND login_epoch=?7",
+            params![
+                profile_id,
+                lock_owner,
+                login_id,
+                next,
+                expires_at_ms,
+                now,
+                epoch
+            ],
+        )?;
+        tx.commit()?;
+        u64::try_from(next).context("negative credential login epoch")
+    }
+
+    pub fn complete_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        login_epoch: u64,
+        sanitized_account: &serde_json::Value,
+    ) -> Result<u64> {
+        let account_json = serde_json::to_string(sanitized_account)?;
+        validate_bounded_runtime_text("sanitized credential account", &account_json, 16 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let login_epoch = i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=?5, credential_generation=credential_generation+1,
+                    updated_at_ms=?6, authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
+                AND login_epoch=?4 AND state='enrolling' AND login_expires_at_ms>=?6",
+            params![
+                profile_id,
+                lock_owner,
+                login_id,
+                login_epoch,
+                account_json,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential enrollment completion lost its ceremony CAS");
+        }
+        self.conn
+            .query_row(
+                "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+            .and_then(|value| u64::try_from(value).context("negative credential generation"))
+    }
+
+    pub fn observe_session_credential_enrollment(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        worker_boot_epoch: u64,
+        sanitized_account: &serde_json::Value,
+    ) -> Result<u64> {
+        let account_json = serde_json::to_string(sanitized_account)?;
+        validate_bounded_runtime_text("sanitized credential account", &account_json, 16 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let profile: (String, String, i64) = tx.query_row(
+            "SELECT credential_profile_id, active_login_id, login_epoch
+               FROM dedicated_session JOIN credential_profile
+                 ON profile_id=credential_profile_id
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND credential_profile.lock_owner=?2
+                AND credential_profile.state='enrolling'
+                AND credential_profile.login_expires_at_ms>=?4",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                i64::try_from(worker_boot_epoch)?,
+                now
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let profile_changed = tx.execute(
+            "UPDATE credential_profile
+                SET state='confirming', sanitized_account_json=?4, updated_at_ms=?5,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
+                AND state='enrolling'",
+            params![profile.0, worker_instance_id, profile.1, account_json, now],
+        )?;
+        if profile_changed != 1 {
+            bail!("session credential observation lost its profile/session CAS");
+        }
+        tx.commit()?;
+        u64::try_from(profile.2).context("negative credential login epoch")
+    }
+
+    pub fn confirm_credential_enrollment(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+        expected_account_digest: &str,
+    ) -> Result<u64> {
+        if !lillux::valid_hash(expected_account_digest) {
+            bail!("credential confirmation account digest is not canonical");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let account_json: String = tx
+            .query_row(
+                "SELECT sanitized_account_json FROM credential_profile
+                  WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
+                    AND state='confirming' AND login_expires_at_ms>=?4
+                    AND lock_owner IS NULL",
+                params![
+                    profile_id,
+                    owner_principal,
+                    i64::try_from(login_epoch)?,
+                    now
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("credential confirmation ceremony is absent or expired"))?;
+        let account: serde_json::Value = serde_json::from_str(&account_json)?;
+        if ryeos_state::objects::canonical_value_digest(&account)? != expected_account_digest {
+            bail!("credential confirmation account digest changed");
+        }
+        let changed = tx.execute(
+            "UPDATE credential_profile
+                SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
+                    credential_generation=credential_generation+1, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
+                AND state='confirming'",
+            params![
+                profile_id,
+                owner_principal,
+                i64::try_from(login_epoch)?,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential confirmation lost its ceremony CAS");
+        }
+        let generation: i64 = tx.query_row(
+            "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+            [profile_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        u64::try_from(generation).context("negative credential generation")
+    }
+
+    pub fn cancel_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        login_epoch: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
+                    login_expires_at_ms=NULL, updated_at_ms=?5,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
+                AND login_epoch=?4 AND state='enrolling'",
+            params![
+                profile_id,
+                lock_owner,
+                login_id,
+                i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential enrollment cancellation lost its ceremony CAS");
+        }
+        Ok(())
+    }
+
+    pub fn revoke_credential_profile(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        expected_generation: u64,
+    ) -> Result<u64> {
+        let expected = i64::try_from(expected_generation)
+            .context("credential generation exceeds SQLite range")?;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='revoking', credential_generation=credential_generation+1,
+                    active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state NOT IN ('revoking','revoked','deleting')",
+            params![
+                profile_id,
+                owner_principal,
+                expected,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential revocation lost its owner/generation CAS");
+        }
+        Ok(expected_generation + 1)
+    }
+
+    pub fn finish_credential_profile_revocation(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        revoking_generation: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='revoked', lock_owner=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state='revoking'",
+            params![
+                profile_id,
+                owner_principal,
+                i64::try_from(revoking_generation)?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential revocation finalization lost its generation CAS");
+        }
+        Ok(())
+    }
+
+    pub fn begin_credential_profile_deletion(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        expected_generation: u64,
+    ) -> Result<u64> {
+        let expected = i64::try_from(expected_generation)
+            .context("credential generation exceeds SQLite range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let live_sessions: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM dedicated_session
+              WHERE credential_profile_id=?1 AND state!='terminal'",
+            [profile_id],
+            |row| row.get(0),
+        )?;
+        if live_sessions != 0 {
+            bail!("credential profile still owns nonterminal sessions");
+        }
+        let changed = tx.execute(
+            "UPDATE credential_profile
+                SET state='deleting', credential_generation=credential_generation+1,
+                    active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=NULL, lock_owner=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state IN ('unauthenticated','revoked')",
+            params![
+                profile_id,
+                owner_principal,
+                expected,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile deletion lost its owner/generation CAS");
+        }
+        tx.commit()?;
+        Ok(expected_generation + 1)
+    }
+
+    pub fn finish_credential_profile_deletion(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        deleting_generation: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='deleted', active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=NULL, lock_owner=NULL,
+                    updated_at_ms=?4, authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state='deleting'",
+            params![
+                profile_id,
+                owner_principal,
+                i64::try_from(deleting_generation)
+                    .context("credential generation exceeds SQLite range")?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile deletion finalization lost its generation CAS");
+        }
+        Ok(())
+    }
+
+    pub fn reserve_dedicated_session_command(
+        &self,
+        command: NewDedicatedSessionCommand<'_>,
+    ) -> Result<DedicatedSessionCommandRecord> {
+        let payload_json = validate_dedicated_session_command_authority(
+            command.placement_thread_id,
+            command.idempotency_key,
+            command.command_kind,
+            command.request_digest,
+            command.payload,
+        )?;
+        let epoch = i64::try_from(command.worker_boot_epoch)
+            .context("worker boot epoch exceeds SQLite range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(existing) = read_dedicated_command_by_key(
+            &tx,
+            command.placement_thread_id,
+            command.idempotency_key,
+        )? {
+            if existing.command_kind != command.command_kind
+                || existing.request_digest != command.request_digest
+                || existing.payload != *command.payload
+            {
+                bail!("command idempotency key was reused for different authority");
+            }
+            if existing.worker_boot_epoch != command.worker_boot_epoch
+                && !(existing.state == "failed"
+                    && existing.result.as_ref().and_then(|value| {
+                        value
+                            .get("retryable_uncontacted")
+                            .and_then(serde_json::Value::as_bool)
+                    }) == Some(true))
+            {
+                bail!("command idempotency key belongs to a different contacted worker epoch");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let next: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(command_sequence), 0) + 1 FROM dedicated_session_command WHERE placement_thread_id=?1",
+            [command.placement_thread_id], |row| row.get(0),
+        )?;
+        if next > MAX_DEDICATED_SESSION_COMMANDS {
+            bail!("dedicated session command ledger reached its count ceiling");
+        }
+        let spool_bytes: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(length(payload_json) + COALESCE(length(result_json), 0)), 0)
+               FROM dedicated_session_command WHERE placement_thread_id=?1",
+            [command.placement_thread_id],
+            |row| row.get(0),
+        )?;
+        let reserved_bytes = i64::try_from(payload_json.len())?
+            .checked_add(256 * 1024)
+            .context("dedicated command reservation byte overflow")?;
+        if spool_bytes
+            .checked_add(reserved_bytes)
+            .is_none_or(|total| total > MAX_DEDICATED_SESSION_COMMAND_SPOOL_BYTES)
+        {
+            bail!("dedicated session command/output spool reached its byte ceiling");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let active_commands: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM dedicated_session_command
+              WHERE placement_thread_id=?1 AND state IN ('committed','dispatched')",
+            [command.placement_thread_id],
+            |row| row.get(0),
+        )?;
+        if active_commands != 0 {
+            bail!("dedicated session already has an unsettled command");
+        }
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='committed', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','recovering')
+                AND send_boundary IN ('none','settled')
+                AND EXISTS(SELECT 1 FROM credential_profile
+                    WHERE profile_id=dedicated_session.credential_profile_id
+                      AND credential_generation=dedicated_session.credential_generation
+                      AND lock_owner=dedicated_session.worker_instance_id
+                      AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![command.placement_thread_id, epoch, now],
+        )?;
+        if session_changed != 1 {
+            bail!("command admission lost its idle worker-epoch CAS");
+        }
+        tx.execute(
+            "INSERT INTO dedicated_session_command (
+                placement_thread_id, command_sequence, idempotency_key, worker_boot_epoch,
+                command_kind, request_digest, payload_json, state, result_json,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'committed', NULL, ?8, ?8)",
+            params![
+                command.placement_thread_id,
+                next,
+                command.idempotency_key,
+                epoch,
+                command.command_kind,
+                command.request_digest,
+                payload_json,
+                now
+            ],
+        )?;
+        let record = read_dedicated_command_by_key(
+            &tx,
+            command.placement_thread_id,
+            command.idempotency_key,
+        )?
+        .ok_or_else(|| anyhow!("committed command disappeared"))?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    /// Return an already-settled command for an exact idempotent replay.
+    ///
+    /// This lookup deliberately does not require the session's current worker
+    /// epoch: a terminal root has no live worker authority, while the retained
+    /// command row already binds the exact epoch that produced its result.
+    /// New or unsettled commands return `None` and must still pass ordinary
+    /// root-operation and worker-contact admission.
+    pub fn settled_dedicated_session_command_replay(
+        &self,
+        placement_thread_id: &str,
+        idempotency_key: &str,
+        command_kind: &str,
+        request_digest: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<DedicatedSessionCommandRecord>> {
+        let _payload_json = validate_dedicated_session_command_authority(
+            placement_thread_id,
+            idempotency_key,
+            command_kind,
+            request_digest,
+            payload,
+        )?;
+        let Some(existing) =
+            read_dedicated_command_by_key(&self.conn, placement_thread_id, idempotency_key)?
+        else {
+            return Ok(None);
+        };
+        if existing.command_kind != command_kind
+            || existing.request_digest != request_digest
+            || existing.payload != *payload
+        {
+            bail!("command idempotency key was reused for different authority");
+        }
+        Ok(matches!(existing.state.as_str(), "completed" | "failed").then_some(existing))
+    }
+
+    /// Read one exact placement-local command coordinate. The operational
+    /// row is only a lookup projection; callers must verify it against the
+    /// authoritative placement-thread facts before trusting its contents.
+    pub fn dedicated_session_command(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+    ) -> Result<Option<DedicatedSessionCommandRecord>> {
+        validate_bounded_runtime_text("command placement thread id", placement_thread_id, 256)?;
+        if command_sequence == 0 {
+            bail!("command sequence must be positive");
+        }
+        let idempotency_key = self
+            .conn
+            .query_row(
+                "SELECT idempotency_key FROM dedicated_session_command
+                  WHERE placement_thread_id=?1 AND command_sequence=?2",
+                params![placement_thread_id, i64::try_from(command_sequence)?],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        idempotency_key
+            .map(|idempotency_key| {
+                read_dedicated_command_by_key(&self.conn, placement_thread_id, &idempotency_key)?
+                    .ok_or_else(|| anyhow!("selected dedicated command disappeared"))
+            })
+            .transpose()
+    }
+
+    /// Prove every workload-contact outbox owned by one placement is settled
+    /// and return a canonical digest of the complete retained frontier. The
+    /// caller separately proves process death and provider-attempt settlement.
+    pub fn dedicated_session_checkpoint_settlement_digest(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<String> {
+        validate_bounded_runtime_text("checkpoint placement thread id", placement_thread_id, 256)?;
+        let session = self
+            .dedicated_session(placement_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("checkpoint dedicated session is missing"))?;
+        if session.state != "frozen"
+            || session.current_turn_id.is_some()
+            || session.send_boundary != "settled"
+        {
+            bail!("checkpoint requires a frozen session with a settled contact boundary");
+        }
+
+        let mut commands = self.conn.prepare(
+            "SELECT command_sequence, worker_boot_epoch, command_kind, request_digest, state,
+                    result_json
+               FROM dedicated_session_command
+              WHERE placement_thread_id=?1
+              ORDER BY command_sequence",
+        )?;
+        let commands = commands
+            .query_map([placement_thread_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .map(|row| {
+                let (sequence, epoch, kind, request_digest, state, result) = row?;
+                if matches!(
+                    state.as_str(),
+                    "committed" | "dispatched" | "outcome_unknown"
+                ) {
+                    bail!("checkpoint has an unresolved possible-contact command");
+                }
+                let result = result
+                    .map(|value| serde_json::from_str::<serde_json::Value>(&value))
+                    .transpose()?;
+                Ok(serde_json::json!({
+                    "sequence": sequence,
+                    "worker_boot_epoch": epoch,
+                    "command_kind": kind,
+                    "request_digest": request_digest,
+                    "state": state,
+                    "result_digest": result.as_ref()
+                        .map(ryeos_state::objects::canonical_value_digest)
+                        .transpose()?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut approvals = self.conn.prepare(
+            "SELECT approval_id, worker_boot_epoch, request_digest, state, decision_digest
+               FROM dedicated_session_approval
+              WHERE placement_thread_id=?1
+              ORDER BY approval_id",
+        )?;
+        let approvals = approvals
+            .query_map([placement_thread_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (approval_id, epoch, request_digest, state, decision_digest) = row?;
+                if matches!(
+                    state.as_str(),
+                    "pending" | "decision_reserved" | "delivery_contacting" | "delivery_unknown"
+                ) {
+                    bail!("checkpoint has an unresolved possible-contact approval");
+                }
+                Ok(serde_json::json!({
+                    "approval_id": approval_id,
+                    "worker_boot_epoch": epoch,
+                    "request_digest": request_digest,
+                    "state": state,
+                    "decision_digest": decision_digest,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut observations = self.conn.prepare(
+            "SELECT worker_boot_epoch, through_sequence, batch_digest, cumulative_event_count,
+                    state
+               FROM dedicated_session_observation_batch
+              WHERE placement_thread_id=?1
+              ORDER BY worker_boot_epoch, through_sequence",
+        )?;
+        let observations = observations
+            .query_map([placement_thread_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (epoch, through, digest, count, state) = row?;
+                if state != "settled" {
+                    bail!("checkpoint has an unacknowledged observation batch");
+                }
+                Ok(serde_json::json!({
+                    "worker_boot_epoch": epoch,
+                    "through_sequence": through,
+                    "batch_digest": digest,
+                    "cumulative_event_count": count,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let frontier = serde_json::json!({
+            "schema": "ryeos.worker_session.contact_settlement.v1",
+            "placement_thread_id": placement_thread_id,
+            "commands": commands,
+            "approvals": approvals,
+            "observations": observations,
+        });
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&frontier)?.as_bytes(),
+        ))
+    }
+
+    /// Durable command-outbox rows whose canonical root testimony may need to
+    /// be completed after a daemon crash. The root chain remains authoritative;
+    /// these rows only retain enough exact material to idempotently finish it.
+    pub fn dedicated_command_outbox_records(&self) -> Result<Vec<DedicatedSessionCommandRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id, idempotency_key
+               FROM dedicated_session_command
+              WHERE state IN ('committed','dispatched','outcome_unknown','failed')
+              ORDER BY placement_thread_id, command_sequence",
+        )?;
+        let identities = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        identities
+            .into_iter()
+            .map(|(placement_thread_id, idempotency_key)| {
+                read_dedicated_command_by_key(&self.conn, &placement_thread_id, &idempotency_key)?
+                    .ok_or_else(|| anyhow!("listed dedicated command outbox row disappeared"))
+            })
+            .collect()
+    }
+
+    pub fn mark_dedicated_command_contacted(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state='dispatched', updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='committed'",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='contacted', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','recovering')
+                AND send_boundary='committed'
+                AND EXISTS(SELECT 1 FROM credential_profile
+                    WHERE profile_id=dedicated_session.credential_profile_id
+                      AND credential_generation=dedicated_session.credential_generation
+                      AND lock_owner=dedicated_session.worker_instance_id
+                      AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("command contact lost its command/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn settle_dedicated_command(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        succeeded: bool,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let result_json = serde_json::to_string(result)?;
+        validate_bounded_runtime_text("command result", &result_json, 256 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let state = if succeeded { "completed" } else { "failed" };
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state=?4, result_json=?5, updated_at_ms=?6
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, state, result_json, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='settled', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','recovering')
+                AND send_boundary='contacted'",
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("command settlement lost its command/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Settle a command whose authoritative response batch was recovered
+    /// from the root event chain after a daemon crash. The response body is
+    /// intentionally not reconstructed; only its retained redacted digest is
+    /// projected back into the outbox.
+    pub fn settle_recovered_dedicated_command(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let result_json = serde_json::to_string(result)?;
+        validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state='completed', result_json=?4, updated_at_ms=?5
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
+                AND state IN ('dispatched','outcome_unknown')",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='settled',
+                    state=CASE WHEN state='outcome_unknown' THEN 'idle' ELSE state END,
+                    updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','recovering','outcome_unknown')
+                AND send_boundary IN ('contacted','outcome_unknown')",
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("recovered command settlement lost its command/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Project an authoritative response for a historical worker epoch after
+    /// the owning root is already terminal.  The terminal root is the caller's
+    /// authority for this transition; the current session projection may have
+    /// detached or advanced past the dead worker epoch, so it must not be
+    /// rewritten while repairing the exact command row.
+    pub fn settle_terminal_recovered_dedicated_command(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let result_json = serde_json::to_string(result)?;
+        validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_command
+                SET state='completed', result_json=?4, updated_at_ms=?5
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
+                AND state IN ('dispatched','outcome_unknown')
+                AND EXISTS(SELECT 1 FROM dedicated_session WHERE placement_thread_id=?1)",
+            params![
+                placement_thread_id,
+                i64::try_from(command_sequence)?,
+                i64::try_from(worker_boot_epoch)?,
+                result_json,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("terminal recovered command settlement lost its exact command CAS");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_command_outcome_unknown(
+        &self,
+        placement_thread_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND send_boundary='contacted'",
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("ambiguous command reconciliation lost its CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Reserve the possible-contact boundary before appending a worker batch
+    /// to the authoritative root thread event chain. The exact canonical batch
+    /// is retained so startup, after quiescing the old worker epoch, can inspect
+    /// root testimony and safely append or rebuild the missing projection.
+    pub fn exact_dedicated_observation_batch_exists(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        through_sequence: u64,
+        previous_digest: Option<&str>,
+        batch_digest: &str,
+        canonical_batch: &serde_json::Value,
+    ) -> Result<bool> {
+        let canonical_batch_json = serde_json::to_string(canonical_batch)?;
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT through_sequence, previous_digest, batch_digest,
+                        canonical_batch_json, state
+                   FROM dedicated_session_observation_batch
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
+                params![
+                    placement_thread_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    i64::try_from(first_sequence)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+        if existing.0 != i64::try_from(through_sequence)?
+            || existing.1.as_deref() != previous_digest
+            || existing.2 != batch_digest
+        {
+            bail!("observation batch sequence identity was reused with different content");
+        }
+        match existing.4.as_str() {
+            "settled" if existing.3.is_none() => Ok(true),
+            "append_contacting" | "append_unknown"
+                if existing.3.as_deref() == Some(canonical_batch_json.as_str()) =>
+            {
+                Ok(true)
+            }
+            "append_contacting" | "append_unknown" => {
+                bail!("observation batch sequence identity was reused with different content")
+            }
+            _ => bail!("observation batch has an invalid durable state"),
+        }
+    }
+
+    pub fn reserve_dedicated_observation_batch(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        through_sequence: u64,
+        previous_digest: Option<&str>,
+        batch_digest: &str,
+        canonical_batch: &serde_json::Value,
+    ) -> Result<ObservationBatchReservation> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("observation batch digest", batch_digest, 128)?;
+        if let Some(previous) = previous_digest {
+            validate_bounded_runtime_text("previous observation digest", previous, 128)?;
+        }
+        if worker_boot_epoch == 0
+            || first_sequence == 0
+            || through_sequence < first_sequence
+            || through_sequence - first_sequence >= 512
+        {
+            bail!("observation batch sequence range is invalid or unbounded");
+        }
+        let canonical_batch_json = serde_json::to_string(canonical_batch)?;
+        if canonical_batch_json.len() > ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
+        {
+            bail!("observation batch exceeds its exact serialized-byte ceiling");
+        }
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let first = i64::try_from(first_sequence)?;
+        let through = i64::try_from(through_sequence)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let attached: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                  FROM dedicated_session
+                  JOIN worker_process
+                    ON worker_process.worker_instance_id=dedicated_session.worker_instance_id
+                   AND worker_process.placement_thread_id=dedicated_session.placement_thread_id
+                   AND worker_process.boot_epoch=dedicated_session.worker_boot_epoch
+                  JOIN credential_profile
+                    ON credential_profile.profile_id=dedicated_session.credential_profile_id
+                 WHERE dedicated_session.placement_thread_id=?1
+                   AND dedicated_session.worker_boot_epoch=?2
+                   AND dedicated_session.state IN ('idle','turn_running','awaiting_approval','recovering')
+                   AND worker_process.state='live'
+                   AND worker_process.cleanup_state='owned'
+                   AND credential_profile.credential_generation=dedicated_session.credential_generation
+                   AND credential_profile.lock_owner=dedicated_session.worker_instance_id
+                   AND credential_profile.state IN ('unauthenticated','enrolling','confirming','active')
+            )",
+            params![placement_thread_id, epoch],
+            |row| row.get(0),
+        )?;
+        if !attached {
+            bail!("observation batch lost its live worker epoch");
+        }
+        let existing = tx
+            .query_row(
+                "SELECT through_sequence, previous_digest, batch_digest, cumulative_event_count,
+                        canonical_batch_json, state
+                   FROM dedicated_session_observation_batch
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
+                params![placement_thread_id, epoch, first],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 != through
+                || existing.1.as_deref() != previous_digest
+                || existing.2 != batch_digest
+            {
+                bail!("observation batch sequence identity was reused with different content");
+            }
+            if existing.3 <= 0
+                || u64::try_from(existing.3)?
+                    > ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS
+            {
+                bail!("observation batch has an invalid cumulative event count");
+            }
+            return match existing.5.as_str() {
+                "settled" if existing.4.is_none() => {
+                    Ok(ObservationBatchReservation::AlreadySettled)
+                }
+                "append_contacting" | "append_unknown"
+                    if existing.4.as_deref() == Some(canonical_batch_json.as_str()) =>
+                {
+                    Ok(ObservationBatchReservation::RebuildProjection)
+                }
+                "append_contacting" | "append_unknown" => {
+                    bail!("observation batch sequence identity was reused with different content")
+                }
+                _ => bail!("observation batch has an invalid durable state"),
+            };
+        }
+        let predecessor = tx
+            .query_row(
+                "SELECT through_sequence, batch_digest, state
+                   FROM dedicated_session_observation_batch
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                  ORDER BY through_sequence DESC LIMIT 1",
+                params![placement_thread_id, epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match predecessor {
+            None if first_sequence == 1 && previous_digest.is_none() => {}
+            Some((prior_through, prior_digest, prior_state))
+                if prior_state == "settled"
+                    && prior_through.checked_add(1) == Some(first)
+                    && previous_digest == Some(prior_digest.as_str()) => {}
+            Some((_, _, prior_state)) if prior_state != "settled" => {
+                bail!("prior observation append outcome is unknown")
+            }
+            _ => bail!("observation batch has a gap, reordering, or broken digest chain"),
+        }
+        let settled_event_count = tx
+            .query_row(
+                "SELECT cumulative_event_count
+                   FROM dedicated_session_observation_batch
+                  WHERE placement_thread_id=?1 AND state='settled'
+                  ORDER BY settled_at_ms DESC, worker_boot_epoch DESC, through_sequence DESC
+                  LIMIT 1",
+                [placement_thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let batch_event_count = through
+            .checked_sub(first)
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| anyhow!("observation batch event count overflow"))?;
+        let cumulative_event_count = settled_event_count
+            .checked_add(batch_event_count)
+            .ok_or_else(|| anyhow!("hosted session observation event count overflow"))?;
+        if cumulative_event_count
+            > i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)?
+        {
+            bail!("hosted session observation event ceiling is exhausted");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        tx.execute(
+            "INSERT INTO dedicated_session_observation_batch(
+                placement_thread_id, worker_boot_epoch, first_sequence, through_sequence,
+                previous_digest, batch_digest, cumulative_event_count, canonical_batch_json,
+                state, created_at_ms, settled_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'append_contacting', ?9, NULL)",
+            params![
+                placement_thread_id,
+                epoch,
+                first,
+                through,
+                previous_digest,
+                batch_digest,
+                cumulative_event_count,
+                canonical_batch_json,
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(ObservationBatchReservation::ContactAppend)
+    }
+
+    pub fn settle_dedicated_observation_batch(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let first = i64::try_from(first_sequence)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_observation_batch
+                SET state='settled', canonical_batch_json=NULL, settled_at_ms=?5
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+                AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
+            params![
+                placement_thread_id,
+                epoch,
+                first,
+                batch_digest,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("observation batch lost its append-contacting reservation");
+        }
+        // The root chain retains complete authoritative testimony. SQLite
+        // keeps one cumulative predecessor frontier per session plus any
+        // currently ambiguous outbox body; settled per-batch metadata is not
+        // a second unbounded journal.
+        tx.execute(
+            "DELETE FROM dedicated_session_observation_batch
+              WHERE placement_thread_id=?1 AND state='settled'
+                AND NOT (worker_boot_epoch=?2 AND first_sequence=?3)",
+            params![placement_thread_id, epoch, first],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Return pushed-observation reservations whose authoritative append or
+    /// rebuildable projection was interrupted. Startup repairs these while the
+    /// exact old worker epoch is still retained and after its process has been
+    /// quiesced.
+    pub fn dedicated_observation_outbox_records(
+        &self,
+    ) -> Result<Vec<DedicatedObservationBatchRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id, worker_boot_epoch, first_sequence,
+                    through_sequence, batch_digest, canonical_batch_json, state
+               FROM dedicated_session_observation_batch
+              WHERE state IN ('append_contacting','append_unknown')
+              ORDER BY placement_thread_id, worker_boot_epoch, first_sequence",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .map(|row| {
+                let row = row?;
+                Ok(DedicatedObservationBatchRecord {
+                    placement_thread_id: row.0,
+                    worker_boot_epoch: u64::try_from(row.1)?,
+                    first_sequence: u64::try_from(row.2)?,
+                    through_sequence: u64::try_from(row.3)?,
+                    batch_digest: row.4,
+                    canonical_batch: serde_json::from_str(&row.5).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    state: row.6,
+                })
+            })
+            .collect()
+    }
+
+    /// Remove an exact append reservation only after the startup reconciler
+    /// has quiesced the old worker and proved that the immutable root chain has
+    /// no corresponding batch. No authority was published, so the reservation
+    /// itself is rebuildable and may be discarded.
+    pub fn discard_unappended_dedicated_observation_batch(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "DELETE FROM dedicated_session_observation_batch
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+                AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
+            params![
+                placement_thread_id,
+                i64::try_from(worker_boot_epoch)?,
+                i64::try_from(first_sequence)?,
+                batch_digest,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("unappended observation discard lost its exact reservation CAS");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_observation_batch_unknown(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE dedicated_session_observation_batch SET state='append_unknown'
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+                AND batch_digest=?4 AND state='append_contacting'",
+            params![
+                placement_thread_id,
+                i64::try_from(worker_boot_epoch)?,
+                i64::try_from(first_sequence)?,
+                batch_digest
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_dedicated_session_approval(
+        &self,
+        approval: NewDedicatedSessionApproval<'_>,
+    ) -> Result<()> {
+        let authority_json = serde_json::to_string(approval.requested_authority)?;
+        validate_bounded_runtime_text("approval authority", &authority_json, 64 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        if approval.expires_at_ms <= now {
+            bail!("approval expiry must be in the future");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let existing: Option<(String, String, String, i64)> = tx
+            .query_row(
+                "SELECT request_digest, operation_class, requested_authority_json, worker_boot_epoch
+                   FROM dedicated_session_approval WHERE placement_thread_id=?1 AND approval_id=?2",
+                params![approval.placement_thread_id, approval.approval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 == approval.request_digest
+                && existing.1 == approval.operation_class
+                && existing.2 == authority_json
+                && existing.3 == i64::try_from(approval.worker_boot_epoch)?
+            {
+                return Ok(());
+            }
+            bail!("approval identity was reused with different authority");
+        }
+        let session_live: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='turn_running')",
+            params![
+                approval.placement_thread_id,
+                approval.worker_instance_id,
+                i64::try_from(approval.worker_boot_epoch)?,
+            ],
+            |row| row.get(0),
+        )?;
+        if !session_live {
+            bail!("approval admission lost its active worker/session CAS");
+        }
+        tx.execute(
+            "INSERT INTO dedicated_session_approval (
+                placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
+                request_digest, operation_class, requested_authority_json, state,
+                decision_principal, decision_json, decision_digest, reservation_token,
+                expires_at_ms, created_at_ms, resolved_at_ms,
+                delivery_contacted_at_ms, delivery_settled_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending',
+                       NULL, NULL, NULL, NULL, ?8, ?9, NULL, NULL, NULL)",
+            params![
+                approval.placement_thread_id,
+                approval.approval_id,
+                approval.worker_instance_id,
+                i64::try_from(approval.worker_boot_epoch)?,
+                approval.request_digest,
+                approval.operation_class,
+                authority_json,
+                approval.expires_at_ms,
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn pending_dedicated_session_approvals(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Vec<DedicatedSessionApprovalRecord>> {
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
+                    request_digest, operation_class, requested_authority_json, state,
+                    decision_principal, decision_json, decision_digest, reservation_token,
+                    expires_at_ms, created_at_ms, resolved_at_ms,
+                    delivery_contacted_at_ms, delivery_settled_at_ms
+               FROM dedicated_session_approval
+              WHERE placement_thread_id=?1
+                AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown')
+              ORDER BY created_at_ms, approval_id",
+        )?;
+        let rows = statement.query_map([placement_thread_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, Option<i64>>(14)?,
+                row.get::<_, Option<i64>>(15)?,
+                row.get::<_, Option<i64>>(16)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(DedicatedSessionApprovalRecord {
+                placement_thread_id: row.0,
+                approval_id: row.1,
+                worker_instance_id: row.2,
+                worker_boot_epoch: u64::try_from(row.3)?,
+                request_digest: row.4,
+                operation_class: row.5,
+                requested_authority: serde_json::from_str(&row.6)?,
+                state: row.7,
+                decision_principal: row.8,
+                decision: row
+                    .9
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?,
+                decision_digest: row.10,
+                reservation_token: row.11,
+                expires_at_ms: row.12,
+                created_at_ms: row.13,
+                resolved_at_ms: row.14,
+                delivery_contacted_at_ms: row.15,
+                delivery_settled_at_ms: row.16,
+            })
+        })
+        .collect()
+    }
+
+    pub fn dedicated_approval_has_exact_state(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+        reservation_token: &str,
+        decision_digest: &str,
+        state: &str,
+    ) -> Result<bool> {
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("approval id", approval_id, 256)?;
+        validate_sha256("approval request digest", request_digest)?;
+        validate_bounded_runtime_text("approval reservation token", reservation_token, 256)?;
+        validate_sha256("approval decision digest", decision_digest)?;
+        if !matches!(state, "expired" | "delivery_settled") {
+            bail!("approval exact-state query is outside its fixed vocabulary");
+        }
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND request_digest=?4 AND reservation_token=?5
+                    AND decision_digest=?6 AND state=?7)",
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    request_digest,
+                    reservation_token,
+                    decision_digest,
+                    state,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn reconcile_dedicated_approval_delivery_unknown(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_unknown', resolved_at_ms=?4
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND state IN ('decision_reserved','delivery_contacting')",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND state='delivery_unknown')",
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?
+                ],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("approval outbox reconciliation lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Retire a decision that was durably reserved but provably never crossed
+    /// the worker-contact boundary. This is distinct from delivery-unknown:
+    /// no external effect is possible, and a terminal root cannot accept new
+    /// delivery facts for the historical epoch.
+    pub fn reconcile_dedicated_approval_stale_epoch(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='stale_epoch', resolved_at_ms=?4
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND state='decision_reserved'",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND state='stale_epoch')",
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?
+                ],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("approval stale-epoch reconciliation lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Revalidate a completion fence against the retained owner-route frontier
+    /// after the session has already terminalized.
+    pub fn require_dedicated_session_route_frontier(
+        &self,
+        placement_thread_id: &str,
+        expected_route_command_sequence: u64,
+    ) -> Result<()> {
+        if expected_route_command_sequence == 0 {
+            bail!("expected completion route-command sequence must be positive");
+        }
+        let found: Option<i64> = self.conn.query_row(
+            "SELECT MAX(command_sequence) FROM dedicated_session_command
+              WHERE placement_thread_id=?1 AND command_kind='route'",
+            params![placement_thread_id],
+            |row| row.get(0),
+        )?;
+        if found
+            .map(u64::try_from)
+            .transpose()
+            .context("retained route-command frontier overflow")?
+            != Some(expected_route_command_sequence)
+        {
+            bail!("completed termination command frontier has advanced");
+        }
+        Ok(())
+    }
+
+    /// Atomically closes command and approval admission before retirement.
+    /// A retained draining reservation is safe to retry after a crash.
+    pub fn reserve_dedicated_session_completion(
+        &self,
+        placement_thread_id: &str,
+        worker_boot_epoch: u64,
+        expected_route_command_sequence: Option<u64>,
+    ) -> Result<()> {
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let expected_route_command_sequence = expected_route_command_sequence
+            .map(|sequence| {
+                if sequence == 0 {
+                    bail!("expected completion route-command sequence must be positive");
+                }
+                i64::try_from(sequence)
+                    .context("expected completion route-command sequence overflow")
+            })
+            .transpose()?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session SET state='draining', updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='idle'
+                AND current_turn_id IS NULL
+                AND (?3 IS NULL OR ?3=(SELECT MAX(command_sequence)
+                    FROM dedicated_session_command
+                    WHERE placement_thread_id=?1 AND command_kind='route'))
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session_command
+                    WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                      AND state IN ('committed','dispatched','outcome_unknown'))
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session_approval
+                    WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                      AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown'))
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session_observation_batch
+                    WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state!='settled')",
+            params![placement_thread_id, epoch, expected_route_command_sequence, now],
+        )?;
+        if changed == 0 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='draining'
+                    AND (?3 IS NULL OR ?3=(SELECT MAX(command_sequence)
+                        FROM dedicated_session_command
+                        WHERE placement_thread_id=?1 AND command_kind='route')))",
+                params![placement_thread_id, epoch, expected_route_command_sequence],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                if let Some(expected) = expected_route_command_sequence {
+                    let found: Option<i64> = tx.query_row(
+                        "SELECT MAX(command_sequence) FROM dedicated_session_command
+                          WHERE placement_thread_id=?1 AND command_kind='route'",
+                        params![placement_thread_id],
+                        |row| row.get(0),
+                    )?;
+                    if found != Some(expected) {
+                        bail!("completed termination command frontier has advanced");
+                    }
+                }
+                bail!("dedicated completion requires an idle, quiescent worker");
+            }
+        }
+        let worker_changed = tx.execute(
+            "UPDATE worker_process SET state='draining', cleanup_state='draining', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND boot_epoch=?2 AND state='live' AND cleanup_state='owned'",
+            params![placement_thread_id, epoch, now],
+        )?;
+        if worker_changed == 0 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_process
+                  WHERE placement_thread_id=?1 AND boot_epoch=?2 AND state='draining'
+                    AND cleanup_state='draining')",
+                params![placement_thread_id, epoch],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated completion lost its live worker reservation");
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_dedicated_session_approval_decision(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+        decision_principal: &str,
+        decision: &serde_json::Value,
+        decision_digest: &str,
+        reservation_token: &str,
+    ) -> Result<()> {
+        let decision_json = lillux::canonical_json(decision)?;
+        validate_bounded_runtime_text("approval decision", &decision_json, 64 * 1024)?;
+        validate_bounded_runtime_text("approval decision digest", decision_digest, 128)?;
+        validate_bounded_runtime_text("approval reservation token", reservation_token, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='decision_reserved', decision_principal=?5,
+                    decision_json=?6, decision_digest=?7, reservation_token=?8,
+                    resolved_at_ms=?9
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND request_digest=?4 AND state='pending' AND expires_at_ms>=?9",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                request_digest,
+                decision_principal,
+                decision_json,
+                decision_digest,
+                reservation_token,
+                now,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval resolution lost its digest/epoch/single-use CAS");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_approval_delivery_contacting(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_contacting', delivery_contacted_at_ms=?6
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='decision_reserved'
+                AND EXISTS(SELECT 1 FROM dedicated_session
+                  JOIN credential_profile ON profile_id=credential_profile_id
+                  WHERE dedicated_session.placement_thread_id=?1
+                    AND dedicated_session.worker_boot_epoch=?3
+                    AND dedicated_session.worker_instance_id=dedicated_session_approval.worker_instance_id
+                    AND dedicated_session.state IN ('turn_running','awaiting_approval')
+                    AND credential_profile.state='active'
+                    AND credential_profile.credential_generation=dedicated_session.credential_generation
+                    AND credential_profile.lock_owner=dedicated_session.worker_instance_id)",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                reservation_token,
+                decision_digest,
+                lillux::time::timestamp_millis() as i64,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval delivery lost its reserved pre-contact CAS");
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_approval_delivery(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_settled', delivery_settled_at_ms=?6
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='delivery_contacting'",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                reservation_token,
+                decision_digest,
+                lillux::time::timestamp_millis() as i64,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval delivery lost its contacted CAS");
+        }
+        Ok(())
+    }
+
+    /// Rebuild approval settlement from an exact authoritative root fact. The
+    /// fact can outlive both an interrupted SQLite settlement and detachment of
+    /// its historical worker epoch, so this repairs only the approval row.
+    pub fn settle_recovered_dedicated_approval_delivery(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_settled', delivery_settled_at_ms=?6
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state IN ('decision_reserved','delivery_contacting','delivery_unknown')",
+            params![
+                placement_thread_id,
+                approval_id,
+                epoch,
+                reservation_token,
+                decision_digest,
+                now,
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let settled: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='delivery_settled')",
+            params![
+                placement_thread_id,
+                approval_id,
+                epoch,
+                reservation_token,
+                decision_digest,
+            ],
+            |row| row.get(0),
+        )?;
+        if !settled {
+            bail!("recovered approval settlement lost its exact decision CAS");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_approval_delivery_unknown(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown'
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='delivery_contacting'",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                reservation_token,
+                decision_digest,
+            ],
+        )?;
+        if changed != 1 {
+            let expiry_won: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND reservation_token=?4 AND decision_digest=?5 AND state='expired')",
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    reservation_token,
+                    decision_digest,
+                ],
+                |row| row.get(0),
+            )?;
+            if !expiry_won {
+                bail!("approval unknown settlement lost its contacted CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Project an exact root-appended worker expiry observation. The worker
+    /// protocol has already sent its admitted fail-closed response before this
+    /// fact is accepted, so it—not projection-time wall clock—is the authority.
+    /// Expiry may win against a concurrently reserved/contacting decision, but
+    /// never against a delivery already proven settled.
+    pub fn observe_dedicated_session_approval_expiry(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("approval id", approval_id, 256)?;
+        validate_sha256("approval request digest", request_digest)?;
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='expired', resolved_at_ms=?5
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND request_digest=?4
+                AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown')",
+            params![placement_thread_id, approval_id, epoch, request_digest, now],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let state = self
+            .conn
+            .query_row(
+                "SELECT state FROM dedicated_session_approval
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND request_digest=?4",
+                params![placement_thread_id, approval_id, epoch, request_digest],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match state.as_deref() {
+            Some("expired") => Ok(()),
+            Some("delivery_settled") => {
+                bail!("worker expiry contradicts an already-settled approval delivery")
+            }
+            _ => bail!("observed approval expiry lost its exact id/epoch/digest CAS"),
+        }
+    }
+
+    pub fn expire_dedicated_session_approval(
+        &self,
+        placement_thread_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("approval id", approval_id, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let approval_changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='expired', resolved_at_ms=?4
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND state='pending' AND expires_at_ms<=?4",
+            params![
+                placement_thread_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                now
+            ],
+        )?;
+        if approval_changed != 1 {
+            let expired: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND state='expired')",
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?
+                ],
+                |row| row.get(0),
+            )?;
+            if !expired {
+                bail!("approval expiry lost its id/epoch CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically publish the operational owner of one held exclusive process
+    /// and activate its already-constructed workspace. The caller may release
+    /// the held child only after this transaction commits.
+    pub fn attach_worker_process(&self, record: &WorkerProcessRecord) -> Result<()> {
+        validate_worker_process_record(record)?;
+        if record.state != WorkerProcessState::Attached || record.cleanup_state != "owned" {
+            bail!("new worker process must enter as attached and owned");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let session: Option<(String, String, String, String, i64)> = tx
+            .query_row(
+                "SELECT admitted_capsule_hash, workspace_id, state,
+                        credential_profile_id, credential_generation
+                 FROM dedicated_session WHERE placement_thread_id = ?1",
+                [&record.placement_thread_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((capsule_hash, workspace_id, session_state, profile_id, generation)) = session
+        else {
+            bail!("worker process references an unknown dedicated session");
+        };
+        if capsule_hash != record.session_capsule_hash || session_state != "admitted" {
+            bail!("worker process contradicts admitted session authority or state");
+        }
+        let credential_fenced: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM credential_profile
+              WHERE profile_id=?1 AND credential_generation=?2 AND lock_owner=?3
+                AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![profile_id, generation, record.worker_instance_id],
+            |row| row.get(0),
+        )?;
+        if !credential_fenced {
+            bail!("dedicated worker attachment lost its credential generation/lock fence");
+        }
+        let workspace: Option<(String, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT execution_workspace.state,
+                        execution_workspace.process_identity,
+                        thread_runtime.process_identity
+                   FROM execution_workspace
+                   LEFT JOIN thread_runtime ON thread_runtime.thread_id = ?2
+                  WHERE workspace_id = ?1 AND execution_workspace.thread_id = ?2",
+                params![workspace_id, record.placement_thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let workspace_handoff_identity = match workspace {
+            Some((state, None, _)) if state == "ready" => None,
+            Some((state, Some(workspace_identity), Some(root_identity)))
+                if state == "active" && workspace_identity == root_identity =>
+            {
+                Some(workspace_identity)
+            }
+            _ => bail!(
+                "dedicated worker workspace is not ready or actively owned by its root process"
+            ),
+        };
+        let process_identity = serde_json::to_string(&record.process_identity)
+            .context("serialize worker process identity")?;
+        tx.execute(
+            "INSERT INTO worker_process (
+                worker_instance_id, boot_identity_hash, session_capsule_hash,
+                boot_epoch, lifecycle_generation, process_identity,
+                control_channel_identity, state, daemon_generation_id,
+                placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                record.worker_instance_id,
+                record.boot_identity_hash,
+                record.session_capsule_hash,
+                i64::try_from(record.boot_epoch)
+                    .context("worker boot epoch exceeds SQLite range")?,
+                i64::try_from(record.lifecycle_generation)
+                    .context("worker lifecycle generation exceeds SQLite range")?,
+                process_identity,
+                record.control_channel_identity,
+                record.state.as_str(),
+                record.daemon_generation_id,
+                record.placement_thread_id,
+                record.cleanup_state,
+                record.created_at_ms,
+                record.updated_at_ms,
+            ],
+        )?;
+        let workspace_changed = match workspace_handoff_identity {
+            None => tx.execute(
+                "UPDATE execution_workspace
+                    SET state = 'active', process_identity = ?2, updated_at_ms = ?3
+                  WHERE workspace_id = ?1 AND state = 'ready' AND process_identity IS NULL",
+                params![workspace_id, process_identity, record.updated_at_ms],
+            )?,
+            Some(root_identity) => tx.execute(
+                "UPDATE execution_workspace
+                    SET process_identity = ?2, updated_at_ms = ?3
+                  WHERE workspace_id = ?1 AND state = 'active' AND process_identity = ?4
+                    AND EXISTS(SELECT 1 FROM thread_runtime
+                      WHERE thread_id = ?5 AND process_identity = ?4)",
+                params![
+                    workspace_id,
+                    process_identity,
+                    record.updated_at_ms,
+                    root_identity,
+                    record.placement_thread_id,
+                ],
+            )?,
+        };
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session
+             SET worker_instance_id = ?2, worker_boot_epoch = ?3,
+                 state = 'binding', updated_at_ms = ?4
+             WHERE placement_thread_id = ?1 AND state = 'admitted' AND worker_instance_id IS NULL",
+            params![
+                record.placement_thread_id,
+                record.worker_instance_id,
+                i64::try_from(record.boot_epoch)
+                    .context("worker boot epoch exceeds SQLite range")?,
+                record.updated_at_ms,
+            ],
+        )?;
+        if workspace_changed != 1 || session_changed != 1 {
+            bail!("dedicated worker atomic attachment lost its workspace/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Preserve exact process evidence when atomic attachment failed and the
+    /// held child could not be proved reaped. This quarantine row lets
+    /// revocation/restart verify the exact group before releasing credentials.
+    pub fn fence_unproved_worker_start(
+        &self,
+        record: &WorkerProcessRecord,
+        reason: &str,
+    ) -> Result<()> {
+        validate_worker_process_record(record)?;
+        validate_bounded_runtime_text("unproved worker start reason", reason, 4096)?;
+        let process_identity = serde_json::to_string(&record.process_identity)?;
+        let epoch = i64::try_from(record.boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO worker_process (
+                worker_instance_id, boot_identity_hash, session_capsule_hash,
+                boot_epoch, lifecycle_generation, process_identity,
+                control_channel_identity, state, daemon_generation_id,
+                placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'dead', ?8, ?9, 'unproved', ?10, ?10)
+             ON CONFLICT(worker_instance_id) DO NOTHING",
+            params![
+                record.worker_instance_id,
+                record.boot_identity_hash,
+                record.session_capsule_hash,
+                epoch,
+                i64::try_from(record.lifecycle_generation)?,
+                process_identity,
+                record.control_channel_identity,
+                record.daemon_generation_id,
+                record.placement_thread_id,
+                now,
+            ],
+        )?;
+        let exact: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM worker_process
+              WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
+                AND process_identity=?4 AND state='dead' AND cleanup_state='unproved')",
+            params![
+                record.worker_instance_id,
+                record.placement_thread_id,
+                epoch,
+                serde_json::to_string(&record.process_identity)?,
+            ],
+            |row| row.get(0),
+        )?;
+        if !exact {
+            bail!("unproved worker identity conflicts with existing durable evidence");
+        }
+        let changed = tx.execute(
+            "UPDATE dedicated_session
+                SET worker_instance_id=?2, worker_boot_epoch=?3,
+                    state='outcome_unknown', send_boundary='outcome_unknown',
+                    terminal_reason=?4, updated_at_ms=?5
+              WHERE placement_thread_id=?1
+                AND (worker_instance_id IS NULL OR worker_instance_id=?2)
+                AND (worker_boot_epoch IS NULL OR worker_boot_epoch=?3)
+                AND state IN ('admitted','binding','recovering','outcome_unknown')",
+            params![
+                record.placement_thread_id,
+                record.worker_instance_id,
+                epoch,
+                reason,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("unproved worker start fence lost its placement identity CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn worker_process(&self, worker_instance_id: &str) -> Result<Option<WorkerProcessRecord>> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT worker_instance_id, boot_identity_hash, session_capsule_hash,
+                        boot_epoch, lifecycle_generation, process_identity,
+                        control_channel_identity, state, daemon_generation_id,
+                        placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
+                 FROM worker_process WHERE worker_instance_id = ?1",
+                [worker_instance_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            instance,
+            boot_hash,
+            capsule,
+            boot_epoch,
+            lifecycle_generation,
+            process_identity,
+            control_channel,
+            state,
+            daemon_generation,
+            placement_thread_id,
+            cleanup_state,
+            created_at_ms,
+            updated_at_ms,
+        )) = raw
+        else {
+            return Ok(None);
+        };
+        let record = WorkerProcessRecord {
+            worker_instance_id: instance,
+            boot_identity_hash: boot_hash,
+            session_capsule_hash: capsule,
+            boot_epoch: u64::try_from(boot_epoch).context("negative worker boot epoch")?,
+            lifecycle_generation: u64::try_from(lifecycle_generation)
+                .context("negative worker lifecycle generation")?,
+            process_identity: serde_json::from_str(&process_identity)
+                .context("decode worker process identity")?,
+            control_channel_identity: control_channel,
+            state: WorkerProcessState::parse(&state)?,
+            daemon_generation_id: daemon_generation,
+            placement_thread_id,
+            cleanup_state,
+            created_at_ms,
+            updated_at_ms,
+        };
+        validate_worker_process_record(&record)?;
+        Ok(Some(record))
+    }
+
+    pub fn live_worker_processes(&self) -> Result<Vec<WorkerProcessRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT worker_instance_id FROM worker_process
+              WHERE state IN ('starting','attached','live','draining')
+                 OR (state='dead' AND cleanup_state='unproved')
+              ORDER BY created_at_ms, worker_instance_id",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                self.worker_process(&id)?
+                    .ok_or_else(|| anyhow!("listed worker process disappeared"))
+            })
+            .collect()
+    }
+
+    /// Fence a previous daemon generation before any replacement worker can
+    /// be admitted. Contacted commands become permanently ambiguous and
+    /// pending approvals become stale; neither may be replayed into a new
+    /// process epoch.
+    pub fn fence_abandoned_worker_process(
+        &self,
+        worker_instance_id: &str,
+        placement_thread_id: &str,
+        boot_epoch: u64,
+        cleanup_state: &str,
+    ) -> Result<()> {
+        if !matches!(cleanup_state, "reaped" | "unproved") {
+            bail!("abandoned worker cleanup state must be reaped or unproved");
+        }
+        let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE worker_process SET state='dead', cleanup_state=?4, updated_at_ms=?5
+              WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
+                AND state IN ('starting','attached','live','draining')",
+            params![
+                worker_instance_id,
+                placement_thread_id,
+                epoch,
+                cleanup_state,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("abandoned worker fence lost its process-identity CAS");
+        }
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='delivery_contacting'",
+            params![placement_thread_id, epoch, now],
+        )?;
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('pending', 'decision_reserved')",
+            params![placement_thread_id, epoch, now],
+        )?;
+        // `committed` is mechanically before possible worker contact: the
+        // contacting transition is durable before the socket write. Retire
+        // these old-epoch reservations as a stable retryable failure so they
+        // cannot block recovery or a later command.
+        tx.execute(
+            "UPDATE dedicated_session_command
+                SET state='failed', result_json=?3, updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='committed'",
+            params![
+                placement_thread_id,
+                epoch,
+                serde_json::to_string(&serde_json::json!({
+                    "error":"worker epoch ended before contact",
+                    "retryable_uncontacted":true,
+                }))?,
+                now
+            ],
+        )?;
+        let contacted = tx.execute(
+            "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='dispatched'",
+            params![placement_thread_id, epoch, now],
+        )?;
+        let next_state = if contacted > 0 || cleanup_state == "unproved" {
+            "outcome_unknown"
+        } else {
+            "recovering"
+        };
+        let next_boundary = if contacted > 0 || cleanup_state == "unproved" {
+            "outcome_unknown"
+        } else {
+            "none"
+        };
+        let session_changed = if cleanup_state == "reaped" {
+            tx.execute(
+                "UPDATE dedicated_session
+                    SET worker_instance_id=NULL, worker_boot_epoch=NULL, state=?4,
+                        send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                params![
+                    placement_thread_id,
+                    worker_instance_id,
+                    epoch,
+                    next_state,
+                    next_boundary,
+                    now
+                ],
+            )?
+        } else {
+            // Unproved cleanup is still a live-credential possibility. Retain
+            // the exact worker identity and profile fence so revocation and
+            // recovery can never mistake it for a safely unattached session.
+            tx.execute(
+                "UPDATE dedicated_session
+                    SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?4
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                params![placement_thread_id, worker_instance_id, epoch, now],
+            )?
+        };
+        if session_changed != 1 {
+            bail!("abandoned worker fence lost its session-epoch CAS");
+        }
+        if cleanup_state == "reaped" {
+            tx.execute(
+                "UPDATE execution_workspace SET state='ready', process_identity=NULL, updated_at_ms=?2
+                  WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE placement_thread_id=?1)
+                    AND state='active'",
+                params![placement_thread_id, now],
+            )?;
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+                  WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                      WHERE placement_thread_id=?1)
+                    AND lock_owner=?2",
+                params![placement_thread_id, worker_instance_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Publish readiness only after the worker completed its signed boot
+    /// handshake. Both the process and its owning session cross the boundary
+    /// in one transaction, fenced by the boot epoch.
+    pub fn complete_worker_binding(
+        &self,
+        worker_instance_id: &str,
+        placement_thread_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        if boot_epoch == 0 {
+            bail!("worker boot epoch must be positive");
+        }
+        let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let worker_changed = tx.execute(
+            "UPDATE worker_process SET state = 'live', updated_at_ms = ?4
+             WHERE worker_instance_id = ?1 AND placement_thread_id = ?2 AND boot_epoch = ?3
+               AND state = 'attached' AND cleanup_state = 'owned'
+               AND EXISTS(SELECT 1 FROM dedicated_session
+                 JOIN credential_profile ON credential_profile.profile_id=dedicated_session.credential_profile_id
+                 WHERE dedicated_session.placement_thread_id=?2
+                   AND dedicated_session.worker_instance_id=?1
+                   AND dedicated_session.worker_boot_epoch=?3
+                   AND credential_profile.credential_generation=dedicated_session.credential_generation
+                   AND credential_profile.lock_owner=?1
+                   AND credential_profile.state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![worker_instance_id, placement_thread_id, epoch, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session
+                SET state = CASE WHEN remote_thread_id IS NULL THEN 'idle' ELSE 'recovering' END,
+                    send_boundary = 'none',
+                    updated_at_ms = ?4
+             WHERE placement_thread_id = ?1 AND worker_instance_id = ?2
+               AND worker_boot_epoch = ?3 AND state = 'binding'
+               AND EXISTS(SELECT 1 FROM credential_profile
+                 WHERE profile_id=dedicated_session.credential_profile_id
+                   AND credential_generation=dedicated_session.credential_generation
+                   AND lock_owner=?2
+                   AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![placement_thread_id, worker_instance_id, epoch, now],
+        )?;
+        if worker_changed != 1 || session_changed != 1 {
+            bail!("worker readiness lost its attached process/session epoch");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Fence and settle an owned worker after exact process-group cleanup.
+    pub fn settle_worker_process(
+        &self,
+        worker_instance_id: &str,
+        placement_thread_id: &str,
+        boot_epoch: u64,
+        cleanup_state: &str,
+        terminal_reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("worker cleanup state", cleanup_state, 32)?;
+        validate_bounded_runtime_text("worker terminal reason", terminal_reason, 2048)?;
+        if !matches!(cleanup_state, "reaped" | "unproved") || boot_epoch == 0 {
+            bail!("worker settlement is not canonical");
+        }
+        let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let worker_changed = tx.execute(
+            "UPDATE worker_process SET state = 'dead', cleanup_state = ?4,
+                    updated_at_ms = ?5
+             WHERE worker_instance_id = ?1 AND placement_thread_id = ?2 AND boot_epoch = ?3
+               AND (state IN ('attached', 'live', 'draining')
+                    OR (state='dead' AND cleanup_state='unproved' AND ?4='reaped'))",
+            params![
+                worker_instance_id,
+                placement_thread_id,
+                epoch,
+                cleanup_state,
+                now
+            ],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET state = 'recovering', terminal_reason = ?4,
+                    updated_at_ms = ?5
+             WHERE placement_thread_id = ?1 AND worker_instance_id = ?2
+               AND worker_boot_epoch = ?3
+               AND state IN ('admitted','binding','idle','turn_running','awaiting_approval',
+                             'recovering','outcome_unknown','draining')",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                epoch,
+                terminal_reason,
+                now
+            ],
+        )?;
+        if worker_changed != 1 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_process
+                  WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
+                    AND state='dead' AND cleanup_state=?4)",
+                params![
+                    worker_instance_id,
+                    placement_thread_id,
+                    epoch,
+                    cleanup_state
+                ],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("worker settlement lost its process identity");
+            }
+        }
+        if session_changed != 1 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND state IN ('recovering','freezing','frozen','verifying','publish_ready',
+                                  'publishing','discarding','terminal'))",
+                params![placement_thread_id, worker_instance_id, epoch],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("worker settlement lost its session epoch");
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn terminalize_dedicated_session(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+        reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let candidate_required: bool = tx.query_row(
+            "SELECT candidate_required != 0 FROM dedicated_session
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                i64::try_from(boot_epoch)?
+            ],
+            |row| row.get(0),
+        )?;
+        let terminal_state = if reason == "completed" && candidate_required {
+            "freezing"
+        } else {
+            "terminal"
+        };
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET state=?6, terminal_reason=?4,
+                    current_turn_id=NULL, updated_at_ms=?5
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='recovering'
+                AND EXISTS(SELECT 1 FROM worker_process
+                    WHERE worker_instance_id=?2 AND placement_thread_id=?1 AND boot_epoch=?3
+                      AND state='dead' AND cleanup_state='reaped')",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                i64::try_from(boot_epoch)?,
+                reason,
+                now,
+                terminal_state,
+            ],
+        )?;
+        if session_changed != 1 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND terminal_reason=?4 AND state=?5)",
+                params![
+                    placement_thread_id,
+                    worker_instance_id,
+                    i64::try_from(boot_epoch)?,
+                    reason,
+                    terminal_state
+                ],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated terminal settlement lost its worker/session CAS");
+            }
+        }
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?2
+              WHERE placement_thread_id=?1 AND state='delivery_contacting'",
+            params![placement_thread_id, now],
+        )?;
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?2
+              WHERE placement_thread_id=?1 AND state IN ('pending', 'decision_reserved')",
+            params![placement_thread_id, now],
+        )?;
+        // Terminal settlement owns the credential lease release in the same
+        // durable transaction. This closes the crash window where a dead
+        // worker had terminalized its session but left the profile fenced.
+        tx.execute(
+            "UPDATE credential_profile
+                SET state=CASE WHEN state='enrolling' THEN 'unauthenticated' ELSE state END,
+                    active_login_id=CASE WHEN state='enrolling' THEN NULL ELSE active_login_id END,
+                    login_expires_at_ms=CASE WHEN state='enrolling' THEN NULL ELSE login_expires_at_ms END,
+                    lock_owner=NULL, updated_at_ms=?4
+              WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                  WHERE placement_thread_id=?1)
+                AND lock_owner=?2
+                AND EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?3)",
+            params![placement_thread_id, worker_instance_id, i64::try_from(boot_epoch)?, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn bind_dedicated_session_candidate(
+        &self,
+        placement_thread_id: &str,
+        snapshot_hash: &str,
+    ) -> Result<bool> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        if !lillux::valid_hash(snapshot_hash) {
+            bail!("dedicated candidate snapshot hash is not canonical");
+        }
+        let candidate_validation_hash =
+            ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+                "schema":"ryeos.dedicated_candidate_verification.v1",
+                "candidate_snapshot_hash":snapshot_hash,
+                "checks":["canonical_snapshot_manifest","base_ancestry_at_publication"]
+            }))?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET candidate_snapshot_hash=?2, candidate_validation_hash=?3,
+                    publication_result='retained', state='frozen', updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND state='freezing'
+                AND terminal_reason='completed'
+                AND candidate_required=1
+                AND candidate_snapshot_hash IS NULL
+                AND EXISTS(SELECT 1 FROM execution_workspace
+                    WHERE workspace_id=dedicated_session.workspace_id AND state='closed')",
+            params![
+                placement_thread_id,
+                snapshot_hash,
+                candidate_validation_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn reserve_dedicated_candidate_validation(
+        &self,
+        placement_thread_id: &str,
+        candidate_snapshot_hash: &str,
+        candidate_validation_hash: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state='verifying', disposition_resume_state='frozen', updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND state='frozen'
+                AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
+                AND publication_result='retained'",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                candidate_validation_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(true);
+        }
+        let retry: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE placement_thread_id=?1 AND state='verifying'
+                AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
+                AND publication_result='retained')",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                candidate_validation_hash
+            ],
+            |row| row.get(0),
+        )?;
+        if !retry {
+            bail!("dedicated candidate validation lost its identity/state CAS");
+        }
+        Ok(false)
+    }
+
+    pub fn settle_dedicated_candidate_validation(
+        &self,
+        placement_thread_id: &str,
+        candidate_snapshot_hash: &str,
+        candidate_validation_hash: &str,
+        evidence: &Value,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        if !lillux::valid_hash(candidate_snapshot_hash)
+            || !lillux::valid_hash(candidate_validation_hash)
+        {
+            bail!("dedicated validation identity is not canonical");
+        }
+        let _evidence_digest = ryeos_state::objects::canonical_value_digest(evidence)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session SET state='publish_ready', disposition_resume_state=NULL, updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND state='verifying'
+                AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
+                AND publication_result='retained'",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                candidate_validation_hash,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated candidate validation lost its identity/state CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reserve_dedicated_candidate_discard(
+        &self,
+        placement_thread_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        if !lillux::valid_hash(candidate_snapshot_hash) {
+            bail!("discarded candidate hash is not canonical");
+        }
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET disposition_resume_state=state, state='discarding', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
+                AND publication_result='retained' AND state IN ('frozen','publish_ready')",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
+                    AND publication_result='retained' AND state='discarding')",
+                params![placement_thread_id, candidate_snapshot_hash],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated candidate discard lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_candidate_discard(
+        &self,
+        placement_thread_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET state='terminal', publication_result='discarded',
+                    disposition_resume_state=NULL, updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
+                AND publication_result='retained' AND state='discarding'",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated candidate discard settlement lost its reservation");
+        }
+        Ok(())
+    }
+
+    pub fn reserve_dedicated_candidate_publication(
+        &self,
+        placement_thread_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state='publishing', disposition_resume_state='publish_ready', updated_at_ms=?3
+              WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
+                AND publication_result='retained' AND state='publish_ready'",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
+                    AND publication_result='retained' AND state='publishing')",
+                params![placement_thread_id, candidate_snapshot_hash],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated candidate publication lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_candidate_publication(
+        &self,
+        placement_thread_id: &str,
+        candidate_snapshot_hash: &str,
+        publication_result: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
+        if !lillux::valid_hash(candidate_snapshot_hash) {
+            bail!("published candidate snapshot hash is not canonical");
+        }
+        validate_bounded_runtime_text("dedicated publication result", publication_result, 512)?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET publication_result=?3, state='terminal',
+                    disposition_resume_state=NULL, updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND state='publishing'
+                AND candidate_snapshot_hash=?2
+                AND publication_result='retained'",
+            params![
+                placement_thread_id,
+                candidate_snapshot_hash,
+                publication_result,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated publication result lost its session/candidate CAS");
+        }
+        Ok(())
+    }
+
+    pub fn fail_dedicated_candidate_disposition(
+        &self,
+        placement_thread_id: &str,
+        reserved_state: &str,
+    ) -> Result<()> {
+        if !matches!(reserved_state, "verifying" | "publishing" | "discarding") {
+            bail!("candidate disposition failure state is invalid");
+        }
+        let fallback = match reserved_state {
+            "verifying" => "frozen",
+            "publishing" => "publish_ready",
+            "discarding" => "", // retained per-row below
+            _ => unreachable!(),
+        };
+        let changed = if reserved_state == "discarding" {
+            self.conn.execute(
+                "UPDATE dedicated_session SET state=disposition_resume_state,
+                    disposition_resume_state=NULL, updated_at_ms=?3
+                  WHERE placement_thread_id=?1 AND state=?2
+                    AND disposition_resume_state IN ('frozen','publish_ready')
+                    AND publication_result='retained'",
+                params![
+                    placement_thread_id,
+                    reserved_state,
+                    lillux::time::timestamp_millis() as i64
+                ],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE dedicated_session SET state=?3, disposition_resume_state=NULL,
+                    updated_at_ms=?4
+                  WHERE placement_thread_id=?1 AND state=?2 AND publication_result='retained'",
+                params![
+                    placement_thread_id,
+                    reserved_state,
+                    fallback,
+                    lillux::time::timestamp_millis() as i64
+                ],
+            )?
+        };
+        if changed != 1 {
+            bail!("candidate disposition failure lost its reservation");
+        }
+        Ok(())
+    }
+
+    pub fn cancel_dedicated_candidate_for_root_stop(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET state='terminal', terminal_reason='cancelled',
+                    publication_result=CASE
+                      WHEN candidate_snapshot_hash IS NULL THEN 'abandoned'
+                      ELSE 'discarded'
+                    END,
+                    disposition_resume_state=NULL, updated_at_ms=?2
+              WHERE placement_thread_id=?1
+                AND state IN ('freezing','frozen','verifying','publish_ready','discarding')
+                AND EXISTS(SELECT 1 FROM worker_process
+                  WHERE worker_instance_id=dedicated_session.worker_instance_id
+                    AND placement_thread_id=dedicated_session.placement_thread_id
+                    AND boot_epoch=dedicated_session.worker_boot_epoch
+                    AND state='dead' AND cleanup_state='reaped')",
+            params![placement_thread_id, now],
+        )?;
+        if changed != 1 {
+            bail!("candidate root-stop cancellation lost its dead-worker/session proof");
+        }
+        Ok(())
     }
 
     pub fn reserve_launch_planning(
@@ -3106,6 +8371,14 @@ impl RuntimeDb {
         }
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
+        let already_reserved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM launch_planning WHERE launch_id = ?1)",
+            [launch_id],
+            |row| row.get(0),
+        )?;
+        if already_reserved {
+            return Err(LaunchPlanningAlreadyReserved.into());
+        }
         let pending_rows: i64 = tx.query_row(
             "SELECT COUNT(*) FROM launch_planning WHERE state = 'planning'",
             [],
@@ -3178,6 +8451,18 @@ impl RuntimeDb {
         Ok(records)
     }
 
+    pub fn dedicated_approval_outbox_session_ids(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT placement_thread_id FROM dedicated_session_approval
+              WHERE state IN ('decision_reserved','delivery_contacting','delivery_unknown')
+              ORDER BY placement_thread_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn cancel_unbound_launch_planning(&self, launch_id: &str) -> Result<bool> {
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
@@ -3209,14 +8494,26 @@ impl RuntimeDb {
     }
 
     pub fn fail_launch_planning(&self, reserved_thread_id: &str) -> Result<bool> {
+        self.fail_launch_planning_with_outcome(reserved_thread_id, "thread_creation_failed")
+    }
+
+    pub fn fail_launch_planning_admission(&self, reserved_thread_id: &str) -> Result<bool> {
+        self.fail_launch_planning_with_outcome(reserved_thread_id, "launch_admission_failed")
+    }
+
+    fn fail_launch_planning_with_outcome(
+        &self,
+        reserved_thread_id: &str,
+        outcome_code: &str,
+    ) -> Result<bool> {
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE launch_planning
-                SET state = 'failed', outcome_code = 'thread_creation_failed',
-                    updated_at_ms = ?2, finished_at_ms = ?2
+                SET state = 'failed', outcome_code = ?2,
+                    updated_at_ms = ?3, finished_at_ms = ?3
               WHERE reserved_thread_id = ?1 AND state = 'planning'",
-            params![reserved_thread_id, now],
+            params![reserved_thread_id, outcome_code, now],
         )? == 1;
         prune_launch_planning(&tx, now)?;
         tx.commit()?;
@@ -3263,7 +8560,7 @@ impl RuntimeDb {
                 )?,
                 thread_commands: count(&self.conn, "thread_commands")?,
                 hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
-                detached_spawn_intents: count(&self.conn, "detached_spawn_intent")?,
+                runtime_action_intents: count(&self.conn, "runtime_action_intent")?,
                 recovery_waits: count(&self.conn, "thread_recovery_wait")?,
                 thread_launch_claims: count(&self.conn, "thread_launch_claim")?,
                 thread_launch_epochs: count(&self.conn, "thread_launch_epoch")?,
@@ -3292,7 +8589,7 @@ impl RuntimeDb {
             seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
             launch_planning: conn.execute("DELETE FROM launch_planning", [])?,
             hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
-            detached_spawn_intents: conn.execute("DELETE FROM detached_spawn_intent", [])?,
+            runtime_action_intents: conn.execute("DELETE FROM runtime_action_intent", [])?,
             recovery_waits: conn.execute("DELETE FROM thread_recovery_wait", [])?,
             thread_runtime: conn.execute("DELETE FROM thread_runtime", [])?,
         };
@@ -3420,33 +8717,43 @@ impl RuntimeDb {
         Ok(reservation)
     }
 
-    /// Bind one logical detached action to exactly one child identity. The
-    /// binding precedes every workspace freeze and child-row mutation, so a
-    /// callback retry after any crash boundary reuses the same identity.
-    pub fn reserve_detached_spawn_intent(
+    /// Bind one runtime-asserted logical action to exactly one daemon-minted
+    /// child. This precedes child-row mutation or detached workspace capture,
+    /// so retries after any crash boundary reuse the same execution identity.
+    pub fn reserve_runtime_action_intent(
         &self,
         operation_id: &str,
-        parent_thread_id: &str,
+        chain_root_id: &str,
+        caller_thread_id: &str,
+        mode: RuntimeActionMode,
         request_hash: &str,
         proposed_child_thread_id: &str,
         child_project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<String> {
-        validate_detached_spawn_intent(
+        if matches!(mode, RuntimeActionMode::Inline) && child_project_authority.is_some() {
+            bail!("inline runtime action cannot carry detached project authority");
+        }
+        validate_runtime_action_intent(
             operation_id,
-            parent_thread_id,
+            chain_root_id,
+            caller_thread_id,
+            &mode,
             request_hash,
             proposed_child_thread_id,
         )?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO detached_spawn_intent(
-                operation_id, parent_thread_id, request_hash, child_thread_id,
+            "INSERT INTO runtime_action_intent(
+                operation_id, chain_root_id, first_caller_thread_id, mode,
+                request_hash, child_thread_id,
                 child_project_authority, created_at_ms
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(operation_id) DO NOTHING",
             params![
                 operation_id,
-                parent_thread_id,
+                chain_root_id,
+                caller_thread_id,
+                mode.as_str(),
                 request_hash,
                 proposed_child_thread_id,
                 child_project_authority
@@ -3455,20 +8762,36 @@ impl RuntimeDb {
                 lillux::time::timestamp_millis(),
             ],
         )?;
-        let (stored_parent, stored_request, child_thread_id, stored_authority): (
-            String,
-            String,
-            String,
-            Option<String>,
-        ) = tx.query_row(
-            "SELECT parent_thread_id, request_hash, child_thread_id, child_project_authority
-                   FROM detached_spawn_intent WHERE operation_id=?1",
+        let (
+            stored_chain,
+            stored_caller,
+            stored_mode,
+            stored_request,
+            child_thread_id,
+            stored_authority,
+        ): (String, String, String, String, String, Option<String>) = tx.query_row(
+            "SELECT chain_root_id, first_caller_thread_id, mode, request_hash,
+                    child_thread_id, child_project_authority
+                   FROM runtime_action_intent WHERE operation_id=?1",
             params![operation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )?;
-        if stored_parent != parent_thread_id || stored_request != request_hash {
+        if stored_chain != chain_root_id
+            || stored_caller != caller_thread_id
+            || stored_mode != mode.as_str()
+            || stored_request != request_hash
+        {
             bail!(
-                "detached operation `{operation_id}` was reused with different parent or request authority"
+                "runtime action `{operation_id}` was reused with different chain, caller, mode, or request authority"
             );
         }
         let stored_authority = stored_authority
@@ -3477,9 +8800,7 @@ impl RuntimeDb {
             .transpose()?;
         if child_project_authority.is_some() && stored_authority.as_ref() != child_project_authority
         {
-            bail!(
-                "detached operation `{operation_id}` was reused with different project authority"
-            );
+            bail!("runtime action `{operation_id}` was reused with different project authority");
         }
         tx.commit()?;
         Ok(child_thread_id)
@@ -3491,7 +8812,7 @@ impl RuntimeDb {
     /// capture starts, while the capture itself is not authoritative until its
     /// exact snapshot authority is sealed here. Concurrent retries may bind the
     /// same value; a different value is an authority conflict.
-    pub fn bind_detached_spawn_project_authority(
+    pub fn bind_detached_action_project_authority(
         &self,
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -3499,14 +8820,16 @@ impl RuntimeDb {
         let encoded = encode_current_project_authority(child_project_authority)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let changed = tx.execute(
-            "UPDATE detached_spawn_intent
+            "UPDATE runtime_action_intent
                 SET child_project_authority=?2
-              WHERE operation_id=?1 AND child_project_authority IS NULL",
+              WHERE operation_id=?1 AND mode='detached'
+                AND child_project_authority IS NULL",
             params![operation_id, encoded],
         )?;
         let stored: Option<String> = tx
             .query_row(
-                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id=?1",
+                "SELECT child_project_authority FROM runtime_action_intent
+                  WHERE operation_id=?1 AND mode='detached'",
                 params![operation_id],
                 |row| row.get(0),
             )
@@ -3527,7 +8850,7 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn seal_detached_spawn_intent(
+    pub fn seal_detached_action_intent(
         &self,
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -3555,10 +8878,10 @@ impl RuntimeDb {
         let events = serde_json::to_string(initial_events)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
-            "UPDATE detached_spawn_intent
+            "UPDATE runtime_action_intent
              SET child_project_authority=?2, admitted_launch_capsule_hash=?3,
                  launch_metadata=?4, initial_events=?5
-             WHERE operation_id=?1 AND launch_metadata IS NULL",
+             WHERE operation_id=?1 AND mode='detached' AND launch_metadata IS NULL",
             params![
                 operation_id,
                 authority,
@@ -3569,12 +8892,13 @@ impl RuntimeDb {
         )?;
         let persisted = tx
             .query_row(
-                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                "SELECT operation_id, chain_root_id, first_caller_thread_id, mode,
+                        request_hash, child_thread_id,
                         child_project_authority, admitted_launch_capsule_hash,
                         launch_metadata, initial_events
-                 FROM detached_spawn_intent WHERE operation_id=?1",
+                 FROM runtime_action_intent WHERE operation_id=?1 AND mode='detached'",
                 params![operation_id],
-                decode_detached_spawn_intent,
+                decode_runtime_action_intent,
             )
             .optional()?
             .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
@@ -3608,50 +8932,44 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn get_detached_spawn_intent(
+    pub fn get_runtime_action_intent(
         &self,
         operation_id: &str,
-    ) -> Result<Option<DetachedSpawnIntent>> {
+    ) -> Result<Option<RuntimeActionIntent>> {
         let row = self
             .conn
             .query_row(
-                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                "SELECT operation_id, chain_root_id, first_caller_thread_id, mode,
+                        request_hash, child_thread_id,
                         child_project_authority, admitted_launch_capsule_hash,
                         launch_metadata, initial_events
-                   FROM detached_spawn_intent WHERE operation_id=?1",
+                   FROM runtime_action_intent WHERE operation_id=?1",
                 params![operation_id],
-                decode_detached_spawn_intent,
+                decode_runtime_action_intent,
             )
             .optional()?;
         if let Some(intent) = &row {
-            validate_detached_spawn_intent_record(intent)?;
+            validate_runtime_action_intent_record(intent)?;
         }
         Ok(row)
     }
 
-    pub fn detached_spawn_intents(&self) -> Result<Vec<DetachedSpawnIntent>> {
+    pub fn runtime_action_intents(&self) -> Result<Vec<RuntimeActionIntent>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+            "SELECT operation_id, chain_root_id, first_caller_thread_id, mode,
+                    request_hash, child_thread_id,
                     child_project_authority, admitted_launch_capsule_hash,
                     launch_metadata, initial_events
-               FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
+               FROM runtime_action_intent ORDER BY created_at_ms, operation_id",
         )?;
         let intents = statement
-            .query_map([], decode_detached_spawn_intent)?
+            .query_map([], decode_runtime_action_intent)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(anyhow::Error::from)?;
         for intent in &intents {
-            validate_detached_spawn_intent_record(intent)?;
+            validate_runtime_action_intent_record(intent)?;
         }
         Ok(intents)
-    }
-
-    pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
-        Ok(self.conn.execute(
-            "DELETE FROM detached_spawn_intent
-             WHERE operation_id=?1 AND launch_metadata IS NULL",
-            params![operation_id],
-        )? > 0)
     }
 
     /// CAS objects referenced by durable handoff intents before their child
@@ -3660,7 +8978,7 @@ impl RuntimeDb {
     /// authority sealing and child birth.
     pub fn handoff_cas_object_roots(&self) -> Result<Vec<String>> {
         let mut roots = BTreeSet::new();
-        for intent in self.detached_spawn_intents()? {
+        for intent in self.runtime_action_intents()? {
             if let Some(hash) = intent.admitted_launch_capsule_hash {
                 roots.insert(hash);
             }
@@ -4114,33 +9432,32 @@ impl RuntimeDb {
         let mut reset_required = false;
         if created {
             initialize_current_runtime_schema(&conn, path)?;
-        } else if let Err(error) = validate_current_runtime_store(&conn, path) {
-            if !mode.explicit_history_reset() {
-                if is_newer_execution_schema(&error) {
-                    return Err(error);
+        } else {
+            let stored_epoch = runtime_operator_schema_epoch(&conn, path)?;
+            if stored_epoch > RUNTIME_OPERATOR_SCHEMA_EPOCH {
+                let error = incompatible_runtime_operator_schema(stored_epoch);
+                if mode.explicit_history_reset() {
+                    return Err(error).context(
+                        "runtime database belongs to a newer RyeOS runtime epoch; refusing destructive reset",
+                    );
                 }
-                if requires_execution_schema_cutover(&error) {
+                return Err(error);
+            }
+            if stored_epoch < RUNTIME_OPERATOR_SCHEMA_EPOCH {
+                let error = incompatible_runtime_operator_schema(stored_epoch);
+                if !mode.explicit_history_reset() {
                     return Err(error).context(format!(
                         "runtime database contains predecessor execution authority and requires the explicit no-backcompat reset ({})",
                         path.display()
                     ));
                 }
-                return Err(error);
+                // Do not inspect or mutate the predecessor schema. Offline
+                // reset first publishes the authoritative cross-store discard
+                // intent, then replaces this pinned store wholesale.
+                reset_required = true;
+            } else {
+                validate_current_runtime_store(&conn, path)?;
             }
-            if is_newer_execution_schema(&error) {
-                return Err(error).context(
-                    "runtime database contains execution authority newer than this RyeOS binary; refusing destructive reset",
-                );
-            }
-            if !requires_execution_schema_cutover(&error) {
-                return Err(error).context(
-                    "runtime database validation failed without a proven predecessor schema epoch; refusing destructive reset",
-                );
-            }
-            // Do not mutate yet. Offline GC first publishes the authoritative
-            // cross-store discard intent; only then may it call
-            // `apply_explicit_history_reset` on this pinned handle.
-            reset_required = true;
         }
         if reset_required {
             let integrity: String = conn
@@ -4165,6 +9482,12 @@ impl RuntimeDb {
             });
         }
         validate_current_runtime_store(&conn, path)?;
+        let integrity_started = std::time::Instant::now();
+        let database_bytes = database_file.metadata()?.len();
+        tracing::info!(
+            database_bytes,
+            "verifying retained runtime database integrity"
+        );
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .context("verify runtime database integrity")?;
@@ -4174,6 +9497,11 @@ impl RuntimeDb {
                 path.display()
             );
         }
+        tracing::info!(
+            database_bytes,
+            duration_ms = integrity_started.elapsed().as_millis(),
+            "retained runtime database integrity verified"
+        );
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .context("read runtime database journal mode")?;
@@ -4260,6 +9588,80 @@ impl RuntimeDb {
              VALUES (?1, ?2, NULL, NULL, NULL, NULL)",
             params![thread_id, chain_root_id],
         )?;
+        Ok(())
+    }
+
+    /// Idempotently materialize the operational runtime seed for a thread
+    /// whose authoritative signed head was adopted from another node. The
+    /// caller proves that head first; this transaction refuses to overwrite a
+    /// process identity, another chain, or different launch authority.
+    pub fn install_imported_thread_runtime(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        launch_metadata.validate()?;
+        if launch_metadata.launch_driver
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("imported subprocess runtime cannot use the in-process launch driver");
+        }
+        let encoded = encode_current_launch_metadata(launch_metadata)
+            .context("encode imported thread launch metadata")?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO thread_runtime (
+                thread_id, chain_root_id, pid, pgid, metadata, launch_metadata
+             ) VALUES (?1, ?2, NULL, NULL, NULL, NULL)
+             ON CONFLICT(thread_id) DO NOTHING",
+            params![thread_id, chain_root_id],
+        )?;
+        let (observed_chain, pid, pgid, process_identity, observed_metadata): (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT chain_root_id, pid, pgid, process_identity, launch_metadata
+               FROM thread_runtime WHERE thread_id=?1",
+            [thread_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        if observed_chain != chain_root_id
+            || pid.is_some()
+            || pgid.is_some()
+            || process_identity.is_some()
+        {
+            bail!("imported thread runtime coordinate is already owned by another launch");
+        }
+        match observed_metadata {
+            Some(existing) if existing != encoded => {
+                bail!("imported thread runtime already carries different launch authority")
+            }
+            Some(_) => {}
+            None => {
+                let changed = tx.execute(
+                    "UPDATE thread_runtime SET launch_metadata=?2
+                      WHERE thread_id=?1 AND chain_root_id=?3
+                        AND launch_metadata IS NULL AND process_identity IS NULL",
+                    params![thread_id, encoded, chain_root_id],
+                )?;
+                if changed != 1 {
+                    bail!("imported thread runtime lost its empty-row installation CAS");
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -4931,6 +10333,10 @@ impl RuntimeDb {
                 "DELETE FROM hook_dispatch_ledger WHERE chain_root_id=?1",
                 params![chain_root_id],
             )?;
+            deleted += self.conn.execute(
+                "DELETE FROM runtime_action_intent WHERE chain_root_id=?1",
+                params![chain_root_id],
+            )?;
             // Signed chain truth supplies the authoritative members. Include
             // any runtime row structurally attributed to the same chain so a
             // replay after the head-removal boundary cannot leave orphaned
@@ -4947,8 +10353,11 @@ impl RuntimeDb {
                 cleanup_thread_ids.extend(runtime_thread_ids);
             }
             for thread_id in cleanup_thread_ids {
+                // A bound accepted-launch coordinate has exactly the lifetime
+                // of its authoritative thread history. It is not a response
+                // cache and must not expire while that root can still exist.
                 deleted += self.conn.execute(
-                    "DELETE FROM detached_spawn_intent WHERE parent_thread_id=?1",
+                    "DELETE FROM launch_planning WHERE reserved_thread_id=?1",
                     params![&thread_id],
                 )?;
                 deleted += self.conn.execute(
@@ -5035,6 +10444,7 @@ impl RuntimeDb {
             process_identity,
             launch_metadata,
             false,
+            false,
         )
     }
 
@@ -5057,6 +10467,30 @@ impl RuntimeDb {
             process_identity,
             launch_metadata,
             true,
+            false,
+        )
+    }
+
+    /// Attach a newly held process and atomically re-arm the thread's
+    /// same-thread resume budget. Machine continuation admission consumes a
+    /// retry before spawn; once the exact successor process is durably
+    /// attached, that launch-window budget has completed its purpose.
+    pub fn attach_new_process_rearming_resume_budget(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &ExecutionProcessIdentity,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        self.attach_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            true,
+            true,
         )
     }
 
@@ -5068,7 +10502,11 @@ impl RuntimeDb {
         process_identity: &ExecutionProcessIdentity,
         launch_metadata: &RuntimeLaunchMetadata,
         require_empty: bool,
+        rearm_resume_budget: bool,
     ) -> Result<()> {
+        if rearm_resume_budget && !require_empty {
+            bail!("resume budget can be re-armed only by a new process attachment");
+        }
         if launch_metadata.launch_driver
             == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
         {
@@ -5176,11 +10614,12 @@ impl RuntimeDb {
         let Some(merged_launch_metadata) = merged_launch_metadata else {
             let updated = self.conn.execute(
                 "UPDATE thread_runtime
-                    SET pid = ?2, pgid = ?3, process_identity = ?4
+                    SET pid = ?2, pgid = ?3, process_identity = ?4,
+                        resume_attempts = CASE WHEN ?5 THEN 0 ELSE resume_attempts END
                   WHERE thread_id = ?1
                     AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                     AND stop_requested_at_ms IS NULL",
-                params![thread_id, pid, pgid, identity_json],
+                params![thread_id, pid, pgid, identity_json, rearm_resume_budget],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -5191,11 +10630,19 @@ impl RuntimeDb {
             .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
-                SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5
+                SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5,
+                    resume_attempts = CASE WHEN ?6 THEN 0 ELSE resume_attempts END
               WHERE thread_id = ?1
                 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND stop_requested_at_ms IS NULL",
-            params![thread_id, pid, pgid, lm_json, identity_json],
+            params![
+                thread_id,
+                pid,
+                pgid,
+                lm_json,
+                identity_json,
+                rearm_resume_budget
+            ],
         )?;
         if updated == 0 {
             bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -5526,8 +10973,9 @@ impl RuntimeDb {
         let owner_json = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
         let changed = tx.execute(
             "INSERT INTO thread_launch_claim
-                 (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                 (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
+                  rearm_resume_budget_if_stale)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(thread_id) DO NOTHING",
             params![thread_id, claim_id, now_ms, i64::MAX, owner_json],
         )?;
@@ -5537,6 +10985,93 @@ impl RuntimeDb {
         }
         tx.commit()?;
         Ok(LaunchClaimOutcome::Claimed)
+    }
+
+    /// Clear every launch claim owned by a daemon generation other than
+    /// `current_daemon_generation_id` — the startup half of the claim
+    /// contract. Claims deliberately never expire by wall clock, on the
+    /// promise that a restart clears the previous daemon's survivors; a claim
+    /// from another generation cannot have a live launch task by
+    /// construction, and leaving it would turn every future recovery of its
+    /// thread into a silent `AlreadyClaimed` skip — the stranded-`created`
+    /// bug. A row whose stored owner does not parse is equally dead (this
+    /// generation only writes valid owners) and is cleared fail-closed.
+    /// Deletes are exact `(thread_id, claim_id)` matches, never cross-owner.
+    pub fn clear_stale_launch_claims(
+        &self,
+        current_daemon_generation_id: &str,
+    ) -> Result<Vec<StaleLaunchClaimCleared>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut rows: Vec<(String, String, String, bool)> = Vec::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT thread_id, claim_id, claimed_by, rearm_resume_budget_if_stale
+                   FROM thread_launch_claim",
+            )?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            for row in mapped {
+                rows.push(row?);
+            }
+        }
+        let mut cleared = Vec::new();
+        for (thread_id, claim_id, claimed_by, rearm_resume_budget_if_stale) in rows {
+            let parsed_owner = match serde_json::from_str::<LaunchOwner>(&claimed_by) {
+                Ok(owner) if owner.daemon_generation_id == current_daemon_generation_id => {
+                    continue;
+                }
+                Ok(owner) => Some(owner),
+                Err(_) => None,
+            };
+            let dead_generation = parsed_owner
+                .as_ref()
+                .map(|owner| owner.daemon_generation_id.clone())
+                .unwrap_or_else(|| "<malformed owner>".to_string());
+            // A process identity is written only after the claim owner has
+            // spawned and durably attached the exact held process. All three
+            // attachment columns being empty is therefore positive proof that
+            // a well-formed dead-generation claim died before that boundary.
+            // Malformed owners and partial attachment residue fail closed and
+            // retain the consumed retry budget.
+            let proved_unattached = if parsed_owner.is_some() {
+                tx.query_row(
+                    "SELECT pid, pgid, process_identity
+                       FROM thread_runtime WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| {
+                        Ok(row.get::<_, Option<i64>>(0)?.is_none()
+                            && row.get::<_, Option<i64>>(1)?.is_none()
+                            && row.get::<_, Option<String>>(2)?.is_none())
+                    },
+                )
+                .optional()?
+                .unwrap_or(false)
+            } else {
+                false
+            };
+            let removed = tx.execute(
+                "DELETE FROM thread_launch_claim WHERE thread_id = ?1 AND claim_id = ?2",
+                params![thread_id, claim_id],
+            )?;
+            if removed > 0 {
+                let resume_budget_rearmed = rearm_resume_budget_if_stale
+                    && proved_unattached
+                    && tx.execute(
+                        "UPDATE thread_runtime SET resume_attempts = 0
+                           WHERE thread_id = ?1 AND resume_attempts != 0",
+                        params![thread_id],
+                    )? != 0;
+                cleared.push(StaleLaunchClaimCleared {
+                    thread_id,
+                    claim_id,
+                    dead_generation,
+                    resume_budget_rearmed,
+                });
+            }
+        }
+        tx.commit()?;
+        Ok(cleared)
     }
 
     /// Release a launch claim the caller owns (matched by `claim_id`), e.g. when
@@ -5549,6 +11084,106 @@ impl RuntimeDb {
             params![thread_id, claim_id],
         )?;
         Ok(removed > 0)
+    }
+
+    /// Consume one completed runtime-recovery attempt and rotate its active
+    /// launch owner without an unclaimed visibility gap. Counter advancement,
+    /// owner fencing, and the startup rearm posture are one transaction: a
+    /// daemon death after this commit must retain the attempt consumed by the
+    /// process that already returned an unknown outcome.
+    pub fn rotate_thread_launch_claim_after_runtime_recovery(
+        &self,
+        thread_id: &str,
+        expected_claimed_by: &str,
+        next_claim_id: &str,
+        daemon_generation_id: &str,
+        max_attempts: u32,
+    ) -> Result<RuntimeRecoveryClaimRotation> {
+        let now_ms = lillux::time::timestamp_millis();
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT claim.claimed_by, runtime.resume_attempts
+                   FROM thread_launch_claim AS claim
+                   JOIN thread_runtime AS runtime ON runtime.thread_id = claim.thread_id
+                  WHERE claim.thread_id = ?1",
+                params![thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((current_owner, attempts)) = current else {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        };
+        if current_owner != expected_claimed_by {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        if attempts < 0 {
+            bail!("resume_attempts is negative ({attempts}) for thread {thread_id}");
+        }
+        let attempts = u32::try_from(attempts).context("resume attempt counter exceeds u32")?;
+        if attempts >= max_attempts {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::Exhausted { attempts });
+        }
+        let next_attempt = attempts
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("resume attempt counter overflow for thread {thread_id}"))?;
+        let bumped = tx.execute(
+            "UPDATE thread_runtime SET resume_attempts = ?2
+              WHERE thread_id = ?1 AND resume_attempts = ?3",
+            params![thread_id, i64::from(next_attempt), i64::from(attempts)],
+        )?;
+        if bumped != 1 {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        let next_epoch: i64 = tx.query_row(
+            "INSERT INTO thread_launch_epoch(thread_id,last_epoch) VALUES (?1,1)
+             ON CONFLICT(thread_id) DO UPDATE SET last_epoch=last_epoch+1
+             RETURNING last_epoch",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        let owner = LaunchOwner {
+            thread_id: thread_id.to_string(),
+            monotonic_launch_epoch: u64::try_from(next_epoch)
+                .context("launch epoch cannot be represented")?,
+            unpredictable_nonce: next_claim_id.to_string(),
+            daemon_generation_id: daemon_generation_id.to_string(),
+        };
+        let claimed_by = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
+        let changed = tx.execute(
+            "UPDATE thread_launch_claim
+                SET claim_id=?2, claimed_at_ms=?3, lease_expires_at_ms=?4, claimed_by=?5,
+                    rearm_resume_budget_if_stale=0
+              WHERE thread_id=?1 AND claimed_by=?6",
+            params![
+                thread_id,
+                next_claim_id,
+                now_ms,
+                i64::MAX,
+                claimed_by,
+                expected_claimed_by,
+            ],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        tx.commit()?;
+        Ok(RuntimeRecoveryClaimRotation::Rotated {
+            claim: LaunchClaim {
+                thread_id: thread_id.to_string(),
+                claim_id: next_claim_id.to_string(),
+                claimed_at_ms: now_ms,
+                lease_expires_at_ms: i64::MAX,
+                claimed_by,
+                owner,
+            },
+            next_attempt,
+        })
     }
 
     /// Read the current launch claim for a thread, if any. The reconciler uses
@@ -5604,18 +11239,18 @@ impl RuntimeDb {
     pub fn reserve_workspace(
         &self,
         workspace_id: &str,
-        lower_snapshot: &str,
+        base_snapshot: &str,
         root_path: &str,
     ) -> Result<()> {
         let now = lillux::time::timestamp_millis();
         let changed = self.conn.execute(
             "INSERT INTO execution_workspace
-                (workspace_id, lower_snapshot, root_path, state, created_at_ms, updated_at_ms)
+                (workspace_id, base_snapshot, root_path, state, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)
              ON CONFLICT(workspace_id) DO NOTHING",
             params![
                 workspace_id,
-                lower_snapshot,
+                base_snapshot,
                 root_path,
                 WorkspaceState::Reserved.as_str(),
                 now
@@ -5625,7 +11260,7 @@ impl RuntimeDb {
             let existing = self
                 .workspace(workspace_id)?
                 .ok_or_else(|| anyhow::anyhow!("workspace reservation disappeared"))?;
-            if existing.lower_snapshot != lower_snapshot
+            if existing.base_snapshot != base_snapshot
                 || existing.root_path != root_path
                 || !matches!(
                     existing.state,
@@ -5856,6 +11491,89 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Transfer a retained workspace from one proved-dead launch owner to the
+    /// current same-thread recovery claim. Backend/root evidence is verified
+    /// by the caller before this transaction; this boundary makes the owner
+    /// replacement and removal of the stale process attachment indivisible.
+    pub fn rebind_workspace_for_recovery(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        previous_launch_owner: &str,
+        recovery_launch_owner: &str,
+        expected_state: WorkspaceState,
+        expected_process_identity: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(
+            expected_state,
+            WorkspaceState::Ready | WorkspaceState::Active | WorkspaceState::Freezing
+        ) {
+            bail!("retained workspace recovery requires ready, active, or freezing state");
+        }
+        let recovery_state = if expected_state == WorkspaceState::Freezing {
+            WorkspaceState::Freezing
+        } else {
+            WorkspaceState::Ready
+        };
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin retained workspace owner transfer")?;
+        let claim_owner: Option<String> = tx
+            .query_row(
+                "SELECT claimed_by FROM thread_launch_claim WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if claim_owner.as_deref() != Some(recovery_launch_owner) {
+            bail!("retained workspace recovery lost its current launch claim");
+        }
+        let existing: Option<(
+            Option<String>,
+            Option<String>,
+            WorkspaceState,
+            Option<String>,
+        )> = tx
+            .query_row(
+                "SELECT thread_id, launch_owner, state, process_identity
+                   FROM execution_workspace WHERE workspace_id=?1",
+                params![workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((workspace_thread, workspace_owner, state, process_identity)) = existing else {
+            bail!("retained workspace {workspace_id} disappeared");
+        };
+        if workspace_thread.as_deref() != Some(thread_id)
+            || workspace_owner.as_deref() != Some(previous_launch_owner)
+            || state != expected_state
+            || process_identity.as_deref() != expected_process_identity
+        {
+            bail!("retained workspace owner or process evidence changed before recovery");
+        }
+        let changed = tx.execute(
+            "UPDATE execution_workspace
+                SET launch_owner=?4, state=?5, process_identity=NULL, updated_at_ms=?6
+              WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
+                AND state=?7
+                AND ((?8 IS NULL AND process_identity IS NULL) OR process_identity=?8)",
+            params![
+                workspace_id,
+                thread_id,
+                previous_launch_owner,
+                recovery_launch_owner,
+                recovery_state.as_str(),
+                lillux::time::timestamp_millis(),
+                expected_state.as_str(),
+                expected_process_identity,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("retained workspace owner transfer lost its exact row CAS");
+        }
+        tx.commit()
+            .context("commit retained workspace owner transfer")
+    }
+
     /// Atomically publish the result of a callback freeze into both durable
     /// recovery authorities. The workspace row is the lifecycle journal; the
     /// thread launch metadata is the native-resume seed. They must never name
@@ -5880,7 +11598,7 @@ impl RuntimeDb {
         if claim_owner.as_deref() != Some(launch_owner) {
             bail!("stale launch owner cannot bind frozen workspace {workspace_id}");
         }
-        let (workspace_thread, workspace_owner, state, lower_snapshot, existing_frozen): (
+        let (workspace_thread, workspace_owner, state, base_snapshot, existing_frozen): (
             Option<String>,
             Option<String>,
             WorkspaceState,
@@ -5888,7 +11606,7 @@ impl RuntimeDb {
             Option<String>,
         ) = tx
             .query_row(
-                "SELECT thread_id, launch_owner, state, lower_snapshot, frozen_snapshot_hash
+                "SELECT thread_id, launch_owner, state, base_snapshot, frozen_snapshot_hash
                    FROM execution_workspace WHERE workspace_id=?1",
                 params![workspace_id],
                 |row| {
@@ -5923,28 +11641,21 @@ impl RuntimeDb {
         let launch_metadata_json = launch_metadata_json.ok_or_else(|| {
             anyhow::anyhow!("thread {thread_id} has no launch metadata for frozen workspace")
         })?;
-        let mut launch_metadata = decode_current_launch_metadata(&launch_metadata_json)
+        let launch_metadata = decode_current_launch_metadata(&launch_metadata_json)
             .context("decode launch metadata while binding frozen workspace")?;
-        let resume = launch_metadata.resume_context.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("thread {thread_id} has no ResumeContext for frozen workspace")
-        })?;
-        match existing_frozen.as_deref() {
-            Some(_) if resume.original_snapshot_hash.as_deref() != Some(snapshot_hash) => {
-                bail!("frozen workspace and ResumeContext snapshot hashes contradict");
-            }
-            None if resume.durable_project_snapshot_hash() != Some(lower_snapshot.as_str()) => {
-                bail!("workspace lower snapshot and predecessor ResumeContext contradict");
-            }
-            _ => {}
+        let admitted_project_authority = launch_metadata
+            .admitted_project_authority
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thread {thread_id} has no admitted project authority for frozen workspace"
+                )
+            })?;
+        if admitted_project_authority.operational_snapshot_projection()
+            != Some(base_snapshot.as_str())
+        {
+            bail!("workspace base snapshot and admitted launch authority contradict");
         }
-        resume.original_snapshot_hash = Some(snapshot_hash.to_string());
-        resume.original_pushed_head_ref = None;
-        resume.project_authority = resume.project_authority.transition_operational_generation(
-            ryeos_state::objects::OperationalProjectAuthorityTransition::SealPinnedCowCheckpoint {
-                snapshot_hash,
-            },
-        )?;
-        let launch_metadata_json = encode_current_launch_metadata(&launch_metadata)?;
         let workspace_updated = tx.execute(
             "UPDATE execution_workspace
                 SET frozen_snapshot_hash=?4, updated_at_ms=?5
@@ -5960,12 +11671,8 @@ impl RuntimeDb {
                 WorkspaceState::Freezing.as_str()
             ],
         )?;
-        let runtime_updated = tx.execute(
-            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
-            params![thread_id, launch_metadata_json],
-        )?;
-        if workspace_updated != 1 || runtime_updated != 1 {
-            bail!("frozen workspace binding lost its durable owner rows");
+        if workspace_updated != 1 {
+            bail!("frozen workspace binding lost its durable owner row");
         }
         tx.commit()
             .context("commit atomic frozen workspace binding")
@@ -5975,7 +11682,7 @@ impl RuntimeDb {
         self.conn
             .query_row(
                 "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
-                        pinned_root_identities, mount_identity, lower_snapshot,
+                        pinned_root_identities, mount_identity, base_snapshot,
                         frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
                    FROM execution_workspace WHERE workspace_id=?1",
                 params![workspace_id],
@@ -5988,7 +11695,7 @@ impl RuntimeDb {
                         backend_version: row.get(4)?,
                         pinned_root_identities: row.get(5)?,
                         mount_identity: row.get(6)?,
-                        lower_snapshot: row.get(7)?,
+                        base_snapshot: row.get(7)?,
                         frozen_snapshot_hash: row.get(8)?,
                         root_path: row.get(9)?,
                         state: row.get(10)?,
@@ -6005,7 +11712,7 @@ impl RuntimeDb {
     pub fn open_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
-                    pinned_root_identities, mount_identity, lower_snapshot,
+                    pinned_root_identities, mount_identity, base_snapshot,
                     frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
                FROM execution_workspace WHERE state != ?1 ORDER BY created_at_ms",
         )?;
@@ -6018,7 +11725,7 @@ impl RuntimeDb {
                 backend_version: row.get(4)?,
                 pinned_root_identities: row.get(5)?,
                 mount_identity: row.get(6)?,
-                lower_snapshot: row.get(7)?,
+                base_snapshot: row.get(7)?,
                 frozen_snapshot_hash: row.get(8)?,
                 root_path: row.get(9)?,
                 state: row.get(10)?,
@@ -6029,6 +11736,19 @@ impl RuntimeDb {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    pub fn workspace_for_thread(&self, thread_id: &str) -> Result<Option<WorkspaceRecord>> {
+        validate_bounded_runtime_text("workspace thread id", thread_id, 256)?;
+        let matches = self
+            .open_workspaces()?
+            .into_iter()
+            .filter(|workspace| workspace.thread_id.as_deref() == Some(thread_id))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("thread owns more than one open execution workspace");
+        }
+        Ok(matches.into_iter().next())
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
@@ -7199,9 +12919,23 @@ impl RuntimeDb {
         )?)
     }
 
+    /// Node-resource occupancy, distinct from each window's logical width.
+    /// A launched chain that is durably suspended in `follow` keeps its
+    /// originating window slot, but it has no running runtime and must yield
+    /// its node slot to the followed child. Excluding exactly `waiting`
+    /// parents prevents a finite global ceiling from deadlocking nested
+    /// fanout while `ready`/`resuming` parents count again before execution.
     fn launch_window_live_total(&self) -> Result<u32> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM launch_window WHERE launched_at_ms IS NOT NULL",
+            "SELECT COUNT(*)
+               FROM launch_window AS lw
+              WHERE lw.launched_at_ms IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM follow_waiter AS fw
+                     WHERE fw.parent_chain_root_id = lw.child_chain_root_id
+                       AND fw.phase = 'waiting'
+                )",
             [],
             |r| r.get(0),
         )?)
@@ -7211,7 +12945,8 @@ impl RuntimeDb {
     /// width and the optional daemon-global live ceiling. Marks admitted
     /// rows launched and returns their chain roots — the caller owns
     /// actually launching them.
-    pub fn launch_window_admit(
+    #[cfg(test)]
+    fn launch_window_admit(
         &self,
         window_key: &str,
         global_live_limit: Option<u32>,
@@ -7270,6 +13005,75 @@ impl RuntimeDb {
         Ok(admitted)
     }
 
+    fn launch_window_phase_is_eligible(&self, window_key: &str) -> Result<bool> {
+        let Some(follow_key) = window_key.strip_prefix("follow:") else {
+            return Ok(true);
+        };
+        let phase = self
+            .conn
+            .query_row(
+                "SELECT phase FROM follow_waiter WHERE follow_key = ?1",
+                params![follow_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(phase.as_deref() == Some(follow_phase::WAITING))
+    }
+
+    /// Admit the oldest eligible members across every launch window. This is
+    /// the node-wide fairness boundary: freeing a slot in one cohort must wake
+    /// an older queued member in another cohort immediately, not at the next
+    /// maintenance sweep.
+    pub fn launch_window_admit_global(
+        &self,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let mut admitted = Vec::new();
+        loop {
+            if let Some(cap) = global_live_limit
+                && self.launch_window_live_total()? >= cap
+            {
+                break;
+            }
+            let mut statement = self.conn.prepare(
+                "SELECT child_chain_root_id, window_key, width
+                   FROM launch_window
+                  WHERE launched_at_ms IS NULL AND cancelled_at_ms IS NULL
+                  ORDER BY created_at_ms ASC, rowid ASC",
+            )?;
+            let candidates = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut selected = None;
+            for (chain_root, window_key, width) in candidates {
+                if self.launch_window_phase_is_eligible(&window_key)?
+                    && self.launch_window_live_count(&window_key)? < width
+                {
+                    selected = Some(chain_root);
+                    break;
+                }
+            }
+            let Some(chain_root) = selected else {
+                break;
+            };
+            self.conn.execute(
+                "UPDATE launch_window SET launched_at_ms = ?2
+                  WHERE child_chain_root_id = ?1
+                    AND launched_at_ms IS NULL AND cancelled_at_ms IS NULL",
+                params![chain_root, now_ms],
+            )?;
+            admitted.push(chain_root);
+        }
+        Ok(admitted)
+    }
+
     /// Release a finished window member (its chain reached a hard terminal)
     /// and admit the window's next queued members. Empty for a chain that
     /// holds no window row.
@@ -7279,22 +13083,19 @@ impl RuntimeDb {
         global_live_limit: Option<u32>,
         now_ms: i64,
     ) -> Result<Vec<String>> {
-        let key: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT window_key FROM launch_window WHERE child_chain_root_id = ?1",
-                params![child_chain_root_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(key) = key else {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM launch_window WHERE child_chain_root_id = ?1)",
+            params![child_chain_root_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
             return Ok(Vec::new());
-        };
+        }
         self.conn.execute(
             "DELETE FROM launch_window WHERE child_chain_root_id = ?1",
             params![child_chain_root_id],
         )?;
-        self.launch_window_admit(&key, global_live_limit, now_ms)
+        self.launch_window_admit_global(global_live_limit, now_ms)
     }
 
     /// Remove exactly the requested members that are still queued. This is used
@@ -7644,6 +13445,2081 @@ mod tests {
             )
     }
 
+    fn create_locked_profile(db: &RuntimeDb, profile_id: &str, lock_owner: &str) {
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id,
+            owner_principal: "fp:operator",
+            home_id: &format!("home-{profile_id}"),
+        })
+        .unwrap();
+        db.acquire_credential_profile(profile_id, "fp:operator", lock_owner)
+            .unwrap();
+    }
+
+    #[test]
+    fn dedicated_admission_acquires_profile_in_the_session_transaction() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-atomic",
+            owner_principal: "fp:operator",
+            home_id: "home-P-atomic",
+        })
+        .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-atomic",
+            chain_root_id: "T-atomic",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-atomic",
+            candidate_required: false,
+            credential_profile_id: "P-atomic",
+            credential_generation: 1,
+            credential_lock_owner: "worker-atomic",
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.credential_profile("P-atomic")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-atomic")
+        );
+        assert_eq!(
+            db.dedicated_session("T-atomic").unwrap().unwrap().state,
+            "admitted"
+        );
+    }
+
+    #[test]
+    fn handoff_credential_reservation_survives_reconcile_and_is_consumed_atomically() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-handoff-reserved",
+            owner_principal: "fp:operator",
+            home_id: "home-P-handoff-reserved",
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE credential_profile SET state='active' WHERE profile_id='P-handoff-reserved'",
+                [],
+            )
+            .unwrap();
+        let reservation = NewCredentialProfileReservation {
+            reservation_id: "reservation-handoff",
+            operation_id: "operation-handoff",
+            successor_thread_id: "T-handoff-target",
+            profile_id: "P-handoff-reserved",
+            owner_principal: "fp:operator",
+            credential_generation: 1,
+            subject_contract_digest: &"1".repeat(64),
+            subject_digest: &"2".repeat(64),
+            checkpoint_manifest_hash: &"3".repeat(64),
+            upstream_session_id: "upstream-session",
+            project_principal_key: &"5".repeat(64),
+            project_hash: &"6".repeat(64),
+            target_project_head_hash: &"7".repeat(64),
+        };
+        let reserved = db
+            .reserve_credential_profile_generation(reservation.clone())
+            .unwrap();
+        assert_eq!(reserved.state, "reserved");
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks().unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            db.credential_profile("P-handoff-reserved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("reservation-handoff")
+        );
+
+        db.release_project_head_fence("reservation-handoff")
+            .unwrap();
+
+        db.admit_dedicated_session_from_reservation(
+            NewDedicatedSession {
+                placement_thread_id: "T-handoff-target",
+                chain_root_id: "T-root",
+                owner_principal: "fp:operator",
+                admitted_capsule_hash: &"4".repeat(64),
+                workspace_id: "W-handoff-target",
+                candidate_required: true,
+                credential_profile_id: "P-handoff-reserved",
+                credential_generation: 1,
+                credential_lock_owner: "worker-target",
+            },
+            Some("upstream-session"),
+            "reservation-handoff",
+        )
+        .unwrap();
+        assert_eq!(
+            db.credential_profile_reservation("reservation-handoff")
+                .unwrap()
+                .unwrap()
+                .state,
+            "consumed"
+        );
+        assert_eq!(
+            db.credential_profile("P-handoff-reserved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-target")
+        );
+        assert_eq!(
+            db.dedicated_session("T-handoff-target")
+                .unwrap()
+                .unwrap()
+                .remote_thread_id
+                .as_deref(),
+            Some("upstream-session")
+        );
+    }
+
+    #[test]
+    fn released_handoff_credential_reservation_allows_a_new_operation_for_the_same_successor() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-handoff-retry",
+            owner_principal: "fp:operator",
+            home_id: "home-P-handoff-retry",
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE credential_profile SET state='active' WHERE profile_id='P-handoff-retry'",
+                [],
+            )
+            .unwrap();
+        let first = NewCredentialProfileReservation {
+            reservation_id: "reservation-first",
+            operation_id: "operation-first",
+            successor_thread_id: "T-handoff-retry",
+            profile_id: "P-handoff-retry",
+            owner_principal: "fp:operator",
+            credential_generation: 1,
+            subject_contract_digest: &"1".repeat(64),
+            subject_digest: &"2".repeat(64),
+            checkpoint_manifest_hash: &"3".repeat(64),
+            upstream_session_id: "upstream-session",
+            project_principal_key: &"5".repeat(64),
+            project_hash: &"6".repeat(64),
+            target_project_head_hash: &"7".repeat(64),
+        };
+        db.reserve_credential_profile_generation(first).unwrap();
+        db.release_credential_profile_reservation("reservation-first")
+            .unwrap();
+
+        let second = NewCredentialProfileReservation {
+            reservation_id: "reservation-second",
+            operation_id: "operation-second",
+            successor_thread_id: "T-handoff-retry",
+            profile_id: "P-handoff-retry",
+            owner_principal: "fp:operator",
+            credential_generation: 1,
+            subject_contract_digest: &"1".repeat(64),
+            subject_digest: &"2".repeat(64),
+            checkpoint_manifest_hash: &"3".repeat(64),
+            upstream_session_id: "upstream-session",
+            project_principal_key: &"5".repeat(64),
+            project_hash: &"6".repeat(64),
+            target_project_head_hash: &"7".repeat(64),
+        };
+        let reserved = db.reserve_credential_profile_generation(second).unwrap();
+        assert_eq!(reserved.reservation_id, "reservation-second");
+        assert_eq!(reserved.operation_id, "operation-second");
+        assert_eq!(reserved.state, "reserved");
+        assert!(
+            db.credential_profile_reservation("reservation-first")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.credential_profile("P-handoff-retry")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("reservation-second")
+        );
+    }
+
+    #[test]
+    fn imported_runtime_seed_is_idempotent_and_never_overwrites_authority() {
+        let (_tmp, db) = fresh_db();
+        let metadata = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime);
+        db.install_imported_thread_runtime("T-imported", "T-root", &metadata)
+            .unwrap();
+        db.install_imported_thread_runtime("T-imported", "T-root", &metadata)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                db.get_runtime_info("T-imported")
+                    .unwrap()
+                    .unwrap()
+                    .launch_metadata
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&metadata).unwrap()
+        );
+
+        let mut changed = metadata.clone();
+        changed.cancellation_mode = Some(CancellationMode::Hard);
+        assert!(
+            db.install_imported_thread_runtime("T-imported", "T-root", &changed)
+                .is_err()
+        );
+        assert!(
+            db.install_imported_thread_runtime("T-imported", "T-other", &metadata)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_releases_only_pre_attachment_credential_reservations() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-orphan", "worker-orphan");
+        create_locked_profile(&db, "P-admitted", "worker-admitted");
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-admitted",
+            chain_root_id: "T-admitted",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-admitted",
+            candidate_required: false,
+            credential_profile_id: "P-admitted",
+            credential_generation: 1,
+            credential_lock_owner: "worker-admitted",
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks().unwrap(),
+            (1, 2)
+        );
+        assert_eq!(
+            db.dedicated_session("T-admitted").unwrap().unwrap().state,
+            "recovering"
+        );
+        assert_eq!(
+            db.credential_profile("P-admitted")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+        assert_eq!(
+            db.credential_profile("P-orphan")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+    }
+
+    #[test]
+    fn startup_preserves_attached_worker_credential_fence() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-fenced", "worker-fenced");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-fenced', 'T-fenced', 'owner', 'backend',
+                           'a', '/tmp/workspace-fenced', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-fenced",
+            chain_root_id: "T-fenced",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-fenced",
+            candidate_required: false,
+            credential_profile_id: "P-fenced",
+            credential_generation: 1,
+            credential_lock_owner: "worker-fenced",
+        })
+        .unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-fenced".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(155, 155),
+            control_channel_identity: "fd:fenced".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-old".to_owned(),
+            placement_thread_id: "T-fenced".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks().unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            db.credential_profile("P-fenced")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-fenced")
+        );
+    }
+
+    #[test]
+    fn dedicated_worker_attachment_atomically_owns_process_workspace_and_session() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-one", "worker-one");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-one', 'T-one', 'dedicated_worker_session', 'trusted-daemon',
+                           'a', '/tmp/workspace-one', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-one",
+            chain_root_id: "T-root",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-one",
+            candidate_required: false,
+            credential_profile_id: "P-one",
+            credential_generation: 1,
+            credential_lock_owner: "worker-one",
+        })
+        .unwrap();
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-one".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(123, 123),
+            control_channel_identity: "fd:9".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-one".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.attach_worker_process(&record).unwrap();
+        assert_eq!(db.worker_process("worker-one").unwrap(), Some(record));
+        let workspace_state: String = db
+            .conn
+            .query_row(
+                "SELECT state FROM execution_workspace WHERE workspace_id = 'W-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let session_state: String = db
+            .conn
+            .query_row(
+                "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(workspace_state, "active");
+        assert_eq!(session_state, "binding");
+        db.complete_worker_binding("worker-one", "T-one", 1)
+            .unwrap();
+        assert_eq!(
+            db.worker_process("worker-one").unwrap().unwrap().state,
+            WorkerProcessState::Live
+        );
+        let session_state: String = db
+            .conn
+            .query_row(
+                "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_state, "idle");
+        db.settle_worker_process("worker-one", "T-one", 1, "reaped", "fixture restart")
+            .unwrap();
+        let settled = db.worker_process("worker-one").unwrap().unwrap();
+        assert_eq!(settled.state, WorkerProcessState::Dead);
+        assert_eq!(settled.cleanup_state, "reaped");
+        db.terminalize_dedicated_session("T-one", "worker-one", 1, "completed")
+            .unwrap();
+        let login_terminal = db.dedicated_session("T-one").unwrap().unwrap();
+        assert_eq!(login_terminal.state, "terminal");
+        assert!(login_terminal.candidate_snapshot_hash.is_none());
+    }
+
+    #[test]
+    fn dedicated_worker_recovery_retains_prior_boot_and_attaches_next_epoch() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-recover", "worker-recover-1");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-recover', 'T-recover', 'owner', 'backend',
+                           'a', '/tmp/workspace-recover', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-recover",
+            chain_root_id: "T-recover",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-recover",
+            candidate_required: false,
+            credential_profile_id: "P-recover",
+            credential_generation: 1,
+            credential_lock_owner: "worker-recover-1",
+        })
+        .unwrap();
+        let first = WorkerProcessRecord {
+            worker_instance_id: "worker-recover-1".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(131, 131),
+            control_channel_identity: "fd:recover-1".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-recover".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.attach_worker_process(&first).unwrap();
+        db.complete_worker_binding("worker-recover-1", "T-recover", 1)
+            .unwrap();
+        db.bind_dedicated_remote_thread("T-recover", "worker-recover-1", 1, "remote-recover")
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-recover-1", "T-recover", 1, "reaped")
+            .unwrap();
+
+        db.acquire_credential_profile("P-recover", "fp:operator", "worker-recover-2")
+            .unwrap();
+        assert_eq!(
+            db.prepare_dedicated_session_recovery("T-recover", 1, "worker-recover-2")
+                .unwrap(),
+            2
+        );
+        let second = WorkerProcessRecord {
+            worker_instance_id: "worker-recover-2".to_owned(),
+            boot_identity_hash: "c".repeat(64),
+            boot_epoch: 2,
+            process_identity: fake_process_identity(132, 132),
+            control_channel_identity: "fd:recover-2".to_owned(),
+            daemon_generation_id: "daemon-two".to_owned(),
+            created_at_ms: 3,
+            updated_at_ms: 3,
+            ..first.clone()
+        };
+        db.attach_worker_process(&second).unwrap();
+        db.complete_worker_binding("worker-recover-2", "T-recover", 2)
+            .unwrap();
+
+        let payload = serde_json::json!({"upstream_session_id":"upstream-recover"});
+        let reattach = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "reattach-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", reattach.command_sequence, 2)
+            .unwrap();
+        db.settle_dedicated_command(
+            "T-recover",
+            reattach.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let recovering = db.dedicated_session("T-recover").unwrap().unwrap();
+        assert_eq!(recovering.state, "recovering");
+        assert_eq!(recovering.send_boundary, "settled");
+
+        let recovered_reattach = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "reattach-recovered-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"e".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", recovered_reattach.command_sequence, 2)
+            .unwrap();
+        db.settle_recovered_dedicated_command(
+            "T-recover",
+            recovered_reattach.command_sequence,
+            2,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        db.observe_dedicated_remote_reattach("T-recover", 2, "remote-recover")
+            .unwrap();
+        db.settle_dedicated_remote_recovery_status("T-recover", 2, "remote-recover", "safe_idle")
+            .unwrap();
+        let recovered = db.dedicated_session("T-recover").unwrap().unwrap();
+        assert_eq!(recovered.state, "idle");
+        assert_eq!(recovered.send_boundary, "settled");
+        let route_payload = serde_json::json!({"route_id":"turn.start","payload":{}});
+        let completed_route = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "route-one",
+                worker_boot_epoch: 2,
+                command_kind: "route",
+                request_digest: &"1".repeat(64),
+                payload: &route_payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", completed_route.command_sequence, 2)
+            .unwrap();
+        db.settle_dedicated_command(
+            "T-recover",
+            completed_route.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let later_route = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "route-two",
+                worker_boot_epoch: 2,
+                command_kind: "route",
+                request_digest: &"2".repeat(64),
+                payload: &route_payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", later_route.command_sequence, 2)
+            .unwrap();
+        db.settle_dedicated_command(
+            "T-recover",
+            later_route.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        assert!(
+            db.require_dedicated_session_route_frontier(
+                "T-recover",
+                completed_route.command_sequence,
+            )
+            .is_err(),
+            "a delayed completion fence must not match an advanced terminal frontier"
+        );
+        db.require_dedicated_session_route_frontier("T-recover", later_route.command_sequence)
+            .unwrap();
+        assert!(
+            db.reserve_dedicated_session_completion(
+                "T-recover",
+                2,
+                Some(completed_route.command_sequence),
+            )
+            .is_err(),
+            "completed termination must reject a command frontier that moved"
+        );
+
+        let terminal_recovered = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "reattach-terminal-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"f".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", terminal_recovered.command_sequence, 2)
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-recover-2", "T-recover", 2, "reaped")
+            .unwrap();
+        let detached = db.dedicated_session("T-recover").unwrap().unwrap();
+        assert_eq!(detached.state, "outcome_unknown");
+        assert!(detached.worker_instance_id.is_none());
+        assert!(detached.worker_boot_epoch.is_none());
+        db.settle_terminal_recovered_dedicated_command(
+            "T-recover",
+            terminal_recovered.command_sequence,
+            2,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let projected = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "reattach-terminal-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"f".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(projected.state, "completed");
+        let replay = db
+            .settled_dedicated_session_command_replay(
+                "T-recover",
+                "reattach-terminal-two",
+                "reattach",
+                &"f".repeat(64),
+                &payload,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.command_sequence, terminal_recovered.command_sequence);
+        assert_eq!(replay.state, "completed");
+        assert!(
+            db.settled_dedicated_session_command_replay(
+                "T-recover",
+                "reattach-terminal-two",
+                "route",
+                &"f".repeat(64),
+                &payload,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.dedicated_session("T-recover").unwrap().unwrap().state,
+            "outcome_unknown"
+        );
+
+        assert_eq!(
+            db.worker_process("worker-recover-1")
+                .unwrap()
+                .unwrap()
+                .cleanup_state,
+            "reaped"
+        );
+        assert_eq!(
+            db.worker_process("worker-recover-2")
+                .unwrap()
+                .unwrap()
+                .boot_epoch,
+            2
+        );
+        let history_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM worker_process WHERE placement_thread_id='T-recover'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 2);
+    }
+
+    #[test]
+    fn retained_workspace_recovery_is_exact_claim_and_owner_fenced() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id, backend_version,
+                    pinned_root_identities, mount_identity, base_snapshot, root_path,
+                    state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-retained', 'T-retained', 'old-owner', 'backend', 'v1',
+                           '{}', 'mount', ?1, '/tmp/W-retained', 'ready', 1, 1)",
+                [&"a".repeat(64)],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.claim_thread_launch("T-retained", "claim-retained", "daemon-new")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        ));
+        let recovery_owner = db
+            .get_launch_claim("T-retained")
+            .unwrap()
+            .unwrap()
+            .claimed_by;
+
+        assert!(
+            db.rebind_workspace_for_recovery(
+                "W-retained",
+                "T-retained",
+                "wrong-old-owner",
+                &recovery_owner,
+                WorkspaceState::Ready,
+                None,
+            )
+            .is_err()
+        );
+        db.rebind_workspace_for_recovery(
+            "W-retained",
+            "T-retained",
+            "old-owner",
+            &recovery_owner,
+            WorkspaceState::Ready,
+            None,
+        )
+        .unwrap();
+        let retained = db.workspace("W-retained").unwrap().unwrap();
+        assert_eq!(retained.state, WorkspaceState::Ready);
+        assert_eq!(
+            retained.launch_owner.as_deref(),
+            Some(recovery_owner.as_str())
+        );
+        assert!(retained.process_identity.is_none());
+
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id, backend_version,
+                    pinned_root_identities, mount_identity, base_snapshot,
+                    frozen_snapshot_hash, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-frozen', 'T-frozen', 'old-frozen-owner', 'backend', 'v1',
+                           '{}', 'mount', ?1, ?2, '/tmp/W-frozen', 'freezing', 1, 1)",
+                rusqlite::params!["b".repeat(64), "c".repeat(64)],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.claim_thread_launch("T-frozen", "claim-frozen", "daemon-new")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        ));
+        let frozen_recovery_owner = db.get_launch_claim("T-frozen").unwrap().unwrap().claimed_by;
+        db.rebind_workspace_for_recovery(
+            "W-frozen",
+            "T-frozen",
+            "old-frozen-owner",
+            &frozen_recovery_owner,
+            WorkspaceState::Freezing,
+            None,
+        )
+        .unwrap();
+        let frozen = db.workspace("W-frozen").unwrap().unwrap();
+        assert_eq!(frozen.state, WorkspaceState::Freezing);
+        assert_eq!(
+            frozen.frozen_snapshot_hash.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+        assert_eq!(
+            frozen.launch_owner.as_deref(),
+            Some(frozen_recovery_owner.as_str())
+        );
+    }
+
+    #[test]
+    fn dedicated_worker_attachment_hands_off_an_active_root_workspace_exactly() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-handoff", "worker-handoff");
+        let root_identity = serde_json::to_string(&fake_process_identity(124, 124)).unwrap();
+        let stale_identity = serde_json::to_string(&fake_process_identity(125, 125)).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO thread_runtime (thread_id, chain_root_id, process_identity)
+                 VALUES ('T-handoff', 'T-handoff', ?1)",
+                [&root_identity],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, process_identity,
+                    created_at_ms, updated_at_ms
+                 ) VALUES ('W-handoff', 'T-handoff', 'owner', 'backend',
+                           'a', '/tmp/workspace-handoff', 'active', ?1, 1, 1)",
+                [&stale_identity],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-handoff",
+            chain_root_id: "T-handoff",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-handoff",
+            candidate_required: true,
+            credential_profile_id: "P-handoff",
+            credential_generation: 1,
+            credential_lock_owner: "worker-handoff",
+        })
+        .unwrap();
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-handoff".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(126, 126),
+            control_channel_identity: "fd:handoff".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-handoff".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+
+        assert!(db.attach_worker_process(&record).is_err());
+        assert!(db.worker_process("worker-handoff").unwrap().is_none());
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET process_identity=?2
+                  WHERE workspace_id=?1",
+                params!["W-handoff", root_identity],
+            )
+            .unwrap();
+        db.attach_worker_process(&record).unwrap();
+
+        let (state, process_identity): (String, String) = db
+            .conn
+            .query_row(
+                "SELECT state, process_identity FROM execution_workspace
+                  WHERE workspace_id='W-handoff'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "active");
+        assert_eq!(
+            process_identity,
+            serde_json::to_string(&record.process_identity).unwrap()
+        );
+    }
+
+    #[test]
+    fn credential_revocation_fences_worker_attachment() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-fence", "worker-fence");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-fence', 'T-fence', 'owner', 'backend',
+                           'a', '/tmp/workspace-fence', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-fence",
+            chain_root_id: "T-fence",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-fence",
+            candidate_required: false,
+            credential_profile_id: "P-fence",
+            credential_generation: 1,
+            credential_lock_owner: "worker-fence",
+        })
+        .unwrap();
+        db.revoke_credential_profile("P-fence", "fp:operator", 1)
+            .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        assert!(
+            db.attach_worker_process(&WorkerProcessRecord {
+                worker_instance_id: "worker-fence".to_owned(),
+                boot_identity_hash: "b".repeat(64),
+                session_capsule_hash: "a".repeat(64),
+                boot_epoch: 1,
+                lifecycle_generation: 1,
+                process_identity: fake_process_identity(126, 126),
+                control_channel_identity: "fd:12".to_owned(),
+                state: WorkerProcessState::Attached,
+                daemon_generation_id: "daemon-one".to_owned(),
+                placement_thread_id: "T-fence".to_owned(),
+                cleanup_state: "owned".to_owned(),
+                created_at_ms: now,
+                updated_at_ms: now,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn proved_abandoned_worker_fence_releases_credential_atomically() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-abandoned", "worker-abandoned");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                workspace_id, thread_id, launch_owner, backend_id,
+                base_snapshot, root_path, state, created_at_ms, updated_at_ms
+             ) VALUES ('W-abandoned', 'T-abandoned', 'owner', 'backend',
+                       'a', '/tmp/workspace-abandoned', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-abandoned",
+            chain_root_id: "T-abandoned",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-abandoned",
+            candidate_required: false,
+            credential_profile_id: "P-abandoned",
+            credential_generation: 1,
+            credential_lock_owner: "worker-abandoned",
+        })
+        .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-abandoned".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(127, 127),
+            control_channel_identity: "fd:13".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-abandoned".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-abandoned", "T-abandoned", 1)
+            .unwrap();
+        let payload = serde_json::json!({"work":"never-contacted"});
+        let committed = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-abandoned",
+                idempotency_key: "before-crash",
+                worker_boot_epoch: 1,
+                command_kind: "fixture",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(committed.state, "committed");
+        db.fence_abandoned_worker_process("worker-abandoned", "T-abandoned", 1, "reaped")
+            .unwrap();
+        assert_eq!(
+            db.credential_profile("P-abandoned")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+        let retry = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-abandoned",
+                idempotency_key: "before-crash",
+                worker_boot_epoch: 2,
+                command_kind: "fixture",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(retry.state, "failed");
+        assert_eq!(
+            retry
+                .result
+                .as_ref()
+                .and_then(|value| value.get("retryable_uncontacted"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let outbox = db.dedicated_command_outbox_records().unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0], retry);
+    }
+
+    #[test]
+    fn unproved_abandoned_worker_retains_identity_and_credential_fence() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-unproved", "worker-unproved");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-unproved', 'T-unproved', 'owner', 'backend',
+                           'a', '/tmp/workspace-unproved', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-unproved",
+            chain_root_id: "T-unproved",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-unproved",
+            candidate_required: false,
+            credential_profile_id: "P-unproved",
+            credential_generation: 1,
+            credential_lock_owner: "worker-unproved",
+        })
+        .unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-unproved".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(128, 128),
+            control_channel_identity: "fd:14".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-unproved".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-unproved", "T-unproved", 1)
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-unproved", "T-unproved", 1, "unproved")
+            .unwrap();
+
+        let session = db.dedicated_session("T-unproved").unwrap().unwrap();
+        assert_eq!(session.state, "outcome_unknown");
+        assert_eq!(
+            session.worker_instance_id.as_deref(),
+            Some("worker-unproved")
+        );
+        assert_eq!(session.worker_boot_epoch, Some(1));
+        assert_eq!(
+            db.credential_profile("P-unproved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-unproved")
+        );
+
+        db.settle_worker_process(
+            "worker-unproved",
+            "T-unproved",
+            1,
+            "reaped",
+            "credential_revoked",
+        )
+        .unwrap();
+        assert_eq!(
+            db.worker_process("worker-unproved")
+                .unwrap()
+                .unwrap()
+                .cleanup_state,
+            "reaped"
+        );
+        db.terminalize_dedicated_session("T-unproved", "worker-unproved", 1, "credential_revoked")
+            .unwrap();
+        assert_eq!(
+            db.credential_profile("P-unproved")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+    }
+
+    #[test]
+    fn unproved_attachment_failure_persists_exact_worker_and_credential_fence() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-start-unproved", "worker-start-unproved");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-start-unproved', 'T-start-unproved', 'owner', 'backend',
+                           'a', '/tmp/workspace-start-unproved', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-start-unproved",
+            chain_root_id: "T-start-unproved",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-start-unproved",
+            candidate_required: false,
+            credential_profile_id: "P-start-unproved",
+            credential_generation: 1,
+            credential_lock_owner: "worker-start-unproved",
+        })
+        .unwrap();
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-start-unproved".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(129, 129),
+            control_channel_identity: "fd:15".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-start-unproved".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.fence_unproved_worker_start(&record, "attach cleanup unproved")
+            .unwrap();
+
+        let worker = db.worker_process("worker-start-unproved").unwrap().unwrap();
+        assert_eq!(worker.process_identity, record.process_identity);
+        assert_eq!(worker.state, WorkerProcessState::Dead);
+        assert_eq!(worker.cleanup_state, "unproved");
+        let session = db.dedicated_session("T-start-unproved").unwrap().unwrap();
+        assert_eq!(session.state, "outcome_unknown");
+        assert_eq!(session.send_boundary, "outcome_unknown");
+        assert_eq!(
+            db.credential_profile("P-start-unproved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-start-unproved")
+        );
+        assert!(
+            db.fence_unproved_worker_start(
+                &WorkerProcessRecord {
+                    process_identity: fake_process_identity(130, 130),
+                    ..record
+                },
+                "conflicting retry",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn readiness_failure_terminalizes_a_recovering_dedicated_session() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-ready-fail", "worker-ready-fail");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-ready-fail', 'T-ready-fail', 'owner', 'backend',
+                           'a', '/tmp/workspace-ready-fail', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-ready-fail",
+            chain_root_id: "T-ready-fail",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-ready-fail",
+            candidate_required: false,
+            credential_profile_id: "P-ready-fail",
+            credential_generation: 1,
+            credential_lock_owner: "worker-ready-fail",
+        })
+        .unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-ready-fail".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(125, 125),
+            control_channel_identity: "fd:11".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-ready-fail".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+        db.settle_worker_process(
+            "worker-ready-fail",
+            "T-ready-fail",
+            1,
+            "reaped",
+            "readiness failed",
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session("T-ready-fail").unwrap().unwrap().state,
+            "recovering"
+        );
+        db.fail_dedicated_session_start(
+            "T-ready-fail",
+            "worker-ready-fail",
+            "readiness failed",
+            true,
+        )
+        .unwrap();
+        let session = db.dedicated_session("T-ready-fail").unwrap().unwrap();
+        assert_eq!(session.state, "terminal");
+        assert_eq!(session.terminal_reason.as_deref(), Some("readiness failed"));
+        assert_eq!(
+            db.credential_profile("P-ready-fail")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+    }
+
+    #[test]
+    fn observation_batches_are_epoch_ordered_and_rebuild_only_from_root_facts() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO credential_profile(
+                    profile_id, owner_principal, home_id, credential_generation, state,
+                    active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision
+                 ) VALUES ('P-observe', 'fp:operator', 'home-observe', 1, 'active',
+                           NULL, 0, NULL, NULL, 'worker-observe', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO worker_process(
+                    worker_instance_id, boot_identity_hash, session_capsule_hash,
+                    boot_epoch, lifecycle_generation, process_identity,
+                    control_channel_identity, state, daemon_generation_id,
+                    placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
+                 ) VALUES ('worker-observe', ?1, ?2, 3, 1, '{}', 'fd:observe',
+                           'live', 'daemon-observe', 'T-observe', 'owned', 1, 1)",
+                [&"e".repeat(64), &"a".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO dedicated_session(
+                    placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
+                    worker_instance_id, worker_boot_epoch, workspace_id,
+                    candidate_required, credential_profile_id, credential_generation, remote_thread_id,
+                    current_turn_id, state, send_boundary, candidate_snapshot_hash,
+                    candidate_validation_hash, publication_result, terminal_reason,
+                    created_at_ms, updated_at_ms
+                 ) VALUES ('T-observe', 'T-observe', 'fp:operator', ?1,
+                           'worker-observe', 3, 'W-observe', 0, 'P-observe', 1,
+                           NULL, NULL, 'idle', 'none', NULL, NULL, NULL, NULL, 1, 1)",
+                [&"a".repeat(64)],
+            )
+            .unwrap();
+        let canonical_batch = serde_json::json!({
+            "events": [],
+            "session_observations": [],
+        });
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
+            ObservationBatchReservation::ContactAppend
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
+            ObservationBatchReservation::RebuildProjection
+        );
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &serde_json::json!({"events":[{"changed":true}],"session_observations":[]}),
+            )
+            .is_err(),
+            "an accepted observation coordinate must retain one exact canonical batch"
+        );
+        db.settle_dedicated_observation_batch("T-observe", 3, 1, &"b".repeat(64))
+            .unwrap();
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT canonical_batch_json FROM dedicated_session_observation_batch
+                      WHERE placement_thread_id='T-observe' AND worker_boot_epoch=3 AND first_sequence=1",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+                .is_none(),
+            "the authoritative root fact replaces the settled SQLite body"
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
+            ObservationBatchReservation::AlreadySettled
+        );
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                4,
+                4,
+                Some(&"b".repeat(64)),
+                &"c".repeat(64),
+                &canonical_batch,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                3,
+                3,
+                Some(&"b".repeat(64)),
+                &"c".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
+            ObservationBatchReservation::ContactAppend
+        );
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                2,
+                1,
+                1,
+                None,
+                &"d".repeat(64),
+                &canonical_batch,
+            )
+            .is_err()
+        );
+        let unfinished = db.dedicated_observation_outbox_records().unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].first_sequence, 3);
+        assert_eq!(unfinished[0].state, "append_contacting");
+        db.mark_dedicated_observation_batch_unknown("T-observe", 3, 3, &"c".repeat(64))
+            .unwrap();
+        assert_eq!(
+            db.dedicated_observation_outbox_records().unwrap()[0].state,
+            "append_unknown"
+        );
+        db.discard_unappended_dedicated_observation_batch("T-observe", 3, 3, &"c".repeat(64))
+            .unwrap();
+        assert!(
+            db.dedicated_observation_outbox_records()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                3,
+                3,
+                Some(&"b".repeat(64)),
+                &"c".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
+            ObservationBatchReservation::ContactAppend
+        );
+        db.settle_dedicated_observation_batch("T-observe", 3, 3, &"c".repeat(64))
+            .unwrap();
+        let frontier = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*), first_sequence, cumulative_event_count
+                   FROM dedicated_session_observation_batch
+                  WHERE placement_thread_id='T-observe' AND state='settled'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(frontier, (1, 3, 3));
+        db.conn
+            .execute(
+                "UPDATE dedicated_session_observation_batch
+                    SET cumulative_event_count=?2
+                  WHERE placement_thread_id=?1 AND state='settled'",
+                params![
+                    "T-observe",
+                    i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)
+                        .unwrap()
+                ],
+            )
+            .unwrap();
+        let ceiling = db
+            .reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                4,
+                4,
+                Some(&"c".repeat(64)),
+                &"d".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap_err();
+        assert!(
+            ceiling
+                .to_string()
+                .contains("observation event ceiling is exhausted")
+        );
+
+        let generation = db
+            .revoke_credential_profile("P-observe", "fp:operator", 1)
+            .unwrap();
+        assert_eq!(generation, 2);
+        db.fence_abandoned_worker_process("worker-observe", "T-observe", 3, "unproved")
+            .unwrap();
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "T-observe",
+                3,
+                3,
+                3,
+                Some(&"b".repeat(64)),
+                &"d".repeat(64),
+                &canonical_batch,
+            )
+            .is_err(),
+            "a revoked unproved worker epoch must not append buffered testimony"
+        );
+    }
+
+    #[test]
+    fn credential_ceremony_and_dedicated_ledgers_are_epoch_fenced() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-one",
+            owner_principal: "fp:operator",
+            home_id: "home-one",
+        })
+        .unwrap();
+        assert_eq!(
+            db.acquire_credential_profile("P-one", "fp:operator", "login-owner")
+                .unwrap(),
+            1
+        );
+        let login_epoch = db
+            .begin_credential_enrollment(
+                "P-one",
+                "login-owner",
+                "login-one",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap();
+        let generation = db
+            .complete_credential_enrollment(
+                "P-one",
+                "login-owner",
+                "login-one",
+                login_epoch,
+                &serde_json::json!({"account_label": "fixture"}),
+            )
+            .unwrap();
+        assert_eq!(generation, 2);
+        db.release_credential_profile("P-one", "login-owner")
+            .unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-ledger', 'T-ledger', 'dedicated_worker_session', 'trusted-daemon',
+                           'a', '/tmp/workspace-ledger', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            db.acquire_credential_profile("P-one", "fp:operator", "worker-ledger")
+                .unwrap(),
+            generation
+        );
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-ledger",
+            chain_root_id: "T-ledger",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"c".repeat(64),
+            workspace_id: "W-ledger",
+            candidate_required: false,
+            credential_profile_id: "P-one",
+            credential_generation: generation,
+            credential_lock_owner: "worker-ledger",
+        })
+        .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-ledger".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "c".repeat(64),
+            boot_epoch: 4,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(124, 124),
+            control_channel_identity: "fd:10".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-ledger".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-ledger", "T-ledger", 4)
+            .unwrap();
+
+        let payload = serde_json::json!({"operation": "fixture_turn"});
+        let command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-ledger",
+                idempotency_key: "request-one",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        let replay = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-ledger",
+                idempotency_key: "request-one",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(command, replay);
+        db.mark_dedicated_command_contacted("T-ledger", command.command_sequence, 4)
+            .unwrap();
+        db.observe_dedicated_session_state(
+            "T-ledger",
+            4,
+            "idle",
+            "turn_running",
+            None,
+            Some("turn-fixture"),
+        )
+        .unwrap();
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            placement_thread_id: "T-ledger",
+            approval_id: "approval-one",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"e".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        let approval_decision = serde_json::json!({"decision": "deny"});
+        let approval_decision_digest =
+            ryeos_state::objects::canonical_value_digest(&approval_decision).unwrap();
+        db.reserve_dedicated_session_approval_decision(
+            "T-ledger",
+            "approval-one",
+            4,
+            &"e".repeat(64),
+            "fp:operator",
+            &approval_decision,
+            &approval_decision_digest,
+            "reservation-one",
+        )
+        .unwrap();
+        assert!(
+            db.reserve_dedicated_session_approval_decision(
+                "T-ledger",
+                "approval-one",
+                4,
+                &"e".repeat(64),
+                "fp:operator",
+                &approval_decision,
+                &approval_decision_digest,
+                "reservation-two",
+            )
+            .is_err()
+        );
+        db.mark_dedicated_approval_delivery_contacting(
+            "T-ledger",
+            "approval-one",
+            4,
+            "reservation-one",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        db.settle_dedicated_approval_delivery(
+            "T-ledger",
+            "approval-one",
+            4,
+            "reservation-one",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO dedicated_session_approval (
+                    placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
+                    request_digest, operation_class, requested_authority_json, state,
+                    decision_principal, decision_json, decision_digest, reservation_token,
+                    expires_at_ms, created_at_ms, resolved_at_ms,
+                    delivery_contacted_at_ms, delivery_settled_at_ms
+                 ) VALUES ('T-ledger', 'approval-recovered', 'worker-ledger', 4,
+                           ?1, 'fixture', '{}', 'delivery_unknown', 'fp:operator',
+                           ?2, ?3, 'reservation-recovered', ?4, 1, 1, 1, NULL)",
+                params![
+                    "9".repeat(64),
+                    serde_json::to_string(&approval_decision).unwrap(),
+                    approval_decision_digest,
+                    lillux::time::timestamp_millis() as i64 + 60_000,
+                ],
+            )
+            .unwrap();
+        db.settle_recovered_dedicated_approval_delivery(
+            "T-ledger",
+            "approval-recovered",
+            4,
+            "reservation-recovered",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        // Root-derived projection repair is idempotent and does not depend on
+        // the session still retaining this historical worker epoch.
+        db.settle_recovered_dedicated_approval_delivery(
+            "T-ledger",
+            "approval-recovered",
+            4,
+            "reservation-recovered",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT state FROM dedicated_session_approval
+                      WHERE placement_thread_id='T-ledger' AND approval_id='approval-recovered'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delivery_settled"
+        );
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            placement_thread_id: "T-ledger",
+            approval_id: "approval-uncontacted",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"8".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        db.reserve_dedicated_session_approval_decision(
+            "T-ledger",
+            "approval-uncontacted",
+            4,
+            &"8".repeat(64),
+            "fp:operator",
+            &approval_decision,
+            &approval_decision_digest,
+            "reservation-uncontacted",
+        )
+        .unwrap();
+        db.reconcile_dedicated_approval_stale_epoch("T-ledger", "approval-uncontacted", 4)
+            .unwrap();
+        db.reconcile_dedicated_approval_stale_epoch("T-ledger", "approval-uncontacted", 4)
+            .unwrap();
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT state FROM dedicated_session_approval
+                      WHERE placement_thread_id='T-ledger' AND approval_id='approval-uncontacted'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "stale_epoch"
+        );
+        db.settle_dedicated_command(
+            "T-ledger",
+            command.command_sequence,
+            4,
+            true,
+            &serde_json::json!({"ok": true}),
+        )
+        .unwrap();
+        db.observe_dedicated_session_state(
+            "T-ledger",
+            4,
+            "turn_running",
+            "idle",
+            Some("turn-fixture"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session("T-ledger").unwrap().unwrap().state,
+            "idle"
+        );
+        let recovered_command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-ledger",
+                idempotency_key: "request-recovered",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"c".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-ledger", recovered_command.command_sequence, 4)
+            .unwrap();
+        db.mark_dedicated_command_outcome_unknown(
+            "T-ledger",
+            recovered_command.command_sequence,
+            4,
+        )
+        .unwrap();
+        db.settle_recovered_dedicated_command(
+            "T-ledger",
+            recovered_command.command_sequence,
+            4,
+            &serde_json::json!({"redacted":true,"response_digest":"c".repeat(64)}),
+        )
+        .unwrap();
+        let recovered = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-ledger",
+                idempotency_key: "request-recovered",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"c".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(recovered.state, "completed");
+        let session = db.dedicated_session("T-ledger").unwrap().unwrap();
+        assert_eq!(session.state, "idle");
+        assert_eq!(session.send_boundary, "settled");
+        let expiry_command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-ledger",
+                idempotency_key: "request-expiry",
+                worker_boot_epoch: 4,
+                command_kind: "events",
+                request_digest: &"a".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-ledger", expiry_command.command_sequence, 4)
+            .unwrap();
+        db.observe_dedicated_session_state(
+            "T-ledger",
+            4,
+            "idle",
+            "turn_running",
+            None,
+            Some("turn-expiry"),
+        )
+        .unwrap();
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            placement_thread_id: "T-ledger",
+            approval_id: "approval-expiry",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"b".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        db.observe_dedicated_session_approval_expiry(
+            "T-ledger",
+            "approval-expiry",
+            4,
+            &"b".repeat(64),
+        )
+        .unwrap();
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            placement_thread_id: "T-ledger",
+            approval_id: "approval-expiry-contacting",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"d".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        db.reserve_dedicated_session_approval_decision(
+            "T-ledger",
+            "approval-expiry-contacting",
+            4,
+            &"d".repeat(64),
+            "fp:operator",
+            &approval_decision,
+            &approval_decision_digest,
+            "reservation-expiry-contacting",
+        )
+        .unwrap();
+        db.mark_dedicated_approval_delivery_contacting(
+            "T-ledger",
+            "approval-expiry-contacting",
+            4,
+            "reservation-expiry-contacting",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        db.observe_dedicated_session_approval_expiry(
+            "T-ledger",
+            "approval-expiry-contacting",
+            4,
+            &"d".repeat(64),
+        )
+        .unwrap();
+        db.mark_dedicated_approval_delivery_unknown(
+            "T-ledger",
+            "approval-expiry-contacting",
+            4,
+            "reservation-expiry-contacting",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        assert!(
+            db.settle_dedicated_approval_delivery(
+                "T-ledger",
+                "approval-expiry-contacting",
+                4,
+                "reservation-expiry-contacting",
+                &approval_decision_digest,
+            )
+            .is_err(),
+            "a root-observed expiry must win over an unsettled delivery attempt"
+        );
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT state FROM dedicated_session_approval
+                      WHERE placement_thread_id='T-ledger' AND approval_id='approval-expiry-contacting'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "expired"
+        );
+        assert!(
+            db.pending_dedicated_session_approvals("T-ledger")
+                .unwrap()
+                .is_empty()
+        );
+        db.settle_dedicated_command(
+            "T-ledger",
+            expiry_command.command_sequence,
+            4,
+            true,
+            &serde_json::json!({"expired":true}),
+        )
+        .unwrap();
+        db.observe_dedicated_session_state(
+            "T-ledger",
+            4,
+            "turn_running",
+            "idle",
+            Some("turn-expiry"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.revoke_credential_profile("P-one", "fp:operator", generation)
+                .unwrap(),
+            3
+        );
+        assert!(
+            db.reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-ledger",
+                idempotency_key: "request-after-revocation",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"f".repeat(64),
+                payload: &payload,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frozen_candidate_requires_exact_verification_before_publish_or_discard() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-candidate", "worker-candidate");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-candidate', 'T-candidate', 'owner', 'trusted-daemon',
+                           'a', '/tmp/candidate', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-candidate",
+            chain_root_id: "T-candidate",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-candidate",
+            candidate_required: true,
+            credential_profile_id: "P-candidate",
+            credential_generation: 1,
+            credential_lock_owner: "worker-candidate",
+        })
+        .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-candidate".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(125, 125),
+            control_channel_identity: "fd:11".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-candidate".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-candidate", "T-candidate", 1)
+            .unwrap();
+        db.reserve_dedicated_session_completion("T-candidate", 1, None)
+            .unwrap();
+        db.settle_worker_process("worker-candidate", "T-candidate", 1, "reaped", "completed")
+            .unwrap();
+        db.terminalize_dedicated_session("T-candidate", "worker-candidate", 1, "completed")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET state='closed'
+                  WHERE workspace_id='W-candidate'",
+                [],
+            )
+            .unwrap();
+        let candidate = "c".repeat(64);
+        assert!(
+            db.bind_dedicated_session_candidate("T-candidate", &candidate)
+                .unwrap()
+        );
+        let frozen = db.dedicated_session("T-candidate").unwrap().unwrap();
+        assert_eq!(frozen.state, "frozen");
+        let plan = frozen.candidate_validation_hash.unwrap();
+        assert!(
+            db.reserve_dedicated_candidate_publication("T-candidate", &candidate)
+                .is_err()
+        );
+        assert!(
+            db.reserve_dedicated_candidate_validation("T-candidate", &candidate, &"d".repeat(64))
+                .is_err()
+        );
+        db.reserve_dedicated_candidate_validation("T-candidate", &candidate, &plan)
+            .unwrap();
+        db.fail_dedicated_candidate_disposition("T-candidate", "verifying")
+            .unwrap();
+        assert_eq!(
+            db.dedicated_session("T-candidate").unwrap().unwrap().state,
+            "frozen"
+        );
+        db.reserve_dedicated_candidate_validation("T-candidate", &candidate, &plan)
+            .unwrap();
+        db.settle_dedicated_candidate_validation(
+            "T-candidate",
+            &candidate,
+            &plan,
+            &serde_json::json!({"ok":true}),
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session("T-candidate").unwrap().unwrap().state,
+            "publish_ready"
+        );
+        db.reserve_dedicated_candidate_publication("T-candidate", &candidate)
+            .unwrap();
+        let unknown_result = format!("publication_unknown:{candidate}");
+        db.settle_dedicated_candidate_publication("T-candidate", &candidate, &unknown_result)
+            .unwrap();
+        let unknown = db.dedicated_session("T-candidate").unwrap().unwrap();
+        assert_eq!(unknown.state, "terminal");
+        assert_eq!(
+            unknown.publication_result.as_deref(),
+            Some(unknown_result.as_str())
+        );
+        assert!(
+            db.reserve_dedicated_candidate_publication("T-candidate", &candidate)
+                .is_err()
+        );
+
+        // Reuse the fully constructed candidate to retain independent discard
+        // settlement coverage in this state-machine test.
+        db.conn
+            .execute(
+                "UPDATE dedicated_session SET state='publish_ready', publication_result='retained'
+                  WHERE placement_thread_id='T-candidate'",
+                [],
+            )
+            .unwrap();
+        db.reserve_dedicated_candidate_discard("T-candidate", &candidate)
+            .unwrap();
+        db.settle_dedicated_candidate_discard("T-candidate", &candidate)
+            .unwrap();
+        let discarded = db.dedicated_session("T-candidate").unwrap().unwrap();
+        assert_eq!(discarded.state, "terminal");
+        assert_eq!(discarded.publication_result.as_deref(), Some("discarded"));
+    }
+
     #[test]
     fn in_process_birth_reservation_is_atomic_typed_and_settleable() {
         let (_tmp, db) = fresh_db();
@@ -7778,7 +15654,8 @@ mod tests {
             .err()
             .expect("missing current reservation contract must fail closed");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let read_only =
             Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -7854,7 +15731,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
         )));
-        assert!(message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
         assert!(!message.contains("missing field `base_snapshot_hash`"));
     }
 
@@ -7874,7 +15751,9 @@ mod tests {
             "stored schema_epoch={}",
             PROJECT_AUTHORITY_SCHEMA_EPOCH + 1
         )));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
     }
@@ -7899,7 +15778,9 @@ mod tests {
             "stored schema_epoch={}",
             RUNTIME_OPERATOR_SCHEMA_EPOCH + 1
         )));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let reset_error = RuntimeDb::open_for_explicit_history_reset(&path)
             .err()
@@ -7954,7 +15835,9 @@ mod tests {
             .expect("an unowned database must fail closed");
         let message = format!("{error:#}");
         assert!(message.contains("refusing to classify or reset unowned store"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let reset_error = RuntimeDb::open_for_explicit_history_reset(&path)
             .err()
@@ -8011,163 +15894,34 @@ mod tests {
     }
 
     #[test]
-    fn newer_project_authority_vetoes_mixed_epoch_reset() {
+    fn predecessor_reset_never_decodes_embedded_authority_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
-        let newer = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH + 1,
-            "authority": {"deliberately": "newer"}
-        }))
-        .unwrap();
-        for (operation_id, authority) in [
-            ("a-predecessor", predecessor.as_str()),
-            ("z-newer", newer.as_str()),
-        ] {
-            db.conn
-                .execute(
-                    "INSERT INTO detached_spawn_intent(
-                         operation_id, parent_thread_id, request_hash, child_thread_id,
-                         child_project_authority, created_at_ms
-                     ) VALUES (?1, 'T-parent', ?1, ?1, ?2, 1)",
-                    params![operation_id, authority],
-                )
-                .unwrap();
-        }
-        db.conn
-            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
-            .expect("mark the mixed store as predecessor-layout");
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("a newer row must veto reset even after a predecessor row");
-        let message = format!("{error:#}");
-        assert!(message.contains("z-newer"));
-        assert!(message.contains("newer"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
-
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let retained: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM detached_spawn_intent
-                  WHERE operation_id IN ('a-predecessor', 'z-newer')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retained, 2);
-    }
-
-    #[test]
-    fn newer_capsule_epoch_vetoes_reset_even_without_a_current_sealed_request() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('a-predecessor', 'T-parent', 'request', 'T-child', ?1, 1)",
-                params![predecessor],
-            )
-            .unwrap();
-        db.insert_thread_runtime("T-newer-capsule", "T-newer-capsule")
-            .unwrap();
-        let newer_capsule = lillux::canonical_json(&serde_json::json!({
-            "schema_version": LAUNCH_METADATA_SCHEMA_VERSION,
-            "admitted_launch_capsule_schema":
-                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION + 1,
-            "sealed_root_request": null
-        }))
-        .unwrap();
-        db.conn
-            .execute(
-                "UPDATE thread_runtime SET launch_metadata=?1 WHERE thread_id='T-newer-capsule'",
-                params![newer_capsule],
-            )
-            .unwrap();
-        db.conn
-            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
-            .expect("mark the mixed store as predecessor-layout");
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("a newer nested capsule epoch must veto reset");
-        let message = format!("{error:#}");
-        assert!(message.contains("T-newer-capsule"));
-        assert!(message.contains("newer admitted launch capsule"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
-    }
-
-    #[test]
-    fn unrecognized_project_authority_kind_vetoes_mixed_epoch_reset() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("runtime.db");
-        let db = RuntimeDb::open(&path).unwrap();
-        let predecessor = lillux::canonical_json(&serde_json::json!({
-            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
-            "authority": {"deliberately": "predecessor"}
-        }))
-        .unwrap();
-        let unrecognized = lillux::canonical_json(&serde_json::json!({
-            "kind": "future_project_authority",
-            "authority": {"deliberately": "opaque"}
-        }))
-        .unwrap();
-        for (operation_id, authority) in [
-            ("a-predecessor", predecessor.as_str()),
-            ("z-unrecognized", unrecognized.as_str()),
-        ] {
-            db.conn
-                .execute(
-                    "INSERT INTO detached_spawn_intent(
-                         operation_id, parent_thread_id, request_hash, child_thread_id,
-                         child_project_authority, created_at_ms
-                     ) VALUES (?1, 'T-parent', ?1, ?1, ?2, 1)",
-                    params![operation_id, authority],
-                )
-                .unwrap();
-        }
-        db.conn
-            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
-            .expect("mark the mixed store as predecessor-layout");
-        drop(db);
-
-        let error = RuntimeDb::open_for_explicit_history_reset(&path)
-            .err()
-            .expect("an unrecognized authority kind must veto reset");
-        let message = format!("{error:#}");
-        assert!(message.contains("z-unrecognized"));
-        assert!(message.contains("unrecognized outer kind"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
-
-        let retained: i64 = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM detached_spawn_intent
-                  WHERE operation_id IN ('a-predecessor', 'z-unrecognized')",
+                 ) VALUES (
+                     'opaque-row', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', 'not-json-and-never-decoded', 1
+                 )",
                 [],
-                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(retained, 2);
+        db.conn
+            .pragma_update(None, "application_id", PREDECESSOR_RUNTIME_APP_ID)
+            .expect("mark the store as an owned predecessor");
+        drop(db);
+
+        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+        assert!(reset.requires_explicit_history_reset());
+        reset.apply_explicit_history_reset(&path).unwrap();
+        assert_eq!(
+            reset.discard_all_thread_history(true).unwrap().total_rows(),
+            0
+        );
     }
 
     #[test]
@@ -8183,10 +15937,13 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('op-newer', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'op-newer', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![newer],
             )
             .unwrap();
@@ -8196,14 +15953,19 @@ mod tests {
             .err()
             .expect("an older daemon must not erase newer runtime authority");
         let message = format!("{error:#}");
-        assert!(message.contains("newer than this RyeOS binary"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            PROJECT_AUTHORITY_SCHEMA_EPOCH + 1
+        )));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
             .query_row(
                 "SELECT child_project_authority
-                   FROM detached_spawn_intent
+                   FROM runtime_action_intent
                   WHERE operation_id='op-newer'",
                 [],
                 |row| row.get(0),
@@ -8225,11 +15987,21 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('op-predecessor', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'op-predecessor', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![predecessor],
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
             )
             .unwrap();
         drop(db);
@@ -8259,7 +16031,7 @@ mod tests {
         let retained: String = conn
             .query_row(
                 "SELECT child_project_authority
-                   FROM detached_spawn_intent
+                   FROM runtime_action_intent
                   WHERE operation_id='op-predecessor'",
                 [],
                 |row| row.get(0),
@@ -8296,7 +16068,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
         )));
-        assert!(message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
         assert!(!message.contains("missing field `confinement`"));
         assert!(!message.contains("unknown field"));
     }
@@ -8316,7 +16088,9 @@ mod tests {
             "stored schema_version={}",
             LAUNCH_METADATA_SCHEMA_VERSION + 1
         )));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
     }
@@ -8345,7 +16119,7 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO execution_workspace
-                         (workspace_id, lower_snapshot, root_path, state,
+                         (workspace_id, base_snapshot, root_path, state,
                           created_at_ms, updated_at_ms)
                      VALUES (?1, 'snapshot', ?2, ?3, 1, 1)",
                     params![
@@ -8370,7 +16144,7 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO execution_workspace
-                     (workspace_id, lower_snapshot, root_path, state,
+                     (workspace_id, base_snapshot, root_path, state,
                       created_at_ms, updated_at_ms)
                  VALUES ('workspace-invalid', 'snapshot', '/tmp/workspace-invalid',
                          'invalid', 1, 1)",
@@ -8501,10 +16275,21 @@ mod tests {
     }
 
     fn hook_response() -> Value {
-        serde_json::json!({
-            "thread": {"id": "T-hook", "status": "completed"},
-            "result": {"accepted": true, "cost": 7}
+        serde_json::to_value(ryeos_runtime::callback_contract::CallbackDispatchResponse {
+            thread: serde_json::json!({"id": "T-hook", "status": "completed"}),
+            result: serde_json::json!({"accepted": true, "cost": 7}),
+            dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+                effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+                action_digest: "7".repeat(64),
+                effect_identity: None,
+                publication:
+                    ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                record_hash: None,
+                replayed_from: None,
+            },
         })
+        .expect("serialize test hook response")
     }
 
     #[test]
@@ -8542,14 +16327,16 @@ mod tests {
     }
 
     #[test]
-    fn detached_spawn_intent_reuses_one_child_and_rejects_request_drift() {
+    fn runtime_action_intent_reuses_one_child_and_rejects_caller_or_request_drift() {
         let db = RuntimeDb::new_in_memory().unwrap();
         let operation_id = "d".repeat(64);
         let request_hash = "e".repeat(64);
         assert_eq!(
-            db.reserve_detached_spawn_intent(
+            db.reserve_runtime_action_intent(
                 &operation_id,
+                "T-chain",
                 "T-parent",
+                RuntimeActionMode::Inline,
                 &request_hash,
                 "T-child-first",
                 None,
@@ -8557,10 +16344,24 @@ mod tests {
             .unwrap(),
             "T-child-first"
         );
-        assert_eq!(
-            db.reserve_detached_spawn_intent(
+        assert!(
+            db.reserve_runtime_action_intent(
                 &operation_id,
+                "T-chain",
+                "T-successor",
+                RuntimeActionMode::Inline,
+                &request_hash,
+                "T-child-retry",
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.reserve_runtime_action_intent(
+                &operation_id,
+                "T-chain",
                 "T-parent",
+                RuntimeActionMode::Inline,
                 &request_hash,
                 "T-child-retry",
                 None,
@@ -8569,15 +16370,48 @@ mod tests {
             "T-child-first"
         );
         assert!(
-            db.reserve_detached_spawn_intent(
+            db.reserve_runtime_action_intent(
                 &operation_id,
+                "T-chain",
                 "T-parent",
+                RuntimeActionMode::Inline,
                 &"f".repeat(64),
                 "T-child-retry",
                 None,
             )
             .is_err()
         );
+        assert!(
+            db.reserve_runtime_action_intent(
+                &operation_id,
+                "T-other-chain",
+                "T-parent",
+                RuntimeActionMode::Inline,
+                &request_hash,
+                "T-child-retry",
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            db.reserve_runtime_action_intent(
+                &operation_id,
+                "T-chain",
+                "T-parent",
+                RuntimeActionMode::Detached,
+                &request_hash,
+                "T-child-retry",
+                None,
+            )
+            .is_err()
+        );
+        let retained = db
+            .get_runtime_action_intent(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.chain_root_id, "T-chain");
+        assert_eq!(retained.first_caller_thread_id, "T-parent");
+        assert!(matches!(retained.mode, RuntimeActionMode::Inline));
     }
 
     #[test]
@@ -8682,10 +16516,8 @@ mod tests {
         let response = hook_response();
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
             .unwrap();
-        let divergent = serde_json::json!({
-            "thread": {"id": "T-hook", "status": "completed"},
-            "result": {"accepted": false}
-        });
+        let mut divergent = hook_response();
+        divergent["result"] = serde_json::json!({"accepted": false});
         assert!(
             db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &divergent)
                 .is_err()
@@ -8705,10 +16537,9 @@ mod tests {
             )
             .is_err()
         );
-        let oversize = serde_json::json!({
-            "thread": {},
-            "result": {"body": "x".repeat(MAX_HOOK_DISPATCH_RESPONSE_BYTES)}
-        });
+        let mut oversize = hook_response();
+        oversize["result"] =
+            serde_json::json!({"body": "x".repeat(MAX_HOOK_DISPATCH_RESPONSE_BYTES)});
         assert!(
             db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &oversize)
                 .is_err()
@@ -9244,7 +17075,7 @@ mod tests {
     fn empty_installed_schema_with_unset_authority_columns_remains_current() {
         let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
-        for table in ["detached_spawn_intent", "follow_waiter"] {
+        for table in ["runtime_action_intent", "follow_waiter"] {
             let mut statement = db
                 .conn
                 .prepare(&format!("PRAGMA table_info({table})"))
@@ -9317,20 +17148,90 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // The release under the same ceiling hands the slot across windows
-        // only via that window's own admit — the sweep drives other keys.
+        // Release wakes the globally oldest eligible row immediately; a
+        // different window never waits for the maintenance sweep.
         assert_eq!(
             db.launch_window_release("a1", Some(1), 5).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            db.launch_window_admit("Q:two", Some(1), 6).unwrap(),
             vec!["b1"]
         );
         assert_eq!(
             db.launch_window_keys_with_queue().unwrap(),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn suspended_window_member_yields_global_slot_to_nested_follow() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("chain-parent", "outer", 1, 1)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit("outer", Some(1), 2).unwrap(),
+            vec!["chain-parent"]
+        );
+
+        let follow_key = "nested-follow";
+        db.reserve_follow(&seed_follow(follow_key)).unwrap();
+        set_single_follow_child(&db, follow_key, "nested-thread", "nested-chain").unwrap();
+        db.set_follow_parent_successor(follow_key, "parent-successor")
+            .unwrap();
+        assert_eq!(db.mark_follow_waiting(follow_key).unwrap(), "waiting");
+
+        let nested_window = format!("follow:{follow_key}");
+        db.launch_window_insert("nested-chain", &nested_window, 1, 3)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit(&nested_window, Some(1), 4).unwrap(),
+            vec!["nested-chain"],
+            "a suspended parent must not consume the only node execution slot"
+        );
+        assert_eq!(db.launch_window_live_total().unwrap(), 1);
+    }
+
+    #[test]
+    fn cap_one_nested_completion_releases_child_before_parent_resume() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("chain-parent", "outer", 1, 1)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 2).unwrap(),
+            vec!["chain-parent"]
+        );
+
+        let follow_key = "nested-follow-completion";
+        db.reserve_follow(&seed_follow(follow_key)).unwrap();
+        set_single_follow_child(&db, follow_key, "nested-thread", "nested-chain").unwrap();
+        db.set_follow_parent_successor(follow_key, "parent-successor")
+            .unwrap();
+        db.mark_follow_waiting(follow_key).unwrap();
+        db.launch_window_insert("nested-chain", &format!("follow:{follow_key}"), 1, 3)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 4).unwrap(),
+            vec!["nested-chain"]
+        );
+
+        assert!(
+            db.mark_follow_child_terminal(
+                "nested-chain",
+                "nested-tail",
+                "completed",
+                &serde_json::json!({"status":"completed","result":{}}),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            db.launch_window_live_total().unwrap(),
+            2,
+            "READY parent counts again until the terminal child releases its slot"
+        );
+        assert!(
+            db.launch_window_release("nested-chain", Some(1), 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.launch_window_live_total().unwrap(), 1);
+        assert!(!db.launch_window_is_member("nested-chain").unwrap());
     }
 
     #[test]
@@ -9365,6 +17266,27 @@ mod tests {
         db.launch_window_discard_member("admitted").unwrap();
         db.launch_window_discard_member("queued").unwrap();
         assert!(db.launch_window_cancelled_members().unwrap().is_empty());
+    }
+
+    #[test]
+    fn discarded_cancelled_member_wakes_oldest_global_replacement() {
+        let (_tmp, mut db) = fresh_db();
+        db.launch_window_insert("cancelled", "A", 1, 1).unwrap();
+        db.launch_window_insert("replacement", "B", 1, 2).unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 3).unwrap(),
+            vec!["cancelled"]
+        );
+        assert_eq!(
+            db.launch_window_cancel_members(&["cancelled".into()], 4)
+                .unwrap(),
+            vec!["cancelled"]
+        );
+        db.launch_window_discard_member("cancelled").unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 5).unwrap(),
+            vec!["replacement"]
+        );
     }
 
     /// Unknown owned state must fail without mutation. Normal open never
@@ -9424,7 +17346,8 @@ mod tests {
             .err()
             .expect("owned stale runtime database must be rejected");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let added: i64 = conn
@@ -9449,7 +17372,8 @@ mod tests {
             .err()
             .expect("non-current runtime structure must fail closed");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let child_links: i64 = conn
@@ -9481,7 +17405,7 @@ mod tests {
     }
 
     #[test]
-    fn unwrapped_detached_project_authority_requires_reset_without_mutation() {
+    fn predecessor_detached_project_authority_is_not_decoded_during_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -9492,11 +17416,21 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('op-former', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'op-former', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![predecessor],
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
             )
             .unwrap();
         drop(db);
@@ -9506,14 +17440,16 @@ mod tests {
             .expect("unwrapped detached authority must require explicit reset");
         let message = format!("{error:#}");
         assert!(message.contains("explicit no-backcompat reset"));
-        assert!(message.contains("stored project authority is not the exact current contract"));
-        assert!(message.contains("stored kind=\"projectless\""));
-        assert!(!message.contains("missing field `authority`"));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
+        )));
+        assert!(!message.contains("stored project authority"));
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
             .query_row(
-                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id='op-former'",
+                "SELECT child_project_authority FROM runtime_action_intent WHERE operation_id='op-former'",
                 [],
                 |row| row.get(0),
             )
@@ -9522,7 +17458,7 @@ mod tests {
     }
 
     #[test]
-    fn unwrapped_follow_project_authority_requires_reset_without_mutation() {
+    fn predecessor_follow_project_authority_is_not_decoded_during_open() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -9542,6 +17478,13 @@ mod tests {
                 params![predecessor],
             )
             .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
         drop(db);
 
         let error = RuntimeDb::open(&path)
@@ -9549,9 +17492,11 @@ mod tests {
             .expect("unwrapped follow authority must require explicit reset");
         let message = format!("{error:#}");
         assert!(message.contains("explicit no-backcompat reset"));
-        assert!(message.contains("stored project authority is not the exact current contract"));
-        assert!(message.contains("stored kind=\"projectless\""));
-        assert!(!message.contains("missing field `authority`"));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
+        )));
+        assert!(!message.contains("stored project authority"));
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
@@ -9647,6 +17592,39 @@ mod tests {
     }
 
     #[test]
+    fn predecessor_launch_epoch_is_classified_before_nested_policy_decode() {
+        let raw = lillux::canonical_json(&serde_json::json!({
+            "schema_version": LAUNCH_METADATA_SCHEMA_VERSION - 1,
+            "admitted_launch_capsule_schema":
+                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            "sealed_root_request": {
+                "captured_history_policy": {
+                    "resolved_from": {
+                        "item_authored": {
+                            "node_policy": {
+                                "signed_config": {
+                                    "path": ".ai/node/policies/thread_history.yaml",
+                                    "space": "node"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let StoredLaunchMetadata::Incompatible(incompatible) =
+            decode_stored_launch_metadata(&raw).unwrap()
+        else {
+            panic!("predecessor nested policy shape must remain opaque")
+        };
+        assert_eq!(
+            incompatible.schema_version,
+            u64::from(LAUNCH_METADATA_SCHEMA_VERSION - 1)
+        );
+    }
+
+    #[test]
     fn committed_predecessor_follow_rejects_without_interpreting_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
@@ -9658,7 +17636,8 @@ mod tests {
             .err()
             .expect("committed predecessor follow must fail closed");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let follows: i64 = conn
@@ -9677,11 +17656,40 @@ mod tests {
     }
 
     #[test]
-    fn explicit_history_reset_replaces_predecessor_runtime_schema_without_migrating_rows() {
+    fn explicit_history_reset_replaces_any_owned_predecessor_schema_without_interpretation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
-        rewrite_as_recognized_runtime_predecessor(&db, "waiting", Some("T-successor"));
+        db.conn
+            .execute_batch(
+                "CREATE TABLE \"retired parent\" (id INTEGER PRIMARY KEY);
+                 CREATE TABLE \"retired \"\"runtime\"\" table\" (
+                     parent_id INTEGER NOT NULL REFERENCES \"retired parent\"(id),
+                     value TEXT NOT NULL
+                 );
+                 CREATE INDEX \"retired index\"
+                     ON \"retired \"\"runtime\"\" table\"(value);
+                 CREATE VIEW \"retired view\" AS
+                     SELECT value FROM \"retired \"\"runtime\"\" table\";
+                 CREATE TRIGGER \"retired trigger\"
+                     AFTER INSERT ON \"retired \"\"runtime\"\" table\"
+                     BEGIN
+                         UPDATE \"retired \"\"runtime\"\" table\"
+                            SET value = NEW.value
+                          WHERE rowid = NEW.rowid;
+                     END;
+                 INSERT INTO \"retired parent\"(id) VALUES (1);
+                 INSERT INTO \"retired \"\"runtime\"\" table\"(parent_id, value)
+                     VALUES (1, 'opaque predecessor state');",
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
         drop(db);
 
         let directory = lillux::PinnedDirectory::open(tmp.path())
@@ -9715,6 +17723,56 @@ mod tests {
     }
 
     #[test]
+    fn explicit_history_reset_rebuilds_credentials_only_from_stable_authority() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        db.conn
+            .execute_batch(
+                "DROP INDEX idx_credential_profile_owner_state;
+                 DROP TABLE credential_profile;
+                 CREATE TABLE credential_profile (
+                     deliberately_unknown_predecessor_shape BLOB NOT NULL
+                 );
+                 INSERT INTO credential_profile VALUES (x'00');",
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
+        drop(db);
+
+        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+        let stable = ryeos_state::OperationalCredentialProfileRecord {
+            profile_id: "profile-stable".to_owned(),
+            owner_principal: "fp:operator".to_owned(),
+            home_id: "credential-stable".to_owned(),
+            authority_revision: 7,
+            credential_generation: 4,
+            state: "active".to_owned(),
+            active_login_id: None,
+            login_epoch: 3,
+            login_expires_at_ms: None,
+            sanitized_account: Some(serde_json::json!({"account_id":"account-stable"})),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        reset.apply_explicit_history_reset(&path).unwrap();
+        assert!(reset.credential_profile_projections().unwrap().is_empty());
+        reset
+            .reconcile_credential_profile_projection(&stable)
+            .unwrap();
+        let restored = reset.credential_profile("profile-stable").unwrap().unwrap();
+        assert_eq!(restored.state, "active");
+        assert_eq!(restored.credential_generation, 4);
+        assert_eq!(restored.authority_revision, 7);
+    }
+
+    #[test]
     fn projection_rebuild_runtime_open_requires_existing_current_schema() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("missing-runtime.db");
@@ -9730,22 +17788,23 @@ mod tests {
     fn all_thread_history_discard_clears_every_runtime_table_and_preserves_schema() {
         let (tmp, db) = fresh_db();
         db.conn
-            .execute_batch(
+            .execute_batch(&format!(
                 "INSERT INTO thread_commands
                      (thread_id, command_type, status, created_at)
                      VALUES ('T-root', 'cancel', 'pending', '2026-07-15T00:00:00Z');
                  INSERT INTO hook_dispatch_ledger
                      (dispatch_key, seed_version, chain_root_id, caller_thread_id, event, hook_id,
                       request_hash, status, created_at_ms)
-                     VALUES ('dispatch-1', 2, 'T-root', 'T-root', 'completed', 'hook-1',
+                     VALUES ('dispatch-1', {HOOK_DISPATCH_SEED_VERSION}, 'T-root', 'T-root', 'completed', 'hook-1',
                              'request-1', 'pending', 1);
                  INSERT INTO thread_launch_claim
-                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
-                     VALUES ('T-root', 'claim-1', 1, 2, 'test');
+                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
+                      rearm_resume_budget_if_stale)
+                     VALUES ('T-root', 'claim-1', 1, 2, 'test', 1);
                  INSERT INTO thread_launch_epoch (thread_id, last_epoch)
                      VALUES ('T-root', 1);
                  INSERT INTO execution_workspace
-                     (workspace_id, thread_id, lower_snapshot, root_path, state,
+                     (workspace_id, thread_id, base_snapshot, root_path, state,
                       created_at_ms, updated_at_ms)
                      VALUES ('workspace-1', 'T-root', 'snapshot-1', '/tmp/workspace-1',
                              'orphaned', 1, 1);
@@ -9758,7 +17817,7 @@ mod tests {
                      (follow_key, item_index, item_ref, spec_hash, child_thread_id,
                       child_chain_root_id, sealed_root_request, created_at_ms, updated_at_ms)
                      VALUES ('follow-1', 0, 'directive:test/child', 'spec-1', 'T-child',
-                             'T-child', '{}', 1, 1);
+                             'T-child', '{{}}', 1, 1);
                  INSERT INTO thread_child_link
                      (child_thread_id, parent_thread_id, relation, created_at_ms)
                      VALUES ('T-child', 'T-root', 'follow', 1);
@@ -9767,8 +17826,8 @@ mod tests {
                      VALUES ('T-child', 'window-1', 1, 1);
                  INSERT INTO seat_lease
                      (seat_thread_id, owner, surface, client_ref, last_seen_at_ms)
-                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);",
-            )
+                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);"
+            ))
             .unwrap();
         db.reserve_in_process_handler_birth("T-root", "T-root", &in_process_launch_metadata())
             .unwrap();
@@ -10140,6 +18199,222 @@ mod tests {
             lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap()
         );
         assert_eq!(claim.lease_expires_at_ms, i64::MAX);
+    }
+
+    #[test]
+    fn startup_sweep_clears_only_dead_generation_claims() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(
+            db.claim_thread_launch("t-dead", "c-dead", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        assert_eq!(
+            db.claim_thread_launch("t-live", "c-live", "daemon-current")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].thread_id, "t-dead");
+        assert_eq!(cleared[0].dead_generation, "daemon-old");
+        assert!(!cleared[0].resume_budget_rearmed);
+
+        // The live claim survives; the dead thread is claimable again and its
+        // epoch fencing still advances monotonically.
+        assert!(db.get_launch_claim("t-live").unwrap().is_some());
+        assert!(db.get_launch_claim("t-dead").unwrap().is_none());
+        assert_eq!(
+            db.claim_thread_launch("t-dead", "c-new", "daemon-current")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        let reclaimed = db.get_launch_claim("t-dead").unwrap().expect("reclaimed");
+        assert_eq!(reclaimed.owner.monotonic_launch_epoch, 2);
+
+        // Idempotent: a second sweep finds nothing.
+        assert!(
+            db.clear_stale_launch_claims("daemon-current")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn startup_sweep_clears_malformed_owner_rows_fail_closed() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO thread_launch_claim
+                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
+                      rearm_resume_budget_if_stale)
+                 VALUES ('t-junk', 'c-junk', 0, 9223372036854775807, 'not json', 1)",
+                [],
+            )
+            .unwrap();
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].dead_generation, "<malformed owner>");
+        assert!(!cleared[0].resume_budget_rearmed);
+        assert_eq!(
+            db.claim_thread_launch("t-junk", "c-new", "daemon-current")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+    }
+
+    #[test]
+    fn startup_sweep_rearms_retry_reserved_before_process_attachment() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert!(cleared[0].resume_budget_rearmed);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
+        assert!(db.get_launch_claim("t1").unwrap().is_none());
+    }
+
+    #[test]
+    fn runtime_recovery_rotation_consumes_attempt_and_startup_never_rearms_it() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        let old_owner = db
+            .get_launch_claim("t1")
+            .unwrap()
+            .expect("old claim")
+            .claimed_by;
+
+        let rotated = db
+            .rotate_thread_launch_claim_after_runtime_recovery(
+                "t1",
+                &old_owner,
+                "claim-recovery",
+                "daemon-old",
+                2,
+            )
+            .unwrap();
+        let RuntimeRecoveryClaimRotation::Rotated {
+            claim,
+            next_attempt,
+        } = rotated
+        else {
+            panic!("runtime recovery must rotate the exact owner");
+        };
+        assert_eq!(next_attempt, 1);
+        assert_eq!(claim.owner.monotonic_launch_epoch, 2);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert!(!cleared[0].resume_budget_rearmed);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+    }
+
+    #[test]
+    fn runtime_recovery_rotation_exhaustion_and_owner_loss_are_non_mutating() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        let old = db.get_launch_claim("t1").unwrap().expect("claim");
+
+        assert!(matches!(
+            db.rotate_thread_launch_claim_after_runtime_recovery(
+                "t1",
+                "wrong-owner",
+                "claim-lost",
+                "daemon-old",
+                2,
+            )
+            .unwrap(),
+            RuntimeRecoveryClaimRotation::LostOwner
+        ));
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.get_launch_claim("t1").unwrap().unwrap().claimed_by,
+            old.claimed_by
+        );
+
+        assert!(matches!(
+            db.rotate_thread_launch_claim_after_runtime_recovery(
+                "t1",
+                &old.claimed_by,
+                "claim-exhausted",
+                "daemon-old",
+                1,
+            )
+            .unwrap(),
+            RuntimeRecoveryClaimRotation::Exhausted { attempts: 1 }
+        ));
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.get_launch_claim("t1").unwrap().unwrap().claim_id,
+            "claim-old"
+        );
+    }
+
+    #[test]
+    fn new_process_attachment_atomically_rearms_machine_launch_budget() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        let identity = fake_process_identity(201, 202);
+
+        db.attach_new_process_rearming_resume_budget(
+            "t1",
+            201,
+            202,
+            &identity,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+
+        let runtime = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(runtime.process_identity.as_ref(), Some(&identity));
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
+    }
+
+    #[test]
+    fn startup_sweep_retains_retry_consumed_by_an_attached_process() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        db.attach_new_process(
+            "t1",
+            201,
+            202,
+            &fake_process_identity(201, 202),
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert!(!cleared[0].resume_budget_rearmed);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+        assert!(db.get_launch_claim("t1").unwrap().is_none());
     }
 
     #[test]
@@ -10601,6 +18876,39 @@ mod tests {
     }
 
     #[test]
+    fn bound_launch_planning_lives_with_authoritative_chain_history() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-bound", "T-bound", "fp:owner")
+            .unwrap();
+        assert!(db.bind_launch_planning("T-bound").unwrap());
+        db.conn
+            .execute(
+                "UPDATE launch_planning SET finished_at_ms = 1 WHERE launch_id = 'L-bound'",
+                [],
+            )
+            .unwrap();
+        // More than the terminal-row cap cannot evict a bound coordinate.
+        for index in 0..4_100 {
+            db.conn
+                .execute(
+                    "INSERT INTO launch_planning (
+                        launch_id, reserved_thread_id, requested_by,
+                        daemon_generation_id, state, created_at_ms,
+                        updated_at_ms, finished_at_ms, outcome_code
+                     ) VALUES (?1, ?2, 'fp:owner', 'generation', 'failed', 1, 1, 1, 'failed')",
+                    params![format!("L-failed-{index}"), format!("T-failed-{index}")],
+                )
+                .unwrap();
+        }
+        prune_launch_planning(&db.conn, 24 * 60 * 60 * 1_000 + 2).unwrap();
+        assert!(db.launch_planning_by_id("L-bound").unwrap().is_some());
+
+        db.delete_chain_runtime("T-bound", &["T-bound".to_string()])
+            .unwrap();
+        assert!(db.launch_planning_by_id("L-bound").unwrap().is_none());
+    }
+
+    #[test]
     fn restart_generation_expires_only_unbound_predecessor_planning() {
         let (_tmp, db) = fresh_db();
         db.reserve_launch_planning("L-stale", "T-stale", "fp:owner")
@@ -10644,5 +18952,18 @@ mod tests {
         db.reserve_launch_planning_bounded("L-three", "T-three", "fp:owner", 2)
             .unwrap();
         assert_eq!(db.pending_launch_planning().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn launch_planning_coordinate_cannot_be_reused() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-one", "T-one", "fp:owner")
+            .unwrap();
+        let error = db
+            .reserve_launch_planning("L-one", "T-two", "fp:owner")
+            .expect_err("one coordinate cannot name two launch attempts");
+        assert!(error.is::<LaunchPlanningAlreadyReserved>());
+        let retained = db.launch_planning_by_id("L-one").unwrap().unwrap();
+        assert_eq!(retained.reserved_thread_id, "T-one");
     }
 }

@@ -1,7 +1,7 @@
-//! Engine-backed offline command dispatch.
+//! Engine-backed local and stopped-node command dispatch.
 //!
-//! Commands whose service descriptor declares `availability: offline` (or `both`)
-//! run locally without a daemon. Client and tool descriptors are also dispatchable
+//! Commands whose service descriptor declares `availability: local`,
+//! `stopped_node`, or `both` can run without a daemon. Client and tool descriptors are also dispatchable
 //! offline when the command's `execute` field targets them directly.
 //!
 //! The engine resolves items (tools, services, clients) through the same pipeline
@@ -83,6 +83,12 @@ pub async fn try_offline_dispatch(
         })?;
     let snapshot = crate::node_descriptors::load_verified_snapshot_with_trust(app_root, node_trust)
         .map_err(local_err)?;
+    let node_policy =
+        crate::node_descriptors::load_verified_policy_snapshot_with_trust(app_root, node_trust)
+            .map_err(local_err)?;
+    let command_registration = node_policy
+        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .map_err(local_err)?;
 
     // 1. Consume bundle and command records from that same generation.
     let bundle_roots: Vec<PathBuf> = snapshot
@@ -95,13 +101,11 @@ pub async fn try_offline_dispatch(
     }
 
     // 2. Resolve the command from the verified snapshot.
-    let registry = CommandRegistry::from_records(
-        &snapshot.commands,
-        &snapshot.command_registration_policy.policy,
-    )
-    .map_err(|error| CliError::Local {
-        detail: format!("load verified node commands: {error:#}"),
-    })?;
+    let registry =
+        CommandRegistry::from_records(&snapshot.commands, &command_registration.runtime_policy())
+            .map_err(|error| CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        })?;
     let Ok(matched) = registry.resolve(argv) else {
         return Ok(None);
     };
@@ -115,7 +119,11 @@ pub async fn try_offline_dispatch(
     if *availability == CommandAvailability::Daemon {
         return Ok(None);
     }
-
+    if *availability == CommandAvailability::Both
+        && prefer_live_daemon_for_dual_mode(app_root).await?
+    {
+        return Ok(None);
+    }
     // 3. Parse the command's execute ref for the engine. Kind semantics stay in
     //    the engine; dispatch below is based on composed fields.
     let execute_ref = execute;
@@ -132,6 +140,9 @@ pub async fn try_offline_dispatch(
         project_path,
         &bundle_roots,
         std::sync::Arc::clone(&isolation),
+        node_policy
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .map_err(local_err)?,
     )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
@@ -152,7 +163,7 @@ pub async fn try_offline_dispatch(
         .map(Some);
     }
 
-    if has_service_offline_dispatch(&item.composed_value) {
+    if has_service_local_dispatch(&item.composed_value) {
         let service = dispatch_service(
             &engine,
             item,
@@ -208,6 +219,7 @@ fn boot_engine(
     project_path: &str,
     bundle_roots: &[PathBuf],
     isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
+    execution_policy: &ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -221,6 +233,7 @@ fn boot_engine(
         project_root.as_deref(),
         None, // no trust overlay
         isolation,
+        execution_policy,
     )
     .map_err(local_err)
 }
@@ -271,14 +284,14 @@ fn has_launch_binary_ref(value: &Value) -> bool {
         .is_some()
 }
 
-fn has_service_offline_dispatch(value: &Value) -> bool {
+fn has_service_local_dispatch(value: &Value) -> bool {
     value
-        .get("offline_execute")
+        .get("local_execute")
         .and_then(|v| v.as_str())
         .is_some()
         || matches!(
             value.get("availability").and_then(|v| v.as_str()),
-            Some("offline" | "both")
+            Some("local" | "stopped_node" | "both")
         )
 }
 
@@ -375,7 +388,7 @@ async fn exec_client(
     let mut command = std::process::Command::new(&executable);
     command.args(&args);
     command
-        .env("RYEOS_PROJECT_PATH", project_path)
+        .env("RYEOS_CLIENT_PROJECT_PATH", project_path)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
@@ -577,16 +590,10 @@ fn exec_tool(
 
     // Resolve binary
     let cmd = expand_template(command_template, &params_json, project_path)?;
-    let resolved = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
+    let captured = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
         &cmd,
         bundle_root,
-        |fp| {
-            engine
-                .node_trust_store
-                .get(fp)
-                .map(|signer| signer.verifying_key)
-        },
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
+        &engine.node_trust_store,
     )
     .map_err(|e| CliError::Local {
         detail: format!("resolve offline binary `{cmd}`: {e}"),
@@ -669,8 +676,8 @@ fn exec_tool(
     }
 
     let verified_command = ryeos_engine::isolation::IsolationVerifiedCode {
-        source_path: resolved.absolute_path.clone(),
-        content_hash: resolved.content_hash.clone(),
+        source_path: captured.identity.absolute_path.clone(),
+        content_hash: captured.identity.content_hash.clone(),
     };
     let isolation_verified_code = [
         ryeos_engine::isolation::IsolationVerifiedCode {
@@ -679,26 +686,36 @@ fn exec_tool(
         },
         verified_command.clone(),
     ];
+    let base_request = lillux::SubprocessRequest {
+        cmd: captured
+            .identity
+            .absolute_path
+            .to_string_lossy()
+            .into_owned(),
+        argv0: None,
+        args,
+        cwd,
+        envs,
+        stdin_data,
+        timeout: timeout as f64,
+        limits: None,
+        inherited_fds: Vec::new(),
+        supervised_status: None,
+    };
     let mut request = isolation
         .apply(
-            lillux::SubprocessRequest {
-                cmd: resolved.absolute_path.to_string_lossy().into_owned(),
-                argv0: None,
-                args,
-                cwd,
-                envs,
-                stdin_data,
-                timeout: timeout as f64,
-                limits: None,
-                inherited_fds: Vec::new(),
-                supervised_status: None,
-            },
+            base_request,
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: Path::new(project_path),
                 project_authority: project_authority.project,
+                filesystem_authority_ceiling:
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: project_authority.live_access.as_ref(),
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: std::slice::from_ref(bundle_root),
                 node_trusted_keys_dir: Some(
@@ -708,6 +725,10 @@ fn exec_tool(
                 ),
                 verified_code: &isolation_verified_code,
                 verified_command: Some(&verified_command),
+                // Offline dispatch admits no launch capsule, so there is no
+                // realization to bind; declaring kinds refuse at finalization.
+                external_read_only_mounts: &[],
+                target_channel: None,
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
             },
@@ -774,7 +795,7 @@ fn dispatch_service(
         .and_then(|v| v.as_str())
         .unwrap_or("daemon_only");
 
-    let is_offline = availability == "offline" || availability == "both";
+    let is_offline = matches!(availability, "local" | "stopped_node" | "both");
     if !is_offline {
         // A descriptor that names an offline tool while staying daemon-only
         // is contradicting itself; routing to the daemon here would silently
@@ -782,15 +803,15 @@ fn dispatch_service(
         // (An explicit null is "absent", matching the resolution below.)
         if item
             .composed_value
-            .get("offline_execute")
+            .get("local_execute")
             .and_then(Value::as_str)
             .is_some()
         {
             return Err(CliError::Local {
                 detail: format!(
-                    "service '{}' declares offline_execute but availability is \
-                     '{availability}'; set availability to offline|both or drop \
-                     offline_execute",
+                    "service '{}' declares local_execute but availability is \
+                     '{availability}'; set availability to local or drop \
+                     local_execute",
                     item.canonical_ref
                 ),
             });
@@ -799,9 +820,9 @@ fn dispatch_service(
     }
 
     // Resolve offline tool ref
-    let offline_execute = item
+    let local_execute = item
         .composed_value
-        .get("offline_execute")
+        .get("local_execute")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| match &command.dispatch {
@@ -831,7 +852,7 @@ fn dispatch_service(
         obj.retain(|key, _| !key.starts_with('_'));
     }
 
-    let Some(tool_ref) = offline_execute else {
+    let Some(tool_ref) = local_execute else {
         return Ok(ServiceDispatchOutcome::Standalone {
             service_ref: item.canonical_ref,
             params,
@@ -916,7 +937,50 @@ fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError>
         }
         Err(error) => Err(CliError::Local {
             detail: format!(
-                "this command is offline-only and the daemon appears to be running. Run `ryeos stop`, then retry. ({error:#})"
+                "this command requires stopped-node authority and the daemon appears to be running. Run `ryeos stop`, then retry. ({error:#})"
+            ),
+        }),
+    }
+}
+
+/// Dual-mode commands use the live daemon whenever it owns this node, and
+/// fall back to the exact standalone service only when lifecycle state proves
+/// the node is stopped. Starting/unresponsive state is deliberately routed to
+/// normal daemon preflight so it produces the authoritative wait/refusal
+/// instead of racing a second state owner.
+async fn prefer_live_daemon_for_dual_mode(app_root: &Path) -> Result<bool, CliError> {
+    if std::env::var_os("RYEOSD_URL").is_some() {
+        return Ok(true);
+    }
+    let env =
+        ryeos_node::LocalLifecycleEnv::load(Some(app_root.to_path_buf())).map_err(|error| {
+            CliError::Local {
+                detail: format!("resolve local node lifecycle state: {error:#}"),
+            }
+        })?;
+    let controller = ryeos_node::LifecycleController::from_env(env);
+    match controller.status().await.map_err(|error| CliError::Local {
+        detail: format!("read local node lifecycle state: {error:#}"),
+    })? {
+        ryeos_node::LifecycleStatus::Running { .. }
+        | ryeos_node::LifecycleStatus::Starting { .. }
+        | ryeos_node::LifecycleStatus::Unresponsive { .. } => Ok(true),
+        ryeos_node::LifecycleStatus::Stopped { .. }
+        | ryeos_node::LifecycleStatus::NotInitialized { .. } => Ok(false),
+        ryeos_node::LifecycleStatus::Stale { diagnostics, .. } => Err(CliError::Local {
+            detail: format!(
+                "dual-mode command refused because node lifecycle ownership is stale: {}",
+                diagnostics.message
+            ),
+        }),
+        ryeos_node::LifecycleStatus::Failed { startup, .. } => Err(CliError::Local {
+            detail: format!(
+                "dual-mode command refused because node startup failed during {}: {}",
+                startup.phase.as_str(),
+                startup
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown startup failure")
             ),
         }),
     }
@@ -1070,7 +1134,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let authority = resolve_offline_project_isolation_authority(
             project.path(),
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
 
@@ -1173,7 +1237,7 @@ mod tests {
                 &core_key,
             );
             this.write_manifest();
-            this.write_command_registration_policy();
+            this.write_node_policy_generation();
             this.write_registration();
             this.write_core_bundle_registration(&core_bundle);
             for handler_bin in [
@@ -1190,7 +1254,7 @@ mod tests {
                 );
             }
             this.write_echo_bin();
-            this.write_standard_descriptors(Some("offline_execute: tool:custom/echo\n"));
+            this.write_standard_descriptors(Some("local_execute: tool:custom/echo\n"));
             this
         }
 
@@ -1218,7 +1282,7 @@ mod tests {
             }
         }
 
-        fn write_standard_descriptors(&self, offline_execute_line: Option<&str>) {
+        fn write_standard_descriptors(&self, local_execute_line: Option<&str>) {
             self.write_signed(
                 &self
                     .bundle
@@ -1228,7 +1292,7 @@ mod tests {
                     .join("custom.yaml"),
                 "tokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\n",
             );
-            let offline_execute_line = offline_execute_line.unwrap_or("");
+            let local_execute_line = local_execute_line.unwrap_or("");
             self.write_signed(
                 &self
                     .bundle
@@ -1236,7 +1300,7 @@ mod tests {
                     .join("services")
                     .join("custom.yaml"),
                 &format!(
-                    "kind: service\nendpoint: custom\navailability: offline\n{offline_execute_line}schema:\n  name: string?\n  project_path: string?\n"
+                    "kind: service\nendpoint: custom\navailability: local\n{local_execute_line}schema:\n  name: string?\n  project_path: string?\n"
                 ),
             );
             self.write_signed(
@@ -1264,54 +1328,42 @@ mod tests {
             self.write_bundle_registration("test", &self.bundle);
         }
 
-        fn write_command_registration_policy(&self) {
-            self.write_signed(
-                &self
-                    .system
-                    .join(ryeos_engine::AI_DIR)
-                    .join("node")
-                    .join("command_registration")
-                    .join("default.yaml"),
-                "claim_rules:\n  - claim:\n      kind: command.root\n      value: execute\n    required_caps:\n      - ryeos.register.command.root.execute\n  - claim:\n      kind: command.dispatch.kind\n      value: direct_execute_item_ref\n    required_caps:\n      - ryeos.register.command.dispatch.direct_execute_item_ref\nsystem_source_caps:\n  - ryeos.register.command.root.execute\n  - ryeos.register.command.dispatch.direct_execute_item_ref\n",
-            );
+        fn write_node_policy_generation(&self) {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../bundles/.ai/node/init/profiles/full.yaml");
+            let raw = std::fs::read_to_string(&source).unwrap();
+            let body = lillux::signature::strip_signature_lines(&raw);
+            let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+                serde_yaml::from_str(&body).unwrap();
+            for (name, source_policy) in profile.policies() {
+                let mut policy = source_policy.clone();
+                if name == "command_registration" {
+                    policy["bundle_source_caps"]["test"] = serde_json::json!([]);
+                }
+                self.write_signed(
+                    &self
+                        .system
+                        .join(ryeos_engine::AI_DIR)
+                        .join("node")
+                        .join("policies")
+                        .join(format!("{name}.yaml")),
+                    &serde_yaml::to_string(&policy).unwrap(),
+                );
+            }
         }
 
         fn write_core_bundle_registration(&self, core_bundle: &Path) {
-            self.write_bundle_registration_with_caps(
-                "core",
-                core_bundle,
-                &[
-                    "ryeos.register.command.root.execute",
-                    "ryeos.register.command.dispatch.direct_execute_item_ref",
-                ],
-            );
+            self.write_bundle_registration("core", core_bundle);
         }
 
         fn write_bundle_registration(&self, id: &str, bundle_root: &Path) {
-            self.write_bundle_registration_with_caps(id, bundle_root, &[]);
-        }
-
-        fn write_bundle_registration_with_caps(
-            &self,
-            id: &str,
-            bundle_root: &Path,
-            command_registration_caps: &[&str],
-        ) {
             let path = self
                 .system
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
                 .join("bundles")
                 .join(format!("{id}.yaml"));
-            let mut body = format!("kind: node\npath: {}\n", bundle_root.display());
-            if !command_registration_caps.is_empty() {
-                body.push_str("command_registration_caps:\n");
-                for cap in command_registration_caps {
-                    body.push_str("  - ");
-                    body.push_str(cap);
-                    body.push('\n');
-                }
-            }
+            let body = format!("kind: node\npath: {}\n", bundle_root.display());
             self.write_signed(&path, &body);
         }
 
@@ -1321,7 +1373,7 @@ mod tests {
 
         fn write_capture_bin(&self, capture_file: &Path) {
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$RYEOS_PROJECT_PATH\" > {}\nprintf '%s\\n' \"$@\" >> {}\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$RYEOS_CLIENT_PROJECT_PATH\" > {}\nprintf '%s\\n' \"$@\" >> {}\n",
                 capture_file.display(),
                 capture_file.display()
             );

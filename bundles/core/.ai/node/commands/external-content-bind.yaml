@@ -1,0 +1,12 @@
+# ryeos:signed:2026-08-11T02:28:07Z:f7559032f323a8d5d138dea65eede3bdef54c555a405ec11c9306b062b1137d5:VVYluv2iRcNWPt/bY8PwMN1G9xsshJDORXLM1i2cOXGwyWv9aAPu7qT8dCvfztEbcF9dw3mP2WmIFIYntsagCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, bind]
+description: Bind a staged external-content manifest to one trusted consumer
+forms:
+  - slots:
+      - field: staging_id
+      - field: request_digest
+      - field: manifest_hash
+      - field: consumer_ref
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/bind

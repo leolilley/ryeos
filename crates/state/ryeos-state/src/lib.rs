@@ -11,19 +11,25 @@ pub mod admission;
 pub mod bundle_events;
 pub mod bundle_outbox;
 pub mod bundle_projection;
+pub mod capability;
 pub mod chain;
 pub mod event_types;
+pub mod external_content;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
+pub mod large_object_store;
 pub mod locators;
 pub mod object_closure;
 pub mod objects;
 pub mod operational;
+mod pending_publication;
 pub mod project_discovery;
 pub mod project_materialization;
+pub mod project_observation;
 pub mod project_sync;
 pub mod projection;
+pub mod provider_call_observation;
 pub mod queries;
 pub mod reachability;
 pub mod rebuild;
@@ -49,7 +55,20 @@ pub use bundle_projection::{
     BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
 };
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
+pub use external_content::{
+    DigestOnlyExternalContentSink, ExternalCapturePolicy, ExternalContentBlobSink,
+    ExternalContentCaptureKind, ExternalLargeContentSink, LargeContentCaptureBounds,
+    LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES, MAX_CAPTURE_DEPTH,
+    MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
+    capture_external_content_at, capture_file_at, capture_large_file, capture_large_tree,
+    capture_tree, external_content_manifest_digest,
+};
 pub use head_cache::{CachedHead, HeadCache};
+pub use large_object_store::{
+    IngestedLargeObject, LargeObjectIntegrityFinding, LargeObjectScrubReport,
+    LargeObjectStagingSweepReport, LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject,
+    PinnedLargeObjectSourceIdentity,
+};
 pub use locators::ThreadLocator;
 pub use objects::{
     Attestation, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
@@ -64,12 +83,29 @@ pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
     CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    OperationalDb, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState,
-    SyncJobUpdate,
+    OperationalCredentialProfileRecord, OperationalDb, ReplayIndexActivationRequired,
+    ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome, ReplayPublishOutcome,
+    ReplayRecordVerification, SYNC_JOB_UNBOUNDED_ATTEMPTS,
+    SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS, SyncJobAttemptRecord, SyncJobAttemptState,
+    SyncJobRecord, SyncJobState, SyncJobUpdate, sync_job_attempt_count_is_valid,
+    sync_job_attempts_are_unbounded, sync_job_attempts_exhausted,
 };
+pub use pending_publication::PendingCasPublication;
 pub use project_materialization::PinnedProjectMaterialization;
+pub use project_observation::{
+    MAX_PROJECT_OBSERVATION_JSON_DEPTH, MAX_PROJECT_OBSERVATION_JSON_VALUES,
+    MAX_PROJECT_OBSERVATION_NAMESPACE_BYTES, MAX_PROJECT_OBSERVATION_PAYLOAD_BYTES,
+    MAX_PROJECT_OBSERVATION_STABLE_ID_BYTES, MAX_PROJECT_OBSERVATIONS_PER_ACTION,
+    PROJECT_OBSERVATION_SCHEMA, ProjectObservationOccurrence, ProjectObservationRecordedPayload,
+    ProjectObservationRequest, project_observation_id,
+};
 pub use projection::{
     ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+};
+pub use provider_call_observation::{
+    PROVIDER_CALL_OBSERVATION_SCHEMA, ProviderCallObservationDraft,
+    ProviderCallObservationPublication, ProviderCallObservationRecordedPayload,
+    ProviderCallObservationSource, ProviderCallReplaySource, provider_call_observation_id,
 };
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage, HeadOperation,

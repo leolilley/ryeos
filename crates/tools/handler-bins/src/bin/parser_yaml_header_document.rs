@@ -12,6 +12,10 @@ fn main() {
                 },
             }
         }
+        HandlerRequest::EditSource(_) => HandlerResponse::EditSourceErr {
+            kind: ryeos_handler_protocol::ParseErrKind::Schema,
+            message: "yaml header parser does not expose source editing".into(),
+        },
         HandlerRequest::ValidateParserConfig(v) => {
             match yaml_header_document::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,
@@ -21,7 +25,8 @@ fn main() {
         HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)
         | HandlerRequest::LaunchPrepare(_)
-        | HandlerRequest::ValidateLaunchPreparerConfig(_) => HandlerResponse::ParseErr {
+        | HandlerRequest::ValidateLaunchPreparerConfig(_)
+        | HandlerRequest::EffectiveValidate(_) => HandlerResponse::ParseErr {
             kind: ryeos_handler_protocol::ParseErrKind::Internal,
             message: "this is a parser binary; received composer request".into(),
         },

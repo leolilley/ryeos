@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:5e69c3282aecb5dc45d341d6a134aecd211cd68941cb591142d1f9226c4a73aa:/NzeFJzSYisqjCHRvRvM1kMKHUZsWPjE/JDNuPQZ4JqJIR5v7rB10QHW/nR7G00PmLPPjffZqCQp7maV2Q30DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:31Z:5e69c3282aecb5dc45d341d6a134aecd211cd68941cb591142d1f9226c4a73aa:/NzeFJzSYisqjCHRvRvM1kMKHUZsWPjE/JDNuPQZ4JqJIR5v7rB10QHW/nR7G00PmLPPjffZqCQp7maV2Q30DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, overview]

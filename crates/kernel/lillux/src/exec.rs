@@ -56,6 +56,12 @@ pub struct SubprocessRequest {
 pub struct SubprocessLimits {
     /// Maximum number of file descriptors the subprocess may open.
     pub max_open_files: Option<u64>,
+    /// Maximum virtual address space inherited by the subprocess tree.
+    pub max_address_space_bytes: Option<u64>,
+    /// Maximum CPU seconds for each process in the subprocess tree.
+    pub max_cpu_seconds: Option<u64>,
+    /// Maximum processes/threads available to the subprocess OS account.
+    pub max_processes: Option<u64>,
     /// Maximum stdout bytes retained by the node. Lillux continues draining
     /// the pipe after this threshold, but terminates the supervised workload
     /// and reports an explicit output-limit outcome.
@@ -409,6 +415,18 @@ enum InitialLauncherStatus {
 struct LauncherTargetDocument {
     #[serde(rename = "child-pid")]
     child_pid: u32,
+    #[serde(rename = "cgroup-namespace")]
+    _cgroup_namespace: Option<u64>,
+    #[serde(rename = "ipc-namespace")]
+    _ipc_namespace: Option<u64>,
+    #[serde(rename = "mnt-namespace")]
+    _mount_namespace: Option<u64>,
+    #[serde(rename = "net-namespace")]
+    _network_namespace: Option<u64>,
+    #[serde(rename = "pid-namespace")]
+    _pid_namespace: Option<u64>,
+    #[serde(rename = "uts-namespace")]
+    _uts_namespace: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -418,8 +436,9 @@ struct LauncherRefusalDocument {
 }
 
 /// Validate retained descriptors and make them inheritable only inside this
-/// command's forked child. Callers must keep the Arc handles alive through
-/// `spawn`/`status`.
+/// command's forked child. The command's pre-exec closure owns cloned handles,
+/// so the exact descriptors remain live until the command is spawned or
+/// discarded.
 pub fn configure_inherited_fds(
     command: &mut process::Command,
     inherited_fds: &[std::sync::Arc<std::fs::File>],
@@ -438,7 +457,7 @@ pub fn configure_inherited_fds(
         use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
 
-        let mut raw = Vec::with_capacity(inherited_fds.len());
+        let mut retained = Vec::with_capacity(inherited_fds.len());
         for file in inherited_fds {
             let fd = file.as_raw_fd();
             if fd <= libc::STDERR_FILENO {
@@ -456,13 +475,14 @@ pub fn configure_inherited_fds(
                     "inherited descriptor {fd} is not protected by FD_CLOEXEC"
                 ));
             }
-            raw.push(fd);
+            retained.push(std::sync::Arc::clone(file));
         }
         unsafe {
             command.pre_exec(move || {
-                for fd in &raw {
-                    let flags = libc::fcntl(*fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                for file in &retained {
+                    let fd = file.as_raw_fd();
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
@@ -470,6 +490,492 @@ pub fn configure_inherited_fds(
             });
         }
         Ok(())
+    }
+}
+
+/// Convert one already-open CLOEXEC descriptor into the stable pathname that
+/// a Linux child can use after `configure_inherited_fds` makes that exact
+/// descriptor inheritable in the forked child. No ambient pathname is
+/// reopened. The returned handle must be retained through `Command::spawn`.
+pub struct InheritedDescriptorAuthority {
+    path: std::path::PathBuf,
+    handle: std::sync::Arc<std::fs::File>,
+}
+
+impl InheritedDescriptorAuthority {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+pub(crate) fn inherited_descriptor_path(
+    file: std::fs::File,
+) -> Result<InheritedDescriptorAuthority, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err("descriptor-rooted inherited paths are unavailable on this platform".to_owned())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let file = std::sync::Arc::new(file);
+        let fd = file.as_raw_fd();
+        if fd <= libc::STDERR_FILENO {
+            return Err(format!("inherited descriptor {fd} overlaps stdio"));
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(format!(
+                "inherited descriptor {fd} cannot be inspected: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if flags & libc::FD_CLOEXEC == 0 {
+            return Err(format!(
+                "inherited descriptor {fd} is not protected by FD_CLOEXEC"
+            ));
+        }
+        Ok(InheritedDescriptorAuthority {
+            path: std::path::PathBuf::from(format!("/proc/self/fd/{fd}")),
+            handle: file,
+        })
+    }
+}
+
+/// Configure a command to inherit a set of typed descriptor-path
+/// authorities. The raw file handles remain private to Lillux.
+pub fn configure_inherited_descriptor_authorities(
+    command: &mut process::Command,
+    authorities: &[InheritedDescriptorAuthority],
+) -> Result<(), String> {
+    let handles = authorities
+        .iter()
+        .map(|authority| std::sync::Arc::clone(&authority.handle))
+        .collect::<Vec<_>>();
+    configure_inherited_fds(command, &handles)
+}
+
+/// Ensure a live descriptor is protected from accidental inheritance. The
+/// platform flag manipulation remains inside Lillux.
+#[cfg(unix)]
+pub fn protect_descriptor_from_exec<T: std::os::fd::AsRawFd>(descriptor: &T) -> Result<(), String> {
+    let fd = descriptor.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(format!(
+            "descriptor {fd} cannot be inspected: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if flags & libc::FD_CLOEXEC != 0 {
+        return Ok(());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(format!(
+            "descriptor {fd} cannot be protected from exec: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Typed connected inherited byte-stream channel. Platform socket and
+/// descriptor mechanics remain private to Lillux.
+pub struct InheritedDuplexChannel {
+    #[cfg(unix)]
+    stream: std::os::unix::net::UnixStream,
+}
+
+/// Child-side authority for one connected inherited duplex channel.
+///
+/// The descriptor stays close-on-exec in the parent. Consuming this authority
+/// binds both the hidden descriptor value and its inheritance to exactly one
+/// command. Raw descriptor mechanics never leave Lillux.
+pub struct InheritedDuplexChannelChildAuthority {
+    channel: std::sync::Arc<std::fs::File>,
+}
+
+impl InheritedDuplexChannelChildAuthority {
+    /// Consume this authority into one child command. The exact descriptor is
+    /// both retained by the command and installed under `descriptor_env_name`;
+    /// callers cannot split or replay those two operations.
+    pub fn bind_to_command(
+        self,
+        command: &mut process::Command,
+        descriptor_env_name: &str,
+    ) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            let descriptor = self.channel.as_raw_fd();
+            if descriptor <= libc::STDERR_FILENO {
+                return Err("inherited duplex channel overlaps standard I/O".to_owned());
+            }
+            configure_inherited_fds(command, std::slice::from_ref(&self.channel))?;
+            command.env(descriptor_env_name, descriptor.to_string());
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = command;
+            let _ = descriptor_env_name;
+            Err("inherited duplex channels are unavailable on this platform".to_owned())
+        }
+    }
+}
+
+/// Create one connected, atomically close-on-exec duplex channel pair for a
+/// parent and one explicitly configured child.
+#[cfg(unix)]
+pub fn inherited_duplex_channel_pair()
+-> Result<(InheritedDuplexChannel, InheritedDuplexChannelChildAuthority), String> {
+    use std::os::fd::OwnedFd;
+
+    let (parent, child) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| format!("create inherited duplex channel: {error}"))?;
+    protect_descriptor_from_exec(&parent)?;
+    protect_descriptor_from_exec(&child)?;
+    Ok((
+        InheritedDuplexChannel { stream: parent },
+        InheritedDuplexChannelChildAuthority {
+            channel: std::sync::Arc::new(std::fs::File::from(OwnedFd::from(child))),
+        },
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn inherited_duplex_channel_pair()
+-> Result<(InheritedDuplexChannel, InheritedDuplexChannelChildAuthority), String> {
+    Err("inherited duplex channels are unavailable on this platform".to_owned())
+}
+
+impl InheritedDuplexChannel {
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let stream = self.stream.try_clone()?;
+            protect_descriptor_from_exec(&stream).map_err(std::io::Error::other)?;
+            Ok(Self { stream })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+}
+
+impl Read for InheritedDuplexChannel {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        {
+            self.stream.read(buffer)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = buffer;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+}
+
+impl Write for InheritedDuplexChannel {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        {
+            self.stream.write(buffer)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = buffer;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.stream.flush()
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+}
+
+/// Consume one connected duplex descriptor named by the inherited process
+/// environment and immediately protect it from further inheritance.
+///
+/// Parsing, descriptor ownership conversion, and `FD_CLOEXEC` manipulation
+/// stay within Lillux. The returned stream is a typed IPC byte channel rather
+/// than ambient descriptor authority.
+///
+/// # Safety
+///
+/// The typed launch/isolation authority must attest that the descriptor is one
+/// end of a connected Unix stream and grant this process unique ownership of
+/// it. No other owning Rust handle may exist for the same descriptor. Socket
+/// validation happens while minting that authority because the target sandbox
+/// deliberately does not admit socket-inspection syscalls.
+#[cfg(unix)]
+pub unsafe fn take_inherited_duplex_channel_from_env(
+    name: &str,
+) -> Result<InheritedDuplexChannel, String> {
+    let encoded = std::env::var(name)
+        .map_err(|error| format!("missing inherited descriptor {name}: {error}"))?;
+    // SAFETY: the caller's ownership guarantee applies to the descriptor
+    // encoded by this exact inherited environment binding.
+    unsafe { take_inherited_duplex_channel(name, &encoded) }
+}
+
+#[cfg(not(unix))]
+pub unsafe fn take_inherited_duplex_channel_from_env(
+    _name: &str,
+) -> Result<InheritedDuplexChannel, String> {
+    Err("inherited duplex channels are unavailable on this platform".to_owned())
+}
+
+#[cfg(unix)]
+unsafe fn take_inherited_duplex_channel(
+    name: &str,
+    encoded: &str,
+) -> Result<InheritedDuplexChannel, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+
+    if encoded.is_empty() || encoded.len() > 4096 || encoded.chars().any(char::is_control) {
+        return Err(format!(
+            "inherited descriptor {name} is not canonical and bounded"
+        ));
+    }
+    let descriptor = encoded
+        .parse::<std::os::fd::RawFd>()
+        .map_err(|error| format!("parse inherited descriptor {name}: {error}"))?;
+    if descriptor <= libc::STDERR_FILENO {
+        return Err(format!("inherited descriptor {name} overlaps standard I/O"));
+    }
+    // SAFETY: the caller guarantees unique ownership of this live descriptor.
+    // Adopt it before any fallible inspection so every error path closes it.
+    let owned = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let descriptor = owned.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(format!(
+            "inherited descriptor {name} cannot be inspected: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if flags & libc::FD_CLOEXEC == 0
+        && unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+    {
+        return Err(format!(
+            "inherited descriptor {name} cannot be protected from exec: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(InheritedDuplexChannel {
+        stream: std::os::unix::net::UnixStream::from(owned),
+    })
+}
+
+#[cfg(all(test, unix))]
+mod inherited_unix_stream_tests {
+    use super::*;
+    use std::os::fd::IntoRawFd as _;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn typed_duplex_pair_is_connected_and_close_on_exec() {
+        let (mut parent, child) = inherited_duplex_channel_pair().unwrap();
+        let descriptor = child.channel.as_raw_fd();
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+        let mut writer = child.channel.try_clone().unwrap();
+        writer.write_all(b"phase\n").unwrap();
+        let mut observed = [0u8; 6];
+        parent.read_exact(&mut observed).unwrap();
+        assert_eq!(&observed, b"phase\n");
+    }
+
+    #[test]
+    fn inherited_stream_is_immediately_close_on_exec() {
+        let (source, _peer) = UnixStream::pair().unwrap();
+        let encoded = source.into_raw_fd().to_string();
+        // SAFETY: `into_raw_fd` transferred the sole source ownership into
+        // this call, and no other owning handle exists for it.
+        let inherited = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", &encoded) }
+            .expect("consume connected inherited stream");
+
+        let flags = unsafe { libc::fcntl(inherited.stream.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    }
+
+    #[test]
+    fn inherited_stream_rejects_noncanonical_and_stdio_descriptors() {
+        let noncanonical = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", "3\n") }
+            .err()
+            .expect("control characters must be rejected");
+        assert!(noncanonical.contains("not canonical"), "{noncanonical}");
+        let stdio = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", "2") }
+            .err()
+            .expect("standard I/O descriptors must be rejected");
+        assert!(stdio.contains("overlaps standard I/O"), "{stdio}");
+    }
+}
+
+/// One-shot authority to request cooperative termination of an exact owned
+/// child. Requesting termination sends one `SIGTERM`; it never waits, sends
+/// `SIGKILL`, or installs an escalation policy.
+pub struct CooperativeChildTermination {
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+/// Exact child identity after its one cooperative termination request has
+/// been sent. Callers may poll for natural exit without gaining signal or
+/// escalation authority.
+pub struct PendingCooperativeChildTermination {
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl CooperativeChildTermination {
+    /// Pin the identity of a child that remains owned and unreaped by the
+    /// caller. Linux retains a pidfd so the later request cannot target a
+    /// recycled numeric PID. Platforms without pidfds fail closed.
+    pub fn for_child(child: &process::Child) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                pidfd: open_pidfd(child.id())?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = child;
+            Err("exact cooperative child termination requires Linux pidfds".to_owned())
+        }
+    }
+
+    /// Consume this one-shot authority and send one cooperative termination
+    /// request. An already-exited child is treated as success.
+    pub fn request(self) -> Result<PendingCooperativeChildTermination, String> {
+        #[cfg(target_os = "linux")]
+        {
+            match pidfd_send_signal_io(self.pidfd.as_raw_fd(), libc::SIGTERM) {
+                Ok(()) => Ok(PendingCooperativeChildTermination { pidfd: self.pidfd }),
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                    Ok(PendingCooperativeChildTermination { pidfd: self.pidfd })
+                }
+                Err(error) => Err(format!("request cooperative child termination: {error}")),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("exact cooperative child termination requires Linux pidfds".to_owned())
+        }
+    }
+}
+
+impl PendingCooperativeChildTermination {
+    /// Report whether the exact child has exited, without reaping it or
+    /// changing its lifecycle. The original `Child` owner remains responsible
+    /// for reaping.
+    pub fn has_exited(&self) -> Result<bool, String> {
+        #[cfg(target_os = "linux")]
+        {
+            loop {
+                let mut pollfd = libc::pollfd {
+                    fd: self.pidfd.as_raw_fd(),
+                    events: libc::POLLIN | libc::POLLHUP,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut pollfd, 1, 0) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(format!("poll cooperatively terminated child: {error}"));
+                }
+                if ready == 0 {
+                    return Ok(false);
+                }
+                if pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                    return Err(format!(
+                        "poll cooperatively terminated child returned unexpected events {:#x}",
+                        pollfd.revents
+                    ));
+                }
+                return Ok(pollfd.revents & (libc::POLLIN | libc::POLLHUP) != 0);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("exact cooperative child termination requires Linux pidfds".to_owned())
+        }
+    }
+}
+
+/// Disable core dumps for this process and all subsequently spawned
+/// descendants.
+#[cfg(unix)]
+pub fn disable_process_core_dumps() -> Result<(), String> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) } != 0 {
+        return Err(format!(
+            "disable process core dumps: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Install an owner-private creation mask only in this command's forked
+/// child. The parent process-wide mask is never changed.
+#[cfg(unix)]
+pub fn configure_owner_private_creation_mask(command: &mut process::Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+}
+
+/// Set an explicit child `argv[0]` without exposing platform command
+/// extensions to the caller.
+pub fn configure_command_argv0(command: &mut process::Command, argv0: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(argv0);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command, argv0);
+        Err("explicit child argv[0] is unavailable on this platform".to_owned())
     }
 }
 
@@ -534,26 +1040,35 @@ const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
 /// concurrent.
 static DIRECT_ATTACHMENT_FORK_BARRIER: OnceLock<DescriptorForkBarrier> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct DescriptorLeaseLocation {
+    file: &'static str,
+    line: u32,
+    column: u32,
+}
+
 #[derive(Default)]
 struct DescriptorForkBarrierState {
     retained_scopes: usize,
     retained_scope_owners: HashMap<thread::ThreadId, usize>,
+    retained_scope_locations: HashMap<thread::ThreadId, HashMap<DescriptorLeaseLocation, usize>>,
     waiting_forks: usize,
     fork_quiesced: bool,
     pending_fork_control_fds: BTreeSet<i32>,
+    fork_child_close_fds: BTreeSet<i32>,
 }
 
 struct DescriptorForkBarrier {
     state: Mutex<DescriptorForkBarrierState>,
     changed: Condvar,
-    waiting_control_closers: AtomicUsize,
+    waiting_descriptor_closers: AtomicUsize,
 }
 
 fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
     DIRECT_ATTACHMENT_FORK_BARRIER.get_or_init(|| DescriptorForkBarrier {
         state: Mutex::new(DescriptorForkBarrierState::default()),
         changed: Condvar::new(),
-        waiting_control_closers: AtomicUsize::new(0),
+        waiting_descriptor_closers: AtomicUsize::new(0),
     })
 }
 
@@ -561,6 +1076,7 @@ fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
 /// which a pre-exec attachment child must not inherit.
 pub struct ForkSensitiveDescriptorLease {
     owner: thread::ThreadId,
+    location: DescriptorLeaseLocation,
     retained: bool,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -571,9 +1087,16 @@ pub struct ForkSensitiveDescriptorLease {
 /// it until those descriptors/locks have been released. Acquisition is
 /// intentionally infallible after poisoning: the barrier protects process
 /// topology, not data whose consistency could be invalidated by a panic.
+#[track_caller]
 pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
+    let caller = std::panic::Location::caller();
+    let location = DescriptorLeaseLocation {
+        file: caller.file(),
+        line: caller.line(),
+        column: caller.column(),
+    };
     let mut state = barrier
         .state
         .lock()
@@ -594,8 +1117,18 @@ pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
     *owner_scopes = owner_scopes
         .checked_add(1)
         .expect("fork-sensitive descriptor owner count overflow");
+    let location_scopes = state
+        .retained_scope_locations
+        .entry(owner)
+        .or_default()
+        .entry(location)
+        .or_default();
+    *location_scopes = location_scopes
+        .checked_add(1)
+        .expect("fork-sensitive descriptor location count overflow");
     ForkSensitiveDescriptorLease {
         owner,
+        location,
         retained: true,
         _not_send: PhantomData,
     }
@@ -625,6 +1158,22 @@ impl Drop for ForkSensitiveDescriptorLease {
         if *owner_scopes == 0 {
             state.retained_scope_owners.remove(&self.owner);
         }
+        let owner_locations = state
+            .retained_scope_locations
+            .get_mut(&self.owner)
+            .expect("fork-sensitive descriptor owner locations were not registered");
+        let location_scopes = owner_locations
+            .get_mut(&self.location)
+            .expect("fork-sensitive descriptor lease location was not registered");
+        *location_scopes = location_scopes
+            .checked_sub(1)
+            .expect("fork-sensitive descriptor location count underflow");
+        if *location_scopes == 0 {
+            owner_locations.remove(&self.location);
+        }
+        if owner_locations.is_empty() {
+            state.retained_scope_locations.remove(&self.owner);
+        }
         self.retained = false;
         if state.retained_scopes == 0 {
             barrier.changed.notify_all();
@@ -635,14 +1184,18 @@ impl Drop for ForkSensitiveDescriptorLease {
 struct QuiescedForkSensitiveDescriptors;
 
 impl QuiescedForkSensitiveDescriptors {
-    fn pending_fork_control_fds(&self) -> Vec<i32> {
+    fn fork_child_close_fds(&self) -> Vec<i32> {
         let barrier = direct_attachment_fork_barrier();
         let state = barrier
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
-        state.pending_fork_control_fds.iter().copied().collect()
+        state
+            .pending_fork_control_fds
+            .union(&state.fork_child_close_fds)
+            .copied()
+            .collect()
     }
 
     fn register_pending_fork_control(
@@ -657,6 +1210,98 @@ impl QuiescedForkSensitiveDescriptors {
                 .fork_quiesced
         );
         register_pending_fork_control_file(release_writer)
+    }
+}
+
+/// A long-lived exact descriptor which remains open in the parent but is
+/// closed in every direct-attachment fork child before that child enters its
+/// durable pre-exec hold. This is stronger than `FD_CLOEXEC`: the hold occurs
+/// before exec and must not retain advisory locks or equivalent authority.
+#[cfg(unix)]
+pub(crate) struct ForkChildCloseFile {
+    fd: i32,
+    file: Option<std::fs::File>,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for ForkChildCloseFile {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        self.file
+            .as_ref()
+            .expect("fork-child-close descriptor is present")
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for ForkChildCloseFile {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForkChildCloseFile {
+    fn drop(&mut self) {
+        let barrier = direct_attachment_fork_barrier();
+        barrier
+            .waiting_descriptor_closers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_add(1)
+            })
+            .expect("fork-child-close descriptor closer count overflow");
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.fork_quiesced {
+            state = barrier
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        // Close the parent descriptor before removing its child-close
+        // registration. A concurrent fork can therefore observe either a
+        // live registered descriptor or no live descriptor, never an
+        // unregistered live authority.
+        drop(self.file.take());
+        assert!(
+            state.fork_child_close_fds.remove(&self.fd),
+            "fork-child-close descriptor was not registered"
+        );
+        let previous_closers = barrier
+            .waiting_descriptor_closers
+            .fetch_sub(1, Ordering::SeqCst);
+        assert_ne!(
+            previous_closers, 0,
+            "fork-child-close descriptor closer count underflow"
+        );
+        barrier.changed.notify_all();
+    }
+}
+
+/// Register an already-open descriptor while its caller retains a
+/// fork-sensitive lease acquired before opening it.
+#[cfg(unix)]
+pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCloseFile {
+    let fd = file.as_raw_fd();
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        !state.fork_quiesced,
+        "fork-child-close descriptor registered during a fork"
+    );
+    assert!(
+        state.fork_child_close_fds.insert(fd),
+        "fork-child-close descriptor was already registered"
+    );
+    ForkChildCloseFile {
+        fd,
+        file: Some(file),
     }
 }
 
@@ -678,7 +1323,7 @@ impl Drop for PendingForkControlDescriptor {
     fn drop(&mut self) {
         let barrier = direct_attachment_fork_barrier();
         barrier
-            .waiting_control_closers
+            .waiting_descriptor_closers
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 count.checked_add(1)
             })
@@ -702,7 +1347,7 @@ impl Drop for PendingForkControlDescriptor {
         // open in the parent and therefore inheritable.
         drop(self.writer.take());
         let previous_closers = barrier
-            .waiting_control_closers
+            .waiting_descriptor_closers
             .fetch_sub(1, Ordering::SeqCst);
         assert_ne!(
             previous_closers, 0,
@@ -742,7 +1387,39 @@ impl Drop for QuiescedForkSensitiveDescriptors {
     }
 }
 
-fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescriptors, String> {
+fn retained_descriptor_scope_diagnostic(state: &DescriptorForkBarrierState) -> String {
+    let mut owners = state
+        .retained_scope_locations
+        .iter()
+        .map(|(owner, locations)| {
+            let mut locations = locations
+                .iter()
+                .map(|(location, count)| {
+                    format!(
+                        "{}:{}:{} ({} scope{})",
+                        location.file,
+                        location.line,
+                        location.column,
+                        count,
+                        if *count == 1 { "" } else { "s" }
+                    )
+                })
+                .collect::<Vec<_>>();
+            locations.sort();
+            format!("{owner:?}: {}", locations.join(", "))
+        })
+        .collect::<Vec<_>>();
+    owners.sort();
+    if owners.is_empty() {
+        "no retained scope owner was recorded".to_string()
+    } else {
+        owners.join("; ")
+    }
+}
+
+fn quiesce_fork_sensitive_descriptors(
+    deadline: Instant,
+) -> Result<QuiescedForkSensitiveDescriptors, String> {
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
     let mut state = barrier
@@ -750,10 +1427,10 @@ fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescripto
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.retained_scope_owners.contains_key(&owner) {
-        return Err(
-            "direct attachment fork requested while the calling thread retains fork-sensitive descriptor authority"
-                .to_string(),
-        );
+        return Err(format!(
+            "direct attachment fork requested while the calling thread retains fork-sensitive descriptor authority ({})",
+            retained_descriptor_scope_diagnostic(&state)
+        ));
     }
     state.waiting_forks = state
         .waiting_forks
@@ -761,12 +1438,27 @@ fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescripto
         .expect("fork-sensitive descriptor waiter count overflow");
     while state.fork_quiesced
         || state.retained_scopes != 0
-        || barrier.waiting_control_closers.load(Ordering::SeqCst) != 0
+        || barrier.waiting_descriptor_closers.load(Ordering::SeqCst) != 0
     {
-        state = barrier
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            state.waiting_forks = state
+                .waiting_forks
+                .checked_sub(1)
+                .expect("fork-sensitive descriptor waiter count underflow");
+            barrier.changed.notify_all();
+            return Err(format!(
+                "timed out waiting for fork-sensitive descriptor authority to quiesce; retained scopes: {}; fork already quiesced: {}; pending fork-control closers: {}",
+                retained_descriptor_scope_diagnostic(&state),
+                state.fork_quiesced,
+                barrier.waiting_descriptor_closers.load(Ordering::SeqCst)
+            ));
+        }
+        let (next, _) = barrier
             .changed
-            .wait(state)
+            .wait_timeout(state, remaining)
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = next;
     }
     state.waiting_forks = state
         .waiting_forks
@@ -787,7 +1479,7 @@ struct AttachmentWorkerGate {
     cwd_directory: Option<std::fs::File>,
     child_status_reader_fd: i32,
     child_release_writer_fd: i32,
-    inherited_pending_control_fds: Vec<i32>,
+    inherited_child_close_fds: Vec<i32>,
 }
 
 /// A running subprocess that can be waited on later.
@@ -1219,6 +1911,73 @@ impl Drop for ProcessAwaitingAttachment {
 }
 
 impl RunningProcess {
+    /// Return the bounded tail currently captured from stderr without waiting
+    /// for, signalling, or otherwise changing the process lifecycle.
+    ///
+    /// This is intentionally a fixed-size diagnostic view. Protocol owners
+    /// can use it when a separate control channel fails, while the ordinary
+    /// `wait`/`abort` boundary remains the sole owner of process settlement.
+    pub fn stderr_diagnostic_tail(&self) -> Option<String> {
+        const DIAGNOSTIC_TAIL_BYTES: usize = 2 * 1024;
+
+        let capture = self
+            .stderr_capture
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if capture.bytes.is_empty() {
+            return None;
+        }
+        let start = capture.bytes.len().saturating_sub(DIAGNOSTIC_TAIL_BYTES);
+        let body = String::from_utf8_lossy(&capture.bytes[start..]);
+        if capture.truncated || start != 0 {
+            Some(format!(
+                "… (bounded stderr tail; earlier bytes omitted)\n{body}"
+            ))
+        } else {
+            Some(body.into_owned())
+        }
+    }
+
+    /// Wait up to `timeout` for a natural process exit without terminating a
+    /// still-running process. Ownership is returned unchanged on timeout.
+    ///
+    /// Protocols with a separate control channel use this after channel EOF:
+    /// a naturally exited child can be settled with its captured output,
+    /// while a child that merely dropped the channel remains available for
+    /// the caller's ordinary abort policy.
+    pub fn wait_for_natural_exit(mut self, timeout: Duration) -> Result<SubprocessResult, Self> {
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return Err(self);
+        };
+        loop {
+            match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) => {
+                    self.kill_supervised_processes();
+                    return match self.child.wait() {
+                        Ok(status) => {
+                            self.wrapper_reaped = true;
+                            Ok(self.completed_result(status))
+                        }
+                        Err(error) => Ok(self.wait_error_result(error)),
+                    };
+                }
+                #[cfg(not(target_os = "linux"))]
+                Ok(WrapperPoll::ExitedReaped(status)) => {
+                    self.wrapper_reaped = true;
+                    self.kill_supervised_processes();
+                    return Ok(self.completed_result(status));
+                }
+                Ok(WrapperPoll::Running) => {
+                    if Instant::now() >= deadline {
+                        return Err(self);
+                    }
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                }
+                Err(error) => return Ok(self.wait_error_result(error)),
+            }
+        }
+    }
+
     fn validate_attachment_release_ready(&mut self) -> Result<(), String> {
         let stdout_truncated = self
             .stdout_capture
@@ -1755,6 +2514,7 @@ pub fn lib_spawn_awaiting_attachment(
         });
     }
     let timeout = request.timeout;
+    let setup_deadline = supervised_setup_deadline(start, timeout);
     let cwd_directory = match request.cwd.take() {
         Some(path) => Some(open_attachment_cwd(&path, start)?),
         None => None,
@@ -1762,13 +2522,14 @@ pub fn lib_spawn_awaiting_attachment(
     // No other direct child may fork while these control pipes are created.
     // Snapshot the control descriptors of already-held children so the new
     // child can close only those known authorities at its final setup hook.
-    let fork_sensitive_descriptors = quiesce_fork_sensitive_descriptors().map_err(|error| {
-        spawn_failure(
-            start,
-            format!("Failed to spawn awaiting attachment: {error}"),
-        )
-    })?;
-    let inherited_pending_control_fds = fork_sensitive_descriptors.pending_fork_control_fds();
+    let fork_sensitive_descriptors =
+        quiesce_fork_sensitive_descriptors(setup_deadline).map_err(|error| {
+            spawn_failure(
+                start,
+                format!("Failed to spawn awaiting attachment: {error}"),
+            )
+        })?;
+    let inherited_child_close_fds = fork_sensitive_descriptors.fork_child_close_fds();
     let (status_reader, status_writer) = attachment_pipe("readiness", start)?;
     let (release_reader, release_writer) = attachment_pipe("release", start)?;
     let child_status_reader_fd = status_reader.as_raw_fd();
@@ -1779,7 +2540,7 @@ pub fn lib_spawn_awaiting_attachment(
         cwd_directory,
         child_status_reader_fd,
         child_release_writer_fd,
-        inherited_pending_control_fds,
+        inherited_child_close_fds,
     };
 
     // A child held before exec retains every CLOEXEC descriptor inherited at
@@ -1796,7 +2557,6 @@ pub fn lib_spawn_awaiting_attachment(
             )
         })?;
 
-    let setup_deadline = supervised_setup_deadline(start, timeout);
     let identity =
         match read_attachment_ready(&status_reader, setup_deadline, ATTACHMENT_IDENTITY_PHASE) {
             Ok(identity) => identity,
@@ -2102,7 +2862,7 @@ fn lib_spawn_with_stdio(
                         gate.cwd_directory
                             .as_ref()
                             .map(|directory| directory.as_raw_fd()),
-                        gate.inherited_pending_control_fds.clone(),
+                        gate.inherited_child_close_fds.clone(),
                     )
                 });
         unsafe {
@@ -2336,7 +3096,10 @@ fn lib_spawn_with_stdio(
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!("Failed to spawn: supervised launcher refused: {error}"),
+                    append_captured_stderr(
+                        format!("Failed to spawn: supervised launcher refused: {error}"),
+                        &stderr_capture,
+                    ),
                 ));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -2352,9 +3115,12 @@ fn lib_spawn_with_stdio(
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!(
-                        "Failed to spawn: supervised launcher did not report its target PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
-                        setup_wait.as_secs_f64()
+                    append_captured_stderr(
+                        format!(
+                            "Failed to spawn: supervised launcher did not report its target PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
+                            setup_wait.as_secs_f64()
+                        ),
+                        &stderr_capture,
                     ),
                 ));
             }
@@ -2371,7 +3137,10 @@ fn lib_spawn_with_stdio(
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    "Failed to spawn: supervised-launcher status channel closed before reporting its target PID",
+                    append_captured_stderr(
+                        "Failed to spawn: supervised-launcher status channel closed before reporting its target PID".to_owned(),
+                        &stderr_capture,
+                    ),
                 ));
             }
         };
@@ -2885,12 +3654,12 @@ fn direct_attachment_identity_pre_exec(
     status_reader_fd: i32,
     release_writer_fd: i32,
     cwd_directory_fd: Option<i32>,
-    inherited_pending_control_fds: &[i32],
+    inherited_child_close_fds: &[i32],
 ) -> std::io::Result<()> {
     unsafe {
         libc::close(status_reader_fd);
         libc::close(release_writer_fd);
-        for fd in inherited_pending_control_fds {
+        for fd in inherited_child_close_fds {
             libc::close(*fd);
         }
 
@@ -3617,6 +4386,29 @@ fn append_diagnostic(existing: &str, diagnostic: &str) -> String {
     }
 }
 
+fn append_captured_stderr(reason: String, capture: &SharedCapture) -> String {
+    const DIAGNOSTIC_BYTES: usize = 4 * 1024;
+
+    let capture = capture.lock().unwrap_or_else(|error| error.into_inner());
+    if capture.bytes.is_empty() {
+        return reason;
+    }
+    let diagnostic = if capture.bytes.len() > DIAGNOSTIC_BYTES {
+        let half = DIAGNOSTIC_BYTES / 2;
+        let head = String::from_utf8_lossy(&capture.bytes[..half]);
+        let tail = String::from_utf8_lossy(&capture.bytes[capture.bytes.len() - half..]);
+        format!("{head}\n… (bounded launcher stderr; middle bytes omitted) …\n{tail}")
+    } else {
+        let body = String::from_utf8_lossy(&capture.bytes);
+        if capture.truncated {
+            format!("{body}\n… (launcher stderr exceeded its capture limit)")
+        } else {
+            body.into_owned()
+        }
+    };
+    append_diagnostic(&reason, &diagnostic)
+}
+
 fn spawn_failure(start: Instant, reason: impl Into<String>) -> SubprocessResult {
     SubprocessResult {
         success: false,
@@ -3657,14 +4449,17 @@ pub fn validate_subprocess_limits(limits: Option<&SubprocessLimits>) -> Result<(
     validate_output_retention_limits(limits)?;
     #[cfg(unix)]
     {
-        validated_max_open_files(limits).map(|_| ())
+        validated_rlimits(limits).map(|_| ())
     }
     #[cfg(not(unix))]
     {
-        if let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) {
-            return Err(format!(
-                "max_open_files {max_open_files} is unsupported on this platform"
-            ));
+        if limits.is_some_and(|limits| {
+            limits.max_open_files.is_some()
+                || limits.max_address_space_bytes.is_some()
+                || limits.max_cpu_seconds.is_some()
+                || limits.max_processes.is_some()
+        }) {
+            return Err("subprocess kernel limits are unsupported on this platform".to_string());
         }
         Ok(())
     }
@@ -3684,16 +4479,25 @@ pub fn configure_subprocess_limits(
     {
         use std::os::unix::process::CommandExt;
 
-        let max_open_files = validated_max_open_files(limits)?;
-        if let Some(max_open_files) = max_open_files {
+        let installed = validated_rlimits(limits)?;
+        if installed.iter().any(Option::is_some) {
             unsafe {
                 command.pre_exec(move || {
-                    let limit = libc::rlimit {
-                        rlim_cur: max_open_files,
-                        rlim_max: max_open_files,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                        return Err(std::io::Error::last_os_error());
+                    for (resource, value) in [
+                        (libc::RLIMIT_NOFILE, installed[0]),
+                        (libc::RLIMIT_AS, installed[1]),
+                        (libc::RLIMIT_CPU, installed[2]),
+                        (libc::RLIMIT_NPROC, installed[3]),
+                    ] {
+                        if let Some(value) = value {
+                            let limit = libc::rlimit {
+                                rlim_cur: value,
+                                rlim_max: value,
+                            };
+                            if libc::setrlimit(resource, &limit) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
                     }
                     Ok(())
                 });
@@ -3725,40 +4529,62 @@ fn validate_output_retention_limits(limits: Option<&SubprocessLimits>) -> Result
 }
 
 #[cfg(unix)]
-fn validated_max_open_files(
+fn validated_rlimits(
     limits: Option<&SubprocessLimits>,
-) -> Result<Option<libc::rlim_t>, String> {
-    let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) else {
-        return Ok(None);
-    };
-    let platform_limit = max_open_files as libc::rlim_t;
-    if platform_limit as u128 != max_open_files as u128 {
-        return Err(format!(
-            "max_open_files {max_open_files} cannot be represented on this platform"
-        ));
+) -> Result<[Option<libc::rlim_t>; 4], String> {
+    let values = limits.map_or([None; 4], |limits| {
+        [
+            limits.max_open_files,
+            limits.max_address_space_bytes,
+            limits.max_cpu_seconds,
+            limits.max_processes,
+        ]
+    });
+    let names = [
+        "max_open_files",
+        "max_address_space_bytes",
+        "max_cpu_seconds",
+        "max_processes",
+    ];
+    let resources = [
+        libc::RLIMIT_NOFILE,
+        libc::RLIMIT_AS,
+        libc::RLIMIT_CPU,
+        libc::RLIMIT_NPROC,
+    ];
+    let mut output = [None; 4];
+    for index in 0..values.len() {
+        let Some(value) = values[index] else { continue };
+        if value == 0 {
+            return Err(format!("{} must be positive", names[index]));
+        }
+        let platform_limit = value as libc::rlim_t;
+        if platform_limit as u128 != value as u128 || platform_limit == libc::RLIM_INFINITY {
+            return Err(format!(
+                "{} {value} must be finite and representable",
+                names[index]
+            ));
+        }
+        let mut parent_limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(resources[index], &mut parent_limit) } != 0 {
+            return Err(format!(
+                "failed to inspect parent {} limit: {}",
+                names[index],
+                std::io::Error::last_os_error()
+            ));
+        }
+        if parent_limit.rlim_max != libc::RLIM_INFINITY && platform_limit > parent_limit.rlim_max {
+            return Err(format!(
+                "{} {value} exceeds parent hard limit {}",
+                names[index], parent_limit.rlim_max
+            ));
+        }
+        output[index] = Some(platform_limit);
     }
-    if platform_limit == libc::RLIM_INFINITY {
-        return Err("max_open_files must be finite".to_string());
-    }
-
-    let mut parent_limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut parent_limit) } != 0 {
-        return Err(format!(
-            "failed to inspect parent RLIMIT_NOFILE: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    if parent_limit.rlim_max != libc::RLIM_INFINITY && platform_limit > parent_limit.rlim_max {
-        return Err(format!(
-            "max_open_files {max_open_files} exceeds parent hard limit {}",
-            parent_limit.rlim_max
-        ));
-    }
-
-    Ok(Some(platform_limit))
+    Ok(output)
 }
 
 #[cfg(all(test, not(unix)))]

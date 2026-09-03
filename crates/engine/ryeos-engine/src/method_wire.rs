@@ -1,7 +1,7 @@
 //! Generic method-runtime wire contract.
 //!
 //! These types live beside the signed protocol vocabulary so the engine,
-//! daemon, and runtime deserialize one exact `method_call_*_v1` shape. Runtime
+//! daemon, and runtime deserialize one exact `method_call_*` shape. Runtime
 //! crates re-export them; no kind-specific crate owns the wire.
 
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::launch_envelope_types::EnvelopeCallback;
 
-pub const METHOD_CALL_SCHEMA_VERSION: u32 = 1;
+pub const METHOD_CALL_SCHEMA_VERSION: u32 = 2;
 
 /// The envelope for any method call on a kind's selected runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,10 +22,9 @@ pub struct MethodCallEnvelope {
     pub method: String,
     pub thread_id: String,
     pub callback: EnvelopeCallback,
-    /// Callback authorization/state anchor. This may differ from
-    /// `project_root` when execution deliberately overrides its state root.
-    pub callback_project_path: PathBuf,
-    /// Source project root used for item/config resolution.
+    /// Process workspace selected by the daemon for this invocation.
+    /// Item and config resolution has already happened under retained daemon
+    /// authority; runtimes must not treat this path as fresh resolution input.
     pub project_root: PathBuf,
     /// Daemon-resolved runtime/operator config snapshots keyed by the invoked
     /// method's declared config name.
@@ -174,7 +173,6 @@ mod tests {
                 socket_path: PathBuf::from("/tmp/daemon.sock"),
                 token: "token".to_string(),
             },
-            callback_project_path: PathBuf::from("/project"),
             project_root: PathBuf::from("/project"),
             runtime_config: BTreeMap::new(),
             payload: serde_json::Value::Null,
@@ -193,7 +191,6 @@ mod tests {
                 socket_path: PathBuf::from("/tmp/daemon.sock"),
                 token: "token".to_string(),
             },
-            callback_project_path: PathBuf::from("/project"),
             project_root: PathBuf::from("/project"),
             runtime_config: BTreeMap::new(),
             payload: serde_json::Value::Null,

@@ -1,0 +1,16 @@
+# ryeos:signed:2026-09-03T11:56:15Z:b18f0e23ba7be57c4dc268a5b9188c71e749ec707cd0ace3e028d239ead39328:5K9XtFr8ExRo0pdJs0vFx+hUv8rs+jCPOHJ/A//fJyGoVedUa4lCfbYLI6y+eMioYHIapiMxQvcAe6XfBCneAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, terminate]
+description: "Stop and terminally settle one Codex session"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: reason
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/terminate
+  availability: daemon

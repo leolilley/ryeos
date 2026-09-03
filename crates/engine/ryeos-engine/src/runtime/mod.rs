@@ -3,7 +3,7 @@
 //!
 //! Mirrors the composer pattern (`crate::composers`):
 //!   * Each top-level YAML block on a chain intermediate (e.g. `config`,
-//!     `env_config`, `verify_deps`, `runtime_config`) is claimed by
+//!     `env_config`, `runtime_config`) is claimed by
 //!     exactly one `RuntimeHandler` registered under a string key.
 //!   * `compile_with_handlers` walks the chain in order; for each block
 //!     it dispatches to the registered handler, which owns
@@ -24,7 +24,9 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::contracts::{ExecutionDecorations, PlanStdin, PlanSubprocessSpec, RuntimeEnvSource};
+use crate::contracts::{
+    ExecutionDecorations, PlanArgument, PlanStdin, PlanSubprocessSpec, RuntimeEnvSource,
+};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -94,6 +96,8 @@ pub struct ChainIntermediate {
     pub resolved_ref: String,
     pub kind: String,
     pub source_path: PathBuf,
+    pub source_space: crate::contracts::ItemSpace,
+    pub source_root: crate::contracts::ItemSourceRoot,
     pub parsed: Value,
 }
 
@@ -262,10 +266,9 @@ fn compile_stdin_template(
     if compiled.whole_direct_root_reference() == Some("params_json") {
         let mut parameters = parameters.clone();
         let project_path = match (parameters.as_object_mut(), project_root) {
-            (Some(object), Some(project_root)) => {
-                object.remove("project_path");
-                Some(project_root.to_path_buf())
-            }
+            (Some(object), Some(project_root)) => object
+                .remove("project_path")
+                .map(|_| project_root.to_path_buf()),
             _ => None,
         };
         return Ok(PlanStdin::RuntimeParameters {
@@ -280,10 +283,21 @@ fn compile_stdin_template(
 fn render_runtime_argument(
     argument: RuntimeArgument,
     ctx: &TemplateContext,
-) -> Result<String, EngineError> {
+) -> Result<PlanArgument, EngineError> {
     match argument {
-        RuntimeArgument::Template(template) => expand_template(&template, ctx),
-        RuntimeArgument::Literal(literal) => Ok(literal.literal),
+        RuntimeArgument::Template(template) if template == "${source.entry}" => {
+            Ok(PlanArgument::AdmittedSourceEntry)
+        }
+        RuntimeArgument::Template(template) if template.contains("${source.") => {
+            Err(EngineError::InvalidRuntimeConfig {
+                path: "config.args".to_owned(),
+                reason: "source entry must occupy one complete argument".to_owned(),
+            })
+        }
+        RuntimeArgument::Template(template) => {
+            expand_template(&template, ctx).map(PlanArgument::literal)
+        }
+        RuntimeArgument::Literal(literal) => Ok(PlanArgument::literal(literal.literal)),
     }
 }
 
@@ -334,11 +348,14 @@ pub struct CompileContext<'a> {
     pub env: HashMap<String, String>,
     pub env_sources: HashMap<String, RuntimeEnvSource>,
     pub spec_overrides: SpecOverrides,
+    /// Mutable planner parameters. Runtime handlers may add resolved
+    /// execution-policy values here, but those values are not invocation
+    /// input and must never cross the subprocess stdin boundary implicitly.
     pub params: Value,
-    /// Original caller-supplied parameters BEFORE any handler
-    /// mutation. `ValidateInput` phase handlers (e.g. `config_schema`)
-    /// must validate against this — not `params` — so they see what
-    /// the user actually passed in.
+    /// Original caller-supplied invocation parameters BEFORE any handler
+    /// mutation. `ValidateInput` phase handlers (e.g. `config_schema`) must
+    /// validate against this, and subprocess input is projected from this
+    /// authority plus only root-owned resolved configuration.
     pub original_params: &'a Value,
     pub chain: &'a [ChainIntermediate],
     pub current_index: usize,
@@ -352,6 +369,10 @@ pub struct CompileContext<'a> {
         &'a Path,
         &'a dyn crate::project_content::AuthoritativeProjectContent,
     )>,
+    /// Sealed bytes for dependencies covered by an admitted realization
+    /// mount. Verification consults this before the live filesystem, so a
+    /// realized dependency is judged by the bytes the runtime will execute.
+    pub sealed_content: Option<&'a dyn crate::project_content::SealedDependencyBytes>,
     pub root_trust_class: TrustClass,
     /// Operator-supplied allowlist + snapshot for host-env passthrough.
     /// Populated once at daemon bootstrap from `RYEOS_TOOL_ENV_PASSTHROUGH`.
@@ -380,8 +401,29 @@ pub enum HandlerPhase {
     /// (cancellation_mode, resume_mode, execution_owner). Used by
     /// `native_async`, `native_resume`, `execution_owner`.
     DecorateSpec,
-    /// Post-build integrity / safety checks. Used by `verify_deps`.
-    Verify,
+}
+
+/// Project the exact tool-facing invocation payload from the two parameter
+/// authorities used during runtime compilation.
+///
+/// `resolved_params` is planner scratch: non-root runtime handlers place
+/// timeout and cancellation policy there so later handlers can compile the
+/// process-control contract. Only a root `config_resolve` contribution is
+/// tool input. Project authority is not invented here; an explicitly supplied
+/// `project_path` remains in the invocation until `compile_stdin_template`
+/// converts that one field into a relocatable typed binding.
+fn subprocess_invocation_params(original_params: &Value, resolved_params: &Value) -> Value {
+    let mut invocation = original_params.clone();
+    if let Some(resolved_config) = resolved_params.get("resolved_config") {
+        if !invocation.is_object() {
+            invocation = Value::Object(Map::new());
+        }
+        invocation
+            .as_object_mut()
+            .expect("invocation converted to object")
+            .insert("resolved_config".to_owned(), resolved_config.clone());
+    }
+    invocation
 }
 
 /// Multiplicity semantics: how many chain elements may declare this
@@ -468,7 +510,6 @@ impl RuntimeHandlerRegistry {
         reg.register(Arc::new(handlers::runtime_config::RuntimeConfigHandler));
         reg.register(Arc::new(handlers::env_config::EnvConfigHandler));
         reg.register(Arc::new(handlers::config_resolve::ConfigResolveHandler));
-        reg.register(Arc::new(handlers::verify_deps::VerifyDepsHandler));
         reg.register(Arc::new(handlers::execution_params::ExecutionParamsHandler));
         reg.register(Arc::new(handlers::native_async::NativeAsyncHandler));
         reg.register(Arc::new(handlers::native_resume::NativeResumeHandler));
@@ -515,6 +556,7 @@ pub fn compile_with_handlers(
         &Path,
         &dyn crate::project_content::AuthoritativeProjectContent,
     )>,
+    sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
 ) -> Result<PlanSubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
@@ -535,23 +577,11 @@ pub fn compile_with_handlers(
         node_trust_store,
         project_root,
         project_authority,
+        sealed_content,
         root_trust_class,
         host_env,
     };
     ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
-
-    // Inject project_path into params so tools that accept it in their
-    // config_schema receive it via ${params_json}. Tools that don't
-    // declare it will ignore the extra field (serde deny_unknown_fields
-    // is NOT used by the subprocess — it's only for the config_schema
-    // validation hint). This ensures subprocess tools can locate project
-    // items without a separate --project CLI arg.
-    if let (Some(pp), Some(obj)) = (project_root, ctx.params.as_object_mut()) {
-        obj.insert(
-            "project_path".to_owned(),
-            Value::String(pp.to_string_lossy().into_owned()),
-        );
-    }
 
     ctx.template_ctx.params_json = params.to_string();
 
@@ -574,19 +604,59 @@ pub fn compile_with_handlers(
         );
     }
 
-    // 1. Validate every key up-front: must be ignored or claimed by a
-    //    registered handler. This is a single pass over the chain
-    //    that fails loud BEFORE any handler runs (no partial
-    //    mutations on misconfiguration).
+    // 1. Validate every key up-front against the schema of the chain
+    //    element that authored it. Executor chains may cross kinds (for
+    //    example, a worker whose terminal executor is a tool); borrowing the
+    //    root kind's ignored keys or handler declarations would either reject
+    //    valid terminal metadata or, worse, let one kind smuggle a block that
+    //    only another kind owns. The explicit registry remains the mechanical
+    //    implementation set. Empty test registries without loaded kind
+    //    schemas retain the uniform-policy path used by the focused compiler
+    //    fixtures below.
     for intermediate in chain {
         let Some(obj) = intermediate.parsed.as_object() else {
             continue;
         };
+        let kind_runtime = kinds
+            .get(&intermediate.kind)
+            .map(|schema| {
+                schema.runtime().ok_or_else(|| EngineError::SchemaLoaderError {
+                reason: format!(
+                    "kind `{}` has no runtime block while compiling executor-chain item `{}`",
+                    intermediate.kind, intermediate.resolved_ref
+                ),
+            })
+            })
+            .transpose()?;
+        if let Some(spec) = kind_runtime {
+            for declaration in &spec.handlers {
+                if registry.get(&declaration.type_).is_none() {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "kind `{}` declares runtime handler `{}` which is not registered",
+                            intermediate.kind, declaration.type_
+                        ),
+                    });
+                }
+            }
+        }
         for key in obj.keys() {
-            if ignored_keys.iter().any(|k| k == key) {
+            let (ignored, claimed) = match kind_runtime {
+                Some(spec) => (
+                    spec.ignored_keys.iter().any(|candidate| candidate == key),
+                    spec.handlers
+                        .iter()
+                        .any(|declaration| declaration.type_ == *key),
+                ),
+                None => (
+                    ignored_keys.iter().any(|candidate| candidate == key),
+                    registry.get(key).is_some(),
+                ),
+            };
+            if ignored {
                 continue;
             }
-            if registry.get(key).is_none() {
+            if !claimed || registry.get(key).is_none() {
                 return Err(EngineError::UnknownRuntimeBlock {
                     key: key.clone(),
                     kind: intermediate.kind.clone(),
@@ -603,7 +673,6 @@ pub fn compile_with_handlers(
         HandlerPhase::ResolveContext,
         HandlerPhase::BuildSpec,
         HandlerPhase::DecorateSpec,
-        HandlerPhase::Verify,
     ];
 
     for phase in phases {
@@ -621,10 +690,23 @@ pub fn compile_with_handlers(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parsed
+                    let present = c
+                        .parsed
                         .as_object()
                         .map(|o| o.contains_key(key))
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    if !present {
+                        return false;
+                    }
+                    kinds
+                        .get(&c.kind)
+                        .and_then(|schema| schema.runtime())
+                        .map(|spec| {
+                            spec.handlers
+                                .iter()
+                                .any(|declaration| declaration.type_ == key)
+                        })
+                        .unwrap_or(true)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -669,10 +751,12 @@ pub fn compile_with_handlers(
     // (currently the `config` handler). Templates expanded against
     // the populated template context.
     //
-    // Re-derive `params_json` AFTER all handlers have run — handlers
-    // may have mutated `ctx.params` to inject additional context vars
-    // that must appear in the params JSON passed to the subprocess.
-    ctx.template_ctx.params_json = ctx.params.to_string();
+    // Re-derive the subprocess payload AFTER handlers have run, while keeping
+    // runtime execution policy on the planner side of the ABI. Root-owned
+    // resolved configuration remains an explicit tool input; non-root timeout
+    // and cancellation values do not become caller parameters.
+    let invocation_params = subprocess_invocation_params(ctx.original_params, &ctx.params);
+    ctx.template_ctx.params_json = invocation_params.to_string();
 
     let node_trust_ref = ctx.node_trust_store;
 
@@ -681,7 +765,6 @@ pub fn compile_with_handlers(
         env,
         env_sources,
         spec_overrides,
-        params: runtime_params,
         host_env: ctx_host_env,
         ..
     } = ctx;
@@ -700,6 +783,13 @@ pub fn compile_with_handlers(
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
         let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
             &cmd_expanded,
+            &chain
+                .first()
+                .ok_or_else(|| EngineError::NoRuntimeConfig {
+                    chain: chain_str.to_vec(),
+                })?
+                .source_root,
+            chain[0].source_space,
             root_source_path,
             roots,
             node_trust_ref,
@@ -723,7 +813,7 @@ pub fn compile_with_handlers(
     };
 
     let authored_args = spec_overrides.args.unwrap_or_default();
-    let args: Result<Vec<String>, EngineError> = authored_args
+    let args: Result<Vec<PlanArgument>, EngineError> = authored_args
         .into_iter()
         .map(|argument| render_runtime_argument(argument, &template_ctx))
         .collect();
@@ -733,7 +823,7 @@ pub fn compile_with_handlers(
         .stdin_data
         .as_deref()
         .map(|template| {
-            compile_stdin_template(template, &template_ctx, &runtime_params, project_root)
+            compile_stdin_template(template, &template_ctx, &invocation_params, project_root)
         })
         .transpose()?;
 
@@ -903,7 +993,34 @@ mod tests {
             literal: source.into(),
         });
 
-        assert_eq!(render_runtime_argument(argument, &ctx).unwrap(), source);
+        assert_eq!(
+            render_runtime_argument(argument, &ctx)
+                .unwrap()
+                .literal_value(),
+            Some(source)
+        );
+    }
+
+    #[test]
+    fn source_entry_argument_remains_typed_until_admitted_materialization() {
+        let ctx = TemplateContext::new(PathBuf::from("/worker.yaml"));
+        let argument = RuntimeArgument::Template("${source.entry}".to_owned());
+        assert_eq!(
+            render_runtime_argument(argument, &ctx).unwrap(),
+            PlanArgument::AdmittedSourceEntry
+        );
+    }
+
+    #[test]
+    fn source_entry_refuses_partial_string_interpolation() {
+        let ctx = TemplateContext::new(PathBuf::from("/worker.yaml"));
+        let argument = RuntimeArgument::Template("--entry=${source.entry}".to_owned());
+        let error = render_runtime_argument(argument, &ctx).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source entry must occupy one complete argument")
+        );
     }
 
     #[test]
@@ -928,6 +1045,91 @@ mod tests {
             panic!("direct params_json must remain structured");
         };
         assert_eq!(actual, parameters);
+        assert_eq!(project_path, None);
+    }
+
+    #[test]
+    fn runtime_policy_params_do_not_become_subprocess_input() {
+        let original = json!({"message": "hello"});
+        let resolved = json!({
+            "message": "hello",
+            "timeout": 86400,
+            "cancellation_mode": "graceful",
+            "cancellation_grace_secs": 5,
+        });
+
+        assert_eq!(subprocess_invocation_params(&original, &resolved), original);
+    }
+
+    #[test]
+    fn explicit_project_path_and_root_resolved_config_remain_typed_input() {
+        let project = PathBuf::from("/admitted/project");
+        let invocation = subprocess_invocation_params(
+            &json!({"message": "hello", "project_path": "/caller-controlled"}),
+            &json!({
+                "message": "hello",
+                "resolved_config": {"model": "qualified"},
+                "timeout": 86400,
+            }),
+        );
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params_json = invocation.to_string();
+        let stdin =
+            compile_stdin_template("${params_json}", &ctx, &invocation, Some(&project)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdin.materialize().unwrap()).unwrap(),
+            json!({
+                "message": "hello",
+                "project_path": "/admitted/project",
+                "resolved_config": {"model": "qualified"},
+            })
+        );
+        let PlanStdin::RuntimeParameters {
+            parameters,
+            project_path,
+        } = stdin
+        else {
+            panic!("direct params_json must remain structured");
+        };
+
+        assert_eq!(
+            parameters,
+            json!({
+                "message": "hello",
+                "resolved_config": {"model": "qualified"},
+            })
+        );
+        assert_eq!(project_path.as_deref(), Some(project.as_path()));
+    }
+
+    #[test]
+    fn project_backed_runtime_does_not_invent_project_path_input() {
+        let project = PathBuf::from("/admitted/project");
+        let invocation = subprocess_invocation_params(
+            &json!({}),
+            &json!({
+                "timeout": 86400,
+                "cancellation_mode": "graceful",
+                "cancellation_grace_secs": 5,
+            }),
+        );
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params_json = invocation.to_string();
+        let stdin =
+            compile_stdin_template("${params_json}", &ctx, &invocation, Some(&project)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdin.materialize().unwrap()).unwrap(),
+            json!({})
+        );
+        let PlanStdin::RuntimeParameters {
+            parameters,
+            project_path,
+        } = stdin
+        else {
+            panic!("direct params_json must remain structured");
+        };
+
+        assert_eq!(parameters, json!({}));
         assert_eq!(project_path, None);
     }
 

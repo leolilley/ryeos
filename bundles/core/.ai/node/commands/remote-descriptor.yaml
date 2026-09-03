@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-19T05:40:59Z:e2bf8284284f0a538b4c305777b7649bae72d9382570e610f77cc8553e6f8cf7:OAKBOhvOeYKwrPiAY9EQnowwV0C5BoWuBxHGEipuBFV21chJkAHLhCZJYzO8d+TtGQbX3m5LCPVZ25x4vmK6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:08Z:e2bf8284284f0a538b4c305777b7649bae72d9382570e610f77cc8553e6f8cf7:OAKBOhvOeYKwrPiAY9EQnowwV0C5BoWuBxHGEipuBFV21chJkAHLhCZJYzO8d+TtGQbX3m5LCPVZ25x4vmK6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote-descriptor
 description: Export a remote descriptor trust pin for this node

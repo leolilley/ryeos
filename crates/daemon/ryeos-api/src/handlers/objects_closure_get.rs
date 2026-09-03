@@ -7,13 +7,15 @@ use base64::Engine as _;
 use serde_json::Value;
 
 use crate::handlers::objects_closure_describe::{
-    Request, closure_summary_json, collect_limited_closure_with_cas,
+    Request, admit_request, closure_summary_json, collect_limited_closure_with_cas,
+    enforce_serialized_response_limit,
 };
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    let req = admit_request(req, &state)?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
@@ -21,7 +23,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let cas = authority.cas_store()?;
     let report = collect_limited_closure_with_cas(&req, &cas)?;
     if !req.allow_incomplete && !report.is_complete() {
-        bail!("object closure is incomplete");
+        bail!(
+            "object closure is incomplete: missing_objects={} first_missing_object={:?}; \
+             missing_blobs={} first_missing_blob={:?}; malformed_objects={} \
+             first_malformed_object={:?}; unsupported_objects={} first_unsupported_object={:?}",
+            report.missing_objects.len(),
+            report.missing_objects.first(),
+            report.missing_blobs.len(),
+            report.missing_blobs.first(),
+            report.malformed_objects.len(),
+            report.malformed_objects.first(),
+            report.unsupported_objects.len(),
+            report.unsupported_objects.first(),
+        );
+    }
+    if !report.large_object_hashes.is_empty() && !req.allow_untransported_large_objects {
+        bail!(
+            "objects/closure/get cannot transport {} referenced large objects; use a large-object-aware transport",
+            report.large_object_hashes.len()
+        );
     }
 
     let mut entries = Vec::new();
@@ -96,12 +116,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
     }
 
-    Ok(serde_json::json!({
+    let response = serde_json::json!({
         "closure": closure_summary_json(&report, true),
         "object_bytes": total_object_bytes,
         "blob_bytes": total_blob_bytes,
         "entries": entries,
-    }))
+    });
+    enforce_serialized_response_limit(&response, req.max_response_bytes)?;
+    Ok(response)
 }
 
 fn encoded_len(raw_len: u64) -> u64 {

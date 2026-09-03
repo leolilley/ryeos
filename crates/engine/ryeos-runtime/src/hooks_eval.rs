@@ -149,6 +149,10 @@ pub async fn run_hooks(
             hook_id: hook.id().to_string(),
             layer: hook.layer(),
             result_mode: hook.result_mode(),
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: hook.context_schema().roots().map(str::to_owned).collect(),
+            },
             context_hash: context_hash.clone(),
         };
         let dispatched = match dispatcher(rendered, project_path.to_string(), identity).await {
@@ -232,12 +236,13 @@ pub async fn run_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CompilationLimits;
     use crate::envelope::HookDispatchOutput;
     use crate::hooks_loader::{
         CompiledHook, HookContextSchema, HookDefinition, HookLayer, HookResultMode, HookSources,
         compile_hooks,
     };
-    use crate::{CompilationLimits, ExpressionCondition};
+    use ryeos_engine::hooks::ExpressionCondition;
     use serde_json::json;
 
     fn make_hook(id: &str, event: &str) -> HookDefinition {
@@ -266,29 +271,33 @@ mod tests {
 
     fn occurrence(event: &str) -> HookDispatchOccurrence {
         match event {
-            "graph_step_completed" => HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id: "graph-run-test".to_string(),
-                definition_ref: "graph:test/workflow".to_string(),
-                definition_hash: "definition-hash".to_string(),
-                step: 3,
-                node: "work".to_string(),
-            },
-            "graph_completed" => HookDispatchOccurrence::GraphCompleted {
-                graph_run_id: "graph-run-test".to_string(),
-                definition_ref: "graph:test/workflow".to_string(),
-                definition_hash: "definition-hash".to_string(),
-                steps: 4,
-            },
-            "after_step" => HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: "directive:test/runner".to_string(),
-                definition_hash: "definition-hash".to_string(),
-                turn: 2,
-            },
-            "continuation" => HookDispatchOccurrence::DirectiveContinuation {
-                definition_ref: "directive:test/runner".to_string(),
-                definition_hash: "definition-hash".to_string(),
-                turn: 2,
-            },
+            "graph_step_completed" => HookDispatchOccurrence::new(
+                "graph",
+                event,
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "graph-run-test")
+            .with_counter_coordinate("step", 3)
+            .with_text_coordinate("node", "work"),
+            "graph_completed" => HookDispatchOccurrence::new(
+                "graph",
+                event,
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "graph-run-test")
+            .with_counter_coordinate("steps", 4),
+            "after_step" | "continuation" => HookDispatchOccurrence::new(
+                "directive",
+                event,
+                "directive:test/runner",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_counter_coordinate("turn", 2),
             other => panic!("unsupported test hook occurrence: {other}"),
         }
     }
@@ -311,7 +320,12 @@ mod tests {
             HookSources {
                 authored: vec![make_hook("authored", "graph_step_completed")],
                 builtin: vec![make_hook("builtin", "graph_step_completed")],
-                infrastructure: vec![make_hook("infra", "graph_step_completed")],
+                // Infrastructure hooks may observe but never steer, so the
+                // precedence fixture gives this layer a non-control result.
+                infrastructure: vec![HookDefinition {
+                    result: HookResultMode::Observation,
+                    ..make_hook("infra", "graph_step_completed")
+                }],
                 context: vec![make_hook("context", "graph_step_completed")],
                 operator: vec![make_hook("operator", "graph_step_completed")],
                 project: vec![make_hook("project", "graph_step_completed")],

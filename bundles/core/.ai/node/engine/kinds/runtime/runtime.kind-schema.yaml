@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-23T15:25:30Z:01a0347e5037d565e65e3105fc63cc8484f68a31c94c9392ac8997ee84c84613:xgtZIfWUdn3n9bMCXzYq0BGVFm4aGY+tXRsHO6WK7j4kVn/aSxLn9C5Qc8KGnKoqLiS5rUgGSHdzd+3HZteFAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:03Z:701ec3387d97448c87d8faefd7899ad61dde58c658ffdf4c0a9d92c6f83a053a:djhNQsPx/Qp9VvNbqyYO1hDPLoaED56UxXmLiVV+IZbsJMvL1YgikwAeapM7ctgkUgXLqp1hZXmWcpOr+VogAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
 version: "1.0.0"
 location:
@@ -69,7 +69,9 @@ composed_value_contract:
             prim: sequence
             elements: { type: single, prim: string }
           runtime_facts: { type: single, prim: mapping }
+          execution_dependencies: { type: single, prim: mapping }
           financial_authority: { type: single, prim: mapping }
+          external_effect_authority: { type: single, prim: mapping }
   optional:
     default: { type: single, prim: boolean }
     required_caps:

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-21T00:24:30Z:1ca3fce6dbb862d6a33c702f767598a9e3b2d8c133e64cccf68c2ffccfbcc590:XRwZW/EasOXP+eXcuhhIMw4k7vNEIpuqXlZ2OSDQESamQoE42P8feGXPzorOPct0imt1qCuQkdAHac75UurXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T10:47:11Z:8b7cc639c2b1f8c2ffd6fdab29e586c38d1e1629e5fa11c35bcbd59d85f9e9c3:bX+jAB+vS9AECqE1VwRD+1Af8tO1oc3ba6QHHW/MwLfDY9TPA/8aD10Xq92hlqBW3UaNSLS2IjEg09cvjq8wCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.6.0"
+version: "1.7.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -11,15 +11,34 @@ description: >
 # Execution Isolation
 
 RyeOS can launch executable tools and runtimes through a node-owned isolation
-policy and a selected signed backend bundle. The only policy source is
-`<app-root>/.ai/node/isolation.yaml`. `ryeos init` creates it once; later edits
-belong to the node owner. Items, bundles, requests, and environment variables
-cannot activate the isolation or weaken its controls.
+policy and a selected signed backend bundle. Isolation is one mandatory member
+of the complete node-signed generation under `<app-root>/.ai/node/policies/`.
+The selected init profile makes the first explicit choice; later changes replace
+the whole policy generation atomically. Items, bundles, requests, and environment
+variables cannot activate isolation or weaken its controls.
 
 The engine resolves typed isolation requirements against signed backend
 declarations and live inspected capabilities. It emits a strict backend-neutral
 plan; the selected adapter owns backend-specific inspection and launch
 compilation. RyeOS does not ship or select an isolation backend by default.
+
+Durable execution workspaces use the isolation-adapter v3 contract. RyeOS owns
+one canonical private `project/` generation. Disabled/native execution creates
+no other workspace directory and uses Lillux descriptor-relative filesystem
+mechanics directly. Enforced execution additionally grants the selected signed
+adapter one `backend-state/` directory as an opaque authority. Names and
+representation below that directory—including any platform-specific overlay
+layers—belong exclusively to the adapter and never enter the engine, executor,
+workspace journal, or generic launch plan.
+
+On freeze, an adapter may return normalized mutation facts plus a canonical
+relative content-root name below its still-pinned opaque state authority. RyeOS
+opens that returned root without following links and verifies each regular
+file's mode, size, and content digest before admitting bytes to CAS. Thus
+publication remains backend-neutral without granting the adapter CAS or project
+HEAD authority. The v3/root-identity cut is runtime database epoch 11; older
+workspace journals require the explicit runtime-history retirement ceremony and
+are never reinterpreted.
 
 The engine also keeps node trust separate from project/request trust. The
 `node_trust_store` is loaded only from persistent node configuration and is the
@@ -35,44 +54,67 @@ The policy has two modes:
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement or verification-to-exec path pinning.
   Daemon-owned processes still use attachment-before-execution; Lillux supplies
-  the direct target hold without an isolation backend.
+  the direct target hold without an isolation backend. When a finalized program
+  retains an admitted source closure or external realization, RyeOS gives that
+  process a daemon-private sparse input root and materializes the exact retained
+  bytes there by descriptor-safe reflink or bounded copy. A live launch with no
+  retained filesystem bindings keeps the ordinary live project path. This input
+  delivery is not a substitute for OS isolation: disabled mode still provides no
+  confinement from other host paths visible to the process.
 - `mode: enforce` applies the complete policy and refuses the launch if any
   requested control cannot be enforced.
 
-## Default policy
+## Explicit disabled policy member
 
 ```yaml
-version: 1
-mode: disabled
-backend: null
-filesystem:
-  readable:
-    - "{node_public_identity}"
-    - "{daemon_socket}"
-    - "{bundle_roots}"
-    - "{node_trusted_keys}"
-    - "{verified_code}"
-  writable:
-    - "{project}"
-    - "{checkpoint_dir}"
-network:
-  mode: host
-environment:
-  allow:
-    - "*"
-limits:
-  open_files: 1024
-  stdout_bytes: 8388608
-  stderr_bytes: 8388608
-  verified_artifact_file_bytes: 67108864
-  verified_artifact_total_bytes: 268435456
-  verified_artifact_files: 4096
+schema: 1
+policy:
+  version: 1
+  mode: disabled
+  backend: null
+  filesystem:
+    readable:
+      - "{node_public_identity}"
+      - "{daemon_socket}"
+      - "{bundle_roots}"
+      - "{node_trusted_keys}"
+      - "{verified_code}"
+    writable:
+      - "{project}"
+      - "{checkpoint_dir}"
+  network:
+    mode: host
+  environment:
+    allow:
+      - "*"
+  limits:
+    open_files: 1024
+    stdout_bytes: 8388608
+    stderr_bytes: 8388608
+    verified_artifact_file_bytes: 67108864
+    verified_artifact_total_bytes: 268435456
+    verified_artifact_files: 4096
 ```
 
-The default is deliberately inert. To opt in, install a signed backend bundle,
-select its bundle and implementation in the policy, change the node-owned mode
-to `enforce`, run
-`ryeos node doctor`, and restart the node.
+This is an explicit policy choice, not a Rust fallback. To opt in, install a
+signed backend bundle, select its bundle and implementation in the replacement
+policy generation, change the mode to `enforce`, run `ryeos node doctor`, and
+restart the node.
+
+`--pin-project` remains the explicit complete-project snapshot/COW workflow. It
+does not control ordinary admitted source or external-content delivery, and is
+not required merely to run a definition that already retains those exact bytes.
+Sparse admitted-input roots are process inputs and scratch, not project
+publication. Their writes are discarded at process cleanup and never fold back
+to the live project. Durable outputs use structured results or explicit
+daemon-owned authoring, vault, and bundle-event callbacks; generic opaque file
+ingest is not currently a runtime callback contract.
+The signed node execution config also sets
+`node.max_private_materialization_copy_bytes`. It is one aggregate allowance
+per private materialization transaction when filesystem reflinks are
+unavailable; zero, missing, malformed, or untrusted values refuse node startup.
+The `ryeos.metrics` summary reports reflink/copy counts, copied bytes, allowance
+remaining, and materialization time without exposing host paths.
 The daemon loads one immutable policy generation at startup; editing the file
 does not change a running daemon. The daemon-backed `ryeos daemon status`
 surface (`service:node/status`) reports the loaded mode, version, source, and

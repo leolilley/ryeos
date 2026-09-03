@@ -1,0 +1,20 @@
+# ryeos:signed:2026-08-27T11:46:10Z:3d91778d77b0d34548b228d2e6f11050082a1f3247e0eba3b2e17b3bd1e89656:G4ytOtFhw/j67g5qz+oqpWSinltNQAjZR5gdEAybqu2bT5DxUlBMLsqcbvl326E/JnjXFGtFeAX+82XIUqOQDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex/environments
+schema: ryeos.worker_environment.v2
+worker_ref: worker:codex/hosted
+external_content:
+  - id: developer-tools
+    kind: tree
+    mode: pinned
+    digest: f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5
+    metadata_hint: openai-codex-developer-tools-v0.147.0-x86_64-unknown-linux-musl
+    mount: environment/developer-tools
+configuration:
+  executable_search:
+    - realization_id: developer-tools
+      relative_directory: bin
+credential_requirement:
+  workload_family: codex
+  required_state: active
+  subject_projection_contract: codex.account.v1
+portable_state_contract: ryeos.worker_session.restore.v1

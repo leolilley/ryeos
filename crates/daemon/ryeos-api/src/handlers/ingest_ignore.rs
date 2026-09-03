@@ -17,20 +17,11 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
-    let config_path = state
-        .config
-        .app_root
-        .join(ryeos_app::ignore::IGNORE_CONFIG_RELATIVE);
-
-    if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content)?;
-        Ok(serde_json::to_value(yaml)?)
-    } else {
-        // Return builtin defaults
-        let patterns = ryeos_app::ignore::builtin_patterns();
-        Ok(serde_json::json!({ "patterns": patterns }))
-    }
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>(
+    )?;
+    Ok(serde_json::to_value(&policy.effective_config)?)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

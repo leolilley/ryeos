@@ -1,0 +1,311 @@
+name: Publish local-inference realizations
+
+on:
+  push:
+    tags:
+      - "local-inference-qwen3-0.6b-v1"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Exact immutable realization tag"
+        required: true
+        default: "local-inference-qwen3-0.6b-v1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-inference-qwen3-0.6b-v1-publish
+  cancel-in-progress: false
+
+env:
+  EXPECTED_TAG: local-inference-qwen3-0.6b-v1
+  CONTRACT: scripts/release/local-inference-qwen3-0.6b-v1.json
+
+jobs:
+  build-realizations:
+    name: Author and functionally qualify exact realization assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Validate exact release source
+        id: source
+        run: |
+          test "$RELEASE_TAG" = "$EXPECTED_TAG" || {
+            echo "::error::Unsupported local-inference realization tag: $RELEASE_TAG"
+            exit 1
+          }
+          TAG_COMMIT="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
+          echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Install authoring dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils python3 python3-yaml zstd
+
+      - name: Verify source-owned release contract
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 bundles/local-inference/test_contract.py
+
+      - name: Author deterministic final realizations
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/local-inference-realizations"
+          CACHE_DIR="$RUNNER_TEMP/local-inference-authoring-cache"
+          test ! -e "$ARTIFACT_DIR"
+          python3 scripts/release/author-local-inference-realizations.py \
+            --cache "$CACHE_DIR" \
+            --output "$ARTIFACT_DIR"
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --asset-dir "$ARTIFACT_DIR"
+          rm -rf -- "$CACHE_DIR"
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      # The exact third-party runtime/model is executed only in this
+      # read-only, no-secret job. It cannot publish or promote anything.
+      - name: Functionally qualify the exact worker and model fixture
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/local-inference-realizations"
+          WORKSPACE="$RUNNER_TEMP/local-inference-worker-qualification"
+          test ! -e "$WORKSPACE"
+          mkdir -p "$WORKSPACE/worker"
+          cp -a bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad/. "$WORKSPACE/worker/"
+          install -m 0644 bundles/local-inference/tests/tinygrad_qwen/test_worker.py "$WORKSPACE/worker/_test_worker.py"
+          for component in runtime tinygrad toolchain model
+          do
+            mkdir "$WORKSPACE/$component"
+            tar --extract --gzip \
+              --file "$ARTIFACT_DIR/ryeos-local-inference-qwen3-0.6b-$component-v1.tar.gz" \
+              --directory "$WORKSPACE/$component" \
+              --strip-components=1 \
+              --no-same-owner
+          done
+          (
+            cd "$WORKSPACE"
+            env -i \
+              HOME="$WORKSPACE/scratch/home" \
+              PYTHONHOME="$WORKSPACE/runtime/python" \
+              PYTHONHASHSEED=0 \
+              PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONNOUSERSITE=1 \
+              PYTHONSAFEPATH=1 \
+              RYEOS_LOCAL_WORKER_TEST_WORKSPACE="$WORKSPACE" \
+              RYEOS_RUN_MODEL_GOLDENS=1 \
+              DEV=CPU \
+              CACHELEVEL=0 \
+              CCACHE=0 \
+              LANG=C \
+              LC_ALL=C \
+              "$WORKSPACE/runtime/lib/ld-musl-x86_64.so.1" \
+              --library-path "$WORKSPACE/runtime/lib" \
+              "$WORKSPACE/runtime/python/bin/python3.14" \
+              -P -S "$WORKSPACE/worker/_test_worker.py"
+          )
+          RYEOS_LOCAL_WORKER_TEST_WORKSPACE="$WORKSPACE" \
+            python3 bundles/local-inference/tests/tinygrad_qwen/test_session_protocol.py
+          rm -rf -- "$WORKSPACE"
+
+          # Recheck the complete upload payload after the subject has exited.
+          # A fresh privileged job repeats this from its exact source checkout.
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --asset-dir "$ARTIFACT_DIR"
+
+      - name: Transfer exact assets to the isolated publication job
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: local-inference-release-assets
+          path: ${{ runner.temp }}/local-inference-realizations/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish-prerelease:
+    name: Publish exact immutable prerelease
+    needs: build-realizations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      SOURCE_SHA: ${{ needs.build-realizations.outputs.source_sha }}
+    steps:
+      - name: Check out exact trusted publication source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.build-realizations.outputs.source_sha }}
+
+      - name: Download authored asset payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: local-inference-release-assets
+          path: ${{ runner.temp }}/local-inference-realizations
+
+      - name: Revalidate exact source and every transferred byte
+        run: |
+          test "$RELEASE_TAG" = "$EXPECTED_TAG"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$SOURCE_SHA"
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --asset-dir "$RUNNER_TEMP/local-inference-realizations"
+
+      - name: Settle a recoverable private draft without clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/local-inference-realizations"
+          RELEASE_JSON="$RUNNER_TEMP/local-inference-release.json"
+          RELEASE_PAGES="$RUNNER_TEMP/local-inference-release-pages.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RELEASE_PAGES"
+          RELEASE_ID="$(python3 - "$RELEASE_PAGES" "$RELEASE_TAG" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          pages = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          matches = [
+              release
+              for page in pages
+              for release in page
+              if release.get("tag_name") == sys.argv[2]
+          ]
+          if len(matches) > 1:
+              raise SystemExit("multiple releases occupy the immutable realization tag")
+          if matches:
+              print(matches[0]["id"])
+          PY
+          )"
+          if [[ -z "$RELEASE_ID" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$RELEASE_TAG" \
+              -f target_commitish="$SOURCE_SHA" \
+              -f name="RyeOS Qwen3-0.6B local-inference realizations v1" \
+              -f body="Exact publisher-authored realizations for the signed RyeOS local-inference fixture." \
+              -F draft=true \
+              -F prerelease=true \
+              -f make_latest=false > "$RELEASE_JSON"
+            RELEASE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RELEASE_JSON")"
+          fi
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RELEASE_JSON"
+
+          IS_DRAFT="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["draft"]).lower())' "$RELEASE_JSON")"
+          if [[ "$IS_DRAFT" == true ]]; then
+            # Interrupted first publication is recoverable only while private.
+            # Every extant asset must already be an exact expected byte string.
+            python3 scripts/release/verify-local-inference-release.py \
+              --contract "$CONTRACT" \
+              --release-json "$RELEASE_JSON" \
+              --allow-draft \
+              --allow-partial
+            while IFS= read -r name; do
+              if jq -e --arg name "$name" \
+                  '.assets[] | select(.name == $name)' "$RELEASE_JSON" >/dev/null; then
+                continue
+              fi
+              [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+              curl --proto '=https' --tlsv1.2 \
+                --fail-with-body --silent --show-error \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Content-Type: application/octet-stream" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --data-binary "@$ARTIFACT_DIR/$name" \
+                "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
+                >/dev/null
+            done < <(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 \
+              -type f -printf '%f\n' | LC_ALL=C sort)
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RELEASE_JSON"
+            python3 scripts/release/verify-local-inference-release.py \
+              --contract "$CONTRACT" \
+              --release-json "$RELEASE_JSON" \
+              --allow-draft
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              -F draft=false \
+              -F prerelease=true \
+              -f make_latest=false \
+              >/dev/null
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RELEASE_JSON"
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --release-json "$RELEASE_JSON"
+
+  qualify-online:
+    name: Qualify exact tag source against the public prerelease
+    needs:
+      - build-realizations
+      - publish-prerelease
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/qualify-local-inference-source.yml
+    with:
+      source_sha: ${{ needs.build-realizations.outputs.source_sha }}
+      require_promoted_release: false
+
+  promote:
+    name: Promote the independently qualified immutable release
+    needs:
+      - build-realizations
+      - publish-prerelease
+      - qualify-online
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      SOURCE_SHA: ${{ needs.build-realizations.outputs.source_sha }}
+    steps:
+      - name: Check out exact trusted promotion source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.build-realizations.outputs.source_sha }}
+
+      - name: Revalidate and promote current prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$RELEASE_TAG" = "$EXPECTED_TAG"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$SOURCE_SHA"
+          RELEASE_JSON="$RUNNER_TEMP/prepromotion-local-inference-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RELEASE_JSON"
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --release-json "$RELEASE_JSON"
+          if [[ "$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["prerelease"]).lower())' "$RELEASE_JSON")" == true ]]; then
+            gh release edit "$RELEASE_TAG" --prerelease=false --latest=false
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RELEASE_JSON"
+          python3 scripts/release/verify-local-inference-release.py \
+            --contract "$CONTRACT" \
+            --release-json "$RELEASE_JSON" \
+            --require-promoted

@@ -7,6 +7,7 @@
 mod common;
 
 use common::DaemonHarness;
+use common::fast_fixture::register_config_fixture_bundle;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fast_fixture_boots_daemon_without_real_init() {
@@ -64,6 +65,40 @@ async fn fast_fixture_keys_are_deterministic() {
     assert_eq!(f1.publisher_fp(), f2.publisher_fp());
     assert_eq!(f1.node_fp(), f2.node_fp());
     assert_eq!(f1.user_fp(), f2.user_fp());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsigned_node_execution_limit_contributor_refuses_startup() {
+    let result = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| {
+            register_config_fixture_bundle(
+                state_path,
+                "unsigned-execution-limit",
+                fixture,
+                |bundle_root| {
+                    let directory = bundle_root.join(".ai/config/execution");
+                    std::fs::create_dir_all(&directory)?;
+                    std::fs::write(
+                        directory.join("execution.yaml"),
+                        "node:\n  max_live_fanout: 2\n  max_private_materialization_copy_bytes: 1024\n",
+                    )?;
+                    Ok(())
+                },
+            )
+        },
+        |_| {},
+    )
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("unsigned node-wide valve must refuse daemon startup"),
+        Err(error) => error,
+    };
+    let diagnostic = format!("{error:#}");
+    assert!(
+        diagnostic.contains("config must carry a signature trusted by this node"),
+        "unexpected startup refusal: {diagnostic}"
+    );
 }
 
 /// Byte-stability: every file the fast fixture pins must hash

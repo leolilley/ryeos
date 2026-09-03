@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-26T10:18:38Z:dbceb504ec956e8b4e63b0c8faf4e8742178036d7fde5131838caf8fc7261ad7:SfNOGR6e80AFcukdZKQ1RR6s/yxrvw5Z4VNP6IGQXYLBP1VSyN5/uPHGhQB7/oPvuIrHFhOPsCK8XGxXzOCZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, status]
+description: "Read the durable projection for one hosted worker session chain"
+forms:
+  - slots:
+      - field: chain_root_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/status
+  availability: daemon

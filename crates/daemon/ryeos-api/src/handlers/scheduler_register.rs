@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
-use ryeos_app::node_config::writer;
+use ryeos_app::node_document;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_scheduler::crontab;
@@ -351,7 +351,7 @@ impl<'a> ScheduleSourceMutation<'a> {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .context("schedule source filename must be UTF-8")?;
-        let bytes = writer::render_signed_node_item("schedules", schedule_id, body, identity)?;
+        let bytes = node_document::render_signed_item("schedules", schedule_id, body, identity)?;
         self.directory.atomic_write_if_same(
             &self.name,
             self.current_file.as_ref(),

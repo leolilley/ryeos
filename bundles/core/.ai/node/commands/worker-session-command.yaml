@@ -1,0 +1,17 @@
+# ryeos:signed:2026-08-26T10:18:38Z:cb515a07997397f7ca5dad444209609e4de6054cddbcdf282b8ef0f917ed2750:rsajCzLRM1MRZH/FuUiD2nKiPTP5pBXjDuJmnuK6jQ5EawFmeL615Dmi6f2QBwaeuqW0pCRywhJfRxPwNTW+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, command]
+description: "Send one idempotent typed command to a hosted worker session"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: idempotency_key
+      - field: route_id
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/command
+  availability: daemon

@@ -25,6 +25,7 @@ impl Walker {
             delay_ms,
             elapsed_ms,
             cost,
+            dispatch,
         } = outcome;
         // A failed attempt that will be retried: the same step lifecycle
         // a soft error emits (so the attempt is visible in the braid) plus
@@ -55,9 +56,11 @@ impl Walker {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
+            dispatch,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),

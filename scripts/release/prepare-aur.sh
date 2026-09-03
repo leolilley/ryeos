@@ -68,12 +68,14 @@ head_commit="$(git -C "$root" rev-parse HEAD)"
 verify_status="$(mktemp)"
 archive_entries=""
 archive_listing=""
+node_init_profile_tmp=""
 cleanup_aur() {
     local status="$1"
     ryeos_term_handle_exit "$status"
     [[ -z "$verify_status" ]] || rm -f "$verify_status"
     [[ -z "$archive_entries" ]] || rm -f "$archive_entries"
     [[ -z "$archive_listing" ]] || rm -f "$archive_listing"
+    [[ -z "$node_init_profile_tmp" ]] || rm -rf "$node_init_profile_tmp"
     return "$status"
 }
 trap 'cleanup_aur "$?"' EXIT
@@ -159,6 +161,53 @@ while IFS= read -r bundle; do
         exit 2
     }
 done < <(ryeos_bundle_set_names full)
+
+node_init_prefix="$bundle_root/.ai/node/init/"
+actual_node_init_children="$(awk -v prefix="$node_init_prefix" '
+    index($0, prefix) == 1 {
+        suffix = substr($0, length(prefix) + 1)
+        if (suffix == "") next
+        split(suffix, components, "/")
+        print components[1]
+    }
+' "$archive_entries" | sort -u)"
+[[ "$actual_node_init_children" == profiles ]] || {
+    ryeos_term_fail "bundle archive node init namespace contains unsupported authority inputs"
+    exit 2
+}
+grep -qx "$bundle_root/.ai/node/init/profiles/" "$archive_entries" || {
+    ryeos_term_fail "bundle archive is missing the node init-profile directory"
+    exit 2
+}
+! grep -qx "$bundle_root/.ai/node/init/profiles" "$archive_entries" || {
+    ryeos_term_fail "bundle archive node init-profile path is not a directory"
+    exit 2
+}
+node_init_profile_prefix="$bundle_root/.ai/node/init/profiles/"
+expected_node_init_profiles="$(ryeos_node_init_profile_file_names | sort)"
+actual_node_init_profiles="$(awk -v prefix="$node_init_profile_prefix" '
+    index($0, prefix) == 1 {
+        suffix = substr($0, length(prefix) + 1)
+        if (suffix == "") next
+        sub(/\/$/, "", suffix)
+        print suffix
+    }
+' "$archive_entries" | sort)"
+[[ "$actual_node_init_profiles" == "$expected_node_init_profiles" ]] || {
+    ryeos_term_fail "bundle archive has an incomplete or unsupported node init-profile inventory"
+    exit 2
+}
+node_init_profile_tmp="$(mktemp -d)"
+while IFS= read -r node_init_profile_name; do
+    tar -xOzf "$bundle_archive" \
+        "$node_init_profile_prefix$node_init_profile_name.yaml" \
+        > "$node_init_profile_tmp/$node_init_profile_name.yaml"
+    ryeos_validate_node_init_profile \
+        "$node_init_profile_name" "$node_init_profile_tmp/$node_init_profile_name.yaml" || {
+        ryeos_term_fail "bundle archive node init-profile contract is invalid: $node_init_profile_name"
+        exit 2
+    }
+done < <(ryeos_node_init_profile_names)
 
 official_fp="$("$root/scripts/release/official-publisher-fingerprint.sh")"
 root_trust_doc="$(tar -xOzf "$bundle_archive" "$bundle_root/.ai/PUBLISHER_TRUST.toml")"

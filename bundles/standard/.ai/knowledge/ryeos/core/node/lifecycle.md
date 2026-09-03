@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T05:16:49Z:d0e9dca3755f54960e42cd2cafe195a380bcd403a311965282eb7de796eea5e7:BtG2uPSqB6+6i0iDD7L+6uRn3Tw1dzzk7isPbjlblYIEAXyGDcr9Hi2GcSN/amgUQEiUZHTDRlHFZqIjq91bDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T08:05:37Z:4c7ff2a967ff1f88a6e96903bdf7923aa30a1f4d6eccb9af67d5ab804d4ddee9:YZObAGHim/ZHGUfD2GD1I3MMwxJYyt7OEn6YeGW8Eii20UJfjW7irYFRa0bsrDH23+u2m/Jc4NLOJpAccnP1Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
-version: "1.3.0"
+version: "1.4.1"
 description: >
   Local node lifecycle semantics owned by the ryeos-node crate: init,
   start, stop, status, liveness, daemon metadata, and CLI preflight.
@@ -15,7 +15,7 @@ lifecycle and bootstrap semantics. The supported user lifecycle surface
 is exactly four verbs:
 
 ```bash
-ryeos init
+ryeos init --node-profile full
 ryeos start
 ryeos stop
 ryeos node status
@@ -26,6 +26,13 @@ integration, and no separate probe command. `ryeos node status` is the only
 lifecycle read operation. Lifecycle operations are local-node operations
 and intentionally ignore `RYEOSD_URL`; that variable only steers normal
 daemon-backed dispatch.
+
+`full` above is the native-package distribution selector. Every fresh node
+requires one explicit publisher-signed init profile whose exact bundle inventory
+matches its distribution; image and package entrypoints select their mapped
+profile rather than asking Rust to infer policy from bundle presence. An already
+initialized node may rerun init without a selector only when its signed policy
+generation already exists.
 
 ## Public crate surface
 

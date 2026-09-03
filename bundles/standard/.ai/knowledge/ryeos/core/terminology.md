@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:20Z:3b063382492e5656927a12567a2964e65cff11f4fd7db58ee953552d206648cf:0d51MyxjVD4Dy8EGjEqB8Kt6ac5q+OBen/UrnoRram55yHpEDlJ7f+AN6mxQm7VJwEWhdR0gTKQWEYGjiiGXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:36Z:b676e9dc897e41b5436fb325168b66b6cf64017c0624fa07ad7efed3e6bbf80d:tyV++HqZdVIVwKtMAhfissuyWET5KG1V8WXWpW2Xiif4/7LSM+8I+sVqvhuFG90bkgn2aRfbJ8+LeB8eYxSpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -24,7 +24,7 @@ The Rust workspace produces 14 executables across 8 crates:
 | `ryeos-knowledge-runtime`     | `ryeos-knowledge-runtime`| Knowledge subprocess runtime     |
 | `ryeos-core-tools`            | `ryeos-tools`            | Unified tools (sign/fetch/verify)|
 | `rye-composer-extends-chain`  | `ryeos-handler-bins`     | Composer handler subprocess      |
-| `rye-composer-graph-permissions` | `ryeos-handler-bins`  | Composer handler subprocess      |
+| `ryeos-graph-effective-validator` | `ryeos-handler-bins` | Effective graph validator subprocess |
 | `rye-composer-identity`       | `ryeos-handler-bins`     | Composer handler subprocess      |
 | `rye-parser-yaml-document`    | `ryeos-handler-bins`     | Parser handler subprocess        |
 | `rye-parser-yaml-header-document` | `ryeos-handler-bins` | Parser handler subprocess        |

@@ -183,16 +183,19 @@ impl RyeOsCore {
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
         let subscribed_channels = |binding: &super::content::ViewBinding| {
+            let cursor_scope_depends_on_facet = binding.field_state.as_ref().is_some_and(|state| {
+                state.cursor_scope.subject.iter().any(|subject| {
+                    subject == &format!("@facet:{facet}")
+                        || subject.starts_with(&format!("@facet:{facet}."))
+                })
+            });
             binding
                 .sources
                 .iter()
                 .filter(|(_, source)| {
-                    let refresh = if source.refresh.is_null()
-                        || source
-                            .refresh
-                            .as_object()
-                            .is_some_and(|value| value.is_empty())
-                    {
+                    // Absent/null inherits the view policy; an explicit empty
+                    // object is a declaration of no per-source liveness.
+                    let refresh = if source.refresh.is_null() {
                         &binding.refresh
                     } else {
                         &source.refresh
@@ -201,6 +204,10 @@ impl RyeOsCore {
                         || serde_json::to_string(&source.params)
                             .unwrap_or_default()
                             .contains(&format!("@facet:{facet}"))
+                        || (cursor_scope_depends_on_facet
+                            && serde_json::to_string(&source.params)
+                                .unwrap_or_default()
+                                .contains("@field:cursor"))
                 })
                 .map(|(channel, _)| channel.clone())
                 .collect::<Vec<_>>()
@@ -235,6 +242,7 @@ impl RyeOsCore {
                 // a new route). Fence only subscribed named channels before
                 // resolving their new parameters; unrelated evidence stays
                 // mounted and keeps its accepted revision.
+                self.reset_field_replay_for_subject(&instance_key);
                 channels
                     .into_iter()
                     .flat_map(|channel| {
@@ -303,6 +311,34 @@ impl RyeOsCore {
 mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
+
+    #[test]
+    fn explicit_empty_source_refresh_disables_inherited_facet_liveness() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/static",
+            serde_json::json!({
+                "widget": "text",
+                "sources": {
+                    "default": {
+                        "ref": "service:test/static",
+                        "params": {},
+                        "refresh": {}
+                    }
+                },
+                "refresh": {"on_facet": "selection"}
+            }),
+        );
+        core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/static".to_string(),
+        });
+
+        assert!(
+            core.effects_for_facet("selection").is_empty(),
+            "an explicit per-source empty policy is not an inheritance fallback"
+        );
+    }
 
     #[test]
     fn invoke_affordance_ui_plane_writes_facet_and_refetches_subscribers() {
@@ -541,6 +577,69 @@ mod tests {
                         && params["chain_root_id"] == "T-root")),
             "timeline fetch uses the row's chain_root; got {effects:?}"
         );
+    }
+
+    #[test]
+    fn shipped_comparison_actions_merge_operands_and_fetch_only_when_complete() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let history: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml"
+        ))
+        .unwrap();
+        let comparison: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/runs/comparison.yaml"
+        ))
+        .unwrap();
+        core.views
+            .insert("view:ryeos/threads/history".to_string(), history);
+        core.views
+            .insert("view:ryeos/runs/comparison".to_string(), comparison);
+        core.workspace.add_tile(ViewSpec {
+            view_ref: "view:ryeos/runs/comparison".to_string(),
+        });
+
+        let left_effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/history".to_string(),
+                    affordance_id: "compare-left".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-left" }),
+                },
+            },
+        });
+        assert_eq!(
+            core.seat.fold().get("comparison").unwrap()["left_thread_id"],
+            "T-left"
+        );
+        assert!(
+            !left_effects.iter().any(|effect| matches!(
+                &effect.kind,
+                RyeOsEffectKind::FetchSource { source_ref, .. }
+                    if source_ref == "service:ui/ryeos-ui/field/comparison"
+            )),
+            "a missing right operand must suppress comparison fetch"
+        );
+
+        let right_effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/history".to_string(),
+                    affordance_id: "compare-right".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-right" }),
+                },
+            },
+        });
+        let fold = core.seat.fold();
+        let facet = fold.get("comparison").unwrap();
+        assert_eq!(facet["left_thread_id"], "T-left");
+        assert_eq!(facet["right_thread_id"], "T-right");
+        assert!(right_effects.iter().any(|effect| matches!(
+            &effect.kind,
+            RyeOsEffectKind::FetchSource { source_ref, params, .. }
+                if source_ref == "service:ui/ryeos-ui/field/comparison"
+                    && params["left_thread_id"] == "T-left"
+                    && params["right_thread_id"] == "T-right"
+        )));
     }
 
     #[test]

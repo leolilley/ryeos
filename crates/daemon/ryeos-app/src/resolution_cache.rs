@@ -1194,7 +1194,16 @@ pub fn emit_resolution_cache_metric(
     reason: Option<ResolutionCacheReason>,
     entry_bytes: usize,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: metric.as_str(),
+        namespace: Some(phase.as_str()),
+        outcome: outcome.as_str(),
+        reason: reason.map(ResolutionCacheReason::as_str),
+        source_bytes: 0,
+        entry_bytes,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = metric.as_str(),
         phase = phase.as_str(),
@@ -1880,6 +1889,13 @@ mod tests {
             resolved_ref: "tool:x".into(),
             source_path,
             source_space: space,
+            source_root: match space {
+                ItemSpace::Project => ryeos_engine::contracts::ItemSourceRoot::Project,
+                ItemSpace::Bundle => ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
+                ItemSpace::Node => ryeos_engine::contracts::ItemSourceRoot::Node,
+            },
             trust_class: match space {
                 ItemSpace::Project => TrustClass::TrustedProject,
                 ItemSpace::Bundle => TrustClass::TrustedBundle,

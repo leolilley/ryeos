@@ -1,0 +1,18 @@
+# ryeos:signed:2026-08-11T02:28:26Z:51a85e27c69ebe8998a59b3072457d457809931df8c8a734c2e3869cafa8ff3b:Rd4nSdsB/lq0xC0JFuY8KASnJwb8A6+VellKl8srmDKt7BTtCG+FFI3NjSEWXPgLpZLKO504PJwHnblbp5fFDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos-runtime/hooks
+schema: ryeos.hooks.source.v1
+builtin:
+  requires:
+    capabilities:
+      declared: []
+  hooks: []
+infrastructure:
+  requires:
+    capabilities:
+      declared: []
+  hooks: []
+context:
+  requires:
+    capabilities:
+      declared: []
+  hooks: []

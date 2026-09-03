@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:24:30Z:8997fef31bff96e5cd6aae2cf167ff539064c3b0a2fe9a695ebb79910484de6b:OfrKbDNbwjyiF2MwN9HPdaZAqWRuNz+IJs0FhxDokwCmxgBNaYITis5M5mymle2qe3gonA7pRyGMIxjqEE5TDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:23Z:9fd2f6f2fe461a94734ba682814c56f24b31bd29779d38adb7b5676c44402d63:omdNZZHs4+ZK3GCaxGnMFZ+Pn8veNQRcuyF/i6aQvAU4o6Ath2NSQ6gKNT809j3aweVzebpOBOHV6XiaSahuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -38,33 +38,101 @@ execution:
     # *follow* — a graph driving and polling a CHILD's continuation to terminal —
     # is a separate capability and grants the parent no operator follow-up.
     supports_operator_followup: false
+  hooks:
+    authored_path: [config, hooks]
+    plan_derived: effective_hook_plan
+    events:
+      graph_started:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, graph_id, graph_run_id, state, inputs]
+        allowed_results: [discard, observation]
+      graph_step_completed:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, graph_id, graph_run_id, node, step, status, state, error]
+        allowed_results: [discard, observation]
+      graph_completed:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, graph_id, graph_run_id, status, settled, steps, success, state, inputs]
+        allowed_results: [discard, observation]
+  # Items of this kind may declare top-level `external_content`: content
+  # outside the signed closure that must be captured into CAS at admission
+  # and executed from its realization. The reserved derived slot carries the
+  # realized set into the effective digest; descendants inherit it.
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: [project_files]
+    max_declarations: 4
+  effective_validator:
+    handler: handler:ryeos/core/graph-effective-validator
+    config: {}
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-# Graph permissions composer — lifts `requires.capabilities.declared` from the
-# graph item into `policy_facts.effective_caps` so the daemon-side callback cap
-# enforcement gates graph action callbacks the same way it gates directive tool
-# callbacks, and rejects a legacy top-level `permissions:` block.
-composer: handler:ryeos/core/graph-permissions
+composer: handler:ryeos/core/extends-chain
+composer_config:
+  extends_field: extends
+  fields:
+    - name: version
+      strategy: root_verbatim
+      required: true
+      expect_value_type: string
+    - name: category
+      strategy: root_verbatim
+      required: true
+      expect_value_type: string
+    - name: description
+      strategy: replace_root_last
+      expect_value_type: string
+    # Shallow root-last mapping merge. Each config key is inherited or
+    # replaced atomically; node maps and hook lists are never deep-merged.
+    - name: config
+      strategy: dict_merge_root_last
+      required: true
+      expect_value_type: mapping
+    - name: requires
+      strategy: narrow_requires_capabilities
+      expect_value_type: mapping
+    # Atomic inherit-or-replace: a child's declaration replaces the inherited
+    # set entirely; explicit `[]` declares none and is preserved as such.
+    - name: external_content
+      strategy: replace_root_last
+      expect_value_type: array
+  policy_facts:
+    - name: effective_caps
+      path: [requires, capabilities, declared]
+      expect: array_of_strings
 composed_value_contract:
   root_type: mapping
-  required: {}
-  optional:
-    description:
+  required:
+    version:
+      type: single
+      prim: string
+    category:
       type: single
       prim: string
     config:
       type: single
       prim: mapping
-    # Unified capability requirements: `declared` (self-asserted action
-    # authority, lifted into effective_caps by the graph-permissions composer)
-    # and `manifest` (runtime authority minted from the signed manifest at
-    # launch). Graph composition is leaf-only — no ancestor narrowing.
+  optional:
+    extends:
+      type: union
+      prims: [string, "null"]
+    description:
+      type: single
+      prim: string
+    # Unified capability requirements narrowed across every direct ancestor
+    # edge and finally bounded by the signed manifest at launch.
     requires:
       type: single
       prim: mapping
+    external_content:
+      type: single
+      prim: array
 metadata:
   rules:
     name:

@@ -41,7 +41,10 @@ struct GcRunInput<'a> {
     cas_guard: &'a ryeos_state::CasMutationGuard,
     signer: &'a NodeIdentitySigner,
     params: &'a GcParams,
+    external_content_limits:
+        ryeos_app::node_policy::sections::external_content::ExternalContentImportLimits,
     state_store: &'a ryeos_app::state_store::StateStore,
+    accounting: Option<&'a ryeos_app::accounting_db::AccountingDb>,
     scheduler_db: &'a ryeos_scheduler::SchedulerDb,
     fire_retention: Option<gc::retention::FireRetentionPolicy>,
     reaped_seats: usize,
@@ -206,7 +209,13 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     // drain, without ever carrying that guard across an await.
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let params_clone = params.clone();
+    let external_content_limits = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .limits
+        .clone();
     let state_store = state.state_store.clone();
+    let accounting = state.accounting.clone();
     let scheduler_db = state.scheduler_db.clone();
     let state_authority = state
         .state_store
@@ -238,7 +247,9 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                 cas_guard: &cas_guard,
                 signer: &signer,
                 params: &params_clone,
+                external_content_limits,
                 state_store: &state_store,
+                accounting: accounting.as_deref(),
                 scheduler_db: &scheduler_db,
                 fire_retention,
                 reaped_seats,
@@ -298,10 +309,18 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         .send(GcWorkerCommand::Run(write_barrier_resume))
         .context("GC guard worker stopped before run command")?;
     drop(command_tx);
-    let mut gc_result = gc_worker
-        .await
-        .context("GC blocking task panicked")??
-        .ok_or_else(|| anyhow::anyhow!("GC guard worker aborted before running"))?;
+    let worker_result = gc_worker.await.context("GC blocking task panicked")?;
+    let mut gc_result = match worker_result {
+        Ok(Some(result)) => result,
+        Ok(None) => anyhow::bail!("GC guard worker aborted before running"),
+        Err(error) => {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "maintenance GC pipeline failed"
+            );
+            return Err(error);
+        }
+    };
     gc_result.reaped_seats = reaped_seats;
     gc_result.terminal_chain_candidates = terminal_chain_candidates;
     gc_result.retired_terminal_chains = retired_terminal_chains;
@@ -320,7 +339,9 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         cas_guard,
         signer,
         params,
+        external_content_limits,
         state_store,
+        accounting,
         scheduler_db,
         fire_retention,
         reaped_seats,
@@ -335,6 +356,31 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
     // The worker already owns the exclusive cross-process guard and the daemon
     // write barrier is quiesced. Every unresolved Set/Remove closure remains a
     // temporary root until its compare-acknowledged journal record is removed.
+    // Effect-record retention runs before root gathering so a pruned row's
+    // object is sweepable in this same pass. The cap is a row count: results
+    // are bounded per record, and the CAS bytes follow the rows.
+    const MAX_EFFECT_RECORDS: usize = 10_000;
+    const MAX_PROVIDER_CALL_RECORDS: usize = 10_000;
+    let provider_namespace = ryeos_state::ReplayIndexNamespace::new(
+        ryeos_provider_contract::PROVIDER_CALL_REPLAY_NAMESPACE,
+    )?;
+    let effect_namespace =
+        ryeos_state::ReplayIndexNamespace::new(ryeos_effect_contract::EFFECT_REPLAY_NAMESPACE)?;
+    let pruned_provider_call_records = state_store
+        .with_state_db(|db| db.prune_replay_records(&provider_namespace, MAX_PROVIDER_CALL_RECORDS))
+        .context("prune provider call record retention")?;
+    if pruned_provider_call_records > 0 {
+        tracing::info!(
+            pruned_provider_call_records,
+            "provider-call-record retention pruned rows"
+        );
+    }
+    let pruned_effect_records = state_store
+        .with_state_db(|db| db.prune_replay_records(&effect_namespace, MAX_EFFECT_RECORDS))
+        .context("prune stale effect records before CAS sweep")?;
+    if pruned_effect_records > 0 {
+        tracing::info!(pruned_effect_records, "effect-record retention pruned rows");
+    }
     let mut operational_object_roots = state_store
         .with_state_db(|db| db.pending_transition_object_roots())
         .context("read pending chain-head transition roots before CAS sweep")?
@@ -358,6 +404,21 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
                 operational_blob_roots.insert(entry.hash);
             }
         }
+    }
+    // Indexed effect records are replay authority: they stay reachable
+    // exactly as long as their index rows exist, and retention is row
+    // deletion followed by an ordinary sweep.
+    operational_object_roots.extend(
+        state_store
+            .with_state_db(|db| db.list_replay_record_hashes())
+            .context("read durable replay record roots before sweep")?,
+    );
+    if let Some(accounting) = accounting {
+        operational_object_roots.extend(
+            accounting
+                .provider_evidence_object_roots()
+                .context("read durable provider evidence roots before sweep")?,
+        );
     }
     let operational_roots = gc::AdditionalCasRoots {
         object_hashes: operational_object_roots.into_iter().collect(),
@@ -449,14 +510,56 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         ryeos_executor::execution::cache::MaterializationPruneReport::default()
     };
 
-    let mut result = gc::run_gc_with_pinned_authority(
-        state_authority,
-        cas_guard,
-        Some(signer),
-        params,
-        &operational_roots,
-    )
-    .context("GC pipeline failed")?;
+    let run_gc = || {
+        gc::run_gc_with_pinned_authority(
+            state_authority,
+            cas_guard,
+            Some(signer),
+            params,
+            &operational_roots,
+        )
+        .context("GC pipeline failed")
+    };
+    let mut result = if params.compact && !params.dry_run {
+        state_store.with_project_head_compaction_authority(run_gc)?
+    } else {
+        run_gc()?
+    };
+    let limits = external_content_limits;
+    let store = if params.dry_run {
+        ryeos_state::LargeObjectStore::open_under(state_authority.runtime_directory())?
+    } else {
+        Some(state_authority.large_object_store()?)
+    };
+    if let Some(store) = store {
+        let capacity = store.filesystem_capacity()?;
+        let stored_bytes = store.total_stored_bytes()?;
+        let reserve_shortfall = limits
+            .minimum_free_bytes
+            .saturating_sub(capacity.available_bytes);
+        let reserve_budget = stored_bytes.saturating_sub(reserve_shortfall);
+        let effective_budget = limits.store_budget_bytes.min(reserve_budget);
+        let sweep = store.sweep_to_budget_with_mode(
+            effective_budget,
+            &result.reachable_large_object_hashes,
+            params.dry_run,
+        )?;
+        let staging = store.sweep_abandoned_staging_with_mode(params.dry_run)?;
+        result.inspected_large_objects = sweep.inspected_objects;
+        result.deleted_large_objects = sweep.evicted.len();
+        result.deleted_large_object_staging_files = staging.files;
+        result.preserved_rooted_large_objects = sweep.retained_roots;
+        result.preserved_leased_large_objects = sweep.retained_leased;
+        result.freed_large_object_bytes = sweep
+            .evicted
+            .iter()
+            .fold(staging.bytes, |total, (_, bytes)| {
+                total.saturating_add(*bytes)
+            });
+        result.freed_bytes = result
+            .freed_bytes
+            .saturating_add(result.freed_large_object_bytes);
+    }
     result.deleted_runtime_files = runtime_cleanup
         .deleted_runtime_files
         .saturating_add(materialization_cleanup.reclaimable_files);
@@ -511,8 +614,15 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
                 roots_walked: result.roots_walked,
                 reachable_objects: result.reachable_objects,
                 reachable_blobs: result.reachable_blobs,
+                reachable_large_objects: result.reachable_large_objects,
                 deleted_objects: result.deleted_objects,
                 deleted_blobs: result.deleted_blobs,
+                inspected_large_objects: result.inspected_large_objects,
+                deleted_large_objects: result.deleted_large_objects,
+                deleted_large_object_staging_files: result.deleted_large_object_staging_files,
+                preserved_rooted_large_objects: result.preserved_rooted_large_objects,
+                preserved_leased_large_objects: result.preserved_leased_large_objects,
+                freed_large_object_bytes: result.freed_large_object_bytes,
                 deleted_cas_staging_files: result.deleted_cas_staging_files,
                 deleted_runtime_files: result.deleted_runtime_files,
                 deleted_fire_records: result.deleted_fire_records,

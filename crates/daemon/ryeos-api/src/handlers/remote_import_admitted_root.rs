@@ -13,7 +13,7 @@ use crate::remote::import::{self, VerifiedRemoteImportRequest};
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-const DEFAULT_POLICY: &str = "local-node-v1";
+const DEFAULT_POLICY: &str = super::admission_submit::LOCAL_ADMISSION_POLICY;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,17 +93,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             expected_attestation_hash: req.expected_attestation_hash,
             source_peer: Some(remote_cfg.name.clone()),
             job_id: None,
-            closure_options: ObjectsClosureRequestOptions {
-                max_objects: req.max_objects,
-                max_blobs: req.max_blobs,
-                max_object_bytes: req.max_object_bytes,
-                max_total_object_bytes: req.max_total_object_bytes,
-                max_blob_bytes: req.max_blob_bytes,
-                max_total_blob_bytes: req.max_total_blob_bytes,
-                max_response_bytes: req.max_response_bytes,
-                max_links_per_object: req.max_links_per_object,
-                allow_incomplete: false,
-            },
+            closure_options:
+                crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
+                    &state,
+                    ObjectsClosureRequestOptions {
+                        max_objects: req.max_objects,
+                        max_blobs: req.max_blobs,
+                        max_object_bytes: req.max_object_bytes,
+                        max_total_object_bytes: req.max_total_object_bytes,
+                        max_blob_bytes: req.max_blob_bytes,
+                        max_total_blob_bytes: req.max_total_blob_bytes,
+                        max_response_bytes: req.max_response_bytes,
+                        max_links_per_object: req.max_links_per_object,
+                        allow_incomplete: false,
+                        allow_untransported_large_objects: false,
+                    },
+                )?,
         },
     )
     .await?;

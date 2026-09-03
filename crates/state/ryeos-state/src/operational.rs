@@ -10,12 +10,20 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 1;
+const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
+// Dispatch-effect records retain complete launch and caller authority. Epoch 8
+// is the clean-cut activation for launch-capsule schema 18, which seals the
+// exact target-node operator grant used by a remotely adopted invocation.
+// Predecessor rows cannot prove that authority and must be retired.
+// Provider-call records do not carry that dependency and remain current.
+const REPLAY_INDEX_EPOCH: i32 = 8;
+#[cfg(test)]
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 18;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -23,7 +31,7 @@ const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=1;
+PRAGMA user_version=6;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -46,6 +54,7 @@ CREATE INDEX idx_cas_entries_job_id ON cas_entries(job_id);
 CREATE TABLE sync_jobs (
     job_id TEXT PRIMARY KEY,
     operation_type TEXT NOT NULL,
+    operation_json BLOB NOT NULL DEFAULT X'7B7D',
     peer TEXT,
     state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
     phase TEXT NOT NULL,
@@ -103,6 +112,222 @@ CREATE INDEX idx_admission_attestations_policy ON admission_attestations(policy)
 CREATE INDEX idx_admission_attestations_issuer ON admission_attestations(issuer);
 CREATE INDEX idx_admission_attestations_subject_policy_claim_issuer
     ON admission_attestations(subject_hash, policy, claim, issuer);
+
+CREATE TABLE replay_records (
+    namespace TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    answer_digest TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, cache_key)
+);
+
+CREATE INDEX idx_replay_records_retention
+    ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
+CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
+
+CREATE TABLE replay_index_epoch (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch INTEGER NOT NULL CHECK (epoch > 0)
+);
+
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 8);
+
+CREATE TABLE credential_profiles (
+    profile_id TEXT PRIMARY KEY,
+    owner_principal TEXT NOT NULL,
+    home_id TEXT NOT NULL UNIQUE,
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0),
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    state TEXT NOT NULL CHECK (state IN (
+        'unauthenticated', 'enrolling', 'confirming', 'active',
+        'revoking', 'revoked', 'deleting', 'deleted'
+    )),
+    active_login_id TEXT,
+    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
+    login_expires_at_ms INTEGER,
+    sanitized_account_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX idx_credential_profiles_owner_state
+    ON credential_profiles(owner_principal, state);
+"#;
+
+/// Schema-v5 addition: credential-profile lifecycle authority is stable node
+/// state, not disposable execution history. RuntimeDb retains only the live
+/// projection needed for session/lease transactions. A monotonically
+/// increasing revision makes a crash between the two SQLite commits
+/// recoverable without guessing from timestamps or provider-owned files.
+const CREDENTIAL_PROFILES_DDL: &str = r#"
+CREATE TABLE credential_profiles (
+    profile_id TEXT PRIMARY KEY,
+    owner_principal TEXT NOT NULL,
+    home_id TEXT NOT NULL UNIQUE,
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0),
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    state TEXT NOT NULL CHECK (state IN (
+        'unauthenticated', 'enrolling', 'confirming', 'active',
+        'revoking', 'revoked', 'deleting', 'deleted'
+    )),
+    active_login_id TEXT,
+    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
+    login_expires_at_ms INTEGER,
+    sanitized_account_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX idx_credential_profiles_owner_state
+    ON credential_profiles(owner_principal, state);
+"#;
+
+/// Schema-v6 addition: a durable sync job retains the immutable canonical
+/// operation it is coordinating. Phases and mutable roots remain recovery
+/// progress; they are never allowed to manufacture the caller, peer, or
+/// authority operands after a crash.
+const SYNC_JOB_OPERATION_DDL: &str = r#"
+ALTER TABLE sync_jobs ADD COLUMN operation_json BLOB NOT NULL DEFAULT X'7B7D';
+"#;
+
+// Exact sync-job fragments used to prove and atomically rebuild the one
+// non-additive part of the v5→v6 migration. `ALTER TABLE ADD COLUMN` appends
+// the new column, while fresh v6 stores place the immutable operation beside
+// its type. The migration therefore admits only the exact v5 fragment (or the
+// exact appended-column intermediate produced by the original v6 migrator),
+// then rebuilds the table into the same SQL and column order as `SCHEMA_SQL`.
+const SYNC_JOBS_V5_DDL: &str = r#"
+CREATE TABLE sync_jobs (
+    job_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    peer TEXT,
+    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
+    phase TEXT NOT NULL,
+    roots_json BLOB NOT NULL,
+    heads_json BLOB NOT NULL,
+    uploaded_hashes_json BLOB NOT NULL,
+    fetched_hashes_json BLOB NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
+    last_error TEXT,
+    result_json BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX idx_sync_jobs_state ON sync_jobs(state);
+CREATE INDEX idx_sync_jobs_operation_type ON sync_jobs(operation_type);
+CREATE INDEX idx_sync_jobs_peer ON sync_jobs(peer);
+"#;
+
+const SYNC_JOBS_V6_DDL: &str = r#"
+CREATE TABLE sync_jobs (
+    job_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    operation_json BLOB NOT NULL DEFAULT X'7B7D',
+    peer TEXT,
+    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
+    phase TEXT NOT NULL,
+    roots_json BLOB NOT NULL,
+    heads_json BLOB NOT NULL,
+    uploaded_hashes_json BLOB NOT NULL,
+    fetched_hashes_json BLOB NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
+    last_error TEXT,
+    result_json BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX idx_sync_jobs_state ON sync_jobs(state);
+CREATE INDEX idx_sync_jobs_operation_type ON sync_jobs(operation_type);
+CREATE INDEX idx_sync_jobs_peer ON sync_jobs(peer);
+"#;
+
+/// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
+/// test asserts this block appears verbatim inside `SCHEMA_SQL`, so a
+/// migrated store and a fresh store cannot drift apart.
+const EFFECT_RECORDS_DDL: &str = r#"
+CREATE TABLE effect_records (
+    cache_key TEXT PRIMARY KEY,
+    answer_digest TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
+CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+"#;
+
+/// Schema-v3 additions, applied verbatim by the v2→v3 forward migration,
+/// under the same verbatim-inside-`SCHEMA_SQL` assertion as v2's block.
+const PROVIDER_CALL_RECORDS_DDL: &str = r#"
+CREATE TABLE provider_call_records (
+    cache_key TEXT PRIMARY KEY,
+    answer_digest TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_provider_call_records_last_replayed ON provider_call_records(last_replayed_at);
+CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(record_hash);
+"#;
+
+/// The global operational layout can advance without translating runtime-only
+/// replay authority. A predecessor store receives only this marker; ordinary
+/// open then refuses until the operator explicitly activates the current
+/// replay contract.
+const REPLAY_INDEX_EPOCH_MARKER_DDL: &str = r#"
+CREATE TABLE replay_index_epoch (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch INTEGER NOT NULL CHECK (epoch > 0)
+);
+
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
+"#;
+
+/// Exact immediate-predecessor cut. Dispatch effects from epoch 6 omit the
+/// capsule-17 parent delegation ceiling; provider-call evidence is independent
+/// of that launch authority and remains current.
+const REPLAY_INDEX_RESET_DDL: &str = r#"
+DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
+"#;
+
+/// A skipped replay generation is not interpreted piecemeal. The explicit
+/// reset still succeeds, but discards every replay row because intermediate
+/// compatibility was not proven.
+const STALE_UNIFIED_REPLAY_INDEX_RESET_DDL: &str = r#"
+DELETE FROM replay_records;
+"#;
+
+/// A store upgraded directly from the pre-unified operational layout has no
+/// current namespace table to preserve. Its explicit clean cut discards both
+/// predecessor indexes before entering the current epoch; durable CAS objects
+/// remain.
+const LEGACY_REPLAY_INDEX_RESET_DDL: &str = r#"
+DROP TABLE effect_records;
+DROP TABLE provider_call_records;
+
+CREATE TABLE replay_records (
+    namespace TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    answer_digest TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, cache_key)
+);
+
+CREATE INDEX idx_replay_records_retention
+    ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
+CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -180,6 +405,12 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "operation_type",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_json",
+                        col_type: "BLOB",
                         pk: false,
                         not_null: true,
                     },
@@ -405,6 +636,141 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "replay_records",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "namespace",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cache_key",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "answer_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "record_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "produced_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_replayed_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "replay_index_epoch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "singleton",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "credential_profiles",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "profile_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "home_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "authority_revision",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "active_login_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sanitized_account_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -491,6 +857,24 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["subject_hash", "policy", "claim", "issuer"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_replay_records_retention",
+                table: "replay_records",
+                columns: &["namespace", "last_replayed_at", "produced_at", "cache_key"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_replay_records_record_hash",
+                table: "replay_records",
+                columns: &["record_hash"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profiles_owner_state",
+                table: "credential_profiles",
+                columns: &["owner_principal", "state"],
+                unique: false,
+            },
         ],
     }
 }
@@ -507,6 +891,209 @@ pub struct OperationalDb {
     _shm_file: Option<File>,
     _initialization_marker: Option<File>,
 }
+
+/// Stable, provider-neutral credential-profile lifecycle authority.
+///
+/// Opaque credential bytes stay in the daemon-owned private artifact home.
+/// This record carries only RyeOS ownership, fencing, and sanitized account
+/// evidence. `authority_revision` orders the stable record against the live
+/// RuntimeDb projection after a crash between their commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationalCredentialProfileRecord {
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub home_id: String,
+    pub authority_revision: u64,
+    pub credential_generation: u64,
+    pub state: String,
+    pub active_login_id: Option<String>,
+    pub login_epoch: u64,
+    pub login_expires_at_ms: Option<i64>,
+    pub sanitized_account: Option<serde_json::Value>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl OperationalCredentialProfileRecord {
+    pub fn is_deleted(&self) -> bool {
+        self.state == "deleted"
+    }
+}
+
+fn validate_operational_credential_profile(
+    profile: &OperationalCredentialProfileRecord,
+) -> Result<()> {
+    for (label, value) in [
+        ("credential profile id", profile.profile_id.as_str()),
+        ("credential profile owner", profile.owner_principal.as_str()),
+        ("credential profile home id", profile.home_id.as_str()),
+    ] {
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            anyhow::bail!("{label} is invalid");
+        }
+    }
+    if profile.authority_revision == 0 || profile.credential_generation == 0 {
+        anyhow::bail!("credential profile revisions and generations must be positive");
+    }
+    if !matches!(
+        profile.state.as_str(),
+        "unauthenticated"
+            | "enrolling"
+            | "confirming"
+            | "active"
+            | "revoking"
+            | "revoked"
+            | "deleting"
+            | "deleted"
+    ) {
+        anyhow::bail!("credential profile state is invalid: {}", profile.state);
+    }
+    if let Some(login_id) = profile.active_login_id.as_deref()
+        && (login_id.is_empty() || login_id.len() > 256 || login_id.chars().any(char::is_control))
+    {
+        anyhow::bail!("credential active login id is invalid");
+    }
+    if let Some(account) = profile.sanitized_account.as_ref() {
+        let encoded = lillux::canonical_json(account)?;
+        if encoded.len() > 16 * 1024 {
+            anyhow::bail!("sanitized credential account exceeds 16384 bytes");
+        }
+    }
+    if profile.created_at_ms < 0 || profile.updated_at_ms < 0 {
+        anyhow::bail!("credential profile timestamps must be non-negative");
+    }
+    if profile.state == "deleted"
+        && (profile.active_login_id.is_some()
+            || profile.login_expires_at_ms.is_some()
+            || profile.sanitized_account.is_some())
+    {
+        anyhow::bail!("deleted credential profile retains live lifecycle evidence");
+    }
+    Ok(())
+}
+
+fn operational_credential_profile_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<OperationalCredentialProfileRecord> {
+    let account_json = row.get::<_, Option<String>>(9)?;
+    let sanitized_account = account_json
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let authority_revision = u64::try_from(row.get::<_, i64>(3)?)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, -1))?;
+    let credential_generation = u64::try_from(row.get::<_, i64>(4)?)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, -1))?;
+    let login_epoch = u64::try_from(row.get::<_, i64>(7)?)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(7, -1))?;
+    Ok(OperationalCredentialProfileRecord {
+        profile_id: row.get(0)?,
+        owner_principal: row.get(1)?,
+        home_id: row.get(2)?,
+        authority_revision,
+        credential_generation,
+        state: row.get(5)?,
+        active_login_id: row.get(6)?,
+        login_epoch,
+        login_expires_at_ms: row.get(8)?,
+        sanitized_account,
+        created_at_ms: row.get(10)?,
+        updated_at_ms: row.get(11)?,
+    })
+}
+
+/// Opaque owner-chosen replay namespace. State validates and stores this key
+/// but assigns it no domain meaning; retention and strict object decoding stay
+/// with the owner above state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayIndexNamespace(String);
+
+impl ReplayIndexNamespace {
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 128
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+        {
+            anyhow::bail!("replay namespace is not canonical: {value}");
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayIndexRecord {
+    pub cache_key: String,
+    pub answer_digest: String,
+    pub record_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayRecordVerification {
+    Verified,
+    Unavailable { reason: String },
+    IntegrityFailure { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayLookupOutcome {
+    Absent,
+    Present(ReplayIndexRecord),
+    Unavailable { reason: String },
+    IntegrityFailure { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayPublishOutcome {
+    Inserted {
+        record_hash: String,
+    },
+    Folded {
+        record_hash: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+    IntegrityConflict {
+        existing_record_hash: String,
+        candidate_record_hash: String,
+    },
+    IntegrityFailure {
+        reason: String,
+    },
+}
+
+#[derive(Debug)]
+pub struct ReplayIndexActivationRequired {
+    pub stored: i32,
+    pub current: i32,
+}
+
+impl std::fmt::Display for ReplayIndexActivationRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "operational replay indexes use predecessor epoch {}, current epoch is {}; stop the daemon and run `ryeos node reset replay-indexes --confirm`",
+            self.stored, self.current
+        )
+    }
+}
+
+impl std::error::Error for ReplayIndexActivationRequired {}
 
 impl OperationalDb {
     /// Open the stable store at its protocol-owned runtime-state path.
@@ -620,6 +1207,27 @@ impl OperationalDb {
     /// migrating it.
     pub fn open_existing_current(path: &Path) -> Result<Self> {
         let db = Self::open_existing_owned(path)?;
+        assert_integrity(&db.conn, path)?;
+        Ok(db)
+    }
+
+    /// Explicit clean-cut activation for runtime-only replay indexes.
+    ///
+    /// This path is intentionally unavailable through ordinary open. The
+    /// caller must already have stopped the daemon and obtained node-state
+    /// ownership. It preserves every other operational table. For the exact
+    /// unified predecessor it retires only dispatch-effect rows and preserves
+    /// provider-call evidence; older pre-unified layouts are discarded as one
+    /// explicit clean cut.
+    pub fn open_for_explicit_replay_reset(path: &Path) -> Result<Self> {
+        let (directory, name) = pin_operational_parent(path, false)?;
+        let directory_lock = directory.lock_exclusive()?;
+        let db = Self::open_in_pinned_directory(
+            &directory,
+            &name,
+            OperationalOpenMode::ExistingReplayReset,
+            directory_lock,
+        )?;
         assert_integrity(&db.conn, path)?;
         Ok(db)
     }
@@ -764,6 +1372,11 @@ impl OperationalDb {
         if mode.may_initialize() && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
             sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, &path)?;
         }
+        if !mode.is_read_only() {
+            migrate_forward_if_owned(&conn, &path)?;
+        }
+        assert_operational_identity(&conn, &path)?;
+        enforce_replay_index_epoch(&conn, &path, mode.permits_replay_reset())?;
         assert_current(&conn, &path)?;
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -882,6 +1495,140 @@ impl OperationalDb {
     }
 }
 
+impl OperationalDb {
+    pub fn credential_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<OperationalCredentialProfileRecord>> {
+        if profile_id.is_empty() || profile_id.len() > 256 {
+            anyhow::bail!("credential profile id is invalid");
+        }
+        let profile = self
+            .conn
+            .query_row(
+                "SELECT profile_id, owner_principal, home_id, authority_revision,
+                        credential_generation, state, active_login_id, login_epoch,
+                        login_expires_at_ms, sanitized_account_json, created_at_ms,
+                        updated_at_ms
+                   FROM credential_profiles WHERE profile_id=?1",
+                [profile_id],
+                operational_credential_profile_from_row,
+            )
+            .optional()
+            .context("read stable credential profile")?;
+        if let Some(profile) = profile.as_ref() {
+            validate_operational_credential_profile(profile)?;
+        }
+        Ok(profile)
+    }
+
+    pub fn credential_profiles(&self) -> Result<Vec<OperationalCredentialProfileRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT profile_id, owner_principal, home_id, authority_revision,
+                    credential_generation, state, active_login_id, login_epoch,
+                    login_expires_at_ms, sanitized_account_json, created_at_ms,
+                    updated_at_ms
+               FROM credential_profiles ORDER BY profile_id",
+        )?;
+        let profiles = statement
+            .query_map([], operational_credential_profile_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for profile in &profiles {
+            validate_operational_credential_profile(profile)?;
+        }
+        Ok(profiles)
+    }
+
+    /// Fold a RuntimeDb projection into stable authority after a committed
+    /// lifecycle transition, or during startup recovery after a crash between
+    /// the runtime and operational commits.
+    pub fn merge_credential_profile(
+        &self,
+        candidate: &OperationalCredentialProfileRecord,
+    ) -> Result<OperationalCredentialProfileRecord> {
+        validate_operational_credential_profile(candidate)?;
+        let account_json = candidate
+            .sanitized_account
+            .as_ref()
+            .map(lillux::canonical_json)
+            .transpose()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin stable credential-profile merge")?;
+        let existing = tx
+            .query_row(
+                "SELECT profile_id, owner_principal, home_id, authority_revision,
+                        credential_generation, state, active_login_id, login_epoch,
+                        login_expires_at_ms, sanitized_account_json, created_at_ms,
+                        updated_at_ms
+                   FROM credential_profiles WHERE profile_id=?1",
+                [&candidate.profile_id],
+                operational_credential_profile_from_row,
+            )
+            .optional()?;
+        if let Some(existing) = existing.as_ref() {
+            if existing.owner_principal != candidate.owner_principal
+                || existing.home_id != candidate.home_id
+            {
+                anyhow::bail!("credential profile stable identity changed");
+            }
+            if existing.authority_revision > candidate.authority_revision {
+                tx.commit()?;
+                return Ok(existing.clone());
+            }
+            if existing.authority_revision == candidate.authority_revision {
+                let mut normalized_existing = existing.clone();
+                let mut normalized_candidate = candidate.clone();
+                // Runtime lock acquisition updates this presentation timestamp
+                // without advancing stable lifecycle authority.
+                normalized_existing.updated_at_ms = 0;
+                normalized_candidate.updated_at_ms = 0;
+                if normalized_existing != normalized_candidate {
+                    anyhow::bail!(
+                        "credential profile revision {} has divergent stable content",
+                        candidate.authority_revision
+                    );
+                }
+                tx.commit()?;
+                return Ok(existing.clone());
+            }
+        }
+        tx.execute(
+            "INSERT INTO credential_profiles (
+                profile_id, owner_principal, home_id, authority_revision,
+                credential_generation, state, active_login_id, login_epoch,
+                login_expires_at_ms, sanitized_account_json, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                authority_revision=excluded.authority_revision,
+                credential_generation=excluded.credential_generation,
+                state=excluded.state,
+                active_login_id=excluded.active_login_id,
+                login_epoch=excluded.login_epoch,
+                login_expires_at_ms=excluded.login_expires_at_ms,
+                sanitized_account_json=excluded.sanitized_account_json,
+                updated_at_ms=excluded.updated_at_ms",
+            rusqlite::params![
+                &candidate.profile_id,
+                &candidate.owner_principal,
+                &candidate.home_id,
+                i64::try_from(candidate.authority_revision)?,
+                i64::try_from(candidate.credential_generation)?,
+                &candidate.state,
+                &candidate.active_login_id,
+                i64::try_from(candidate.login_epoch)?,
+                candidate.login_expires_at_ms,
+                account_json,
+                candidate.created_at_ms,
+                candidate.updated_at_ms,
+            ],
+        )?;
+        tx.commit()
+            .context("commit stable credential-profile merge")?;
+        self.credential_profile(&candidate.profile_id)?
+            .ok_or_else(|| anyhow::anyhow!("merged credential profile disappeared"))
+    }
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")
         .context("enable operational foreign keys")?;
@@ -895,6 +1642,7 @@ enum OperationalOpenMode {
     CreateOrOpen,
     ExistingReadWrite,
     ExistingReadOnly,
+    ExistingReplayReset,
 }
 
 impl OperationalOpenMode {
@@ -908,6 +1656,10 @@ impl OperationalOpenMode {
 
     fn is_read_only(self) -> bool {
         matches!(self, Self::ExistingReadOnly)
+    }
+
+    fn permits_replay_reset(self) -> bool {
+        matches!(self, Self::ExistingReplayReset)
     }
 }
 
@@ -1197,6 +1949,412 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SyncJobSchemaEntry {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+fn sync_job_schema_entries(conn: &Connection) -> Result<Vec<SyncJobSchemaEntry>> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql
+           FROM sqlite_master
+          WHERE tbl_name='sync_jobs'
+          ORDER BY type, name",
+    )?;
+    statement
+        .query_map([], |row| {
+            Ok(SyncJobSchemaEntry {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read sync-job schema fragment")
+}
+
+fn sync_job_schema_matches(conn: &Connection, reference_ddl: &str) -> Result<bool> {
+    let reference = Connection::open_in_memory().context("open sync-job schema reference")?;
+    reference
+        .execute_batch(reference_ddl)
+        .context("build sync-job schema reference")?;
+    Ok(sync_job_schema_entries(conn)? == sync_job_schema_entries(&reference)?)
+}
+
+fn appended_sync_job_v6_ddl() -> String {
+    format!("{SYNC_JOBS_V5_DDL}\n{SYNC_JOB_OPERATION_DDL}")
+}
+
+fn backfill_legacy_sync_job_operations(conn: &Connection) -> Result<()> {
+    let legacy_jobs = {
+        let mut statement = conn
+            .prepare(
+                "SELECT job_id, operation_type, peer FROM sync_jobs WHERE operation_json = X'7B7D'",
+            )
+            .context("prepare legacy sync-job operation migration")?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (job_id, operation_type, peer) in legacy_jobs {
+        let operation = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "operation_type": operation_type,
+            "legacy_recovery": true,
+            "peer": peer,
+        }))?;
+        conn.execute(
+            "UPDATE sync_jobs SET operation_json = ? WHERE job_id = ? AND operation_json = X'7B7D'",
+            rusqlite::params![operation, job_id],
+        )
+        .context("retain canonical legacy sync-job operation")?;
+    }
+    Ok(())
+}
+
+/// Convert the exact v5 sync-job fragment, or the exact appended-column
+/// intermediate committed by the original v6 migrator, into the canonical v6
+/// table. Every row is retained. Pre-v6 jobs receive a typed, explicitly
+/// legacy operation envelope; the intermediate repair preserves the envelope
+/// it already wrote. No unknown schema is modified.
+fn migrate_sync_jobs_to_v6(
+    conn: &Connection,
+    path: &Path,
+    appended_column_present: bool,
+) -> Result<()> {
+    let expected = if appended_column_present {
+        appended_sync_job_v6_ddl()
+    } else {
+        SYNC_JOBS_V5_DDL.to_owned()
+    };
+    if !sync_job_schema_matches(conn, &expected)? {
+        anyhow::bail!(
+            "operational sync-job schema is not the exact recognized {} contract in {}; refusing forward migration",
+            if appended_column_present {
+                "v6 appended-column intermediate"
+            } else {
+                "v5 predecessor"
+            },
+            path.display()
+        );
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin operational v5→v6 sync-operation migration")?;
+    if !appended_column_present {
+        tx.execute_batch(SYNC_JOB_OPERATION_DDL)
+            .context("install durable sync-job operation payload")?;
+    }
+
+    // v5 rows predate immutable operation retention. Preserve their exact
+    // existing type and peer as explicitly marked legacy recovery evidence;
+    // never leave an untyped `{}` that a later reconciler could reinterpret as
+    // caller authority. The predicate makes repair of the committed
+    // appended-column intermediate idempotent.
+    backfill_legacy_sync_job_operations(&tx)?;
+
+    tx.execute_batch(
+        "DROP INDEX idx_sync_jobs_state;
+         DROP INDEX idx_sync_jobs_operation_type;
+         DROP INDEX idx_sync_jobs_peer;
+         ALTER TABLE sync_jobs RENAME TO sync_jobs_v6_predecessor;",
+    )
+    .context("retire predecessor sync-job table inside migration transaction")?;
+    tx.execute_batch(SYNC_JOBS_V6_DDL)
+        .context("create canonical durable sync-job table")?;
+    tx.execute_batch(
+        "INSERT INTO sync_jobs (
+             job_id, operation_type, operation_json, peer, state, phase,
+             roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
+             attempt_count, max_attempts, last_error, result_json,
+             created_at, updated_at, finished_at
+         )
+         SELECT job_id, operation_type, operation_json, peer, state, phase,
+                roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
+                attempt_count, max_attempts, last_error, result_json,
+                created_at, updated_at, finished_at
+           FROM sync_jobs_v6_predecessor;
+         DROP TABLE sync_jobs_v6_predecessor;",
+    )
+    .context("copy predecessor sync jobs into canonical table")?;
+    tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+        .context("stamp operational schema v6")?;
+    tx.commit()
+        .context("commit operational v5→v6 sync-operation migration")?;
+    Ok(())
+}
+
+/// Explicit atomic forward migration for the versioned operational store,
+/// per this store's charter: never reset, never archived, one transaction
+/// per schema step, using the same DDL fresh initialization uses. A store
+/// stamped NEWER than this binary is untouched and fails loudly downstream —
+/// that is an operator downgrade, not a cutover. A foreign application id is
+/// untouched for the same reason: the strict ownership check speaks.
+fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
+    let application_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read operational application id before migration")?;
+    if application_id != OPERATIONAL_APP_ID {
+        return Ok(());
+    }
+    loop {
+        let stored: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("read operational schema version before migration")?;
+        match stored {
+            v if v > OPERATIONAL_SCHEMA_VERSION => return Ok(()),
+            OPERATIONAL_SCHEMA_VERSION => {
+                if sync_job_schema_matches(conn, &appended_sync_job_v6_ddl())? {
+                    migrate_sync_jobs_to_v6(conn, path, true)?;
+                    tracing::warn!(
+                        path = %path.display(),
+                        "repaired exact operational v6 appended-column intermediate"
+                    );
+                }
+                return Ok(());
+            }
+            0 => return Ok(()),
+            1 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v1→v2 migration")?;
+                tx.execute_batch(EFFECT_RECORDS_DDL)
+                    .context("apply operational v1→v2 migration DDL")?;
+                tx.pragma_update(None, "user_version", 2)
+                    .context("stamp operational schema v2")?;
+                tx.commit().context("commit operational v1→v2 migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v1 → v2 (effect records)"
+                );
+            }
+            2 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v2→v3 migration")?;
+                tx.execute_batch(PROVIDER_CALL_RECORDS_DDL)
+                    .context("apply operational v2→v3 migration DDL")?;
+                tx.pragma_update(None, "user_version", 3)
+                    .context("stamp operational schema v3")?;
+                tx.commit().context("commit operational v2→v3 migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v2 → v3 (provider call records)"
+                );
+            }
+            3 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational schema-4 replay epoch marker migration")?;
+                tx.execute_batch(REPLAY_INDEX_EPOCH_MARKER_DDL)
+                    .context("install predecessor replay-index epoch marker")?;
+                tx.pragma_update(None, "user_version", 4)
+                    .context("stamp operational schema 4")?;
+                tx.commit()
+                    .context("commit operational schema-4 replay epoch marker migration")?;
+                tracing::warn!(
+                    path = %path.display(),
+                    "operational replay indexes require explicit clean-cut activation"
+                );
+            }
+            4 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v4→v5 credential authority migration")?;
+                tx.execute_batch(CREDENTIAL_PROFILES_DDL)
+                    .context("install stable credential-profile authority")?;
+                tx.pragma_update(None, "user_version", 5)
+                    .context("stamp operational schema v5")?;
+                tx.commit()
+                    .context("commit operational v4→v5 credential authority migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v4 → v5 (credential-profile authority)"
+                );
+            }
+            5 => {
+                if sync_job_schema_matches(conn, SYNC_JOBS_V6_DDL)? {
+                    // A partially staged forward migration may already have
+                    // installed the exact canonical fragment before stamping
+                    // the global version. Complete only its typed legacy-row
+                    // backfill and stamp; unknown variants still fail closed.
+                    let tx = conn
+                        .unchecked_transaction()
+                        .context("finish staged operational v6 sync-operation migration")?;
+                    backfill_legacy_sync_job_operations(&tx)?;
+                    tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                        .context("stamp operational schema v6")?;
+                    tx.commit()
+                        .context("commit staged operational v6 sync-operation migration")?;
+                } else {
+                    migrate_sync_jobs_to_v6(conn, path, false)?;
+                }
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v5 → v6 (durable sync operations)"
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "operational schema version {other} has no forward migration in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+fn replay_index_epoch(conn: &Connection) -> Result<i32> {
+    conn.query_row(
+        "SELECT epoch FROM replay_index_epoch WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )
+    .context("read operational replay-index epoch")
+}
+
+fn assert_operational_identity(conn: &Connection, path: &Path) -> Result<()> {
+    let application_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read operational application id")?;
+    if application_id != OPERATIONAL_APP_ID {
+        anyhow::bail!(
+            "operational database application_id mismatch in {}: stored={application_id}, expected={OPERATIONAL_APP_ID}",
+            path.display()
+        );
+    }
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("read operational schema version")?;
+    if version != OPERATIONAL_SCHEMA_VERSION {
+        anyhow::bail!(
+            "operational schema version mismatch in {}: stored={version}, expected={OPERATIONAL_SCHEMA_VERSION}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn replay_layout_entries(
+    conn: &Connection,
+) -> Result<Vec<(String, String, String, Option<String>)>> {
+    conn.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+           AND (name IN ('effect_records', 'provider_call_records')
+                OR tbl_name IN ('effect_records', 'provider_call_records'))
+         ORDER BY type, name",
+    )?
+    .query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .context("read predecessor replay-index schema")
+}
+
+fn assert_exact_legacy_replay_layout(conn: &Connection, path: &Path) -> Result<()> {
+    let reference = Connection::open_in_memory().context("open legacy replay reference schema")?;
+    reference
+        .execute_batch(EFFECT_RECORDS_DDL)
+        .context("build effect replay reference schema")?;
+    reference
+        .execute_batch(PROVIDER_CALL_RECORDS_DDL)
+        .context("build provider-call replay reference schema")?;
+    if replay_layout_entries(conn)? != replay_layout_entries(&reference)? {
+        anyhow::bail!(
+            "unrecognized predecessor replay-index layout in {}; refusing destructive reset",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bool) -> Result<()> {
+    let stored = replay_index_epoch(conn)?;
+    if stored == REPLAY_INDEX_EPOCH {
+        return Ok(());
+    }
+    if stored > REPLAY_INDEX_EPOCH {
+        anyhow::bail!(
+            "operational replay-index epoch in {} is newer than this binary: stored={stored}, current={REPLAY_INDEX_EPOCH}",
+            path.display()
+        );
+    }
+    if !explicit_reset {
+        return Err(ReplayIndexActivationRequired {
+            stored,
+            current: REPLAY_INDEX_EPOCH,
+        }
+        .into());
+    }
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .context("verify operational database before replay-index reset")?;
+    if integrity != "ok" {
+        anyhow::bail!(
+            "operational database integrity check failed before replay-index reset for {}: {integrity}",
+            path.display()
+        );
+    }
+    let has_unified_replay_index: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'replay_records')",
+            [],
+            |row| row.get(0),
+        )
+        .context("inspect predecessor replay-index layout")?;
+    if has_unified_replay_index {
+        // Epoch contents may be stale, but a unified predecessor must retain
+        // the exact current physical schema before any row is discarded.
+        assert_current(conn, path).context("validate unified replay predecessor before reset")?;
+    } else {
+        // The only admitted pre-unified shape is the exact v2/v3 pair. Do not
+        // let DROP TABLE normalize an unknown/corrupt table into something
+        // that merely looks current after the destructive cut.
+        assert_exact_legacy_replay_layout(conn, path)?;
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin explicit replay-index reset")?;
+    let preserve_provider_records = has_unified_replay_index && stored == REPLAY_INDEX_EPOCH - 1;
+    tx.execute_batch(if preserve_provider_records {
+        REPLAY_INDEX_RESET_DDL
+    } else if has_unified_replay_index {
+        STALE_UNIFIED_REPLAY_INDEX_RESET_DDL
+    } else {
+        LEGACY_REPLAY_INDEX_RESET_DDL
+    })
+    .context("recreate current replay indexes")?;
+    tx.execute(
+        "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
+        rusqlite::params![REPLAY_INDEX_EPOCH],
+    )
+    .context("stamp current replay-index epoch")?;
+    assert_current(&tx, path).context("validate replay-index reset before commit")?;
+    if replay_index_epoch(&tx)? != REPLAY_INDEX_EPOCH {
+        anyhow::bail!("replay-index reset did not establish the current epoch");
+    }
+    tx.commit().context("commit explicit replay-index reset")?;
+    tracing::warn!(
+        database = %path.display(),
+        preserved_provider_records = preserve_provider_records,
+        "explicitly activated current replay indexes"
+    );
+    Ok(())
+}
+
 fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
     sqlite_schema::assert_owned(conn, &operational_schema_spec(), path)?;
     sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?;
@@ -1412,6 +2570,7 @@ impl SyncJobAttemptState {
 pub struct SyncJobRecord {
     pub job_id: String,
     pub operation_type: String,
+    pub operation: serde_json::Value,
     pub peer: Option<String>,
     pub state: SyncJobState,
     pub phase: String,
@@ -1428,10 +2587,48 @@ pub struct SyncJobRecord {
     pub finished_at: Option<String>,
 }
 
+/// A zero sync-job attempt limit is the explicit durable encoding for an
+/// unbounded exact-operation retry lane. It does not relax operation identity,
+/// single-attempt exclusion, or terminal-state fencing; it only prevents an
+/// admitted recovery protocol from becoming permanently uncontactable because
+/// a peer stayed offline longer than an arbitrary retry count.
+pub const SYNC_JOB_UNBOUNDED_ATTEMPTS: u64 = 0;
+/// Unbounded jobs retain a bounded newest suffix for diagnostics. The durable
+/// `attempt_count` remains cumulative, and a running reservation is never
+/// pruned, so compaction cannot create parallel contact authority.
+pub const SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS: u64 = 64;
+
+pub const fn sync_job_attempts_are_unbounded(max_attempts: u64) -> bool {
+    max_attempts == SYNC_JOB_UNBOUNDED_ATTEMPTS
+}
+
+pub const fn sync_job_attempts_exhausted(attempt_count: u64, max_attempts: u64) -> bool {
+    !sync_job_attempts_are_unbounded(max_attempts) && attempt_count >= max_attempts
+}
+
+pub const fn sync_job_attempt_count_is_valid(attempt_count: u64, max_attempts: u64) -> bool {
+    sync_job_attempts_are_unbounded(max_attempts) || attempt_count <= max_attempts
+}
+
+impl SyncJobRecord {
+    pub const fn attempts_are_unbounded(&self) -> bool {
+        sync_job_attempts_are_unbounded(self.max_attempts)
+    }
+
+    pub const fn attempts_exhausted(&self) -> bool {
+        sync_job_attempts_exhausted(self.attempt_count, self.max_attempts)
+    }
+
+    pub const fn attempt_count_is_valid(&self) -> bool {
+        sync_job_attempt_count_is_valid(self.attempt_count, self.max_attempts)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSyncJob {
     pub job_id: String,
     pub operation_type: String,
+    pub operation: serde_json::Value,
     pub peer: Option<String>,
     pub roots: Vec<String>,
     pub heads: Vec<String>,
@@ -1634,6 +2831,275 @@ impl OperationalDb {
             .context("failed to collect CAS entry attribution summary")
     }
 
+    /// Read and verify one current replay row. Only a database-proven absence is an
+    /// executable miss. Once a row exists, unavailable or divergent CAS
+    /// evidence is surfaced distinctly and never collapses into `Absent`.
+    pub fn lookup_replay_index(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        cache_key: &str,
+    ) -> Result<ReplayLookupOutcome> {
+        validate_canonical_hash("replay cache key", cache_key)?;
+        let indexed = self
+            .conn
+            .query_row(
+                "SELECT cache_key, answer_digest, record_hash FROM replay_records
+                 WHERE namespace = ?1 AND cache_key = ?2",
+                rusqlite::params![namespace.as_str(), cache_key],
+                |row| {
+                    Ok(ReplayIndexRecord {
+                        cache_key: row.get(0)?,
+                        answer_digest: row.get(1)?,
+                        record_hash: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to look up replay record")?;
+        let Some(indexed) = indexed else {
+            return Ok(ReplayLookupOutcome::Absent);
+        };
+        if let Err(error) = validate_replay_index_record(&indexed) {
+            return Ok(ReplayLookupOutcome::IntegrityFailure {
+                reason: error.to_string(),
+            });
+        }
+        Ok(ReplayLookupOutcome::Present(indexed))
+    }
+
+    /// Refresh retention for the exact immutable replay row that was verified
+    /// by the caller. A false result means the index moved or was retired while
+    /// verification ran and must not be treated as a cache miss.
+    pub fn touch_replay_record_if_same(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        indexed: &ReplayIndexRecord,
+    ) -> Result<bool> {
+        let now = lillux::time::iso8601_now();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE replay_records SET last_replayed_at = ?1
+                 WHERE namespace = ?2 AND cache_key = ?3
+                   AND answer_digest = ?4 AND record_hash = ?5",
+                rusqlite::params![
+                    &now,
+                    namespace.as_str(),
+                    &indexed.cache_key,
+                    &indexed.answer_digest,
+                    &indexed.record_hash,
+                ],
+            )
+            .context("failed to touch verified replay record")?;
+        Ok(changed == 1)
+    }
+
+    pub fn lookup_replay_record(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        cache_key: &str,
+        mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
+    ) -> Result<ReplayLookupOutcome> {
+        let indexed = match self.lookup_replay_index(namespace, cache_key)? {
+            ReplayLookupOutcome::Absent => return Ok(ReplayLookupOutcome::Absent),
+            ReplayLookupOutcome::Present(indexed) => indexed,
+            failure => return Ok(failure),
+        };
+        match verify(&indexed) {
+            ReplayRecordVerification::Verified => {
+                if !self.touch_replay_record_if_same(namespace, &indexed)? {
+                    return Ok(ReplayLookupOutcome::Unavailable {
+                        reason: "replay index moved while its record was being verified"
+                            .to_string(),
+                    });
+                }
+                Ok(ReplayLookupOutcome::Present(indexed))
+            }
+            ReplayRecordVerification::Unavailable { reason } => {
+                Ok(ReplayLookupOutcome::Unavailable { reason })
+            }
+            ReplayRecordVerification::IntegrityFailure { reason } => {
+                Ok(ReplayLookupOutcome::IntegrityFailure { reason })
+            }
+        }
+    }
+
+    /// Atomically publish or fold an immutable answer under one identity.
+    /// The candidate and any existing indexed object are verified through the
+    /// same caller-owned decoder while an immediate transaction serializes
+    /// all absent readers and publishers.
+    pub fn publish_replay_record(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        candidate: &ReplayIndexRecord,
+        mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
+    ) -> Result<ReplayPublishOutcome> {
+        validate_replay_index_record(candidate)?;
+        match verify(candidate) {
+            ReplayRecordVerification::Verified => {}
+            ReplayRecordVerification::Unavailable { reason } => {
+                return Ok(ReplayPublishOutcome::Unavailable { reason });
+            }
+            ReplayRecordVerification::IntegrityFailure { reason } => {
+                return Ok(ReplayPublishOutcome::IntegrityFailure { reason });
+            }
+        }
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin immutable replay publication")?;
+        let existing = tx
+            .query_row(
+                "SELECT cache_key, answer_digest, record_hash FROM replay_records
+                 WHERE namespace = ?1 AND cache_key = ?2",
+                rusqlite::params![namespace.as_str(), &candidate.cache_key],
+                |row| {
+                    Ok(ReplayIndexRecord {
+                        cache_key: row.get(0)?,
+                        answer_digest: row.get(1)?,
+                        record_hash: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .context("read immutable replay publication slot")?;
+
+        let outcome = match existing {
+            None => {
+                let now = lillux::time::iso8601_now();
+                tx.execute(
+                    "INSERT INTO replay_records
+                     (namespace, cache_key, answer_digest, record_hash, produced_at, last_replayed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        namespace.as_str(),
+                        &candidate.cache_key,
+                        &candidate.answer_digest,
+                        &candidate.record_hash,
+                        &now,
+                        &now,
+                    ],
+                )
+                .context("insert immutable replay publication")?;
+                ReplayPublishOutcome::Inserted {
+                    record_hash: candidate.record_hash.clone(),
+                }
+            }
+            Some(existing) => {
+                if let Err(error) = validate_replay_index_record(&existing) {
+                    ReplayPublishOutcome::IntegrityFailure {
+                        reason: error.to_string(),
+                    }
+                } else {
+                    match verify(&existing) {
+                        ReplayRecordVerification::Verified
+                            if existing.answer_digest == candidate.answer_digest =>
+                        {
+                            ReplayPublishOutcome::Folded {
+                                record_hash: existing.record_hash,
+                            }
+                        }
+                        ReplayRecordVerification::Verified => {
+                            ReplayPublishOutcome::IntegrityConflict {
+                                existing_record_hash: existing.record_hash,
+                                candidate_record_hash: candidate.record_hash.clone(),
+                            }
+                        }
+                        ReplayRecordVerification::Unavailable { reason } => {
+                            ReplayPublishOutcome::Unavailable { reason }
+                        }
+                        ReplayRecordVerification::IntegrityFailure { reason } => {
+                            ReplayPublishOutcome::IntegrityFailure { reason }
+                        }
+                    }
+                }
+            }
+        };
+        tx.commit().context("commit immutable replay publication")?;
+        Ok(outcome)
+    }
+
+    /// Every indexed record hash. These are garbage-collection roots: a
+    /// record stays reachable exactly as long as its row exists, and
+    /// retention is row deletion followed by an ordinary sweep.
+    pub fn list_replay_record_hashes(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT record_hash FROM replay_records ORDER BY record_hash")
+            .context("failed to prepare replay record root query")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .context("failed to query replay record roots")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect replay record roots")
+    }
+
+    /// Retention: drop records beyond `max_rows`, never-replayed rows first
+    /// (oldest publication first), then the least-recently-replayed.
+    ///
+    /// A record that has never served a replay is publication churn — a
+    /// run-scoped action param makes every key unique, publishing a one-shot
+    /// row per dispatch — and its `last_replayed_at` is *newer* than a
+    /// banked record's last genuine replay, so recency order alone would
+    /// evict the proven records and keep the junk. Never-replayed rows have
+    /// `last_replayed_at` equal to `produced_at` (publication stamps both;
+    /// only a replay moves one), which is the lane discriminator. Deleting
+    /// a row un-roots its object; the ordinary CAS sweep reclaims the
+    /// bytes. Losing a record is never a correctness event — the next run
+    /// executes live and is a different run.
+    pub fn prune_replay_records(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        max_rows: usize,
+    ) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM replay_records WHERE namespace = ?1",
+                [namespace.as_str()],
+                |row| row.get(0),
+            )
+            .context("failed to count replay records")?;
+        let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
+        if excess == 0 {
+            return Ok(0);
+        }
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM replay_records
+                 WHERE namespace = ?1 AND cache_key IN (
+                    SELECT cache_key FROM replay_records
+                    WHERE namespace = ?1
+                    ORDER BY (last_replayed_at != produced_at) ASC,
+                             last_replayed_at ASC,
+                             cache_key ASC
+                    LIMIT ?2
+                )",
+                rusqlite::params![namespace.as_str(), excess as i64],
+            )
+            .context("failed to prune replay records")?;
+        Ok(deleted)
+    }
+
+    pub fn delete_replay_records(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        cache_keys: &[String],
+    ) -> Result<usize> {
+        let mut deleted = 0usize;
+        for cache_key in cache_keys {
+            validate_canonical_hash("replay record cache key", cache_key)?;
+            deleted += self
+                .conn
+                .execute(
+                    "DELETE FROM replay_records WHERE namespace = ?1 AND cache_key = ?2",
+                    rusqlite::params![namespace.as_str(), cache_key],
+                )
+                .context("failed to delete replay record")?;
+        }
+        Ok(deleted)
+    }
+
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,
@@ -1734,9 +3200,94 @@ impl OperationalDb {
 }
 
 impl OperationalDb {
+    /// Settle attempts whose owning daemon process ended before recording a
+    /// terminal attempt result. This is called once at daemon startup, before
+    /// any recovery worker creates a new attempt. The durable job remains
+    /// retryable; no remote phase or effect is inferred from process death.
+    pub fn reconcile_interrupted_sync_job_attempts(&self) -> Result<usize> {
+        self.immediate_transaction("reconcile interrupted sync job attempts", || {
+            let now = lillux::time::iso8601_now();
+            let interrupted_unbounded_jobs = {
+                let mut statement = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT DISTINCT attempts.job_id
+                           FROM sync_job_attempts attempts
+                           JOIN sync_jobs jobs ON jobs.job_id = attempts.job_id
+                          WHERE attempts.state = 'running'
+                            AND jobs.max_attempts = ?1
+                          ORDER BY attempts.job_id",
+                    )
+                    .context("failed to prepare interrupted unbounded sync-job query")?;
+                let rows = statement
+                    .query_map([SYNC_JOB_UNBOUNDED_ATTEMPTS], |row| row.get::<_, String>(0))
+                    .context("failed to query interrupted unbounded sync jobs")?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("failed to collect interrupted unbounded sync jobs")?
+            };
+            let interrupted = self
+                .conn
+                .execute(
+                    "UPDATE sync_job_attempts SET
+                        state = 'failed', updated_at = ?1, finished_at = ?1,
+                        error = 'daemon restarted before this attempt settled'
+                     WHERE state = 'running'",
+                    [&now],
+                )
+                .context("failed to settle interrupted sync job attempts")?;
+            self.conn
+                .execute(
+                    "UPDATE sync_jobs SET
+                        state = 'retryable', updated_at = ?1, finished_at = NULL,
+                        last_error = 'daemon restarted before the active attempt settled'
+                     WHERE state IN ('planned', 'running', 'retryable')
+                       AND EXISTS (
+                         SELECT 1 FROM sync_job_attempts
+                          WHERE sync_job_attempts.job_id = sync_jobs.job_id
+                            AND sync_job_attempts.finished_at = ?1
+                            AND sync_job_attempts.error = 'daemon restarted before this attempt settled'
+                       )",
+                    [&now],
+                )
+                .context("failed to make interrupted sync jobs retryable")?;
+            for job_id in interrupted_unbounded_jobs {
+                self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
+            }
+            Ok(interrupted)
+        })
+    }
+
     pub fn create_sync_job(&self, job: &NewSyncJob) -> Result<SyncJobRecord> {
+        self.create_sync_job_with_initial_progress(job, SyncJobState::Planned, "planned", None)
+    }
+
+    /// Create a job whose first row already records a completed durable
+    /// boundary. This avoids manufacturing a crash window by inserting a
+    /// generic `planned` row and updating it in a second transaction.
+    pub fn create_sync_job_with_initial_progress(
+        &self,
+        job: &NewSyncJob,
+        state: SyncJobState,
+        phase: &str,
+        result: Option<&serde_json::Value>,
+    ) -> Result<SyncJobRecord> {
         validate_sync_job_id(&job.job_id)?;
         validate_non_empty_label("operation_type", &job.operation_type)?;
+        validate_non_empty_label("phase", phase)?;
+        if !matches!(state, SyncJobState::Planned | SyncJobState::Running) {
+            anyhow::bail!("a newly created sync job must be planned or running");
+        }
+        let operation = job
+            .operation
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("sync job operation must be a JSON object"))?;
+        if operation
+            .get("operation_type")
+            .and_then(serde_json::Value::as_str)
+            != Some(job.operation_type.as_str())
+        {
+            anyhow::bail!("sync job operation_type does not match its canonical operation payload");
+        }
         for hash in job.roots.iter().chain(job.heads.iter()) {
             validate_canonical_hash("sync job root/head hash", hash)?;
         }
@@ -1744,23 +3295,42 @@ impl OperationalDb {
         let now = lillux::time::iso8601_now();
         let roots_json = serde_json::to_vec(&job.roots).context("failed to serialize job roots")?;
         let heads_json = serde_json::to_vec(&job.heads).context("failed to serialize job heads")?;
+        let operation_json =
+            serde_json::to_vec(&job.operation).context("failed to serialize job operation")?;
+        if operation_json.len() > 256 * 1024 {
+            anyhow::bail!("sync job operation exceeds the 256 KiB maximum");
+        }
+        let result_json = result
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize initial sync job result")?;
+        if result_json
+            .as_ref()
+            .is_some_and(|value| value.len() > 256 * 1024)
+        {
+            anyhow::bail!("sync job result exceeds the 256 KiB maximum");
+        }
         let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
         self.conn
             .execute(
                 "INSERT INTO sync_jobs (
-                    job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                    job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
-                 ) VALUES (?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?, NULL)",
                 rusqlite::params![
                     &job.job_id,
                     &job.operation_type,
+                    operation_json,
                     &job.peer,
+                    state.as_str(),
+                    phase,
                     roots_json,
                     heads_json,
                     empty_hashes,
                     empty_hashes,
                     max_attempts,
+                    result_json,
                     &now,
                     &now,
                 ],
@@ -1918,7 +3488,10 @@ impl OperationalDb {
                 job_state.as_str()
             );
         }
-        if attempt_count >= max_attempts {
+        if sync_job_attempts_exhausted(
+            u64::try_from(attempt_count).context("negative sync job attempt count")?,
+            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+        ) {
             anyhow::bail!(
                 "sync job {} has exhausted attempts ({attempt_count}/{max_attempts})",
                 attempt.job_id
@@ -1934,6 +3507,11 @@ impl OperationalDb {
             .context("failed to count running sync job attempts")?;
         if running_attempts > 0 {
             anyhow::bail!("sync job {} already has a running attempt", attempt.job_id);
+        }
+        if sync_job_attempts_are_unbounded(
+            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+        ) {
+            self.prune_unbounded_sync_job_attempts_inner(&attempt.job_id)?;
         }
 
         let attempt_number: i64 = self
@@ -1998,12 +3576,21 @@ impl OperationalDb {
                 finish.state.as_str()
             );
         }
-        let current_state = self
+        let (current_state, job_id, max_attempts) = self
             .conn
             .query_row(
-                "SELECT state FROM sync_job_attempts WHERE attempt_id = ?",
+                "SELECT sync_job_attempts.state, sync_job_attempts.job_id, sync_jobs.max_attempts
+                   FROM sync_job_attempts
+                   JOIN sync_jobs ON sync_jobs.job_id = sync_job_attempts.job_id
+                  WHERE sync_job_attempts.attempt_id = ?",
                 [attempt_id],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()
             .context("failed to load sync job attempt state")?
@@ -2040,6 +3627,30 @@ impl OperationalDb {
             )
             .context("failed to finish sync job attempt")?;
         debug_assert_eq!(changed, 1);
+        if sync_job_attempts_are_unbounded(
+            u64::try_from(max_attempts).context("negative sync job attempt limit")?,
+        ) {
+            self.prune_unbounded_sync_job_attempts_inner(&job_id)?;
+        }
+        Ok(())
+    }
+
+    fn prune_unbounded_sync_job_attempts_inner(&self, job_id: &str) -> Result<()> {
+        let retained = i64::try_from(SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS)?;
+        self.conn
+            .execute(
+                "DELETE FROM sync_job_attempts
+                  WHERE job_id = ?1
+                    AND state != 'running'
+                    AND attempt_id NOT IN (
+                        SELECT attempt_id FROM sync_job_attempts
+                         WHERE job_id = ?1 AND state != 'running'
+                         ORDER BY attempt_number DESC
+                         LIMIT ?2
+                    )",
+                rusqlite::params![job_id, retained],
+            )
+            .context("failed to compact unbounded sync-job attempt diagnostics")?;
         Ok(())
     }
 
@@ -2107,7 +3718,7 @@ impl OperationalDb {
         validate_sync_job_id(job_id)?;
         self.conn
             .query_row(
-                "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
                  FROM sync_jobs WHERE job_id = ?",
@@ -2125,12 +3736,12 @@ impl OperationalDb {
     ) -> Result<Vec<SyncJobRecord>> {
         let limit = limit.clamp(1, 500);
         let sql = if state.is_some() {
-            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                 uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                 last_error, result_json, created_at, updated_at, finished_at
              FROM sync_jobs WHERE state = ? ORDER BY created_at DESC, job_id DESC LIMIT ?"
         } else {
-            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                 uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                 last_error, result_json, created_at, updated_at, finished_at
              FROM sync_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?"
@@ -2148,6 +3759,185 @@ impl OperationalDb {
         } else {
             stmt.query_map(rusqlite::params![limit as i64], sync_job_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
+    /// Newest-first keyset scan for one durable operation family, including
+    /// terminal rows. The cursor is the exact immutable `(created_at, job_id)`
+    /// pair from the preceding page's last row. Status and audit projections
+    /// use this instead of a capped page of unrelated global jobs.
+    pub fn list_sync_jobs_by_operation_type_before(
+        &self,
+        operation_type: &str,
+        before: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        validate_non_empty_label("operation_type", operation_type)?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows = match before {
+            Some((created_at, job_id)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1
+                           AND (created_at < ?2 OR (created_at = ?2 AND job_id < ?3))
+                         ORDER BY created_at DESC, job_id DESC LIMIT ?4",
+                    )
+                    .context("failed to prepare paged sync operation history query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, created_at, job_id, limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1
+                         ORDER BY created_at DESC, job_id DESC LIMIT ?2",
+                    )
+                    .context("failed to prepare sync operation history query")?;
+                stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Oldest-first bounded recovery scan for one durable operation family.
+    /// Terminal rows are excluded; repeating the scan after completing a page
+    /// eventually reaches every active job without loading historical jobs.
+    pub fn list_active_sync_jobs_by_operation_type(
+        &self,
+        operation_type: &str,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        self.list_active_sync_jobs_by_operation_type_after(operation_type, None, limit)
+    }
+
+    /// Keyset-paginated active recovery scan. The cursor is the exact
+    /// `(created_at, job_id)` pair from the preceding page's last row; both
+    /// columns are immutable, so state transitions during recovery cannot
+    /// make later jobs disappear or make an earlier row repeat.
+    pub fn list_active_sync_jobs_by_operation_type_after(
+        &self,
+        operation_type: &str,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        validate_non_empty_label("operation_type", operation_type)?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows = match after {
+            Some((created_at, job_id)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
+                           AND (created_at > ?2 OR (created_at = ?2 AND job_id > ?3))
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?4",
+                    )
+                    .context("failed to prepare paged active sync recovery query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, created_at, job_id, limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?2",
+                    )
+                    .context("failed to prepare active sync operation recovery query")?;
+                stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Oldest-first bounded scan for one exact operation family and state.
+    /// Recovery owners use this for narrowly qualified terminal cleanup; it
+    /// avoids searching an unrelated global terminal-job page.
+    pub fn list_sync_jobs_by_operation_type_and_state(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        self.list_sync_jobs_by_operation_type_and_state_after(operation_type, state, None, limit)
+    }
+
+    /// Keyset-paginated oldest-first scan for one exact operation family and
+    /// state. This is the terminal-state counterpart of
+    /// [`Self::list_active_sync_jobs_by_operation_type_after`].
+    pub fn list_sync_jobs_by_operation_type_and_state_after(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        validate_non_empty_label("operation_type", operation_type)?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows = match after {
+            Some((created_at, job_id)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state = ?2
+                           AND (created_at > ?3 OR (created_at = ?3 AND job_id > ?4))
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?5",
+                    )
+                    .context("failed to prepare paged exact sync operation state query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, state.as_str(), created_at, job_id, limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state = ?2
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?3",
+                    )
+                    .context("failed to prepare exact sync operation state query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, state.as_str(), limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
         };
         Ok(rows)
     }
@@ -2212,6 +4002,12 @@ fn validate_canonical_hash(label: &str, hash: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_replay_index_record(record: &ReplayIndexRecord) -> Result<()> {
+    validate_canonical_hash("replay cache key", &record.cache_key)?;
+    validate_canonical_hash("replay answer digest", &record.answer_digest)?;
+    validate_canonical_hash("replay record hash", &record.record_hash)
+}
+
 fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> bool {
     !matches!(
         (current, next),
@@ -2225,9 +4021,13 @@ fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> 
 fn validate_sync_job_transition(from: SyncJobState, to: SyncJobState) -> Result<()> {
     use SyncJobState::*;
     let allowed = match from {
-        Planned => matches!(to, Planned | Running | Failed | Cancelled),
+        // A durable external authority may prove completion before the local
+        // attempt is settled (for example, a receipt/head publication followed
+        // by daemon death). Direct completion remains guarded by the absence
+        // of running attempts in `update_sync_job`.
+        Planned => matches!(to, Planned | Running | Completed | Failed | Cancelled),
         Running => matches!(to, Running | Completed | Failed | Retryable | Cancelled),
-        Retryable => matches!(to, Retryable | Running | Failed | Cancelled),
+        Retryable => matches!(to, Retryable | Running | Completed | Failed | Cancelled),
         Completed | Failed | Cancelled => false,
     };
     if !allowed {
@@ -2294,11 +4094,14 @@ fn sync_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobRecord>
     let uploaded_json: Vec<u8> = row.get("uploaded_hashes_json")?;
     let fetched_json: Vec<u8> = row.get("fetched_hashes_json")?;
     let result_json: Option<Vec<u8>> = row.get("result_json")?;
+    let operation_json: Vec<u8> = row.get("operation_json")?;
     let attempt_count: i64 = row.get("attempt_count")?;
     let max_attempts: i64 = row.get("max_attempts")?;
     Ok(SyncJobRecord {
         job_id: row.get("job_id")?,
         operation_type: row.get("operation_type")?,
+        operation: serde_json::from_slice(&operation_json)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
         peer: row.get("peer")?,
         state: SyncJobState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
         phase: row.get("phase")?,
@@ -2383,8 +4186,818 @@ mod tests {
         assert_eq!(app_id, OPERATIONAL_APP_ID);
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
-        assert_eq!(tables, 4);
-        assert_eq!(indexes, 14);
+        assert_eq!(tables, 7);
+        assert_eq!(indexes, 17);
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+    }
+
+    fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecord {
+        ReplayIndexRecord {
+            cache_key: key.to_string().repeat(64),
+            answer_digest: answer.to_string().repeat(64),
+            record_hash: object.to_string().repeat(64),
+        }
+    }
+
+    fn namespace(value: &str) -> ReplayIndexNamespace {
+        ReplayIndexNamespace::new(value).unwrap()
+    }
+
+    fn rewrite_current_sync_jobs_as_v5(db: &OperationalDb) {
+        let tx = db.conn.unchecked_transaction().unwrap();
+        tx.execute_batch(
+            "DROP INDEX idx_sync_jobs_state;
+             DROP INDEX idx_sync_jobs_operation_type;
+             DROP INDEX idx_sync_jobs_peer;
+             ALTER TABLE sync_jobs RENAME TO sync_jobs_current;",
+        )
+        .unwrap();
+        tx.execute_batch(SYNC_JOBS_V5_DDL).unwrap();
+        tx.execute_batch(
+            "INSERT INTO sync_jobs (
+                 job_id, operation_type, peer, state, phase, roots_json,
+                 heads_json, uploaded_hashes_json, fetched_hashes_json,
+                 attempt_count, max_attempts, last_error, result_json,
+                 created_at, updated_at, finished_at
+             )
+             SELECT job_id, operation_type, peer, state, phase, roots_json,
+                    heads_json, uploaded_hashes_json, fetched_hashes_json,
+                    attempt_count, max_attempts, last_error, result_json,
+                    created_at, updated_at, finished_at
+               FROM sync_jobs_current;
+             DROP TABLE sync_jobs_current;
+             PRAGMA user_version=5;",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn create_migration_fixture(db: &OperationalDb) {
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:predecessor".to_owned(),
+            operation_type: "mirror_pull".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "mirror_pull",
+                "modern_only": true,
+            }),
+            peer: Some("node-predecessor".to_owned()),
+            roots: vec!["1".repeat(64)],
+            heads: vec!["2".repeat(64)],
+            max_attempts: 3,
+        })
+        .unwrap();
+        db.merge_credential_profile(&OperationalCredentialProfileRecord {
+            profile_id: "profile-preserved".to_owned(),
+            owner_principal: "fp:operator".to_owned(),
+            home_id: "credential-preserved".to_owned(),
+            authority_revision: 4,
+            credential_generation: 2,
+            state: "active".to_owned(),
+            active_login_id: None,
+            login_epoch: 1,
+            login_expires_at_ms: None,
+            sanitized_account: Some(serde_json::json!({"account_id":"preserved"})),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+    }
+
+    fn assert_migrated_fixture(db: &OperationalDb) {
+        assert_current(&db.conn, db.path()).unwrap();
+        let job = db.get_sync_job("job:predecessor").unwrap().unwrap();
+        assert_eq!(
+            job.operation,
+            serde_json::json!({
+                "schema": 1,
+                "operation_type": "mirror_pull",
+                "legacy_recovery": true,
+                "peer": "node-predecessor",
+            })
+        );
+        let profile = db.credential_profile("profile-preserved").unwrap().unwrap();
+        assert_eq!(profile.authority_revision, 4);
+        assert_eq!(profile.credential_generation, 2);
+        assert_eq!(profile.state, "active");
+    }
+
+    #[test]
+    fn v5_forward_migration_rebuilds_exact_sync_job_schema_and_preserves_authority() {
+        assert!(SCHEMA_SQL.contains(SYNC_JOBS_V6_DDL));
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            create_migration_fixture(&db);
+            rewrite_current_sync_jobs_as_v5(&db);
+        }
+
+        let db = OperationalDb::open(&path).unwrap();
+        assert_migrated_fixture(&db);
+    }
+
+    #[test]
+    fn v6_appended_column_intermediate_repairs_exactly_and_preserves_authority() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            create_migration_fixture(&db);
+            rewrite_current_sync_jobs_as_v5(&db);
+            db.conn.execute_batch(SYNC_JOB_OPERATION_DDL).unwrap();
+            db.conn
+                .pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                .unwrap();
+            assert!(sync_job_schema_matches(&db.conn, &appended_sync_job_v6_ddl()).unwrap());
+        }
+
+        let db = OperationalDb::open(&path).unwrap();
+        assert_migrated_fixture(&db);
+    }
+
+    fn publish_verified(
+        db: &OperationalDb,
+        namespace: &ReplayIndexNamespace,
+        record: &ReplayIndexRecord,
+    ) -> ReplayPublishOutcome {
+        db.publish_replay_record(namespace, record, |_| ReplayRecordVerification::Verified)
+            .unwrap()
+    }
+
+    #[test]
+    fn immutable_replay_insert_fold_conflict_and_lookup_matrix() {
+        for kind in [&namespace("dispatch.effect"), &namespace("provider.call")] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+            let db = OperationalDb::open(&path).unwrap();
+            let first = replay_record('a', 'b', 'c');
+            assert_eq!(
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::Verified
+                })
+                .unwrap(),
+                ReplayLookupOutcome::Absent
+            );
+            assert_eq!(
+                db.publish_replay_record(kind, &first, |_| { ReplayRecordVerification::Verified })
+                    .unwrap(),
+                ReplayPublishOutcome::Inserted {
+                    record_hash: first.record_hash.clone()
+                }
+            );
+
+            let equivalent = replay_record('a', 'b', 'd');
+            assert_eq!(
+                db.publish_replay_record(kind, &equivalent, |_| {
+                    ReplayRecordVerification::Verified
+                })
+                .unwrap(),
+                ReplayPublishOutcome::Folded {
+                    record_hash: first.record_hash.clone()
+                }
+            );
+            assert_eq!(
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::Verified
+                })
+                .unwrap(),
+                ReplayLookupOutcome::Present(first.clone())
+            );
+
+            let divergent = replay_record('a', 'e', 'f');
+            assert_eq!(
+                db.publish_replay_record(kind, &divergent, |_| {
+                    ReplayRecordVerification::Verified
+                })
+                .unwrap(),
+                ReplayPublishOutcome::IntegrityConflict {
+                    existing_record_hash: first.record_hash.clone(),
+                    candidate_record_hash: divergent.record_hash,
+                }
+            );
+            assert_eq!(
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::Unavailable {
+                        reason: "CAS temporarily unavailable".to_string(),
+                    }
+                })
+                .unwrap(),
+                ReplayLookupOutcome::Unavailable {
+                    reason: "CAS temporarily unavailable".to_string()
+                }
+            );
+            assert_eq!(
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::IntegrityFailure {
+                        reason: "indexed object is missing".to_string(),
+                    }
+                })
+                .unwrap(),
+                ReplayLookupOutcome::IntegrityFailure {
+                    reason: "indexed object is missing".to_string()
+                }
+            );
+
+            let unavailable_candidate = replay_record('b', 'c', 'd');
+            assert_eq!(
+                db.publish_replay_record(kind, &unavailable_candidate, |_| {
+                    ReplayRecordVerification::Unavailable {
+                        reason: "CAS unavailable".to_string(),
+                    }
+                })
+                .unwrap(),
+                ReplayPublishOutcome::Unavailable {
+                    reason: "CAS unavailable".to_string()
+                }
+            );
+            let same_key_candidate = replay_record('a', 'd', 'e');
+            assert_eq!(
+                db.publish_replay_record(kind, &same_key_candidate, |record| {
+                    if record.record_hash == first.record_hash {
+                        ReplayRecordVerification::IntegrityFailure {
+                            reason: "indexed object is corrupt".to_string(),
+                        }
+                    } else {
+                        ReplayRecordVerification::Verified
+                    }
+                })
+                .unwrap(),
+                ReplayPublishOutcome::IntegrityFailure {
+                    reason: "indexed object is corrupt".to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_replay_never_replaces_the_first_observation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        let first = replay_record('a', 'b', 'c');
+        db.publish_replay_record(&namespace("dispatch.effect"), &first, |_| {
+            ReplayRecordVerification::Verified
+        })
+        .unwrap();
+        let equivalent = replay_record('a', 'b', 'd');
+        db.publish_replay_record(&namespace("dispatch.effect"), &equivalent, |_| {
+            ReplayRecordVerification::Verified
+        })
+        .unwrap();
+        let indexed = db
+            .lookup_replay_record(&namespace("dispatch.effect"), &first.cache_key, |_| {
+                ReplayRecordVerification::Verified
+            })
+            .unwrap();
+        assert_eq!(indexed, ReplayLookupOutcome::Present(first));
+    }
+
+    #[test]
+    fn fresh_schema_declares_only_the_current_replay_epoch() {
+        assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 8)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 7)"));
+    }
+
+    #[test]
+    fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
+        assert_eq!(REPLAY_INDEX_EPOCH, 8);
+        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 18);
+        assert_eq!(
+            DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
+            crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            "a launch-capsule schema change requires an explicit replay-index epoch decision",
+        );
+    }
+
+    #[test]
+    fn credential_profile_authority_folds_by_monotonic_revision() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join(OPERATIONAL_DB_FILENAME)).unwrap();
+        let mut profile = OperationalCredentialProfileRecord {
+            profile_id: "profile-one".to_string(),
+            owner_principal: "fp:operator".to_string(),
+            home_id: "credential-one".to_string(),
+            authority_revision: 1,
+            credential_generation: 1,
+            state: "unauthenticated".to_string(),
+            active_login_id: None,
+            login_epoch: 0,
+            login_expires_at_ms: None,
+            sanitized_account: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        assert_eq!(db.merge_credential_profile(&profile).unwrap(), profile);
+
+        // A runtime-only lock changes its presentation timestamp but not the
+        // stable revision or content, so an equal-revision fold is idempotent.
+        profile.updated_at_ms = 2;
+        assert_eq!(
+            db.merge_credential_profile(&profile)
+                .unwrap()
+                .authority_revision,
+            1
+        );
+
+        profile.authority_revision = 2;
+        profile.credential_generation = 2;
+        profile.state = "active".to_string();
+        profile.sanitized_account = Some(serde_json::json!({"account_id":"one"}));
+        assert_eq!(
+            db.merge_credential_profile(&profile).unwrap().state,
+            "active"
+        );
+
+        let mut stale = profile.clone();
+        stale.authority_revision = 1;
+        stale.state = "revoked".to_string();
+        let retained = db.merge_credential_profile(&stale).unwrap();
+        assert_eq!(retained.authority_revision, 2);
+        assert_eq!(retained.state, "active");
+
+        let mut divergent = profile.clone();
+        divergent.state = "revoked".to_string();
+        assert!(db.merge_credential_profile(&divergent).is_err());
+    }
+
+    #[test]
+    fn predecessor_store_refuses_until_only_replay_indexes_are_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            // Rewind a fresh store to the exact schema-1 shape. Forward
+            // migration reconstructs the predecessor replay tables and
+            // installs only the predecessor epoch marker; ordinary open must
+            // still refuse until the explicit clean cut.
+            let db = OperationalDb::open(&path).unwrap();
+            db.record_cas_entry(&NewCasEntryAttribution {
+                hash: "d".repeat(64),
+                entry_kind: CasEntryKind::Object,
+                bytes: 7,
+                source_principal: None,
+                source_peer: None,
+                job_id: None,
+                state: CasEntryState::Mirrored,
+            })
+            .unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP INDEX idx_credential_profiles_owner_state;
+                     DROP TABLE credential_profiles;
+                     DROP INDEX idx_replay_records_retention;
+                     DROP INDEX idx_replay_records_record_hash;
+                     DROP TABLE replay_records;
+                     DROP TABLE replay_index_epoch;
+                     PRAGMA user_version=1;",
+                )
+                .unwrap();
+        }
+
+        let error = OperationalDb::open(&path)
+            .err()
+            .expect("predecessor replay epoch must refuse");
+        assert!(
+            error
+                .downcast_ref::<ReplayIndexActivationRequired>()
+                .is_some()
+        );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
+        // Non-replay operational rows survive. The two runtime-only replay
+        // indexes are current and empty; no predecessor row is translated.
+        assert_eq!(
+            db.list_cas_entries_by_state(CasEntryState::Mirrored)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replay_reset_discards_predecessor_rows_instead_of_translating_them() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            // Rewind a fresh store to the exact predecessor replay-table
+            // shape with a row that must be discarded, never decoded or
+            // translated.
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP INDEX idx_credential_profiles_owner_state;
+                     DROP TABLE credential_profiles;
+                     DROP INDEX idx_replay_records_retention;
+                     DROP INDEX idx_replay_records_record_hash;
+                     DROP TABLE replay_records;
+                     DROP TABLE replay_index_epoch;
+                     PRAGMA user_version=3;",
+                )
+                .unwrap();
+            db.conn.execute_batch(EFFECT_RECORDS_DDL).unwrap();
+            db.conn.execute_batch(PROVIDER_CALL_RECORDS_DDL).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO effect_records VALUES (
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );",
+                )
+                .unwrap();
+        }
+
+        let error = OperationalDb::open(&path)
+            .err()
+            .expect("predecessor replay epoch must refuse");
+        assert!(
+            error
+                .downcast_ref::<ReplayIndexActivationRequired>()
+                .is_some()
+        );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replay_reset_refuses_malformed_unified_layout_without_mutation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO replay_records VALUES (
+                        'provider.call',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     ALTER TABLE replay_records ADD COLUMN unexpected TEXT;
+                     UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;",
+                )
+                .unwrap();
+        }
+
+        assert!(OperationalDb::open_for_explicit_replay_reset(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(replay_index_epoch(&conn).unwrap(), 6);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replay_records", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let unexpected: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('replay_records') WHERE name = 'unexpected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unexpected, 1);
+    }
+
+    #[test]
+    fn replay_reset_refuses_malformed_legacy_layout_without_mutation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP INDEX idx_replay_records_retention;
+                     DROP INDEX idx_replay_records_record_hash;
+                     DROP TABLE replay_records;
+                     CREATE TABLE effect_records (
+                        cache_key TEXT PRIMARY KEY,
+                        answer_digest TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        produced_at TEXT NOT NULL,
+                        last_replayed_at TEXT NOT NULL,
+                        unexpected TEXT
+                     );
+                     CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
+                     CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+                     CREATE TABLE provider_call_records (
+                        cache_key TEXT PRIMARY KEY,
+                        answer_digest TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        produced_at TEXT NOT NULL,
+                        last_replayed_at TEXT NOT NULL
+                     );
+                     CREATE INDEX idx_provider_call_records_last_replayed
+                        ON provider_call_records(last_replayed_at);
+                     CREATE INDEX idx_provider_call_records_record_hash
+                        ON provider_call_records(record_hash);
+                     INSERT INTO effect_records VALUES (
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z',
+                        'retained'
+                     );
+                     UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
+                )
+                .unwrap();
+        }
+
+        assert!(OperationalDb::open_for_explicit_replay_reset(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(replay_index_epoch(&conn).unwrap(), 4);
+        let retained: String = conn
+            .query_row("SELECT unexpected FROM effect_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(retained, "retained");
+        let unified: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='replay_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unified, 0);
+    }
+
+    #[test]
+    fn skipped_replay_generations_discard_all_unproven_rows() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO replay_records VALUES (
+                        'dispatch.effect',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     INSERT INTO replay_records VALUES (
+                        'provider.call',
+                        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
+                )
+                .unwrap();
+        }
+
+        let error = OperationalDb::open(&path)
+            .err()
+            .expect("predecessor effect-key epoch must refuse");
+        assert!(
+            error
+                .downcast_ref::<ReplayIndexActivationRequired>()
+                .is_some()
+        );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+    }
+
+    #[test]
+    fn immediate_replay_predecessor_preserves_provider_rows_only() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO replay_records VALUES (
+                        'dispatch.effect',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     INSERT INTO replay_records VALUES (
+                        'provider.call',
+                        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );",
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
+                    rusqlite::params![REPLAY_INDEX_EPOCH - 1],
+                )
+                .unwrap();
+        }
+
+        assert!(OperationalDb::open(&path).is_err());
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        let rows: Vec<(String, String)> = db
+            .conn
+            .prepare("SELECT namespace, record_hash FROM replay_records ORDER BY namespace")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![("provider.call".to_string(), "f".repeat(64),)]);
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+    }
+
+    #[test]
+    fn provider_call_records_round_trip_and_prune_by_lanes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+
+        let record = replay_record('a', 'b', 'c');
+        let key = record.cache_key.clone();
+        let hash = record.record_hash.clone();
+        assert_eq!(
+            db.lookup_replay_record(&namespace("provider.call"), &key, |_| {
+                ReplayRecordVerification::Verified
+            })
+            .unwrap(),
+            ReplayLookupOutcome::Absent
+        );
+        publish_verified(&db, &namespace("provider.call"), &record);
+        assert_eq!(
+            db.lookup_replay_record(&namespace("provider.call"), &key, |_| {
+                ReplayRecordVerification::Verified
+            })
+            .unwrap(),
+            ReplayLookupOutcome::Present(record)
+        );
+        assert_eq!(db.list_replay_record_hashes().unwrap(), vec![hash.clone()]);
+        assert_eq!(
+            db.delete_replay_records(&namespace("provider.call"), &[key.clone()])
+                .unwrap(),
+            1
+        );
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
+
+        // One banked record replayed long ago, two fresh never-replayed
+        // rows: the never-replayed lane prunes first even though its
+        // recency is newer.
+        for (key_char, answer_char, object_char, produced, replayed) in [
+            (
+                'a',
+                'd',
+                'a',
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+            ),
+            (
+                'b',
+                'e',
+                'b',
+                "2026-08-01T00:00:00Z",
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                'c',
+                'f',
+                'c',
+                "2026-08-02T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+            ),
+        ] {
+            let record = replay_record(key_char, answer_char, object_char);
+            publish_verified(&db, &namespace("provider.call"), &record);
+            db.conn
+                .execute(
+                    "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
+                     WHERE namespace = ? AND cache_key = ?",
+                    rusqlite::params![produced, replayed, "provider.call", record.cache_key],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            db.prune_replay_records(&namespace("provider.call"), 1)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.list_replay_record_hashes().unwrap(),
+            vec!["a".repeat(64)]
+        );
+    }
+
+    #[test]
+    fn effect_record_pruning_drops_least_recently_replayed_first() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        // Wall-clock stamps are second-granular, so recency is set
+        // explicitly: `b` is oldest, `a` newest.
+        for (key_char, answer_char, object_char, at) in [
+            ('a', 'd', 'a', "2026-01-03T00:00:00Z"),
+            ('b', 'e', 'b', "2026-01-01T00:00:00Z"),
+            ('c', 'f', 'c', "2026-01-02T00:00:00Z"),
+        ] {
+            let record = replay_record(key_char, answer_char, object_char);
+            publish_verified(&db, &namespace("dispatch.effect"), &record);
+            db.conn
+                .execute(
+                    "UPDATE replay_records SET last_replayed_at = ?
+                     WHERE namespace = ? AND cache_key = ?",
+                    rusqlite::params![at, "dispatch.effect", record.cache_key],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 3)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 2)
+                .unwrap(),
+            1
+        );
+        let remaining = db.list_replay_record_hashes().unwrap();
+        assert!(
+            !remaining.contains(&"b".repeat(64)),
+            "oldest replay pruned first"
+        );
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 0)
+                .unwrap(),
+            2
+        );
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn effect_record_pruning_spares_replayed_records_from_publication_churn() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        // One banked record replayed long ago, and two fresh never-replayed
+        // rows (publication stamps both columns equal) whose recency is
+        // NEWER than the banked record's last replay. Recency order alone
+        // would evict the banked record first; the never-replayed lane must
+        // go first instead.
+        for (key_char, answer_char, object_char, produced, replayed) in [
+            (
+                'a',
+                'd',
+                'a',
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+            ),
+            (
+                'b',
+                'e',
+                'b',
+                "2026-08-01T00:00:00Z",
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                'c',
+                'f',
+                'c',
+                "2026-08-02T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+            ),
+        ] {
+            let record = replay_record(key_char, answer_char, object_char);
+            publish_verified(&db, &namespace("dispatch.effect"), &record);
+            db.conn
+                .execute(
+                    "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
+                     WHERE namespace = ? AND cache_key = ?",
+                    rusqlite::params![produced, replayed, "dispatch.effect", record.cache_key],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 1)
+                .unwrap(),
+            2
+        );
+        let remaining = db.list_replay_record_hashes().unwrap();
+        assert_eq!(remaining, vec!["a".repeat(64)]);
     }
 
     #[test]
@@ -2941,6 +5554,7 @@ mod tests {
             .create_sync_job(&NewSyncJob {
                 job_id: "job:alpha".to_string(),
                 operation_type: "mirror_pull".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
                 peer: Some("node-a".to_string()),
                 roots: vec![root_hash.clone()],
                 heads: vec![head_hash.clone()],
@@ -2950,6 +5564,10 @@ mod tests {
 
         assert_eq!(created.job_id, "job:alpha");
         assert_eq!(created.operation_type, "mirror_pull");
+        assert_eq!(
+            created.operation,
+            serde_json::json!({"schema":1,"operation_type":"mirror_pull"})
+        );
         assert_eq!(created.peer.as_deref(), Some("node-a"));
         assert_eq!(created.state, SyncJobState::Planned);
         assert_eq!(created.phase, "planned");
@@ -2976,6 +5594,7 @@ mod tests {
 
         let running = db.get_sync_job("job:alpha").unwrap().unwrap();
         assert_eq!(running.state, SyncJobState::Running);
+        assert_eq!(running.operation, created.operation);
         assert_eq!(running.phase, "fetching_closure");
         assert_eq!(running.uploaded_hashes, vec![uploaded_hash]);
         assert_eq!(running.fetched_hashes, vec![fetched_hash]);
@@ -2999,6 +5618,7 @@ mod tests {
 
         let completed = db.get_sync_job("job:alpha").unwrap().unwrap();
         assert_eq!(completed.state, SyncJobState::Completed);
+        assert_eq!(completed.operation, created.operation);
         assert_eq!(completed.phase, "done");
         assert_eq!(completed.attempt_count, 0);
         assert_eq!(
@@ -3016,6 +5636,156 @@ mod tests {
     }
 
     #[test]
+    fn active_operation_recovery_keyset_reaches_more_than_one_page() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        for index in 0..70 {
+            db.create_sync_job(&NewSyncJob {
+                job_id: format!("job:paged:{index:03}"),
+                operation_type: "managed_activation".to_string(),
+                operation: serde_json::json!({
+                    "schema": 1,
+                    "operation_type": "managed_activation",
+                    "index": index,
+                }),
+                peer: None,
+                roots: vec![],
+                heads: vec![],
+                max_attempts: 1,
+            })
+            .unwrap();
+        }
+
+        let mut cursor: Option<(String, String)> = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = db
+                .list_active_sync_jobs_by_operation_type_after(
+                    "managed_activation",
+                    cursor
+                        .as_ref()
+                        .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                    11,
+                )
+                .unwrap();
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor = Some((last.created_at.clone(), last.job_id.clone()));
+            observed.extend(page.into_iter().map(|job| job.job_id));
+        }
+
+        assert_eq!(observed.len(), 70);
+        observed.sort();
+        observed.dedup();
+        assert_eq!(observed.len(), 70);
+        assert_eq!(observed.first().unwrap(), "job:paged:000");
+        assert_eq!(observed.last().unwrap(), "job:paged:069");
+
+        for job_id in &observed {
+            db.update_sync_job(
+                job_id,
+                &SyncJobUpdate {
+                    state: SyncJobState::Failed,
+                    phase: "recoverable_terminal_cleanup".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![],
+                    fetched_hashes: vec![],
+                    last_error: Some("fixture".to_string()),
+                    result: None,
+                },
+            )
+            .unwrap();
+        }
+        let mut cursor: Option<(String, String)> = None;
+        let mut failed = Vec::new();
+        loop {
+            let page = db
+                .list_sync_jobs_by_operation_type_and_state_after(
+                    "managed_activation",
+                    SyncJobState::Failed,
+                    cursor
+                        .as_ref()
+                        .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                    13,
+                )
+                .unwrap();
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor = Some((last.created_at.clone(), last.job_id.clone()));
+            failed.extend(page.into_iter().map(|job| job.job_id));
+        }
+        failed.sort();
+        failed.dedup();
+        assert_eq!(failed, observed);
+    }
+
+    #[test]
+    fn sync_job_can_begin_at_an_already_durable_boundary() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let progress = serde_json::json!({
+            "schema":"ryeos.worker_session_handoff_progress.v1",
+            "operation_id":"11".repeat(32),
+            "phase":"source_exported",
+        });
+
+        let created = db
+            .create_sync_job_with_initial_progress(
+                &NewSyncJob {
+                    job_id: "job:source-exported".to_owned(),
+                    operation_type: "worker_session_handoff".to_owned(),
+                    operation: serde_json::json!({
+                        "schema":1,
+                        "operation_type":"worker_session_handoff",
+                    }),
+                    peer: Some("site:b".to_owned()),
+                    roots: vec!["22".repeat(32)],
+                    heads: vec!["33".repeat(32)],
+                    max_attempts: 3,
+                },
+                SyncJobState::Running,
+                "source_exported",
+                Some(&progress),
+            )
+            .unwrap();
+
+        assert_eq!(created.state, SyncJobState::Running);
+        assert_eq!(created.phase, "source_exported");
+        assert_eq!(created.result, Some(progress));
+        assert_eq!(created.attempt_count, 0);
+        assert!(created.finished_at.is_none());
+    }
+
+    #[test]
+    fn sync_job_refuses_an_operation_type_outside_its_canonical_payload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let error = db
+            .create_sync_job(&NewSyncJob {
+                job_id: "job:mismatch".to_string(),
+                operation_type: "worker_session_handoff".to_string(),
+                operation: serde_json::json!({
+                    "schema": 1,
+                    "operation_type": "remote_execute",
+                    "owner_principal": "must-not-be-recovered-from-mutable-state"
+                }),
+                peer: Some("site:b".to_string()),
+                roots: vec![],
+                heads: vec![],
+                max_attempts: 3,
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its canonical operation payload")
+        );
+    }
+
+    #[test]
     fn sync_job_attempt_lifecycle_is_persisted() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
@@ -3024,6 +5794,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job:attempts".to_string(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
             peer: Some("node-a".to_string()),
             roots: vec![],
             heads: vec![],
@@ -3131,6 +5902,106 @@ mod tests {
     }
 
     #[test]
+    fn daemon_restart_settles_running_attempt_and_preserves_retryable_job() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:interrupted".to_owned(),
+            operation_type: "worker_session_handoff".to_owned(),
+            operation: serde_json::json!({
+                "schema":1,
+                "operation_type":"worker_session_handoff"
+            }),
+            peer: Some("node-b".to_owned()),
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 3,
+        })
+        .unwrap();
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:interrupted".to_owned(),
+            job_id: "job:interrupted".to_owned(),
+            worker_id: None,
+            phase: "target_prepare".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 1);
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 0);
+        let attempt = db
+            .get_sync_job_attempt("attempt:interrupted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, SyncJobAttemptState::Failed);
+        assert!(attempt.finished_at.is_some());
+        assert!(attempt.error.unwrap().contains("daemon restarted"));
+        let job = db.get_sync_job("job:interrupted").unwrap().unwrap();
+        assert_eq!(job.state, SyncJobState::Retryable);
+        assert_eq!(job.phase, "target_prepare");
+        assert_eq!(job.attempt_count, 1);
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:replacement".to_owned(),
+            job_id: "job:interrupted".to_owned(),
+            worker_id: None,
+            phase: "target_prepare".to_owned(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn authoritative_result_can_complete_an_exhausted_interrupted_job() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:authoritative-recovery".to_owned(),
+            operation_type: "external_content_activation".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "external_content_activation"
+            }),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 1,
+        })
+        .unwrap();
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:authoritative-recovery".to_owned(),
+            job_id: "job:authoritative-recovery".to_owned(),
+            worker_id: None,
+            phase: "publish".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 1);
+
+        let receipt_hash = "a".repeat(64);
+        db.update_sync_job(
+            "job:authoritative-recovery",
+            &SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "completed_from_authoritative_result".to_owned(),
+                roots: Some(vec![receipt_hash.clone()]),
+                heads: None,
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(serde_json::json!({"receipt_hash": receipt_hash})),
+            },
+        )
+        .unwrap();
+
+        let job = db
+            .get_sync_job("job:authoritative-recovery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, SyncJobState::Completed);
+        assert_eq!(job.attempt_count, 1);
+        assert_eq!(job.roots, vec!["a".repeat(64)]);
+    }
+
+    #[test]
     fn sync_job_attempt_completion_must_match_parent_job() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
@@ -3140,6 +6011,7 @@ mod tests {
             db.create_sync_job(&NewSyncJob {
                 job_id: job_id.to_string(),
                 operation_type: "remote_execute".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
                 peer: None,
                 roots: vec![],
                 heads: vec![],
@@ -3194,6 +6066,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job:limited".to_string(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -3230,6 +6103,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job:terminal".to_string(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -3276,6 +6150,136 @@ mod tests {
     }
 
     #[test]
+    fn zero_attempt_limit_is_an_unbounded_exact_operation_lane() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:unbounded".to_owned(),
+            operation_type: "durable_authority_recovery".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "durable_authority_recovery",
+                "operation_id": "fixed",
+            }),
+            peer: Some("peer-offline".to_owned()),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            max_attempts: SYNC_JOB_UNBOUNDED_ATTEMPTS,
+        })
+        .unwrap();
+
+        let total_attempts = SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS + 36;
+        for number in 1..=total_attempts {
+            let attempt_id = format!("attempt:unbounded:{number}");
+            db.create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: attempt_id.clone(),
+                job_id: "job:unbounded".to_owned(),
+                worker_id: None,
+                phase: "peer_contact".to_owned(),
+            })
+            .unwrap();
+            db.finish_sync_job_attempt(
+                &attempt_id,
+                &FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "peer_offline".to_owned(),
+                    error: Some("peer offline".to_owned()),
+                    result: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let retained = db.get_sync_job("job:unbounded").unwrap().unwrap();
+        assert!(retained.attempts_are_unbounded());
+        assert!(!retained.attempts_exhausted());
+        assert!(retained.attempt_count_is_valid());
+        assert_eq!(retained.attempt_count, total_attempts);
+        let attempts = db.list_sync_job_attempts("job:unbounded").unwrap();
+        assert_eq!(
+            u64::try_from(attempts.len()).unwrap(),
+            SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS
+        );
+        assert_eq!(attempts.first().unwrap().attempt_number, 37);
+        assert_eq!(attempts.last().unwrap().attempt_number, total_attempts);
+    }
+
+    #[test]
+    fn startup_reconciliation_prunes_the_interrupted_unbounded_attempt_at_the_cap() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:restart-at-cap".to_owned(),
+            operation_type: "durable_authority_recovery".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "durable_authority_recovery",
+                "operation_id": "restart-at-cap",
+            }),
+            peer: Some("peer-offline".to_owned()),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            max_attempts: SYNC_JOB_UNBOUNDED_ATTEMPTS,
+        })
+        .unwrap();
+
+        for number in 1..=SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS {
+            let attempt_id = format!("attempt:restart-at-cap:{number}");
+            db.create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: attempt_id.clone(),
+                job_id: "job:restart-at-cap".to_owned(),
+                worker_id: None,
+                phase: "peer_contact".to_owned(),
+            })
+            .unwrap();
+            db.finish_sync_job_attempt(
+                &attempt_id,
+                &FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "peer_offline".to_owned(),
+                    error: Some("peer offline".to_owned()),
+                    result: None,
+                },
+            )
+            .unwrap();
+        }
+        let interrupted_number = SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS + 1;
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: format!("attempt:restart-at-cap:{interrupted_number}"),
+            job_id: "job:restart-at-cap".to_owned(),
+            worker_id: None,
+            phase: "peer_contact".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            u64::try_from(
+                db.list_sync_job_attempts("job:restart-at-cap")
+                    .unwrap()
+                    .len()
+            )
+            .unwrap(),
+            SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS + 1
+        );
+
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 1);
+        let job = db.get_sync_job("job:restart-at-cap").unwrap().unwrap();
+        let attempts = db.list_sync_job_attempts("job:restart-at-cap").unwrap();
+        assert_eq!(job.state, SyncJobState::Retryable);
+        assert_eq!(job.attempt_count, interrupted_number);
+        assert_eq!(
+            u64::try_from(attempts.len()).unwrap(),
+            SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS
+        );
+        assert!(attempts.iter().all(|attempt| attempt.state.is_terminal()));
+        assert_eq!(attempts.first().unwrap().attempt_number, 2);
+        assert_eq!(attempts.last().unwrap().attempt_number, interrupted_number);
+    }
+
+    #[test]
     fn active_sync_job_count_only_includes_non_terminal_jobs() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
@@ -3284,6 +6288,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job-running".to_string(),
             operation_type: "mirror_pull".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -3293,6 +6298,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job-completed".to_string(),
             operation_type: "mirror_pull".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -3340,6 +6346,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job-transition".to_string(),
             operation_type: "mirror_pull".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -3351,8 +6358,8 @@ mod tests {
             .update_sync_job(
                 "job-transition",
                 &SyncJobUpdate {
-                    state: SyncJobState::Completed,
-                    phase: "done".to_string(),
+                    state: SyncJobState::Retryable,
+                    phase: "retryable".to_string(),
                     roots: None,
                     heads: None,
                     uploaded_hashes: vec![],
@@ -3427,6 +6434,7 @@ mod tests {
             .create_sync_job(&NewSyncJob {
                 job_id: "job-invalid".to_string(),
                 operation_type: "mirror_pull".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
                 peer: None,
                 roots: vec!["not-a-hash".to_string()],
                 heads: vec![],
@@ -3440,6 +6448,7 @@ mod tests {
             .create_sync_job(&NewSyncJob {
                 job_id: "job-uppercase".to_string(),
                 operation_type: "mirror_pull".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
                 peer: None,
                 roots: vec!["AA".repeat(32)],
                 heads: vec![],

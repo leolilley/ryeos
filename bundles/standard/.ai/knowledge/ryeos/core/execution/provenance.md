@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:d3a17a64a5e35ecc0b2e28e2fc0566378cf729f16ed45548b7fa6a405064690f:Y4+IihFFE5BLxGt/qe96O4A5ezN2h6L4+AIZJ0wA+fxwz6ESo7I8mVPbFGSiyHWyVnZpBLu1NilTDoh61MSxAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:34:32Z:a4a66a69c7358a733e254fde54a7b859342639745bb984143571d5bc554a8993:Ug5jy7WJRPxVTgNtjDSaQoDyX+h5Ix8FmRvvBatTvNKoiINmIwQYPPrZyRQeWUJ/tFp4lrXVIBmqQ+zVArBDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, provenance, callbacks, pushed-head, typestate]
@@ -58,6 +58,15 @@ CAS context preparation is variant-matched in
 live tree, Root PushedHead tracks the lifeline and reads the pre-manifest,
 and borrowed variants validate the borrowed directory and return no
 manifest/snapshot.
+
+Project provenance and executable source are related but distinct. A live root
+captures the policy-filtered authoritative source view at admission. A pinned
+root reads the same logical files from its retained project generation and can
+reuse their blobs. The resulting source closure names only the subset admitted
+to one executable item; it neither replaces the project snapshot nor grants
+the process access to the rest of that snapshot. Borrowed children inherit the
+parent's authoritative project generation but receive their own item-specific
+source binding.
 
 ## Resume caveat
 

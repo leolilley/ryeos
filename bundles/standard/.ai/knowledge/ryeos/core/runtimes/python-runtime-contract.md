@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-19T06:52:20Z:27891d30ad9602219cd47bd023f8b34315251678837dd89af3aaf2f88548275e:fzGxbwzZwSryLYVVjhskmwl8Z6x4d+MmO6J5FRRhaai3XVOws/1GHOkKpX1Y66zmqJ0gWm9+cUgDbDH2wPd2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:51Z:3fd1d742976c65357abd69da3314a49d41182e3f8df600a4c571ced0dbb6a2a4:zYzlCa2p14n/gEuADJw130O63Ig66kYzr/TK5F31tsB9VVjhWznCLb9EpslBiqyPFggv1kJCkMPDJIJh9uiTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
-version: "1.0.0"
+version: "1.2.0"
 description: Python tool subprocess runtime contract — interpreter, working directory, sys.path, environment, and how params/project_path arrive.
 ---
 
@@ -20,20 +20,29 @@ Resolved in this order (first match wins):
 
 1. **Environment override** — if the `RYE_PYTHON` environment variable is
    set, its value is used verbatim as the interpreter.
-2. **Project virtualenv** — `python` then `python3`, searched under the
-   project root in `.venv/bin` then `.venv/Scripts`. The first existing
-   file wins (so `.venv/bin/python` is preferred over `.venv/bin/python3`,
-   and `.venv/bin/*` over `.venv/Scripts/*`).
-3. **PATH fallback** — bare `python3`, resolved by the OS at spawn time.
+2. **PATH fallback** — bare `python3`, resolved to an absolute executable by
+   the engine before admission.
 
-The resolved interpreter is also exported to the subprocess as
-`RYE_PYTHON` and `PROJECT_VENV_PYTHON`.
+The resolved interpreter is also exported to the subprocess as `RYE_PYTHON`.
+The ordinary runtime never selects a live-project `.venv`: interpreter and
+site-package bytes that affect an exact execution must arrive through an
+admitted runtime or external realization. A project-authored runtime that
+selects a live-project interpreter is refused when execution requires a
+private admitted-input root.
 
 ## Working directory
 
-The subprocess runs with its **current working directory set to the
-project root**. Relative file reads/writes in your tool are therefore
-relative to the project root.
+The subprocess runs with its **current working directory set to the selected
+execution workspace**. For an ordinary live definition with no retained
+filesystem bindings this is the live project root. When the finalized
+definition retains source or external content, it is a daemon-private,
+possibly sparse and ephemeral view containing those admitted bytes. Relative
+file reads/writes are relative to that view; the path is not resolution or
+publication authority. Writes to an ephemeral workspace are discarded when
+the process ends and never fold back into the live project. Durable results
+must use the structured return value or a daemon-owned publication callback
+such as item authoring, vault, or bundle-event publication. RyeOS does not yet
+offer a generic opaque-byte artifact ingest callback.
 
 ## Imports / `sys.path`
 
@@ -51,8 +60,8 @@ code from a tool:
 
 - put shared modules under your bundle tool root or its `lib/` directory
   (e.g. `.ai/tools/<bundle>/lib/util.py` → `from lib.util import …`), or
-- install your package into the project `.venv` (the interpreter resolves
-  to that venv, so installed packages import normally).
+- declare behavior-bearing project dependencies as admitted source/external
+  content. Project virtualenvs are not an implicit dependency channel.
 
 A module sitting at the project root (e.g. `./mypkg.py`) is **not**
 importable — this isolation is intentional and is verified by tests.
@@ -60,7 +69,8 @@ importable — this isolation is intentional and is verified by tests.
 ## Parameters and `project_path`
 
 - **Params** are delivered as a single JSON object on **stdin**.
-- **`project_path`** is passed two ways:
+- **`project_path`** names the selected execution workspace, not necessarily
+  the canonical live project. It is passed two ways:
   - positionally — `script` runtime exposes it via
     `sys.argv` as `--project-path <path>`; `function` runtime receives it
     as the second argument of `execute(params, project_path)`;
@@ -75,7 +85,6 @@ The subprocess always receives at least:
 
 - `PYTHONUNBUFFERED=1`
 - `RYE_PYTHON=<resolved interpreter>`
-- `PROJECT_VENV_PYTHON=<resolved interpreter>`
 
 plus any vault/host bindings the dispatch layer attaches.
 

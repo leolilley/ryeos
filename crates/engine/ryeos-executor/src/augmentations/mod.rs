@@ -44,6 +44,7 @@ pub async fn run_augmentations(
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     plan_ctx: &ryeos_engine::contracts::PlanContext,
     principal_fingerprint: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
     state: &ryeos_app::state::AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_request_snapshot: Option<
@@ -64,6 +65,7 @@ pub async fn run_augmentations(
                         provenance,
                         plan_ctx,
                         principal_fingerprint,
+                        handler_context,
                         state,
                         launch_timings,
                         admitted_request_snapshot,

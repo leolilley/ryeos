@@ -30,7 +30,7 @@ pub struct PendingFollow {
 #[serde(deny_unknown_fields)]
 pub struct ResumeState {
     pub definition_ref: String,
-    pub definition_hash: String,
+    pub effective_definition_digest: String,
     pub expression_language: String,
     pub current_node: String,
     pub step_count: u32,
@@ -58,7 +58,7 @@ pub struct ResumeState {
 struct CheckpointPayload {
     schema_version: u32,
     definition_ref: String,
-    definition_hash: String,
+    effective_definition_digest: String,
     expression_language: String,
     current_node: String,
     step_count: u32,
@@ -110,7 +110,10 @@ fn reject_explicit_null(value: &Value, field: &str) -> Result<()> {
 impl ResumeState {
     fn validate(&self, definition: &GraphDefinition) -> Result<()> {
         require_non_empty(&self.definition_ref, "definition_ref")?;
-        require_non_empty(&self.definition_hash, "definition_hash")?;
+        require_non_empty(
+            &self.effective_definition_digest,
+            "effective_definition_digest",
+        )?;
         require_non_empty(&self.expression_language, "expression_language")?;
         require_non_empty(&self.current_node, "current_node")?;
         require_non_empty(&self.graph_run_id, "graph_run_id")?;
@@ -128,10 +131,10 @@ impl ResumeState {
                 self.definition_ref, definition.definition_ref
             )));
         }
-        if self.definition_hash != definition.definition_hash {
+        if self.effective_definition_digest != definition.effective_definition_digest {
             return Err(restart_required(format!(
-                "resume definition hash `{}` does not match resolved `{}`",
-                self.definition_hash, definition.definition_hash
+                "resume effective definition digest `{}` does not match resolved `{}`",
+                self.effective_definition_digest, definition.effective_definition_digest
             )));
         }
 
@@ -321,7 +324,7 @@ fn checkpoint_to_resume(payload: CheckpointPayload) -> Result<ResumeState> {
     require_non_empty(&payload.written_at, "written_at")?;
     Ok(ResumeState {
         definition_ref: payload.definition_ref,
-        definition_hash: payload.definition_hash,
+        effective_definition_digest: payload.effective_definition_digest,
         expression_language: payload.expression_language,
         current_node: payload.current_node,
         step_count: payload.step_count,
@@ -459,7 +462,7 @@ config:
         json!({
             "schema_version": crate::walker::GRAPH_CHECKPOINT_SCHEMA_VERSION,
             "definition_ref": definition.definition_ref,
-            "definition_hash": definition.definition_hash,
+            "effective_definition_digest": definition.effective_definition_digest,
             "expression_language": crate::walker::EXPRESSION_LANGUAGE,
             "graph_run_id": "run-1",
             "current_node": "done",
@@ -484,12 +487,11 @@ config:
             json!({"error": "child failed"})
         };
         json!({
+            "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
             "success": status.is_success(),
             "child_thread_id": "T-resume-child",
             "status": status,
             "result": result,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         })
     }
@@ -499,7 +501,10 @@ config:
         let definition = definition();
         let state = from_checkpoint_value(&checkpoint(&definition), &definition).unwrap();
         assert_eq!(state.definition_ref, definition.definition_ref);
-        assert_eq!(state.definition_hash, definition.definition_hash);
+        assert_eq!(
+            state.effective_definition_digest,
+            definition.effective_definition_digest
+        );
         assert_eq!(state.expression_language, "rye-expr/1");
         assert_eq!(state.current_node, "done");
         assert_eq!(state.state, json!({"answer": 42}));
@@ -525,7 +530,7 @@ config:
         let definition = definition();
         for (key, replacement) in [
             ("definition_ref", json!("graph:other/item")),
-            ("definition_hash", json!("sha256:other")),
+            ("effective_definition_digest", json!("sha256:other")),
             ("expression_language", json!("rye-expr/2")),
         ] {
             let mut value = checkpoint(&definition);
@@ -929,7 +934,7 @@ config:
         missing_identity
             .as_object_mut()
             .unwrap()
-            .remove("definition_hash");
+            .remove("effective_definition_digest");
         cases.push(missing_identity);
 
         let mut unknown = valid.clone();
@@ -958,7 +963,7 @@ config:
         let valid = injected(&definition);
         for (path, replacement) in [
             ("definition_ref", json!("graph:test/other")),
-            ("definition_hash", json!("sha256:other")),
+            ("effective_definition_digest", json!("sha256:other")),
             ("expression_language", json!("rye-expr/2")),
             ("current_node", json!("")),
             ("graph_run_id", json!("")),

@@ -140,6 +140,7 @@ pub(crate) async fn dispatch_subprocess(
         request,
         ctx,
         state,
+        handler_context,
         role,
         root_subject,
         hop_runtime,
@@ -170,7 +171,41 @@ pub(crate) async fn dispatch_subprocess(
                 detail: "dispatch_subprocess called on a schema with no terminator".into(),
             })?;
     let protocol_ref = match terminator {
-        TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.as_str(),
+        TerminatorDecl::Subprocess { protocol } => {
+            let verified = hop_verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: "subprocess protocol selection requires a verified item".into(),
+            })?;
+            let effective = ctx
+                .engine
+                .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: verified.resolved.canonical_ref.clone(),
+                    expected_kind: Some(current_ref.kind.clone()),
+                    project_root: verified.resolved.materialized_project_root.clone(),
+                    subject_resolution_authority: verified
+                        .resolved
+                        .subject_resolution_authority
+                        .clone(),
+                })
+                .map_err(|error| DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail: format!("resolve subprocess protocol selection: {error}"),
+                })?;
+            if effective.source.content_hash != verified.resolved.content_hash {
+                return Err(DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail:
+                        "effective subprocess protocol selection changed the verified root bytes"
+                            .into(),
+                });
+            }
+            protocol
+                .resolve(&effective.composed_value)
+                .map_err(|detail| DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail,
+                })?
+        }
         TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
@@ -184,8 +219,8 @@ pub(crate) async fn dispatch_subprocess(
     let protocol = ctx
         .engine
         .protocols
-        .require(protocol_ref)
-        .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.to_string()))?;
+        .require(&protocol_ref)
+        .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.clone()))?;
 
     check_dispatch_capabilities(&protocol.descriptor.capabilities, request)?;
 
@@ -211,6 +246,7 @@ pub(crate) async fn dispatch_subprocess(
                     request,
                     ctx,
                     state,
+                    handler_context,
                     role,
                     root_subject,
                     hop_runtime,
@@ -229,6 +265,7 @@ pub(crate) async fn dispatch_subprocess(
                 request,
                 ctx,
                 state,
+                handler_context,
                 launch_handoff,
             ))
             .await
@@ -249,6 +286,7 @@ async fn dispatch_managed_subprocess(
         request,
         ctx,
         state,
+        handler_context,
         role,
         launch_handoff,
     } = sctx;
@@ -316,8 +354,86 @@ async fn dispatch_managed_subprocess(
         &runtime_ref,
         ctx,
         request,
-        &state.node_history_policy,
+        state.node_history_policy()?,
     )?;
+
+    if request.validate_only {
+        let external_content = validate_managed_effective_program(&prepared, request, ctx, state)?;
+        let root_ready = external_content
+            .as_ref()
+            .is_none_or(|preview| preview.ready_for_admission);
+        let root_admission = prepared.resolved.root_admission.as_ref().ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "managed static validation has no exact root admission"
+            ))
+        })?;
+        let applicability = crate::dispatch::LaunchContractApplicability::ManagedEnvelope {
+            runtime: Box::new(verified_runtime.clone()),
+        };
+        let launch_contract = crate::dispatch::prepare_admitted_launch_contract(
+            &applicability,
+            root_admission,
+            &request.ref_bindings,
+            &request.lifecycle_authority,
+            &request.provenance,
+            ctx,
+            state,
+        )
+        .await?
+        .ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "managed static validation produced no prepared launch contract"
+            ))
+        })?;
+        let dependencies = crate::execution::persistent_session::preview_prepared_dependencies(
+            state,
+            &ctx.engine,
+            &launch_contract,
+        )
+        .map_err(DispatchError::Internal)?;
+        let dependencies_ready = dependencies.admission_ready;
+        let mut credential_names = root_admission
+            .verified_subject()
+            .resolved
+            .metadata
+            .required_secrets
+            .clone();
+        credential_names.extend(
+            launch_contract
+                .required_secrets
+                .iter()
+                .map(|requirement| requirement.name.clone()),
+        );
+        credential_names.sort();
+        credential_names.dedup();
+        let credentials_ready = credential_names.is_empty();
+        let credential_readiness = if credentials_ready {
+            "required_none"
+        } else {
+            "not_checked"
+        };
+        let runtime_preparation_ready = dependencies_ready && credentials_ready;
+        let admission_ready = root_ready && runtime_preparation_ready;
+        return Ok(json!({
+            "validated": true,
+            "admission_ready": admission_ready,
+            "item_ref": &prepared.resolved.item_ref,
+            "kind": &prepared.resolved.resolved_item.kind,
+            "executor_ref": &prepared.executor_ref,
+            "external_content": external_content,
+            "runtime_preparation": {
+                "runtime_ref": verified_runtime.canonical_ref.to_string(),
+                "binding_records": dependencies.binding_records,
+                "execution_dependencies": dependencies.execution_dependencies,
+                "content_dependencies": dependencies.content_dependencies,
+                "credential_readiness": {
+                    "status": credential_readiness,
+                    "required_count": credential_names.len(),
+                },
+                "admission_ready": runtime_preparation_ready,
+            },
+        }));
+    }
 
     // Runtime callback caps (bundle-events / runtime-vault) are minted inside
     // `build_and_launch` from the *composed* `requires` block — after the
@@ -332,6 +448,7 @@ async fn dispatch_managed_subprocess(
         // current default).
         runtime_ref: Some(&runtime_ref),
         acting_principal,
+        handler_context: handler_context.as_ref(),
         resolved: &prepared.resolved,
         project_path,
         provenance: &request.provenance,
@@ -347,6 +464,8 @@ async fn dispatch_managed_subprocess(
         capability_policy: crate::execution::launch::CapabilityPolicy::AdmissionDefault,
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
+        pre_pinned_checkpoint_authority: None,
+        rearm_native_resume_budget_after_attach: false,
         launch_handoff,
     })
     .await
@@ -391,7 +510,107 @@ async fn dispatch_managed_subprocess(
     Ok(json!({
         "thread": result.thread,
         "result": result.result,
+        "result_project_snapshot_hash": result.result_project_snapshot_hash,
     }))
+}
+
+fn validate_managed_effective_program(
+    prepared: &crate::dispatch::PreparedManagedLaunch,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<
+    Option<ryeos_app::external_content_admission::ExternalContentValidationPreview>,
+    DispatchError,
+> {
+    let admission = prepared.resolved.root_admission.as_ref().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "managed static validation has no exact root admission"
+        ))
+    })?;
+    admission
+        .ensure_matches_provenance(&request.provenance)
+        .map_err(DispatchError::Internal)?;
+    let engine = admission.request_engine();
+    if !std::sync::Arc::ptr_eq(engine, &ctx.engine) {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "managed static validation engine differs from root admission"
+        )));
+    }
+    let subject_authority = admission
+        .plan_context()
+        .subject_resolution_authority
+        .clone();
+    let resolution_project_root = (!matches!(
+        subject_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ))
+    .then(|| {
+        admission.execution_workspace().ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "managed static validation has no admitted project workspace"
+            ))
+        })
+    })
+    .transpose()?;
+    let roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let request_snapshot = match admission.admitted_request_snapshot() {
+        Some(admitted) => engine.effective_request_snapshot_under_admitted_authority(
+            resolution_project_root.ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "admitted static validation snapshot has no project workspace"
+                ))
+            })?,
+            admitted,
+        ),
+        None if subject_authority.operational_generation().is_some() => {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "content-addressed static validation has no admitted request snapshot"
+            )));
+        }
+        None => engine
+            .effective_request_snapshot(resolution_project_root, &subject_authority)
+            .map(std::sync::Arc::new),
+    }
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "managed static validation request authority: {error}"
+        ))
+    })?;
+    let resolution = admission.resolution_output().clone();
+    let declared_caps = launch::derive_effective_caps(&resolution.composed);
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&declared_caps).map_err(
+        |error| DispatchError::CapabilityRejected {
+            reason: error.to_string(),
+        },
+    )?;
+    let runtime_caps = crate::dispatch::mint_runtime_capability_caps(
+        resolution.composed.composed.get("requires"),
+        &prepared.resolved.resolved_item,
+        resolution.effective_trust_class,
+        engine,
+    )
+    .map_err(|reason| DispatchError::CapabilityRejected { reason })?;
+    let effective_caps = declared_caps
+        .into_iter()
+        .chain(runtime_caps)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let materialization = admission
+        .resolution_materialization_binding()
+        .map_err(DispatchError::Internal)?;
+    crate::execution::effective_program_projection::validate_admitted_effective_program(
+        state,
+        engine,
+        &prepared.resolved.resolved_item.kind,
+        resolution,
+        &effective_caps,
+        &roots,
+        &request_snapshot.parser_dispatcher,
+        &request_snapshot.trust_store,
+        Some(&materialization),
+    )
 }
 
 // Verified hop identity, root authority, request context, daemon state, and
@@ -418,15 +637,10 @@ async fn dispatch_streaming_subprocess(
         .resolution_roots(resolution_project_root.map(std::path::Path::to_path_buf));
 
     let bundle_roots: Vec<std::path::PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        })
+        .authoritative_bundle_roots()
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+        .into_iter()
+        .map(std::path::Path::to_path_buf)
         .collect();
 
     // A callback-free streaming terminator owns its executable directly rather
@@ -587,7 +801,11 @@ async fn dispatch_streaming_subprocess(
             .map_err(DispatchError::Internal)?,
         callback_token: None,
         callback_socket_path: None,
-        callback_project_path: None,
+        project_state_scope: request
+            .provenance
+            .project_authority()
+            .project_state_scope_id()
+            .map_err(DispatchError::Internal)?,
         thread_auth_token: None,
         params: request.params.clone(),
         resolution_output: None,
@@ -852,14 +1070,21 @@ async fn dispatch_streaming_subprocess(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling:
+                        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
+                    external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: &subject_item_ref,
                     thread_id: &thread_id,
                 },
@@ -1019,6 +1244,7 @@ async fn dispatch_tool_subprocess(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
@@ -1054,7 +1280,7 @@ async fn dispatch_tool_subprocess(
             &ctx.plan_ctx,
             &request.provenance,
         )?;
-    let node_history_policy = std::sync::Arc::clone(&state.node_history_policy);
+    let node_history_policy = std::sync::Arc::new(state.node_history_policy()?.clone());
     let resolution_ref_bindings = request.ref_bindings.clone();
     let resolution_launch_mode = request.launch_mode.to_owned();
     let resolution_parameters = request.params.clone();
@@ -1121,6 +1347,7 @@ async fn dispatch_tool_subprocess(
             request,
             ctx,
             state,
+            handler_context,
             launch_handoff,
         ))
         .await;
@@ -1154,11 +1381,12 @@ async fn dispatch_tool_subprocess(
 
     if request.validate_only {
         let engine = ctx.engine.clone();
+        let validation_engine = engine.clone();
         let resolved_clone = resolved.clone();
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let validated = tokio::task::spawn_blocking(move || {
             let _workspace_lifeline = workspace_lifeline;
-            ryeos_app::thread_lifecycle::validate_item(&engine, &resolved_clone)
+            ryeos_app::thread_lifecycle::validate_item(&validation_engine, &resolved_clone)
         })
         .await
         .map_err(|e| DispatchError::SubprocessRunFailed {
@@ -1166,15 +1394,40 @@ async fn dispatch_tool_subprocess(
             detail: format!("validate_only join failure: {e}"),
         })??;
 
+        let source_project_root = resolved
+            .root_admission
+            .as_ref()
+            .and_then(|admission| admission.execution_workspace())
+            .or(Some(request.project_path));
+        let source =
+            validate_direct_source_closure(state, &engine, &resolved, source_project_root)?;
+        let admission_ready = source
+            .as_ref()
+            .is_none_or(|preview| preview.ready_for_admission);
+
         return Ok(json!({
             "validated": true,
+            "admission_ready": admission_ready,
             "item_ref": resolved.item_ref,
             "kind": resolved.kind,
             "executor_ref": resolved.executor_ref,
             "trust_class": validated.trust_class,
             "plan_id": validated.plan_id,
+            "source": source,
         }));
     }
+
+    let parent_thread_id = request
+        .parent_execution_context
+        .as_ref()
+        .map(|parent| parent.parent_thread_id.clone());
+    let finalized_direct = crate::execution::runner::finalize_direct_effective_program(
+        state,
+        &resolved,
+        &request.provenance,
+        parent_thread_id.as_deref(),
+    )
+    .map_err(DispatchError::Internal)?;
 
     let item_ref_for_error = resolved.item_ref.clone();
     let effective_caps =
@@ -1224,6 +1477,7 @@ async fn dispatch_tool_subprocess(
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
+        handler_context,
         vault_bindings,
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
@@ -1233,10 +1487,9 @@ async fn dispatch_tool_subprocess(
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
         runtime_ref: None,
-        parent_thread_id: request
-            .parent_execution_context
-            .as_ref()
-            .map(|parent| parent.parent_thread_id.clone()),
+        parent_thread_id,
+        effect_authority: request.effect_authority.clone(),
+        finalized_direct: Some(finalized_direct),
     };
 
     if request.launch_mode == "detached" {
@@ -1255,22 +1508,121 @@ async fn dispatch_tool_subprocess(
             "detached": true,
         }))
     } else {
-        let result = Box::pin(crate::execution::runner::run_and_wait(
+        let outcome = Box::pin(crate::execution::runner::run_and_wait(
             state.clone(),
             params,
             launch_handoff,
         ))
         .await
         .map_err(|error| map_runner_error(item_ref_for_error, error))?;
-        let mut envelope = json!({
-            "thread": result.finalized_thread,
-            "result": result.result,
-        });
-        if let Some(debug) = result.debug {
-            envelope["debug"] = debug;
+        match outcome {
+            crate::execution::runner::WaitOutcome::Executed(result) => {
+                let mut envelope = json!({
+                    "thread": result.finalized_thread,
+                    "result": result.result,
+                    "result_project_snapshot_hash": result.result_project_snapshot_hash,
+                });
+                if let Some(debug) = result.debug {
+                    envelope["debug"] = debug;
+                }
+                if let Some(dispatch) = result.dispatch_effect {
+                    envelope["dispatch"] = serde_json::to_value(dispatch)
+                        .map_err(|error| DispatchError::Internal(error.into()))?;
+                }
+                Ok(envelope)
+            }
+            crate::execution::runner::WaitOutcome::Replayed { result, dispatch } => Ok(json!({
+                "thread": null,
+                "result": result,
+                "dispatch": dispatch,
+            })),
         }
-        Ok(envelope)
     }
+}
+
+fn validate_direct_source_closure(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    resolved: &ryeos_app::thread_lifecycle::ResolvedExecutionRequest,
+    project_root: Option<&Path>,
+) -> Result<
+    Option<ryeos_app::source_closure_admission::SourceClosureValidationPreview>,
+    DispatchError,
+> {
+    let admission = resolved.root_admission.as_ref().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "direct static validation has no exact root admission"
+        ))
+    })?;
+    let resolution = admission.resolution_output();
+    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
+    let materialization = admission
+        .resolution_materialization_binding()
+        .map_err(DispatchError::Internal)?;
+    let project_content = materialization
+        .authoritative_project_content()
+        .map_err(DispatchError::Internal)?;
+    let project = project_content.as_ref().map(|(root, content)| {
+        (
+            *root,
+            *content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+        )
+    });
+    let source_contract = engine
+        .kinds
+        .get(&resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.source_closure.as_ref());
+    let source_policy = if source_contract.is_some() {
+        let executor_id = resolved
+            .resolved_item
+            .metadata
+            .executor_id
+            .as_deref()
+            .ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "source-owning direct item has no executor chain"
+                ))
+            })?;
+        ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
+            executor_id,
+            &resolution.root.source_path,
+            &resolved.kind,
+            &engine.kinds,
+            &engine.parser_dispatcher,
+            &roots,
+            &engine.trust_store,
+            &engine.node_trust_store,
+            project,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+    } else {
+        None
+    };
+    let project = project
+        .map(|(root, content)| {
+            let identity = materialization
+                .subject_authority()
+                .operational_generation()
+                .ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "pinned source validation has no content generation"
+                    ))
+                })?
+                .to_owned();
+            Ok::<_, DispatchError>((root, content, identity))
+        })
+        .transpose()?;
+    ryeos_app::source_closure_admission::preview_source_closure(
+        state,
+        engine,
+        &resolved.kind,
+        resolution,
+        &roots,
+        project,
+        source_policy.as_ref(),
+    )
+    .map_err(DispatchError::Internal)
 }
 
 fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {

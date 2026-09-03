@@ -1,0 +1,72 @@
+# ryeos:signed:2026-09-02T13:27:39Z:03c38ea029fa38a2e5e98b5c1963603a5a65746abaa175fc333ab4b182ee10a9:bh+7DZaO2vuNrlPw3L2Wt+X53029HzbGJH+wa0uPYe+/tJoBPgUc8hIh4RjbmT1yih5BDl7d2XZeripxKtveCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "local-inference"
+version: "1.0.0"
+executor_id: "@subprocess"
+description: "Hermetic Qwen3 0.6B CPU worker with an exact 4096-process real-UID ceiling."
+execution_protocol: protocol:ryeos/core/persistent_session
+supported_target:
+  os: linux
+  arch: x86_64
+
+# RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
+# process tree. The kind-owned compiler caps and freezes this signed override;
+# RyeOS separately limits session groups and total persistent workers. The
+# worker also needs to fork its pinned compiler while serving a request.
+session_resources:
+  real_uid_process_limit: 4096
+
+source:
+  root: "lib/local-tinygrad"
+  entry: "bootstrap.py"
+  digest: "e97688fbf4cd92d2e620db3e01b47dad7326ae403e0879869a21e63fbab4f28c"
+
+external_content:
+  - id: runtime
+    kind: tree
+    mode: pinned
+    digest: "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
+    metadata_hint: "python-build-standalone-3.14.7-musl"
+    mount: runtime
+  - id: tinygrad
+    kind: tree
+    mode: pinned
+    digest: "e468f263924eb44fc21405dafba8ea27a7cd9e70dd6847822905a652549be21c"
+    metadata_hint: "tinygrad-4c206a52b1a72a98db8c97576959b54fa2a38232"
+    mount: tinygrad
+  - id: toolchain
+    kind: tree
+    mode: pinned
+    digest: "0f278c1f855f123cbab94e6c1aa11dc0ae0b64b27a73241a4f67941d12c70e53"
+    metadata_hint: "alpine-v3.22-clang-lld-20.1.8"
+    mount: toolchain
+  - id: model
+    kind: tree
+    mode: pinned
+    digest: "1a75084b7404ba3409e598a8ee2d09a8d236edf1fa5f33917c3b3a8f0494e35b"
+    metadata_hint: "qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca"
+    mount: model
+
+config:
+  command: "bin:core/ryeos-session-exec"
+  args:
+    - "runtime/lib/ld-musl-x86_64.so.1"
+    - "--library-path"
+    - "runtime/lib"
+    - "runtime/python/bin/python3.14"
+    - "-P"
+    - "-S"
+    - "${source.entry}"
+  env:
+    PYTHONHOME: "runtime/python"
+    PYTHONHASHSEED: "0"
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONNOUSERSITE: "1"
+    PYTHONSAFEPATH: "1"
+    PYTHONUNBUFFERED: "1"
+    PATH: ""
+    DEV: "CPU"
+    CACHELEVEL: "0"
+    CCACHE: "0"
+    LANG: "C"
+    LC_ALL: "C"
+  timeout_secs: 3600

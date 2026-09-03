@@ -20,10 +20,10 @@ use crate::contracts::ValueShape;
 /// one handler invocation.
 ///
 /// `content_addressed` asserts that the handler is deterministic and has no
-/// externally visible side effects for an exact parser configuration,
-/// signature-stripped input, and source-path string. The dispatcher binds all
-/// of those inputs, plus the verified parser/handler registry fingerprint, in
-/// its cache key.
+/// externally visible side effects for an exact parser configuration and
+/// signature-stripped input. The dispatcher binds those inputs plus the
+/// verified parser/handler registry fingerprint in its cache key. A source
+/// path is diagnostics-only and never changes a successful parse result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ParserCachePolicy {

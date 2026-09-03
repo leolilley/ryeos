@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
 
+const DAEMON_DEFAULT_FILTER: &str = "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos.metrics=info";
+
 /// Configuration for the tracing subscriber.
 #[derive(Debug)]
 pub struct SubscriberConfig {
@@ -49,9 +51,7 @@ impl SubscriberConfig {
     /// Config suitable for the ryeosd daemon.
     pub fn for_daemon() -> Self {
         Self {
-            default_filter:
-                "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info"
-                    .into(),
+            default_filter: DAEMON_DEFAULT_FILTER.into(),
             ..Self::default()
         }
     }
@@ -85,11 +85,8 @@ impl SubscriberConfig {
             .expect("failed to open trace-events.ndjson for writing");
 
         // Build the registry: stderr (human) + file (ndjson).
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(
-                "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info",
-            )
-        });
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(DAEMON_DEFAULT_FILTER));
 
         // File layer: structured JSON, span NEW/CLOSE events.
         let file_layer = tracing_subscriber::fmt::layer()
@@ -120,9 +117,7 @@ impl SubscriberConfig {
             .try_init();
 
         Self {
-            default_filter:
-                "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info"
-                    .into(),
+            default_filter: DAEMON_DEFAULT_FILTER.into(),
             ..Self::default()
         }
     }
@@ -359,5 +354,9 @@ mod tests {
         assert_ne!(daemon.default_filter, graph.default_filter);
         assert_ne!(daemon.default_filter, directive.default_filter);
         assert_ne!(daemon.default_filter, cli.default_filter);
+        assert!(
+            daemon.default_filter.contains("ryeos.metrics=info"),
+            "daemon cache and execution metrics must be observable without a custom RUST_LOG"
+        );
     }
 }

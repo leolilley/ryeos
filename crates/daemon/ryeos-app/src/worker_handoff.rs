@@ -1,0 +1,5294 @@
+//! Generic cross-site worker-placement authority.
+//!
+//! The wire object remains RyeOS's ordinary signed `Attestation`. These
+//! structures make the evidence under the two handoff policies exhaustive and
+//! typed so mutable sync-job phases or mere trust-store membership can never
+//! be interpreted as placement or chain-writer authority.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use anyhow::{Context, bail};
+use serde::{Deserialize, Serialize};
+
+use ryeos_state::objects::{AdmittedAccountingScope, Attestation, ExecutionProjectAuthority};
+use ryeos_state::signer::Signer;
+
+use crate::launch_metadata::{OriginalPushedHeadRef, ResumeContext, StableProjectIdentity};
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+pub const WORKER_PLACEMENT_POLICY: &str = "worker-placement-v1";
+pub const WORKER_PLACEMENT_CLAIM: &str = "admitted";
+pub const WORKER_PLACEMENT_PREFLIGHT_POLICY: &str = "worker-placement-preflight-v1";
+pub const WORKER_PLACEMENT_PREFLIGHT_CLAIM: &str = "eligible";
+pub const WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION: &str = "worker_session_handoff_preflight";
+pub const WORKER_SESSION_HANDOFF_OPERATION: &str = "worker_session_handoff";
+/// Handoff writer-transfer and cleanup jobs are authority protocols, not
+/// best-effort tasks. Once admitted they must remain redriveable for the same
+/// immutable operation until signed terminal testimony exists.
+pub const WORKER_SESSION_HANDOFF_MAX_ATTEMPTS: u64 = ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS;
+/// Total wall-clock bound for each authenticated peer interaction in one
+/// handoff phase. It is shorter than the outer wait-mode execution deadline so
+/// a stalled peer reaches durable retry settlement before request detachment.
+pub const WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT: lillux::time::Duration =
+    lillux::time::Duration::from_secs(4 * 60);
+pub const WORKER_HANDOFF_TARGET_ABORT_CLAIM_PHASE: &str = "target_abort_claimed";
+/// One target-owned branch head per handoff operation. Adoption and abort
+/// share this namespace so compare-and-swap publication makes the competing
+/// terminal branches mechanically exclusive even after operational-job GC.
+pub const WORKER_HANDOFF_TARGET_BRANCH_HEAD_NAMESPACE: &str = "worker-handoff-target-branches";
+pub const WORKER_HANDOFF_ABORT_FENCE_POLICY: &str = "worker-handoff-abort-v1";
+pub const WORKER_HANDOFF_ABORT_FENCE_CLAIM: &str = "abort_authorized";
+pub const WORKER_HANDOFF_ADOPTION_RECEIPT_POLICY: &str = "worker-handoff-adoption-receipt-v1";
+pub const WORKER_HANDOFF_ADOPTION_RECEIPT_CLAIM: &str = "target_adoption_attached";
+pub const WORKER_HANDOFF_TERMINAL_COMPLETION_POLICY: &str = "worker-handoff-terminal-completion-v1";
+pub const WORKER_HANDOFF_TERMINAL_COMPLETION_CLAIM: &str =
+    "target_completed_before_attachment_receipt";
+pub const WORKER_HANDOFF_TERMINAL_FAILURE_POLICY: &str = "worker-handoff-terminal-failure-v1";
+pub const WORKER_HANDOFF_TERMINAL_FAILURE_CLAIM: &str = "target_failed_before_attachment";
+pub const WORKER_PLACEMENT_PREFLIGHT_SERVICE: &str = "service:worker-placements/preflight";
+pub const WORKER_PLACEMENT_PREPARE_SERVICE: &str = "service:worker-placements/prepare";
+pub const WORKER_PLACEMENT_ADOPT_SERVICE: &str = "service:worker-placements/adopt";
+pub const WORKER_PLACEMENT_ABORT_SERVICE: &str = "service:worker-placements/abort";
+
+const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v3";
+const PREFLIGHT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_preflight.v3";
+const PREFLIGHT_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_preflight_job.v2";
+const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v3";
+const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1";
+const HANDOFF_ABORT_FENCE_EVIDENCE_SCHEMA: &str = "ryeos.worker_handoff_abort_fence.v2";
+const HANDOFF_ADOPTION_RECEIPT_EVIDENCE_SCHEMA: &str = "ryeos.worker_handoff_adoption_receipt.v1";
+const HANDOFF_TERMINAL_COMPLETION_EVIDENCE_SCHEMA: &str =
+    "ryeos.worker_handoff_terminal_completion.v1";
+const HANDOFF_TERMINAL_FAILURE_EVIDENCE_SCHEMA: &str = "ryeos.worker_handoff_terminal_failure.v1";
+
+/// Non-final target check performed only after the source worker is frozen,
+/// reaped, and checkpointed, but before source writer authority is cut. The
+/// chain-reachable admitted capsule is the immutable source program testimony;
+/// full operational launch metadata remains private to its node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightRequest {
+    pub preflight_id: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub source_launch_capsule_hash: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+    pub upstream_session_id: String,
+    pub credential_subject_contract_digest: String,
+    pub credential_subject_digest: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightResponse {
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
+    pub preflight_attestation: Attestation,
+    pub evidence: WorkerPlacementPreflightEvidence,
+}
+
+/// Exact target-signed receipt for checks that do not require the final
+/// checkpoint/candidate. This never grants chain-writer or process authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightEvidence {
+    pub schema: String,
+    pub operation_type: String,
+    pub preflight_id: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub source_launch_capsule_hash: String,
+    pub outer_exact_program_hash: String,
+    pub persistent_dependency_programs: BTreeMap<String, String>,
+    pub target_persistent_session_capsules: BTreeMap<String, String>,
+    pub target_execution_realization_hash: String,
+    pub target_isolation_digest: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_project_head_hash: String,
+    pub target_credential_profile_id: String,
+    pub target_credential_generation: u64,
+    pub target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_chain_owner_anchor_hash: Option<String>,
+    pub upstream_session_id: String,
+    pub credential_subject_contract_digest: String,
+    pub credential_subject_digest: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
+}
+
+/// Immutable local sync-job body used to retain a preflight receipt and its
+/// staged portable-program closure on each participating node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightJobOperation {
+    pub schema: String,
+    pub operation_type: String,
+    pub role: WorkerHandoffJobRole,
+    pub preflight_id: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub source_launch_capsule_hash: String,
+    pub peer_remote_name: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPrepareRequest {
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_chain_head_hash: String,
+    pub transfer_manifest_hash: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
+    pub source_accounting_frontier: Option<crate::accounting_db::AccountingHandoffFrontier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPrepareResponse {
+    pub operation_id: String,
+    pub placement_attestation_hash: String,
+    pub target_runtime_seed_hash: String,
+    pub target_launch_capsule_hash: String,
+    pub credential_reservation: CredentialGenerationReservation,
+    pub placement: WorkerPlacementAdmissionEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAdoptRequest {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub target_chain_head_hash: String,
+    pub placement_attestation_hash: String,
+    pub writer_grant_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAdoptResponse {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub target_chain_head_hash: String,
+    pub delivery: String,
+}
+
+/// Closed target outcome when the authorized successor terminalizes before
+/// the persistent worker attachment is committed. The target terminal chain
+/// head, not mutable job text, carries the exact failure outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementFailureResponse {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub target_chain_head_hash: String,
+    pub terminal_status: String,
+    pub credential_disposition: String,
+}
+
+/// Closed successful target outcome when the authorized successor completes
+/// before the target can project its persistent-attachment receipt. This is
+/// intentionally distinct from `Attached`: the terminal chain proves that the
+/// target exercised writer authority and completed the execution, but does not
+/// manufacture evidence that a persistent session remained attachable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementCompletionResponse {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub target_chain_head_hash: String,
+    pub terminal_status: String,
+    pub credential_disposition: String,
+}
+
+/// Closed target-service result for one terminal adoption. The response is
+/// ordinary typed outcome data; the attestation hash names the independently
+/// retained target-node-signed authority that must be fetched and verified by
+/// the source before it may settle its own durable job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkerPlacementAdoptResult {
+    Attached {
+        response: WorkerPlacementAdoptResponse,
+        terminal_attestation_hash: String,
+    },
+    FailedBeforeAttachment {
+        failure: WorkerPlacementFailureResponse,
+        terminal_attestation_hash: String,
+    },
+    CompletedBeforeAttachment {
+        completion: WorkerPlacementCompletionResponse,
+        terminal_attestation_hash: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAbortRequest {
+    /// Exact source-role operation whose immediate source-chain successor
+    /// proves cancellation. Carrying the complete operation lets a target that
+    /// has not yet observed `prepare` durably fence the same coordinates.
+    pub operation: WorkerSessionHandoffJobOperation,
+    pub abort_chain_head_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAbortResponse {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub disposition: String,
+}
+
+/// Closed target-service result for one terminal abort. A mutable target job
+/// row is never wire authority: `terminal_attestation_hash` must resolve to the
+/// target-node-signed terminal abort fence carrying this exact response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAbortResult {
+    pub response: WorkerPlacementAbortResponse,
+    pub terminal_attestation_hash: String,
+}
+
+/// Typed evidence inside the target-node-signed abort-fence attestation. The
+/// ordinary `Attestation` remains the wire/CAS object and generic-head target;
+/// this evidence only closes the operation coordinates it protects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHandoffAbortFenceEvidence {
+    pub schema: String,
+    pub target_operation: WorkerSessionHandoffJobOperation,
+    pub abort_chain_head_hash: String,
+    /// Present only after target cleanup has durably completed. This turns the
+    /// node-signed fence into the retention-independent terminal replay
+    /// receipt; the operational sync-job may then expire normally.
+    pub terminal_disposition: Option<String>,
+}
+
+/// Target-node-signed terminal response authority retained independently of
+/// the operational sync-job. It is published only after the exact successor
+/// attachment has been observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHandoffAdoptionReceiptEvidence {
+    pub schema: String,
+    pub target_operation: WorkerSessionHandoffJobOperation,
+    pub request: WorkerPlacementAdoptRequest,
+    pub response: WorkerPlacementAdoptResponse,
+}
+
+/// Target-node-signed terminal failure testimony. This is the third and final
+/// mutually exclusive target branch beside successful adoption and source
+/// abort. It is published only after the successor's signed terminal and
+/// credential/process cleanup are both proved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHandoffTerminalFailureEvidence {
+    pub schema: String,
+    pub target_operation: WorkerSessionHandoffJobOperation,
+    pub request: WorkerPlacementAdoptRequest,
+    pub failure: WorkerPlacementFailureResponse,
+}
+
+/// Target-node-signed successful terminal testimony for the race in which the
+/// successor completes after writer transfer but before attachment projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHandoffTerminalCompletionEvidence {
+    pub schema: String,
+    pub target_operation: WorkerSessionHandoffJobOperation,
+    pub request: WorkerPlacementAdoptRequest,
+    pub completion: WorkerPlacementCompletionResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerHandoffTargetTerminalEvidence {
+    Adoption(WorkerHandoffAdoptionReceiptEvidence),
+    Abort(WorkerHandoffAbortFenceEvidence),
+    Completion(WorkerHandoffTerminalCompletionEvidence),
+    Failure(WorkerHandoffTerminalFailureEvidence),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHandoffJobRole {
+    Source,
+    Target,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHandoffPhase {
+    Planned,
+    SourceExported,
+    TargetPrepared,
+    AbortAuthorized,
+    SourceCommitted,
+    TargetAdopted,
+    StateInstalled,
+    ProcessAttached,
+    Completed,
+}
+
+impl WorkerHandoffPhase {
+    pub const ALL: [Self; 9] = [
+        Self::Planned,
+        Self::SourceExported,
+        Self::TargetPrepared,
+        Self::AbortAuthorized,
+        Self::SourceCommitted,
+        Self::TargetAdopted,
+        Self::StateInstalled,
+        Self::ProcessAttached,
+        Self::Completed,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::SourceExported => "source_exported",
+            Self::TargetPrepared => "target_prepared",
+            Self::AbortAuthorized => "abort_authorized",
+            Self::SourceCommitted => "source_committed",
+            Self::TargetAdopted => "target_adopted",
+            Self::StateInstalled => "state_installed",
+            Self::ProcessAttached => "process_attached",
+            Self::Completed => "completed",
+        }
+    }
+
+    /// Before the source cut, only the source placement may append. Abort is
+    /// deliberately on this side of the cut because it preserves the source
+    /// as the current placement.
+    pub const fn source_is_only_authorized_writer(self) -> bool {
+        matches!(
+            self,
+            Self::Planned | Self::SourceExported | Self::TargetPrepared | Self::AbortAuthorized
+        )
+    }
+
+    /// At and after the source cut, source authority is permanently fenced and
+    /// the exact successor grant is the sole append authority. The target may
+    /// not exercise that grant until adoption verifies it.
+    pub const fn successor_is_only_authorized_writer(self) -> bool {
+        matches!(
+            self,
+            Self::SourceCommitted
+                | Self::TargetAdopted
+                | Self::StateInstalled
+                | Self::ProcessAttached
+                | Self::Completed
+        )
+    }
+
+    pub const fn target_has_adopted_writer_grant(self) -> bool {
+        matches!(
+            self,
+            Self::TargetAdopted | Self::StateInstalled | Self::ProcessAttached | Self::Completed
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::io::Write;
+    use std::str::FromStr;
+    use std::sync::Mutex;
+
+    use anyhow::{Context, Result};
+    use serde::{Deserialize, Serialize};
+
+    use super::{WorkerHandoffPhase, WorkerSessionHandoffJobOperation};
+
+    pub const HANDOFF_PHASE_CUT_FD_ENV: &str = "RYEOSD_TEST_HANDOFF_PHASE_CUT_FD";
+    pub const HANDOFF_PHASE_CUT_EVIDENCE_SCHEMA: &str =
+        "ryeos.worker_handoff_phase_cut_evidence.v1";
+
+    macro_rules! handoff_crash_boundaries {
+        ($($variant:ident => $name:literal),+ $(,)?) => {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+            #[serde(rename_all = "snake_case")]
+            pub enum HandoffCrashBoundary {
+                $($variant),+
+            }
+
+            impl HandoffCrashBoundary {
+                pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+                pub const fn as_str(self) -> &'static str {
+                    match self {
+                        $(Self::$variant => $name),+
+                    }
+                }
+            }
+
+            impl FromStr for HandoffCrashBoundary {
+                type Err = anyhow::Error;
+
+                fn from_str(value: &str) -> Result<Self> {
+                    match value {
+                        $($name => Ok(Self::$variant)),+,
+                        _ => anyhow::bail!("unknown handoff crash boundary `{value}`"),
+                    }
+                }
+            }
+        };
+    }
+
+    handoff_crash_boundaries! {
+        SourceBeforeExportPublication => "source_before_export_publication",
+        SourceExportPublished => "source_export_published",
+        SourceBeforePreparedEvidenceProjection => "source_before_prepared_evidence_projection",
+        SourcePreparedEvidenceProjected => "source_prepared_evidence_projected",
+        SourceBeforeWriterCut => "source_before_writer_cut",
+        SourceWriterCutPublished => "source_writer_cut_published",
+        SourceCommitProjected => "source_commit_projected",
+        SourceBeforeAbortPublication => "source_before_abort_publication",
+        SourceAbortPublished => "source_abort_published",
+        SourceAbortProjected => "source_abort_projected",
+        SourceBeforeCompletion => "source_before_completion",
+        SourceCompletedBeforeResponse => "source_completed_before_response",
+        TargetBeforePreparationPublication => "target_before_preparation_publication",
+        TargetPreparationPublished => "target_preparation_published",
+        TargetBeforeAbortEvidenceStage => "target_before_abort_evidence_stage",
+        TargetAbortEvidenceStaged => "target_abort_evidence_staged",
+        TargetAbortEvidenceVerified => "target_abort_evidence_verified",
+        TargetAbortReservationReleased => "target_abort_reservation_released",
+        TargetAbortReceiptPublished => "target_abort_receipt_published",
+        TargetAbortCompletedBeforeResponse => "target_abort_completed_before_response",
+        TargetBeforeSourceCommitEvidenceStage => "target_before_source_commit_evidence_stage",
+        TargetSourceCommitEvidenceStaged => "target_source_commit_evidence_staged",
+        TargetSourceCommitEvidenceVerified => "target_source_commit_evidence_verified",
+        TargetBeforeAdoptionPublication => "target_before_adoption_publication",
+        TargetAdoptionPublished => "target_adoption_published",
+        TargetAdoptionProjected => "target_adoption_projected",
+        TargetBeforeStateInstall => "target_before_state_install",
+        TargetStateInstalled => "target_state_installed",
+        TargetStateInstallProjected => "target_state_install_projected",
+        TargetProcessAttachmentObserved => "target_process_attachment_observed",
+        TargetProcessAttachmentProjected => "target_process_attachment_projected",
+        TargetBeforeCompletion => "target_before_completion",
+        TargetCompletedBeforeResponse => "target_completed_before_response",
+    }
+
+    impl fmt::Display for HandoffCrashBoundary {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(self.as_str())
+        }
+    }
+
+    /// Test-only evidence emitted by the live request/recovery path at the
+    /// selected crash boundary. The operation identity is captured from the
+    /// executing stack before the daemon is killed, so restart qualification
+    /// cannot use a replacement operation reconstructed from durable state as
+    /// its own oracle.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffPhaseCutEvidence {
+        pub schema: String,
+        pub boundary: HandoffCrashBoundary,
+        pub operation_id: String,
+        pub operation_digest: String,
+    }
+
+    impl HandoffPhaseCutEvidence {
+        pub fn new(
+            boundary: HandoffCrashBoundary,
+            operation: &WorkerSessionHandoffJobOperation,
+        ) -> Result<Self> {
+            operation.validate()?;
+            let evidence = Self {
+                schema: HANDOFF_PHASE_CUT_EVIDENCE_SCHEMA.to_owned(),
+                boundary,
+                operation_id: operation.operation_id.clone(),
+                operation_digest: ryeos_state::objects::canonical_value_digest(
+                    &operation.to_value()?,
+                )?,
+            };
+            evidence.validate()?;
+            Ok(evidence)
+        }
+
+        pub fn validate(&self) -> Result<()> {
+            anyhow::ensure!(
+                self.schema == HANDOFF_PHASE_CUT_EVIDENCE_SCHEMA,
+                "handoff phase-cut evidence is not the exact current contract"
+            );
+            anyhow::ensure!(
+                lillux::valid_hash(&self.operation_id)
+                    && self
+                        .operation_id
+                        .bytes()
+                        .all(|byte| !byte.is_ascii_uppercase()),
+                "handoff phase-cut evidence has a non-canonical operation id"
+            );
+            anyhow::ensure!(
+                lillux::valid_hash(&self.operation_digest)
+                    && self
+                        .operation_digest
+                        .bytes()
+                        .all(|byte| !byte.is_ascii_uppercase()),
+                "handoff phase-cut evidence has a non-canonical operation digest"
+            );
+            Ok(())
+        }
+
+        pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+            self.validate()?;
+            Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum HandoffNode {
+        Source,
+        Target,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CrashCutPosition {
+        Before,
+        After,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum HandoffProtocolMilestone {
+        SourceExportPublication,
+        SourcePreparedEvidenceProjection,
+        SourceWriterCutPublication,
+        SourceCommitProjection,
+        SourceAbortPublication,
+        SourceAbortProjection,
+        SourceCompletion,
+        TargetPreparationPublication,
+        TargetAbortEvidenceStage,
+        TargetAbortAuthorityVerification,
+        TargetCredentialReservationRelease,
+        TargetAbortTerminalReceipt,
+        TargetAbortCompletion,
+        TargetSourceCommitEvidenceStage,
+        TargetSourceCommitAuthorityVerification,
+        TargetAdoptionPublication,
+        TargetAdoptionProjection,
+        TargetPortableStateInstall,
+        TargetStateInstallProjection,
+        TargetProcessAttachment,
+        TargetProcessAttachmentProjection,
+        TargetCompletion,
+    }
+
+    /// One exact instrumentation seam. This inventory is deliberately
+    /// separate from the acceptance cases: the same seam can be exercised by
+    /// multiple durable starting states and therefore cannot itself be the
+    /// recovery oracle.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HandoffCrashBoundarySpec {
+        pub boundary: HandoffCrashBoundary,
+        pub interrupted_node: HandoffNode,
+        pub milestone: HandoffProtocolMilestone,
+        pub position: CrashCutPosition,
+    }
+
+    macro_rules! boundary_spec {
+        ($boundary:ident, $node:ident, $milestone:ident, $position:ident) => {
+            HandoffCrashBoundarySpec {
+                boundary: HandoffCrashBoundary::$boundary,
+                interrupted_node: HandoffNode::$node,
+                milestone: HandoffProtocolMilestone::$milestone,
+                position: CrashCutPosition::$position,
+            }
+        };
+    }
+
+    pub const HANDOFF_CRASH_BOUNDARY_SPECS: &[HandoffCrashBoundarySpec] = &[
+        boundary_spec!(
+            SourceBeforeExportPublication,
+            Source,
+            SourceExportPublication,
+            Before
+        ),
+        boundary_spec!(
+            SourceExportPublished,
+            Source,
+            SourceExportPublication,
+            After
+        ),
+        boundary_spec!(
+            SourceBeforePreparedEvidenceProjection,
+            Source,
+            SourcePreparedEvidenceProjection,
+            Before
+        ),
+        boundary_spec!(
+            SourcePreparedEvidenceProjected,
+            Source,
+            SourcePreparedEvidenceProjection,
+            After
+        ),
+        boundary_spec!(
+            SourceBeforeWriterCut,
+            Source,
+            SourceWriterCutPublication,
+            Before
+        ),
+        boundary_spec!(
+            SourceWriterCutPublished,
+            Source,
+            SourceWriterCutPublication,
+            After
+        ),
+        boundary_spec!(SourceCommitProjected, Source, SourceCommitProjection, After),
+        boundary_spec!(
+            SourceBeforeAbortPublication,
+            Source,
+            SourceAbortPublication,
+            Before
+        ),
+        boundary_spec!(SourceAbortPublished, Source, SourceAbortPublication, After),
+        boundary_spec!(SourceAbortProjected, Source, SourceAbortProjection, After),
+        boundary_spec!(SourceBeforeCompletion, Source, SourceCompletion, Before),
+        boundary_spec!(
+            SourceCompletedBeforeResponse,
+            Source,
+            SourceCompletion,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforePreparationPublication,
+            Target,
+            TargetPreparationPublication,
+            Before
+        ),
+        boundary_spec!(
+            TargetPreparationPublished,
+            Target,
+            TargetPreparationPublication,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeAbortEvidenceStage,
+            Target,
+            TargetAbortEvidenceStage,
+            Before
+        ),
+        boundary_spec!(
+            TargetAbortEvidenceStaged,
+            Target,
+            TargetAbortEvidenceStage,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortEvidenceVerified,
+            Target,
+            TargetAbortAuthorityVerification,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortReservationReleased,
+            Target,
+            TargetCredentialReservationRelease,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortReceiptPublished,
+            Target,
+            TargetAbortTerminalReceipt,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortCompletedBeforeResponse,
+            Target,
+            TargetAbortCompletion,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeSourceCommitEvidenceStage,
+            Target,
+            TargetSourceCommitEvidenceStage,
+            Before
+        ),
+        boundary_spec!(
+            TargetSourceCommitEvidenceStaged,
+            Target,
+            TargetSourceCommitEvidenceStage,
+            After
+        ),
+        boundary_spec!(
+            TargetSourceCommitEvidenceVerified,
+            Target,
+            TargetSourceCommitAuthorityVerification,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeAdoptionPublication,
+            Target,
+            TargetAdoptionPublication,
+            Before
+        ),
+        boundary_spec!(
+            TargetAdoptionPublished,
+            Target,
+            TargetAdoptionPublication,
+            After
+        ),
+        boundary_spec!(
+            TargetAdoptionProjected,
+            Target,
+            TargetAdoptionProjection,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeStateInstall,
+            Target,
+            TargetPortableStateInstall,
+            Before
+        ),
+        boundary_spec!(
+            TargetStateInstalled,
+            Target,
+            TargetPortableStateInstall,
+            After
+        ),
+        boundary_spec!(
+            TargetStateInstallProjected,
+            Target,
+            TargetStateInstallProjection,
+            After
+        ),
+        boundary_spec!(
+            TargetProcessAttachmentObserved,
+            Target,
+            TargetProcessAttachment,
+            After
+        ),
+        boundary_spec!(
+            TargetProcessAttachmentProjected,
+            Target,
+            TargetProcessAttachmentProjection,
+            After
+        ),
+        boundary_spec!(TargetBeforeCompletion, Target, TargetCompletion, Before),
+        boundary_spec!(
+            TargetCompletedBeforeResponse,
+            Target,
+            TargetCompletion,
+            After
+        ),
+    ];
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RequestOutcomeAtCut {
+        FailedBeforeResponse,
+        AmbiguousResponse,
+        RecoveryInterrupted,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RecoveryTrigger {
+        RetryOriginalRequest,
+        RestartSource,
+        RestartTargetThenRetrySource,
+        RestartTargetThenSourceRecovery,
+        ObserveOnly,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AppendAuthorityLane {
+        SourcePlacement,
+        ExactSuccessorGrant,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ExpectedHeadSigner {
+        SourceNode,
+        TargetNode,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DurableJobState {
+        Absent,
+        Planned,
+        Running,
+        Retryable,
+        Completed,
+        Failed,
+        Cancelled,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DurableJobPhase {
+        Absent,
+        Planned,
+        SourceExported,
+        TargetPrepare,
+        PlacementAdmission,
+        TargetPrepared,
+        AbortAuthorized,
+        TargetAbort,
+        TargetAbortClaimed,
+        SourceCommitted,
+        TargetAdopt,
+        TargetAdopted,
+        StateInstalled,
+        ProcessAttached,
+        Completed,
+        Aborted,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case", tag = "kind", content = "phase")]
+    pub enum DurableJobResult {
+        Absent,
+        Progress(WorkerHandoffPhase),
+        AdoptionReceipt,
+        AbortReceipt,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct DurableJobExpectation {
+        pub state: DurableJobState,
+        pub phase: DurableJobPhase,
+        pub result: DurableJobResult,
+        pub active_attempt: bool,
+    }
+
+    const fn absent_job() -> DurableJobExpectation {
+        DurableJobExpectation {
+            state: DurableJobState::Absent,
+            phase: DurableJobPhase::Absent,
+            result: DurableJobResult::Absent,
+            active_attempt: false,
+        }
+    }
+
+    const fn progress_job(
+        state: DurableJobState,
+        phase: DurableJobPhase,
+        progress: WorkerHandoffPhase,
+        active_attempt: bool,
+    ) -> DurableJobExpectation {
+        DurableJobExpectation {
+            state,
+            phase,
+            result: DurableJobResult::Progress(progress),
+            active_attempt,
+        }
+    }
+
+    const fn no_result_job(
+        state: DurableJobState,
+        phase: DurableJobPhase,
+        active_attempt: bool,
+    ) -> DurableJobExpectation {
+        DurableJobExpectation {
+            state,
+            phase,
+            result: DurableJobResult::Absent,
+            active_attempt,
+        }
+    }
+
+    const fn receipt_job(
+        state: DurableJobState,
+        phase: DurableJobPhase,
+        result: DurableJobResult,
+    ) -> DurableJobExpectation {
+        DurableJobExpectation {
+            state,
+            phase,
+            result,
+            active_attempt: false,
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SourcePlacementState {
+        CurrentWriter,
+        AbortRecordedCurrentWriter,
+        Fenced,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SuccessorPlacementState {
+        Absent,
+        PreparedOnly,
+        AuthorizedUnadopted,
+        AdoptedUnattached,
+        Attached,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CredentialDisposition {
+        NotReserved,
+        Reserved,
+        Released,
+        Consumed,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum StagingRootDisposition {
+        None,
+        ActiveJobOwned,
+        TerminalJobOwned,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PortableStateDisposition {
+        Absent,
+        Installed,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkspaceDisposition {
+        None,
+        EphemeralPreparation,
+        PreparedReconstructible,
+        Attached,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ProcessDisposition {
+        None,
+        ExactTargetAttached,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HandoffDurableSnapshot {
+        pub source_phase: Option<WorkerHandoffPhase>,
+        pub target_phase: Option<WorkerHandoffPhase>,
+        pub source_job: DurableJobExpectation,
+        pub target_job: DurableJobExpectation,
+        pub append_authority: AppendAuthorityLane,
+        pub head_signer: ExpectedHeadSigner,
+        pub source_placement: SourcePlacementState,
+        pub successor_placement: SuccessorPlacementState,
+        pub target_credential: CredentialDisposition,
+        pub source_staging_roots: StagingRootDisposition,
+        pub target_staging_roots: StagingRootDisposition,
+        pub portable_state: PortableStateDisposition,
+        pub workspace: WorkspaceDisposition,
+        pub process: ProcessDisposition,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RetryDisposition {
+        ReusesExactOperation,
+        ResumesExactOperation,
+        ResumesSourceFromTargetReceipt,
+        ObservesCompletedReceipt,
+        RejectedByAbortAuthority,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum OperatorOutcome {
+        Completed,
+        AbortedSourceContinues,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HandoffAcceptanceCase {
+        pub case_id: &'static str,
+        pub boundary: HandoffCrashBoundary,
+        pub interrupted_node: HandoffNode,
+        pub request_outcome_at_cut: RequestOutcomeAtCut,
+        pub recovery_trigger: RecoveryTrigger,
+        pub at_cut: HandoffDurableSnapshot,
+        pub after_recovery: HandoffDurableSnapshot,
+        pub retry_disposition: RetryDisposition,
+        pub operator_outcome: OperatorOutcome,
+    }
+
+    macro_rules! acceptance_case {
+        ($id:literal, $boundary:ident, $node:ident, $request:ident, $recovery:ident, $cut:expr, $after:expr, $retry:ident, $operator:ident) => {
+            HandoffAcceptanceCase {
+                case_id: $id,
+                boundary: HandoffCrashBoundary::$boundary,
+                interrupted_node: HandoffNode::$node,
+                request_outcome_at_cut: RequestOutcomeAtCut::$request,
+                recovery_trigger: RecoveryTrigger::$recovery,
+                at_cut: $cut,
+                after_recovery: $after,
+                retry_disposition: RetryDisposition::$retry,
+                operator_outcome: OperatorOutcome::$operator,
+            }
+        };
+    }
+
+    macro_rules! snapshot {
+        (
+            $source_phase:expr,
+            $target_phase:expr,
+            $source_job:expr,
+            $target_job:expr,
+            $authority:ident,
+            $signer:ident,
+            $source_placement:ident,
+            $successor_placement:ident,
+            $credential:ident,
+            $source_roots:ident,
+            $target_roots:ident,
+            $portable_state:ident,
+            $workspace:ident,
+            $process:ident
+        ) => {
+            HandoffDurableSnapshot {
+                source_phase: $source_phase,
+                target_phase: $target_phase,
+                source_job: $source_job,
+                target_job: $target_job,
+                append_authority: AppendAuthorityLane::$authority,
+                head_signer: ExpectedHeadSigner::$signer,
+                source_placement: SourcePlacementState::$source_placement,
+                successor_placement: SuccessorPlacementState::$successor_placement,
+                target_credential: CredentialDisposition::$credential,
+                source_staging_roots: StagingRootDisposition::$source_roots,
+                target_staging_roots: StagingRootDisposition::$target_roots,
+                portable_state: PortableStateDisposition::$portable_state,
+                workspace: WorkspaceDisposition::$workspace,
+                process: ProcessDisposition::$process,
+            }
+        };
+    }
+
+    const RECOVERED_COMPLETED: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::Completed),
+        Some(WorkerHandoffPhase::Completed),
+        receipt_job(
+            DurableJobState::Completed,
+            DurableJobPhase::Completed,
+            DurableJobResult::AdoptionReceipt,
+        ),
+        receipt_job(
+            DurableJobState::Completed,
+            DurableJobPhase::Completed,
+            DurableJobResult::AdoptionReceipt,
+        ),
+        ExactSuccessorGrant,
+        TargetNode,
+        Fenced,
+        Attached,
+        Consumed,
+        TerminalJobOwned,
+        TerminalJobOwned,
+        Installed,
+        Attached,
+        ExactTargetAttached
+    );
+
+    const RECOVERED_ABORTED_WITH_TARGET: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        SourcePlacement,
+        SourceNode,
+        AbortRecordedCurrentWriter,
+        Absent,
+        Released,
+        TerminalJobOwned,
+        TerminalJobOwned,
+        Absent,
+        None,
+        None
+    );
+
+    const RECOVERED_ABORTED_NO_TARGET: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        SourcePlacement,
+        SourceNode,
+        AbortRecordedCurrentWriter,
+        Absent,
+        NotReserved,
+        TerminalJobOwned,
+        TerminalJobOwned,
+        Absent,
+        None,
+        None
+    );
+
+    const CUT_SOURCE_BEFORE_EXPORT: HandoffDurableSnapshot = snapshot!(
+        None,
+        None,
+        absent_job(),
+        absent_job(),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        Absent,
+        NotReserved,
+        None,
+        None,
+        Absent,
+        None,
+        None
+    );
+
+    const CUT_SOURCE_EXPORTED: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        None,
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceExported,
+            WorkerHandoffPhase::SourceExported,
+            false,
+        ),
+        absent_job(),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        Absent,
+        NotReserved,
+        ActiveJobOwned,
+        None,
+        Absent,
+        None,
+        None
+    );
+
+    const CUT_TARGET_PREPARATION_BEFORE_PUBLICATION: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        Some(WorkerHandoffPhase::Planned),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepare,
+            WorkerHandoffPhase::SourceExported,
+            true,
+        ),
+        no_result_job(
+            DurableJobState::Running,
+            DurableJobPhase::PlacementAdmission,
+            true,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        EphemeralPreparation,
+        None
+    );
+
+    const CUT_TARGET_PREPARATION_PUBLISHED: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        Some(WorkerHandoffPhase::TargetPrepared),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepare,
+            WorkerHandoffPhase::SourceExported,
+            true,
+        ),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            true,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        PreparedReconstructible,
+        None
+    );
+
+    const CUT_SOURCE_BEFORE_PREPARED_PROJECTION: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        Some(WorkerHandoffPhase::TargetPrepared),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepare,
+            WorkerHandoffPhase::SourceExported,
+            true,
+        ),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        PreparedReconstructible,
+        None
+    );
+
+    const CUT_SOURCE_PREPARED_PROJECTED_ACTIVE: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::TargetPrepared),
+        Some(WorkerHandoffPhase::TargetPrepared),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            true,
+        ),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        PreparedReconstructible,
+        None
+    );
+
+    const CUT_SOURCE_PREPARED_IDLE: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        ..CUT_SOURCE_PREPARED_PROJECTED_ACTIVE
+    };
+
+    const CUT_SOURCE_WRITER_CUT_PUBLISHED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        append_authority: AppendAuthorityLane::ExactSuccessorGrant,
+        source_placement: SourcePlacementState::Fenced,
+        successor_placement: SuccessorPlacementState::AuthorizedUnadopted,
+        ..CUT_SOURCE_PREPARED_IDLE
+    };
+
+    const CUT_SOURCE_COMMIT_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_phase: Some(WorkerHandoffPhase::SourceCommitted),
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceCommitted,
+            WorkerHandoffPhase::SourceCommitted,
+            false,
+        ),
+        ..CUT_SOURCE_WRITER_CUT_PUBLISHED
+    };
+
+    const CUT_SOURCE_ABORT_BEFORE_NO_TARGET: HandoffDurableSnapshot = CUT_SOURCE_EXPORTED;
+
+    const CUT_SOURCE_ABORT_PUBLISHED_NO_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_EXPORTED
+    };
+
+    const CUT_SOURCE_ABORT_PROJECTED_NO_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_phase: Some(WorkerHandoffPhase::AbortAuthorized),
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::AbortAuthorized,
+            WorkerHandoffPhase::AbortAuthorized,
+            false,
+        ),
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_EXPORTED
+    };
+
+    const CUT_SOURCE_ABORT_BEFORE_WITH_TARGET: HandoffDurableSnapshot = CUT_SOURCE_PREPARED_IDLE;
+
+    const CUT_SOURCE_ABORT_PUBLISHED_WITH_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_PREPARED_IDLE
+    };
+
+    const CUT_SOURCE_ABORT_PROJECTED_WITH_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_phase: Some(WorkerHandoffPhase::AbortAuthorized),
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::AbortAuthorized,
+            WorkerHandoffPhase::AbortAuthorized,
+            false,
+        ),
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_PREPARED_IDLE
+    };
+
+    const CUT_TARGET_ABORT_BEFORE_STAGE: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAbort,
+            WorkerHandoffPhase::AbortAuthorized,
+            true,
+        ),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAbortClaimed,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        ..CUT_SOURCE_ABORT_PROJECTED_WITH_TARGET
+    };
+
+    const CUT_TARGET_ABORT_STAGED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::AbortAuthorized),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::AbortAuthorized,
+            WorkerHandoffPhase::AbortAuthorized,
+            false,
+        ),
+        ..CUT_TARGET_ABORT_BEFORE_STAGE
+    };
+
+    const CUT_TARGET_ABORT_RESERVATION_RELEASED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        successor_placement: SuccessorPlacementState::Absent,
+        target_credential: CredentialDisposition::Released,
+        ..CUT_TARGET_ABORT_STAGED
+    };
+
+    const CUT_TARGET_ABORT_COMPLETED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_job: receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        successor_placement: SuccessorPlacementState::Absent,
+        target_credential: CredentialDisposition::Released,
+        target_staging_roots: StagingRootDisposition::TerminalJobOwned,
+        workspace: WorkspaceDisposition::None,
+        ..CUT_TARGET_ABORT_STAGED
+    };
+
+    const CUT_TARGET_BEFORE_SOURCE_COMMIT_STAGE: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAdopt,
+            WorkerHandoffPhase::SourceCommitted,
+            true,
+        ),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAdopt,
+            WorkerHandoffPhase::TargetPrepared,
+            true,
+        ),
+        ..CUT_SOURCE_COMMIT_PROJECTED
+    };
+
+    const CUT_TARGET_SOURCE_COMMIT_STAGED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::SourceCommitted),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceCommitted,
+            WorkerHandoffPhase::SourceCommitted,
+            true,
+        ),
+        ..CUT_TARGET_BEFORE_SOURCE_COMMIT_STAGE
+    };
+
+    const CUT_TARGET_ADOPTION_PUBLISHED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        head_signer: ExpectedHeadSigner::TargetNode,
+        successor_placement: SuccessorPlacementState::AdoptedUnattached,
+        ..CUT_TARGET_SOURCE_COMMIT_STAGED
+    };
+
+    const CUT_TARGET_ADOPTION_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::TargetAdopted),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAdopted,
+            WorkerHandoffPhase::TargetAdopted,
+            true,
+        ),
+        ..CUT_TARGET_ADOPTION_PUBLISHED
+    };
+
+    const CUT_TARGET_STATE_INSTALLED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        portable_state: PortableStateDisposition::Installed,
+        ..CUT_TARGET_ADOPTION_PROJECTED
+    };
+
+    const CUT_TARGET_STATE_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::StateInstalled),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::StateInstalled,
+            WorkerHandoffPhase::StateInstalled,
+            true,
+        ),
+        ..CUT_TARGET_STATE_INSTALLED
+    };
+
+    const CUT_TARGET_ATTACHMENT_OBSERVED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        successor_placement: SuccessorPlacementState::Attached,
+        target_credential: CredentialDisposition::Consumed,
+        workspace: WorkspaceDisposition::Attached,
+        process: ProcessDisposition::ExactTargetAttached,
+        ..CUT_TARGET_STATE_PROJECTED
+    };
+
+    const CUT_TARGET_ATTACHMENT_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::ProcessAttached),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::ProcessAttached,
+            WorkerHandoffPhase::ProcessAttached,
+            true,
+        ),
+        ..CUT_TARGET_ATTACHMENT_OBSERVED
+    };
+
+    const CUT_TARGET_COMPLETED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::Completed),
+        target_job: receipt_job(
+            DurableJobState::Completed,
+            DurableJobPhase::Completed,
+            DurableJobResult::AdoptionReceipt,
+        ),
+        target_staging_roots: StagingRootDisposition::TerminalJobOwned,
+        ..CUT_TARGET_ATTACHMENT_PROJECTED
+    };
+
+    const CUT_SOURCE_TERMINAL_RECEIPT_ROOTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceCommitted,
+            WorkerHandoffPhase::SourceCommitted,
+            true,
+        ),
+        ..CUT_TARGET_COMPLETED
+    };
+
+    const CUT_SOURCE_COMPLETED: HandoffDurableSnapshot = RECOVERED_COMPLETED;
+
+    /// Executable recovery oracle. Several rows may select the same crash seam
+    /// when distinct durable starting states require distinct assertions.
+    pub const HANDOFF_ACCEPTANCE_MATRIX: &[HandoffAcceptanceCase] = &[
+        acceptance_case!(
+            "source_before_export",
+            SourceBeforeExportPublication,
+            Source,
+            FailedBeforeResponse,
+            RetryOriginalRequest,
+            CUT_SOURCE_BEFORE_EXPORT,
+            RECOVERED_COMPLETED,
+            ReusesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "source_export_published",
+            SourceExportPublished,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_EXPORTED,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_before_prepared_projection",
+            SourceBeforePreparedEvidenceProjection,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_BEFORE_PREPARED_PROJECTION,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_prepared_projected",
+            SourcePreparedEvidenceProjected,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_PREPARED_PROJECTED_ACTIVE,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_before_writer_cut",
+            SourceBeforeWriterCut,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_PREPARED_IDLE,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_writer_cut_published",
+            SourceWriterCutPublished,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_WRITER_CUT_PUBLISHED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "source_commit_projected",
+            SourceCommitProjected,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_COMMIT_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "source_abort_before_no_target",
+            SourceBeforeAbortPublication,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_BEFORE_NO_TARGET,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_before_with_target",
+            SourceBeforeAbortPublication,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_BEFORE_WITH_TARGET,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_published_no_target",
+            SourceAbortPublished,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PUBLISHED_NO_TARGET,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_published_with_target",
+            SourceAbortPublished,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PUBLISHED_WITH_TARGET,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_projected_no_target",
+            SourceAbortProjected,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PROJECTED_NO_TARGET,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_projected_with_target",
+            SourceAbortProjected,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PROJECTED_WITH_TARGET,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_before_completion",
+            SourceBeforeCompletion,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_TERMINAL_RECEIPT_ROOTED,
+            RECOVERED_COMPLETED,
+            ObservesCompletedReceipt,
+            Completed
+        ),
+        acceptance_case!(
+            "source_completed_before_response",
+            SourceCompletedBeforeResponse,
+            Source,
+            AmbiguousResponse,
+            ObserveOnly,
+            CUT_SOURCE_COMPLETED,
+            RECOVERED_COMPLETED,
+            ObservesCompletedReceipt,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_preparation_publication",
+            TargetBeforePreparationPublication,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_PREPARATION_BEFORE_PUBLICATION,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_preparation_published",
+            TargetPreparationPublished,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_PREPARATION_PUBLISHED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_before_abort_stage",
+            TargetBeforeAbortEvidenceStage,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_BEFORE_STAGE,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_staged",
+            TargetAbortEvidenceStaged,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_STAGED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_verified",
+            TargetAbortEvidenceVerified,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_STAGED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_reservation_released",
+            TargetAbortReservationReleased,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_RESERVATION_RELEASED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_receipt_published",
+            TargetAbortReceiptPublished,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_RESERVATION_RELEASED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_completed",
+            TargetAbortCompletedBeforeResponse,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_COMPLETED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_before_source_commit_stage",
+            TargetBeforeSourceCommitEvidenceStage,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_BEFORE_SOURCE_COMMIT_STAGE,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_source_commit_staged",
+            TargetSourceCommitEvidenceStaged,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_SOURCE_COMMIT_STAGED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_source_commit_verified",
+            TargetSourceCommitEvidenceVerified,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_SOURCE_COMMIT_STAGED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_adoption_publication",
+            TargetBeforeAdoptionPublication,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_SOURCE_COMMIT_STAGED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_adoption_published",
+            TargetAdoptionPublished,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ADOPTION_PUBLISHED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_adoption_projected",
+            TargetAdoptionProjected,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ADOPTION_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_state_install",
+            TargetBeforeStateInstall,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ADOPTION_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_state_installed",
+            TargetStateInstalled,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_STATE_INSTALLED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_state_install_projected",
+            TargetStateInstallProjected,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_STATE_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_attachment_observed",
+            TargetProcessAttachmentObserved,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ATTACHMENT_OBSERVED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_attachment_projected",
+            TargetProcessAttachmentProjected,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ATTACHMENT_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_completion",
+            TargetBeforeCompletion,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ATTACHMENT_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesSourceFromTargetReceipt,
+            Completed
+        ),
+        acceptance_case!(
+            "target_completed_before_response",
+            TargetCompletedBeforeResponse,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_COMPLETED,
+            RECOVERED_COMPLETED,
+            ResumesSourceFromTargetReceipt,
+            Completed
+        ),
+    ];
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffMeasurementRecord {
+        pub schema: String,
+        pub case_id: String,
+        pub workload_profile_id: String,
+        pub source_site_id: String,
+        pub target_site_id: String,
+        pub object_schema_versions: BTreeMap<String, u32>,
+        pub failure_cut: Option<HandoffCrashBoundary>,
+        pub cache_state: String,
+        pub object_count: u64,
+        pub blob_count: u64,
+        pub link_count: u64,
+        pub total_bytes: u64,
+        pub largest_entry_bytes: u64,
+        pub target_present_entries: u64,
+        pub target_present_bytes: u64,
+        pub observed: HandoffObservedMeasurements,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffObservedMeasurements {
+        /// A stage is `None` when that stage was not executed by the request
+        /// which produced the retained response, or SIGKILL prevented the
+        /// test-only observer from receiving its duration. Absence is retained
+        /// explicitly; qualification must never manufacture a zero-duration
+        /// observation.
+        pub closure_calculation_ms: Option<u64>,
+        pub staging_and_transfer_ms: Option<u64>,
+        pub closure_verification_ms: Option<u64>,
+        pub source_publication_ms: Option<u64>,
+        pub target_adoption_ms: Option<u64>,
+        pub checkpoint_load_ms: Option<u64>,
+        pub event_replay_ms: Option<u64>,
+        pub project_materialization_ms: Option<u64>,
+        pub worker_attach_recovery_ms: Option<u64>,
+        pub total_handoff_recovery_ms: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffMeasurementReport {
+        pub schema: String,
+        pub records: Vec<HandoffMeasurementRecord>,
+    }
+
+    impl HandoffMeasurementReport {
+        pub const MAX_RECORDS: usize = 128;
+        pub const MAX_ENCODED_BYTES: usize = 256 * 1024;
+
+        pub fn validate(&self) -> Result<()> {
+            if self.schema != "ryeos.worker_handoff_qualification_report.v1" {
+                anyhow::bail!("unknown worker handoff qualification report schema");
+            }
+            if self.records.is_empty() || self.records.len() > Self::MAX_RECORDS {
+                anyhow::bail!("worker handoff qualification report has an invalid record count");
+            }
+            for record in &self.records {
+                if record.schema != "ryeos.worker_handoff_qualification_record.v1" {
+                    anyhow::bail!("unknown worker handoff qualification record schema");
+                }
+                for (label, value) in [
+                    ("case id", record.case_id.as_str()),
+                    ("workload profile", record.workload_profile_id.as_str()),
+                    ("source site", record.source_site_id.as_str()),
+                    ("target site", record.target_site_id.as_str()),
+                    ("cache state", record.cache_state.as_str()),
+                ] {
+                    if value.is_empty() || value.len() > 256 {
+                        anyhow::bail!("handoff measurement {label} is empty or unbounded");
+                    }
+                }
+                if record.object_schema_versions.is_empty() {
+                    anyhow::bail!("handoff measurement omitted object schema versions");
+                }
+                if record.object_schema_versions.len() > 64 {
+                    anyhow::bail!("handoff measurement has too many object schema versions");
+                }
+                if record.total_bytes < record.largest_entry_bytes {
+                    anyhow::bail!("handoff measurement largest entry exceeds total bytes");
+                }
+                if record.target_present_entries > record.object_count + record.blob_count {
+                    anyhow::bail!("handoff measurement target entry count exceeds its closure");
+                }
+                if record.target_present_bytes > record.total_bytes {
+                    anyhow::bail!("handoff measurement target bytes exceed its closure");
+                }
+                if record.observed.closure_calculation_ms.is_none()
+                    || record.observed.total_handoff_recovery_ms.is_none()
+                {
+                    anyhow::bail!("handoff measurement omitted its closure or total observation");
+                }
+                if record.failure_cut.is_none()
+                    && [
+                        record.observed.staging_and_transfer_ms,
+                        record.observed.closure_verification_ms,
+                        record.observed.source_publication_ms,
+                        record.observed.target_adoption_ms,
+                        record.observed.checkpoint_load_ms,
+                        record.observed.event_replay_ms,
+                        record.observed.project_materialization_ms,
+                        record.observed.worker_attach_recovery_ms,
+                    ]
+                    .into_iter()
+                    .any(|measurement| measurement.is_none())
+                {
+                    anyhow::bail!(
+                        "successful handoff measurement omitted an executed stage observation"
+                    );
+                }
+            }
+            let encoded = lillux::canonical_json(&serde_json::to_value(self)?)?;
+            if encoded.len() > Self::MAX_ENCODED_BYTES {
+                anyhow::bail!("worker handoff qualification report exceeds its byte bound");
+            }
+            Ok(())
+        }
+
+        pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+            self.validate()?;
+            Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+        }
+    }
+
+    /// A one-shot, test-owned gate. The selected boundary writes one bounded
+    /// record to an inherited Lillux channel and then parks forever so the
+    /// parent can SIGKILL the daemon without running request or attempt
+    /// destructors.
+    pub struct HandoffPhaseGate {
+        selected: HandoffCrashBoundary,
+        writer: Mutex<lillux::InheritedDuplexChannel>,
+    }
+
+    impl HandoffPhaseGate {
+        pub fn new(selected: HandoffCrashBoundary, writer: lillux::InheritedDuplexChannel) -> Self {
+            Self {
+                selected,
+                writer: Mutex::new(writer),
+            }
+        }
+
+        pub fn reach(
+            &self,
+            boundary: HandoffCrashBoundary,
+            operation: &WorkerSessionHandoffJobOperation,
+        ) -> Result<()> {
+            if boundary != self.selected {
+                return Ok(());
+            }
+            let evidence = HandoffPhaseCutEvidence::new(boundary, operation)?;
+            let mut encoded = evidence.canonical_bytes()?;
+            encoded.push(b'\n');
+            let mut writer = self
+                .writer
+                .lock()
+                .map_err(|_| anyhow::anyhow!("handoff phase-gate writer lock poisoned"))?;
+            writer
+                .write_all(&encoded)
+                .context("write handoff phase-cut evidence")?;
+            writer.flush().context("flush handoff phase-cut evidence")?;
+            drop(writer);
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+}
+
+/// Immutable, bounded operation body retained in the existing sync-job row on
+/// each participating node. Large launch bytes live in
+/// `PlacementTransferManifest`; mutable testimony lives in
+/// `WorkerSessionHandoffProgress` and never replaces chain authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerSessionHandoffJobOperation {
+    pub schema: String,
+    pub operation_type: String,
+    pub role: WorkerHandoffJobRole,
+    pub operation_id: String,
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub checkpoint_manifest_hash: String,
+    pub transfer_manifest_hash: String,
+    pub peer_remote_name: String,
+    pub source_project_path: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
+}
+
+impl WorkerSessionHandoffJobOperation {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        role: WorkerHandoffJobRole,
+        operation_id: String,
+        preflight_id: String,
+        preflight_attestation_hash: String,
+        owner_principal: String,
+        chain_root_id: String,
+        origin_site_id: String,
+        source_site_id: String,
+        target_site_id: String,
+        source_placement_thread_id: String,
+        successor_placement_thread_id: String,
+        source_chain_head_hash: String,
+        source_last_event_hash: String,
+        checkpoint_manifest_hash: String,
+        transfer_manifest_hash: String,
+        peer_remote_name: String,
+        source_project_path: String,
+        target_project_path: String,
+        project_route_digest: String,
+        target_credential_profile_id: String,
+        follow_delivery_reservation_attestation_hash: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let operation = Self {
+            schema: HANDOFF_JOB_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
+            role,
+            operation_id,
+            preflight_id,
+            preflight_attestation_hash,
+            owner_principal,
+            chain_root_id,
+            origin_site_id,
+            source_site_id,
+            target_site_id,
+            source_placement_thread_id,
+            successor_placement_thread_id,
+            source_chain_head_hash,
+            source_last_event_hash,
+            checkpoint_manifest_hash,
+            transfer_manifest_hash,
+            peer_remote_name,
+            source_project_path,
+            target_project_path,
+            project_route_digest,
+            target_credential_profile_id,
+            follow_delivery_reservation_attestation_hash,
+        };
+        operation.validate()?;
+        Ok(operation)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_JOB_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_OPERATION
+        {
+            bail!("worker handoff job is not the exact current contract");
+        }
+        validate_common(
+            &self.operation_id,
+            &self.owner_principal,
+            &self.chain_root_id,
+            &self.origin_site_id,
+            &self.source_site_id,
+            &self.target_site_id,
+            &self.source_placement_thread_id,
+            &self.successor_placement_thread_id,
+            &self.source_chain_head_hash,
+            &self.source_last_event_hash,
+            &self.checkpoint_manifest_hash,
+            &self.transfer_manifest_hash,
+        )?;
+        hash("handoff preflight", &self.preflight_id)?;
+        hash(
+            "handoff preflight attestation",
+            &self.preflight_attestation_hash,
+        )?;
+        hash("handoff project route", &self.project_route_digest)?;
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
+        for (label, value) in [
+            ("peer remote", self.peer_remote_name.as_str()),
+            ("source project path", self.source_project_path.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        for (label, path) in [
+            ("source project path", self.source_project_path.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+        ] {
+            if !std::path::Path::new(path).is_absolute() {
+                bail!("worker handoff {label} is not absolute");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let operation: Self = serde_json::from_value(value)?;
+        operation.validate()?;
+        Ok(operation)
+    }
+
+    /// Project the source-retained operation into the target's local job
+    /// vocabulary. Every authority coordinate remains byte-exact; only the
+    /// local role and the target's configured name for its source peer differ.
+    pub fn target_projection(&self, source_peer_remote_name: String) -> anyhow::Result<Self> {
+        self.validate()?;
+        if self.role != WorkerHandoffJobRole::Source {
+            bail!("only a source handoff operation can produce a target projection");
+        }
+        label_value("source peer remote", &source_peer_remote_name)?;
+        let mut target = self.clone();
+        target.role = WorkerHandoffJobRole::Target;
+        target.peer_remote_name = source_peer_remote_name;
+        target.validate()?;
+        Ok(target)
+    }
+
+    /// Verify a target-retained operation against its source-retained origin
+    /// without pretending that either node shares the other's local remote
+    /// name. Role and peer name are the only locally projected fields.
+    pub fn validate_target_projection_of(&self, source: &Self) -> anyhow::Result<()> {
+        self.validate()?;
+        source.validate()?;
+        if self.role != WorkerHandoffJobRole::Target || source.role != WorkerHandoffJobRole::Source
+        {
+            bail!("worker handoff projection has invalid source/target roles");
+        }
+        let expected = source.target_projection(self.peer_remote_name.clone())?;
+        if *self != expected {
+            bail!("target worker handoff operation differs from its source projection");
+        }
+        Ok(())
+    }
+
+    /// Prove that this retained target operation is the exact durable
+    /// projection of a replayed prepare request. Fields only available in the
+    /// imported transfer remain bound by the immutable operation and are
+    /// checked when that transfer is first staged.
+    pub fn validate_target_prepare_request(
+        &self,
+        request: &WorkerPlacementPrepareRequest,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        request.validate()?;
+        if self.role != WorkerHandoffJobRole::Target
+            || self.operation_id != request.operation_id
+            || self.preflight_id != request.preflight_id
+            || self.preflight_attestation_hash != request.preflight_attestation_hash
+            || self.chain_root_id != request.chain_root_id
+            || self.source_site_id != request.source_site_id
+            || self.target_site_id != request.target_site_id
+            || self.source_chain_head_hash != request.source_chain_head_hash
+            || self.transfer_manifest_hash != request.transfer_manifest_hash
+            || self.target_project_path != request.target_project_path
+            || self.project_route_digest != request.project_route_digest
+            || self.target_credential_profile_id != request.target_credential_profile_id
+            || self.follow_delivery_reservation_attestation_hash
+                != request.follow_delivery_reservation_attestation_hash
+        {
+            bail!("retained target operation differs from replayed prepare request");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerSessionHandoffProgress {
+    pub schema: String,
+    pub operation_id: String,
+    pub phase: WorkerHandoffPhase,
+    pub placement_attestation_hash: Option<String>,
+    pub target_runtime_seed_hash: Option<String>,
+    pub writer_grant_hash: Option<String>,
+    pub target_chain_head_hash: Option<String>,
+    pub credential_reservation_id: Option<String>,
+    pub abort_chain_head_hash: Option<String>,
+}
+
+impl WorkerSessionHandoffProgress {
+    pub fn planned(operation_id: String) -> anyhow::Result<Self> {
+        let progress = Self {
+            schema: HANDOFF_PROGRESS_SCHEMA.to_owned(),
+            operation_id,
+            phase: WorkerHandoffPhase::Planned,
+            placement_attestation_hash: None,
+            target_runtime_seed_hash: None,
+            writer_grant_hash: None,
+            target_chain_head_hash: None,
+            credential_reservation_id: None,
+            abort_chain_head_hash: None,
+        };
+        progress.validate()?;
+        Ok(progress)
+    }
+
+    pub fn source_exported(operation_id: String) -> anyhow::Result<Self> {
+        let mut progress = Self::planned(operation_id)?;
+        progress.phase = WorkerHandoffPhase::SourceExported;
+        progress.validate()?;
+        Ok(progress)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_PROGRESS_SCHEMA {
+            bail!("worker handoff progress is not the exact current contract");
+        }
+        hash("handoff progress operation", &self.operation_id)?;
+        for (label, value) in [
+            (
+                "placement attestation",
+                self.placement_attestation_hash.as_deref(),
+            ),
+            (
+                "target runtime seed",
+                self.target_runtime_seed_hash.as_deref(),
+            ),
+            ("writer grant", self.writer_grant_hash.as_deref()),
+            ("target chain head", self.target_chain_head_hash.as_deref()),
+            ("abort chain head", self.abort_chain_head_hash.as_deref()),
+        ] {
+            if let Some(value) = value {
+                hash(label, value)?;
+            }
+        }
+        if let Some(reservation) = &self.credential_reservation_id {
+            label_value("credential reservation", reservation)?;
+        }
+        if (self.phase == WorkerHandoffPhase::TargetPrepared
+            || self.phase.successor_is_only_authorized_writer())
+            && (self.placement_attestation_hash.is_none()
+                || self.target_runtime_seed_hash.is_none()
+                || self.credential_reservation_id.is_none())
+        {
+            bail!("target-prepared handoff progress is incomplete");
+        }
+        if self.phase.successor_is_only_authorized_writer()
+            && (self.writer_grant_hash.is_none() || self.target_chain_head_hash.is_none())
+        {
+            bail!("source-committed handoff progress is incomplete");
+        }
+        if self.phase == WorkerHandoffPhase::AbortAuthorized && self.abort_chain_head_hash.is_none()
+        {
+            bail!("abort-authorized handoff progress has no source abort head");
+        }
+        if self.phase != WorkerHandoffPhase::AbortAuthorized && self.abort_chain_head_hash.is_some()
+        {
+            bail!("non-abort handoff progress carries abort authority");
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let progress: Self = serde_json::from_value(value)?;
+        progress.validate()?;
+        Ok(progress)
+    }
+}
+
+impl WorkerPlacementPrepareRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, value) in [
+            ("operation", self.operation_id.as_str()),
+            ("preflight", self.preflight_id.as_str()),
+            (
+                "preflight attestation",
+                self.preflight_attestation_hash.as_str(),
+            ),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("transfer manifest", self.transfer_manifest_hash.as_str()),
+            ("project route", self.project_route_digest.as_str()),
+        ] {
+            hash(label, value)?;
+        }
+        for (label, value) in [
+            ("chain root", self.chain_root_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+        {
+            bail!("placement preparation is not an exact cross-site project request");
+        }
+        if let Some(frontier) = &self.source_accounting_frontier {
+            frontier.validate()?;
+        }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementPreflightRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, value) in [
+            ("preflight", self.preflight_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("source last event", self.source_last_event_hash.as_str()),
+            (
+                "source launch capsule",
+                self.source_launch_capsule_hash.as_str(),
+            ),
+            ("project route", self.project_route_digest.as_str()),
+            (
+                "credential subject contract",
+                self.credential_subject_contract_digest.as_str(),
+            ),
+            (
+                "credential subject",
+                self.credential_subject_digest.as_str(),
+            ),
+        ] {
+            hash(label, value)?;
+        }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
+        for (label, value) in [
+            ("owner", self.owner_principal.as_str()),
+            ("chain root", self.chain_root_id.as_str()),
+            ("origin site", self.origin_site_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("source placement", self.source_placement_thread_id.as_str()),
+            (
+                "successor placement",
+                self.successor_placement_thread_id.as_str(),
+            ),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+            ("upstream session", self.upstream_session_id.as_str()),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+        {
+            bail!("worker placement preflight is not an exact cross-site project request");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementPreflightEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        request: &WorkerPlacementPreflightRequest,
+        outer_exact_program_hash: String,
+        persistent_dependency_programs: BTreeMap<String, String>,
+        target_persistent_session_capsules: BTreeMap<String, String>,
+        target_execution_realization_hash: String,
+        target_isolation_digest: String,
+        target_project_head_hash: String,
+        target_credential_generation: u64,
+        target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+        target_chain_owner_anchor_hash: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let evidence = Self {
+            schema: PREFLIGHT_EVIDENCE_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
+            preflight_id: request.preflight_id.clone(),
+            owner_principal: request.owner_principal.clone(),
+            chain_root_id: request.chain_root_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            source_site_id: request.source_site_id.clone(),
+            target_site_id: request.target_site_id.clone(),
+            source_placement_thread_id: request.source_placement_thread_id.clone(),
+            successor_placement_thread_id: request.successor_placement_thread_id.clone(),
+            source_chain_head_hash: request.source_chain_head_hash.clone(),
+            source_last_event_hash: request.source_last_event_hash.clone(),
+            source_launch_capsule_hash: request.source_launch_capsule_hash.clone(),
+            outer_exact_program_hash,
+            persistent_dependency_programs,
+            target_persistent_session_capsules,
+            target_execution_realization_hash,
+            target_isolation_digest,
+            target_project_path: request.target_project_path.clone(),
+            project_route_digest: request.project_route_digest.clone(),
+            target_project_head_hash,
+            target_credential_profile_id: request.target_credential_profile_id.clone(),
+            target_credential_generation,
+            target_operator_authority,
+            target_chain_owner_anchor_hash,
+            upstream_session_id: request.upstream_session_id.clone(),
+            credential_subject_contract_digest: request.credential_subject_contract_digest.clone(),
+            credential_subject_digest: request.credential_subject_digest.clone(),
+            follow_delivery_reservation_attestation_hash: request
+                .follow_delivery_reservation_attestation_hash
+                .clone(),
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PREFLIGHT_EVIDENCE_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
+            || self.target_credential_generation == 0
+        {
+            bail!("worker placement preflight evidence is not the exact current contract");
+        }
+        for (label, value) in [
+            ("preflight", self.preflight_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("source last event", self.source_last_event_hash.as_str()),
+            (
+                "source launch capsule",
+                self.source_launch_capsule_hash.as_str(),
+            ),
+            (
+                "outer exact program",
+                self.outer_exact_program_hash.as_str(),
+            ),
+            (
+                "target execution realization",
+                self.target_execution_realization_hash.as_str(),
+            ),
+            ("target isolation", self.target_isolation_digest.as_str()),
+            ("project route", self.project_route_digest.as_str()),
+            (
+                "target project head",
+                self.target_project_head_hash.as_str(),
+            ),
+            (
+                "credential subject contract",
+                self.credential_subject_contract_digest.as_str(),
+            ),
+            (
+                "credential subject",
+                self.credential_subject_digest.as_str(),
+            ),
+        ] {
+            hash(label, value)?;
+        }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
+        if let Some(digest) = &self.target_chain_owner_anchor_hash {
+            hash("target chain owner anchor", digest)?;
+        }
+        for (label, value) in [
+            ("owner", self.owner_principal.as_str()),
+            ("chain root", self.chain_root_id.as_str()),
+            ("origin site", self.origin_site_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("source placement", self.source_placement_thread_id.as_str()),
+            (
+                "successor placement",
+                self.successor_placement_thread_id.as_str(),
+            ),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+            ("upstream session", self.upstream_session_id.as_str()),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+            || self.persistent_dependency_programs.is_empty()
+            || self
+                .persistent_dependency_programs
+                .keys()
+                .collect::<Vec<_>>()
+                != self
+                    .target_persistent_session_capsules
+                    .keys()
+                    .collect::<Vec<_>>()
+        {
+            bail!("worker placement preflight evidence has invalid placement coordinates");
+        }
+        for (label, entries) in [
+            ("persistent program", &self.persistent_dependency_programs),
+            (
+                "target persistent-session capsule",
+                &self.target_persistent_session_capsules,
+            ),
+        ] {
+            for (name, digest) in entries {
+                label_value("persistent dependency name", name)?;
+                hash(label, digest)?;
+            }
+        }
+        self.target_operator_authority.validate()?;
+        if self.target_operator_authority.owner_principal != self.owner_principal
+            || self.target_operator_authority.origin_site_id != self.origin_site_id
+        {
+            bail!("preflight target operator authority contradicts its owner or origin");
+        }
+        match self.target_operator_authority.principal_class {
+            crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+                if self.target_chain_owner_anchor_hash.is_none() =>
+            {
+                bail!("local-operator preflight has no target chain owner anchor");
+            }
+            crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+                if self.target_chain_owner_anchor_hash.is_some() =>
+            {
+                bail!("remote-operator preflight carries a local chain owner anchor");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.source_launch_capsule_hash.clone(),
+            WORKER_PLACEMENT_PREFLIGHT_CLAIM.to_owned(),
+            WORKER_PLACEMENT_PREFLIGHT_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(attestation: &Attestation) -> anyhow::Result<Self> {
+        if attestation.policy != WORKER_PLACEMENT_PREFLIGHT_POLICY
+            || attestation.claim != WORKER_PLACEMENT_PREFLIGHT_CLAIM
+        {
+            bail!("attestation is not a worker placement preflight receipt");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.source_launch_capsule_hash {
+            bail!("preflight receipt subject differs from its source capsule");
+        }
+        Ok(evidence)
+    }
+}
+
+impl WorkerPlacementPreflightResponse {
+    pub fn validate_against(
+        &self,
+        request: &WorkerPlacementPreflightRequest,
+        target_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<()> {
+        request.validate()?;
+        self.evidence.validate()?;
+        self.preflight_attestation.verify_with_key(target_key)?;
+        let evidence =
+            WorkerPlacementPreflightEvidence::from_attestation(&self.preflight_attestation)?;
+        let attestation_hash =
+            ryeos_state::objects::canonical_value_digest(&self.preflight_attestation.to_value())?;
+        if self.preflight_id != request.preflight_id
+            || self.preflight_attestation_hash != attestation_hash
+            || self.evidence != evidence
+            || evidence.preflight_id != request.preflight_id
+            || evidence.owner_principal != request.owner_principal
+            || evidence.chain_root_id != request.chain_root_id
+            || evidence.origin_site_id != request.origin_site_id
+            || evidence.source_site_id != request.source_site_id
+            || evidence.target_site_id != request.target_site_id
+            || evidence.source_placement_thread_id != request.source_placement_thread_id
+            || evidence.successor_placement_thread_id != request.successor_placement_thread_id
+            || evidence.source_chain_head_hash != request.source_chain_head_hash
+            || evidence.source_last_event_hash != request.source_last_event_hash
+            || evidence.source_launch_capsule_hash != request.source_launch_capsule_hash
+            || evidence.target_project_path != request.target_project_path
+            || evidence.project_route_digest != request.project_route_digest
+            || evidence.target_credential_profile_id != request.target_credential_profile_id
+            || evidence.upstream_session_id != request.upstream_session_id
+            || evidence.credential_subject_contract_digest
+                != request.credential_subject_contract_digest
+            || evidence.credential_subject_digest != request.credential_subject_digest
+            || evidence.follow_delivery_reservation_attestation_hash
+                != request.follow_delivery_reservation_attestation_hash
+        {
+            bail!("worker placement preflight response contradicts its request");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementPreflightJobOperation {
+    pub fn from_request(
+        role: WorkerHandoffJobRole,
+        peer_remote_name: String,
+        request: &WorkerPlacementPreflightRequest,
+    ) -> anyhow::Result<Self> {
+        request.validate()?;
+        let operation = Self {
+            schema: PREFLIGHT_JOB_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
+            role,
+            preflight_id: request.preflight_id.clone(),
+            owner_principal: request.owner_principal.clone(),
+            chain_root_id: request.chain_root_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            source_site_id: request.source_site_id.clone(),
+            target_site_id: request.target_site_id.clone(),
+            source_placement_thread_id: request.source_placement_thread_id.clone(),
+            successor_placement_thread_id: request.successor_placement_thread_id.clone(),
+            source_chain_head_hash: request.source_chain_head_hash.clone(),
+            source_last_event_hash: request.source_last_event_hash.clone(),
+            source_launch_capsule_hash: request.source_launch_capsule_hash.clone(),
+            peer_remote_name,
+            target_project_path: request.target_project_path.clone(),
+            project_route_digest: request.project_route_digest.clone(),
+            target_credential_profile_id: request.target_credential_profile_id.clone(),
+            follow_delivery_reservation_attestation_hash: request
+                .follow_delivery_reservation_attestation_hash
+                .clone(),
+        };
+        operation.validate()?;
+        Ok(operation)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PREFLIGHT_JOB_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
+        {
+            bail!("worker handoff preflight job is not the exact current contract");
+        }
+        for (label, value) in [
+            ("preflight", self.preflight_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("source last event", self.source_last_event_hash.as_str()),
+            (
+                "source launch capsule",
+                self.source_launch_capsule_hash.as_str(),
+            ),
+            ("project route", self.project_route_digest.as_str()),
+        ] {
+            hash(label, value)?;
+        }
+        for (label, value) in [
+            ("owner", self.owner_principal.as_str()),
+            ("chain root", self.chain_root_id.as_str()),
+            ("origin site", self.origin_site_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("source placement", self.source_placement_thread_id.as_str()),
+            (
+                "successor placement",
+                self.successor_placement_thread_id.as_str(),
+            ),
+            ("peer remote", self.peer_remote_name.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+        {
+            bail!("worker handoff preflight job has invalid cross-site coordinates");
+        }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let operation: Self = serde_json::from_value(value)?;
+        operation.validate()?;
+        Ok(operation)
+    }
+}
+
+impl WorkerPlacementAbortRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.operation.validate()?;
+        if self.operation.role != WorkerHandoffJobRole::Source {
+            bail!("handoff abort request must carry the source-role operation");
+        }
+        hash("handoff abort chain head", &self.abort_chain_head_hash)?;
+        Ok(())
+    }
+}
+
+impl WorkerPlacementAbortResponse {
+    pub fn validate_against(&self, request: &WorkerPlacementAbortRequest) -> anyhow::Result<()> {
+        if self.operation_id != request.operation.operation_id
+            || self.chain_root_id != request.operation.chain_root_id
+            || !matches!(
+                self.disposition.as_str(),
+                "reservation_released" | "target_absent"
+            )
+        {
+            bail!("worker placement abort response changed its authority coordinates");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementAbortResult {
+    pub fn validate_against(&self, request: &WorkerPlacementAbortRequest) -> anyhow::Result<()> {
+        hash(
+            "worker placement abort terminal attestation",
+            &self.terminal_attestation_hash,
+        )?;
+        self.response.validate_against(request)
+    }
+}
+
+impl WorkerPlacementAdoptResult {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        hash(
+            "worker placement adoption terminal attestation",
+            self.terminal_attestation_hash(),
+        )?;
+        match self {
+            Self::Attached { response, .. } if response.delivery == "attached" => Ok(()),
+            Self::Attached { .. } => bail!("worker placement adoption result is not attached"),
+            Self::FailedBeforeAttachment { failure, .. } => {
+                hash(
+                    "worker placement failure chain head",
+                    &failure.target_chain_head_hash,
+                )?;
+                if !matches!(
+                    failure.terminal_status.as_str(),
+                    "failed" | "cancelled" | "killed" | "timed_out"
+                ) || !matches!(
+                    failure.credential_disposition.as_str(),
+                    "reservation_released" | "consumed_session_terminal"
+                ) {
+                    bail!("worker placement terminal failure has an invalid disposition");
+                }
+                Ok(())
+            }
+            Self::CompletedBeforeAttachment { completion, .. } => {
+                hash(
+                    "worker placement completion chain head",
+                    &completion.target_chain_head_hash,
+                )?;
+                if completion.terminal_status != "completed"
+                    || completion.credential_disposition != "completed_session_released"
+                {
+                    bail!("worker placement terminal completion has an invalid disposition");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn terminal_attestation_hash(&self) -> &str {
+        match self {
+            Self::Attached {
+                terminal_attestation_hash,
+                ..
+            }
+            | Self::FailedBeforeAttachment {
+                terminal_attestation_hash,
+                ..
+            }
+            | Self::CompletedBeforeAttachment {
+                terminal_attestation_hash,
+                ..
+            } => terminal_attestation_hash,
+        }
+    }
+}
+
+/// Prove that an active target job already projected the exact attachment
+/// coordinates carried by an adoption request. This check must run before an
+/// irreversible node-signed receipt is published and again when that receipt
+/// is folded into the operational job.
+pub fn validate_projected_target_adoption(
+    job: &ryeos_state::SyncJobRecord,
+    operation: &WorkerSessionHandoffJobOperation,
+    progress: &WorkerSessionHandoffProgress,
+    request: &WorkerPlacementAdoptRequest,
+) -> anyhow::Result<()> {
+    operation.validate()?;
+    progress.validate()?;
+    request.validate()?;
+    let retained = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())?;
+    if job.operation_type != WORKER_SESSION_HANDOFF_OPERATION
+        || retained != *operation
+        || operation.role != WorkerHandoffJobRole::Target
+        || !matches!(
+            job.state,
+            ryeos_state::SyncJobState::Running | ryeos_state::SyncJobState::Retryable
+        )
+        || progress.operation_id != operation.operation_id
+        || progress.phase != WorkerHandoffPhase::ProcessAttached
+        || job.phase != progress.phase.as_str()
+        || operation.operation_id != request.operation_id
+        || operation.chain_root_id != request.chain_root_id
+        || progress.placement_attestation_hash.as_deref()
+            != Some(request.placement_attestation_hash.as_str())
+        || progress.writer_grant_hash.as_deref() != Some(request.writer_grant_hash.as_str())
+        || progress.target_chain_head_hash.as_deref()
+            != Some(request.target_chain_head_hash.as_str())
+        || ![
+            &operation.transfer_manifest_hash,
+            &request.placement_attestation_hash,
+            progress
+                .target_runtime_seed_hash
+                .as_ref()
+                .expect("validated process-attached progress has a runtime seed"),
+            &request.writer_grant_hash,
+            &request.target_chain_head_hash,
+        ]
+        .into_iter()
+        .all(|hash| job.roots.iter().any(|root| root == hash))
+    {
+        bail!("target adoption request has no matching projected attachment authority");
+    }
+    Ok(())
+}
+
+impl WorkerHandoffAbortFenceEvidence {
+    pub fn new(
+        target_operation: WorkerSessionHandoffJobOperation,
+        abort_chain_head_hash: String,
+        terminal_disposition: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let evidence = Self {
+            schema: HANDOFF_ABORT_FENCE_EVIDENCE_SCHEMA.to_owned(),
+            target_operation,
+            abort_chain_head_hash,
+            terminal_disposition,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_ABORT_FENCE_EVIDENCE_SCHEMA {
+            bail!("worker handoff abort fence is not the exact current contract");
+        }
+        self.target_operation.validate()?;
+        if self.target_operation.role != WorkerHandoffJobRole::Target {
+            bail!("worker handoff abort fence does not retain a target operation");
+        }
+        hash(
+            "handoff abort fence chain head",
+            &self.abort_chain_head_hash,
+        )?;
+        if self
+            .terminal_disposition
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "reservation_released" | "target_absent"))
+        {
+            bail!("worker handoff abort fence has an invalid terminal disposition");
+        }
+        Ok(())
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.abort_chain_head_hash.clone(),
+            WORKER_HANDOFF_ABORT_FENCE_CLAIM.to_owned(),
+            WORKER_HANDOFF_ABORT_FENCE_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(
+        attestation: &Attestation,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<Self> {
+        attestation.verify_with_key(verifying_key)?;
+        if attestation.policy != WORKER_HANDOFF_ABORT_FENCE_POLICY
+            || attestation.claim != WORKER_HANDOFF_ABORT_FENCE_CLAIM
+        {
+            bail!("attestation is not a worker handoff abort fence");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.abort_chain_head_hash {
+            bail!("worker handoff abort fence subject changed");
+        }
+        Ok(evidence)
+    }
+
+    pub fn validate_prepare_request(
+        &self,
+        request: &WorkerPlacementPrepareRequest,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        self.target_operation
+            .validate_target_prepare_request(request)
+            .context("worker handoff abort fence protects different prepare coordinates")
+    }
+}
+
+impl WorkerHandoffAdoptionReceiptEvidence {
+    pub fn new(
+        target_operation: WorkerSessionHandoffJobOperation,
+        request: WorkerPlacementAdoptRequest,
+        response: WorkerPlacementAdoptResponse,
+    ) -> anyhow::Result<Self> {
+        let evidence = Self {
+            schema: HANDOFF_ADOPTION_RECEIPT_EVIDENCE_SCHEMA.to_owned(),
+            target_operation,
+            request,
+            response,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_ADOPTION_RECEIPT_EVIDENCE_SCHEMA {
+            bail!("worker handoff adoption receipt is not the exact current contract");
+        }
+        self.target_operation.validate()?;
+        self.request.validate()?;
+        if self.target_operation.role != WorkerHandoffJobRole::Target
+            || self.target_operation.operation_id != self.request.operation_id
+            || self.target_operation.chain_root_id != self.request.chain_root_id
+            || self.response.operation_id != self.request.operation_id
+            || self.response.chain_root_id != self.request.chain_root_id
+            || self.response.placement_thread_id
+                != self.target_operation.successor_placement_thread_id
+            || self.response.target_chain_head_hash != self.request.target_chain_head_hash
+            || self.response.delivery != "attached"
+        {
+            bail!("worker handoff adoption receipt changed its authority coordinates");
+        }
+        Ok(())
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.request.target_chain_head_hash.clone(),
+            WORKER_HANDOFF_ADOPTION_RECEIPT_CLAIM.to_owned(),
+            WORKER_HANDOFF_ADOPTION_RECEIPT_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(
+        attestation: &Attestation,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<Self> {
+        attestation.verify_with_key(verifying_key)?;
+        if attestation.policy != WORKER_HANDOFF_ADOPTION_RECEIPT_POLICY
+            || attestation.claim != WORKER_HANDOFF_ADOPTION_RECEIPT_CLAIM
+        {
+            bail!("attestation is not a worker handoff adoption receipt");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.request.target_chain_head_hash {
+            bail!("worker handoff adoption receipt subject changed");
+        }
+        Ok(evidence)
+    }
+}
+
+impl WorkerPlacementFailureResponse {
+    pub fn validate_against(
+        &self,
+        request: &WorkerPlacementAdoptRequest,
+        operation: &WorkerSessionHandoffJobOperation,
+    ) -> anyhow::Result<()> {
+        request.validate()?;
+        operation.validate()?;
+        hash(
+            "worker placement failure chain head",
+            &self.target_chain_head_hash,
+        )?;
+        if operation.role != WorkerHandoffJobRole::Target
+            || operation.operation_id != request.operation_id
+            || operation.chain_root_id != request.chain_root_id
+            || self.operation_id != request.operation_id
+            || self.chain_root_id != request.chain_root_id
+            || self.placement_thread_id != operation.successor_placement_thread_id
+            || self.target_chain_head_hash == request.target_chain_head_hash
+            || !matches!(
+                self.terminal_status.as_str(),
+                "failed" | "cancelled" | "killed" | "timed_out"
+            )
+            || !matches!(
+                self.credential_disposition.as_str(),
+                "reservation_released" | "consumed_session_terminal"
+            )
+        {
+            bail!("worker placement failure changed its authority coordinates");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementCompletionResponse {
+    pub fn validate_against(
+        &self,
+        request: &WorkerPlacementAdoptRequest,
+        operation: &WorkerSessionHandoffJobOperation,
+    ) -> anyhow::Result<()> {
+        request.validate()?;
+        operation.validate()?;
+        hash(
+            "worker placement completion chain head",
+            &self.target_chain_head_hash,
+        )?;
+        if operation.role != WorkerHandoffJobRole::Target
+            || operation.operation_id != request.operation_id
+            || operation.chain_root_id != request.chain_root_id
+            || self.operation_id != request.operation_id
+            || self.chain_root_id != request.chain_root_id
+            || self.placement_thread_id != operation.successor_placement_thread_id
+            || self.target_chain_head_hash == request.target_chain_head_hash
+            || self.terminal_status != "completed"
+            || self.credential_disposition != "completed_session_released"
+        {
+            bail!("worker placement completion changed its authority coordinates");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerHandoffTerminalCompletionEvidence {
+    pub fn new(
+        target_operation: WorkerSessionHandoffJobOperation,
+        request: WorkerPlacementAdoptRequest,
+        completion: WorkerPlacementCompletionResponse,
+    ) -> anyhow::Result<Self> {
+        let evidence = Self {
+            schema: HANDOFF_TERMINAL_COMPLETION_EVIDENCE_SCHEMA.to_owned(),
+            target_operation,
+            request,
+            completion,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_TERMINAL_COMPLETION_EVIDENCE_SCHEMA {
+            bail!("worker handoff terminal completion is not the exact current contract");
+        }
+        self.completion
+            .validate_against(&self.request, &self.target_operation)
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.completion.target_chain_head_hash.clone(),
+            WORKER_HANDOFF_TERMINAL_COMPLETION_CLAIM.to_owned(),
+            WORKER_HANDOFF_TERMINAL_COMPLETION_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(
+        attestation: &Attestation,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<Self> {
+        attestation.verify_with_key(verifying_key)?;
+        if attestation.policy != WORKER_HANDOFF_TERMINAL_COMPLETION_POLICY
+            || attestation.claim != WORKER_HANDOFF_TERMINAL_COMPLETION_CLAIM
+        {
+            bail!("attestation is not a worker handoff terminal completion");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.completion.target_chain_head_hash {
+            bail!("worker handoff terminal completion subject changed");
+        }
+        Ok(evidence)
+    }
+}
+
+impl WorkerHandoffTerminalFailureEvidence {
+    pub fn new(
+        target_operation: WorkerSessionHandoffJobOperation,
+        request: WorkerPlacementAdoptRequest,
+        failure: WorkerPlacementFailureResponse,
+    ) -> anyhow::Result<Self> {
+        let evidence = Self {
+            schema: HANDOFF_TERMINAL_FAILURE_EVIDENCE_SCHEMA.to_owned(),
+            target_operation,
+            request,
+            failure,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_TERMINAL_FAILURE_EVIDENCE_SCHEMA {
+            bail!("worker handoff terminal failure is not the exact current contract");
+        }
+        self.failure
+            .validate_against(&self.request, &self.target_operation)
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.failure.target_chain_head_hash.clone(),
+            WORKER_HANDOFF_TERMINAL_FAILURE_CLAIM.to_owned(),
+            WORKER_HANDOFF_TERMINAL_FAILURE_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(
+        attestation: &Attestation,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<Self> {
+        attestation.verify_with_key(verifying_key)?;
+        if attestation.policy != WORKER_HANDOFF_TERMINAL_FAILURE_POLICY
+            || attestation.claim != WORKER_HANDOFF_TERMINAL_FAILURE_CLAIM
+        {
+            bail!("attestation is not a worker handoff terminal failure");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.failure.target_chain_head_hash {
+            bail!("worker handoff terminal failure subject changed");
+        }
+        Ok(evidence)
+    }
+}
+
+impl WorkerHandoffTargetTerminalEvidence {
+    pub fn from_attestation(
+        attestation: &Attestation,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<Self> {
+        match attestation.policy.as_str() {
+            WORKER_HANDOFF_ADOPTION_RECEIPT_POLICY => Ok(Self::Adoption(
+                WorkerHandoffAdoptionReceiptEvidence::from_attestation(attestation, verifying_key)?,
+            )),
+            WORKER_HANDOFF_ABORT_FENCE_POLICY => Ok(Self::Abort(
+                WorkerHandoffAbortFenceEvidence::from_attestation(attestation, verifying_key)?,
+            )),
+            WORKER_HANDOFF_TERMINAL_COMPLETION_POLICY => Ok(Self::Completion(
+                WorkerHandoffTerminalCompletionEvidence::from_attestation(
+                    attestation,
+                    verifying_key,
+                )?,
+            )),
+            WORKER_HANDOFF_TERMINAL_FAILURE_POLICY => Ok(Self::Failure(
+                WorkerHandoffTerminalFailureEvidence::from_attestation(attestation, verifying_key)?,
+            )),
+            _ => bail!("attestation is not a known worker handoff target terminal branch"),
+        }
+    }
+}
+
+/// Verify the source-signed, immediate abort successor that permanently makes
+/// one pre-cut handoff operation ineligible for a writer transfer. The target
+/// may release its reserved credential generation only after this evidence is
+/// present in the exact source chain closure.
+pub fn validate_handoff_abort_authority(
+    cas: &lillux::CasStore,
+    operation: &WorkerSessionHandoffJobOperation,
+    abort_chain_head_hash: &str,
+) -> anyhow::Result<()> {
+    use ryeos_state::objects::{ChainState, ThreadEvent, ThreadStatus};
+
+    operation.validate()?;
+    hash("handoff abort chain head", abort_chain_head_hash)?;
+    ryeos_state::sync::verify_chain_closure_anchored_pinned(
+        cas,
+        &operation.chain_root_id,
+        abort_chain_head_hash,
+        &operation.source_chain_head_hash,
+    )?;
+    let head_value = cas
+        .get_object(abort_chain_head_hash)?
+        .context("handoff abort chain head is absent")?;
+    let head: ChainState = serde_json::from_value(head_value)?;
+    head.validate()?;
+    if head.chain_root_id != operation.chain_root_id
+        || head.prev_chain_state_hash.as_deref() != Some(operation.source_chain_head_hash.as_str())
+    {
+        bail!("handoff abort is not the immediate source-head successor");
+    }
+    let source = head
+        .threads
+        .get(&operation.source_placement_thread_id)
+        .context("handoff abort source placement is absent")?;
+    if source.status == ThreadStatus::Continued {
+        bail!("handoff abort cannot follow a committed continuation");
+    }
+    let event_hash = source
+        .last_event_hash
+        .as_deref()
+        .context("handoff abort source has no terminal event")?;
+    let event_value = cas
+        .get_object(event_hash)?
+        .context("handoff abort event is absent")?;
+    let event: ThreadEvent = serde_json::from_value(event_value)?;
+    event.validate()?;
+    if event.event_type != "worker_session.handoff_aborted"
+        || event.chain_root_id != operation.chain_root_id
+        || event.thread_id != operation.source_placement_thread_id
+        || event.prev_thread_event_hash.as_deref()
+            != Some(operation.source_last_event_hash.as_str())
+    {
+        bail!("handoff abort event is not the immediate source-placement edge");
+    }
+    let expected = serde_json::json!({
+        "schema":"ryeos.worker_session_handoff_abort.v1",
+        "operation_id":operation.operation_id,
+        "chain_root_id":operation.chain_root_id,
+        "source_placement_thread_id":operation.source_placement_thread_id,
+        "source_site_id":operation.source_site_id,
+        "target_site_id":operation.target_site_id,
+        "source_chain_head_hash":operation.source_chain_head_hash,
+        "source_last_event_hash":operation.source_last_event_hash,
+    });
+    if ryeos_state::objects::canonical_value_digest(&event.payload)?
+        != ryeos_state::objects::canonical_value_digest(&expected)?
+    {
+        bail!("handoff abort event differs from its durable operation");
+    }
+    Ok(())
+}
+
+impl WorkerPlacementPrepareResponse {
+    pub fn validate_against(&self, request: &WorkerPlacementPrepareRequest) -> anyhow::Result<()> {
+        if self.operation_id != request.operation_id {
+            bail!("placement preparation response changed its operation id");
+        }
+        self.placement.validate()?;
+        self.credential_reservation.validate()?;
+        if self.placement.operation_id != request.operation_id
+            || self.placement.preflight_id != request.preflight_id
+            || self.placement.preflight_attestation_hash != request.preflight_attestation_hash
+            || self.placement.follow_delivery_reservation_attestation_hash
+                != request.follow_delivery_reservation_attestation_hash
+            || self.placement.chain_root_id != request.chain_root_id
+            || self.placement.source_site_id != request.source_site_id
+            || self.placement.target_site_id != request.target_site_id
+            || self.placement.source_chain_head_hash != request.source_chain_head_hash
+            || self.placement.project_rebind.route_digest != request.project_route_digest
+            || self.placement_attestation_hash.len() != 64
+            || self.target_runtime_seed_hash != self.placement.target_runtime_seed_hash
+            || self.target_launch_capsule_hash != self.placement.target_launch_capsule_hash
+            || self.credential_reservation != self.placement.credential_reservation
+        {
+            bail!("placement preparation response contradicts its request or signed evidence");
+        }
+        hash("placement attestation", &self.placement_attestation_hash)?;
+        Ok(())
+    }
+}
+
+impl WorkerPlacementAdoptRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        label_value("adopt chain root", &self.chain_root_id)?;
+        for (label, value) in [
+            ("adopt operation", self.operation_id.as_str()),
+            (
+                "adopt target chain head",
+                self.target_chain_head_hash.as_str(),
+            ),
+            (
+                "adopt placement attestation",
+                self.placement_attestation_hash.as_str(),
+            ),
+            ("adopt writer grant", self.writer_grant_hash.as_str()),
+        ] {
+            hash(label, value)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialGenerationReservation {
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub generation: u64,
+    pub reservation_id: String,
+    /// Opaque workload-session coordinate that the target worker must recover.
+    /// It is provider-neutral and never interpreted by RyeOS.
+    pub upstream_session_id: String,
+    pub subject_contract_digest: String,
+    pub subject_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAuthorityRebind {
+    pub route_digest: String,
+    pub source_stable_project_identity: String,
+    pub target_stable_project_identity: String,
+    pub source_candidate_snapshot_hash: String,
+    pub source_base_snapshot_hash: String,
+    pub target_expected_head_hash: Option<String>,
+    pub target_authority: ExecutionProjectAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountingConservation {
+    pub source_scope: Option<AdmittedAccountingScope>,
+    pub target_scope: Option<AdmittedAccountingScope>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub allocation_mode: Option<String>,
+    pub source_financial_high_water: u64,
+    pub source_charged_usd_nanos: u64,
+    pub source_remaining_cap_usd_nanos: Option<u64>,
+    pub target_cap_usd_nanos: Option<u64>,
+    pub source_remaining_directive_cap_usd_nanos: Option<u64>,
+    pub target_directive_cap_usd_nanos: Option<u64>,
+}
+
+/// Node-local operands needed to derive a target `ResumeContext` from an
+/// already admitted source. This is deliberately not a second durable
+/// authority object: the resulting complete resume ledger is sealed into the
+/// target launch capsule, while `WorkerPlacementAdmissionEvidence` binds its
+/// project, credential, site, and accounting substitutions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteResumeContextRebind {
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub target_project_context: ryeos_engine::contracts::ProjectContext,
+    pub target_project_authority: ExecutionProjectAuthority,
+    pub target_stable_project_identity: Option<StableProjectIdentity>,
+    pub target_local_overlay_root: Option<PathBuf>,
+    pub target_original_snapshot_hash: Option<String>,
+    pub target_original_pushed_head_ref: Option<OriginalPushedHeadRef>,
+    pub target_state_root: Option<PathBuf>,
+    pub source_credential_profile_id: String,
+    pub credential_reservation: CredentialGenerationReservation,
+    pub target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAdmissionEvidence {
+    pub schema: String,
+    pub operation_type: String,
+    pub operation_id: String,
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub checkpoint_manifest_hash: String,
+    pub outer_exact_program_hash: String,
+    pub persistent_dependency_programs: BTreeMap<String, String>,
+    pub target_persistent_session_capsules: BTreeMap<String, String>,
+    pub target_execution_realization_hash: String,
+    pub credential_reservation: CredentialGenerationReservation,
+    pub target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+    pub project_rebind: ProjectAuthorityRebind,
+    pub accounting: AccountingConservation,
+    pub target_launch_capsule_hash: String,
+    /// Immutable CAS recovery seed for the exact successor placement. The
+    /// seed is independently reachable from the continuation edge; this hash
+    /// binds target admission to those exact runtime bytes before source cut.
+    pub target_runtime_seed_hash: String,
+}
+
+impl WorkerPlacementAdmissionEvidence {
+    pub fn new(
+        operation_id: String,
+        preflight_id: String,
+        preflight_attestation_hash: String,
+        follow_delivery_reservation_attestation_hash: Option<String>,
+        owner_principal: String,
+        chain_root_id: String,
+        origin_site_id: String,
+        source_site_id: String,
+        target_site_id: String,
+        source_placement_thread_id: String,
+        successor_placement_thread_id: String,
+        source_chain_head_hash: String,
+        source_last_event_hash: String,
+        checkpoint_manifest_hash: String,
+        outer_exact_program_hash: String,
+        persistent_dependency_programs: BTreeMap<String, String>,
+        target_persistent_session_capsules: BTreeMap<String, String>,
+        target_execution_realization_hash: String,
+        credential_reservation: CredentialGenerationReservation,
+        target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority,
+        project_rebind: ProjectAuthorityRebind,
+        accounting: AccountingConservation,
+        target_launch_capsule_hash: String,
+        target_runtime_seed_hash: String,
+    ) -> Self {
+        Self {
+            schema: PLACEMENT_EVIDENCE_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
+            operation_id,
+            preflight_id,
+            preflight_attestation_hash,
+            follow_delivery_reservation_attestation_hash,
+            owner_principal,
+            chain_root_id,
+            origin_site_id,
+            source_site_id,
+            target_site_id,
+            source_placement_thread_id,
+            successor_placement_thread_id,
+            source_chain_head_hash,
+            source_last_event_hash,
+            checkpoint_manifest_hash,
+            outer_exact_program_hash,
+            persistent_dependency_programs,
+            target_persistent_session_capsules,
+            target_execution_realization_hash,
+            credential_reservation,
+            target_operator_authority,
+            project_rebind,
+            accounting,
+            target_launch_capsule_hash,
+            target_runtime_seed_hash,
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PLACEMENT_EVIDENCE_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_OPERATION
+        {
+            bail!("worker placement evidence is not the exact current contract");
+        }
+        validate_common(
+            &self.operation_id,
+            &self.owner_principal,
+            &self.chain_root_id,
+            &self.origin_site_id,
+            &self.source_site_id,
+            &self.target_site_id,
+            &self.source_placement_thread_id,
+            &self.successor_placement_thread_id,
+            &self.source_chain_head_hash,
+            &self.source_last_event_hash,
+            &self.checkpoint_manifest_hash,
+            &self.target_launch_capsule_hash,
+        )?;
+        hash("placement preflight", &self.preflight_id)?;
+        hash(
+            "placement preflight attestation",
+            &self.preflight_attestation_hash,
+        )?;
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
+        hash("outer exact program", &self.outer_exact_program_hash)?;
+        hash(
+            "target execution realization",
+            &self.target_execution_realization_hash,
+        )?;
+        hash("target runtime seed", &self.target_runtime_seed_hash)?;
+        if self.source_site_id == self.target_site_id {
+            bail!("cross-site worker placement must change current site");
+        }
+        validate_dependency_maps(
+            &self.persistent_dependency_programs,
+            &self.target_persistent_session_capsules,
+        )?;
+        self.credential_reservation.validate()?;
+        self.target_operator_authority.validate()?;
+        if self.target_operator_authority.owner_principal != self.owner_principal
+            || self.target_operator_authority.origin_site_id != self.origin_site_id
+        {
+            bail!("worker placement target operator authority contradicts its owner or origin");
+        }
+        self.project_rebind.validate()?;
+        self.accounting.validate()?;
+        Ok(())
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.target_launch_capsule_hash.clone(),
+            WORKER_PLACEMENT_CLAIM.to_owned(),
+            WORKER_PLACEMENT_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self).context("serialize worker placement evidence")?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(attestation: &Attestation) -> anyhow::Result<Self> {
+        if attestation.policy != WORKER_PLACEMENT_POLICY
+            || attestation.claim != WORKER_PLACEMENT_CLAIM
+        {
+            bail!("attestation is not a worker placement admission");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())
+            .context("decode worker placement evidence")?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.target_launch_capsule_hash {
+            bail!("worker placement subject is not its target launch capsule");
+        }
+        Ok(evidence)
+    }
+}
+
+/// Canonical runtime seed bytes prepared for publication in the private CAS.
+/// The object carries only bounded coordinates and a blob edge, keeping
+/// generic object traversal bounded even when the retained exact program is
+/// larger than the ordinary object ceiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlacementRuntimeSeed {
+    pub object: ryeos_state::objects::PlacementRuntimeSeed,
+    pub launch_metadata_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlacementTransferManifest {
+    pub object: ryeos_state::objects::PlacementTransferManifest,
+}
+
+impl PreparedPlacementTransferManifest {
+    pub fn object_hash(&self) -> anyhow::Result<String> {
+        self.object.content_hash()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_placement_transfer_manifest(
+    operation_id: &str,
+    owner_principal: &str,
+    chain_root_id: &str,
+    origin_site_id: &str,
+    source_site_id: &str,
+    target_site_id: &str,
+    source_placement_thread_id: &str,
+    successor_placement_thread_id: &str,
+    source_chain_head_hash: &str,
+    source_last_event_hash: &str,
+    checkpoint_manifest_hash: &str,
+    project_candidate_snapshot_hash: &str,
+    source_launch_capsule_hash: &str,
+) -> anyhow::Result<PreparedPlacementTransferManifest> {
+    let object = ryeos_state::objects::PlacementTransferManifest::new(
+        operation_id.to_owned(),
+        owner_principal.to_owned(),
+        chain_root_id.to_owned(),
+        origin_site_id.to_owned(),
+        source_site_id.to_owned(),
+        target_site_id.to_owned(),
+        source_placement_thread_id.to_owned(),
+        successor_placement_thread_id.to_owned(),
+        source_chain_head_hash.to_owned(),
+        source_last_event_hash.to_owned(),
+        checkpoint_manifest_hash.to_owned(),
+        project_candidate_snapshot_hash.to_owned(),
+        source_launch_capsule_hash.to_owned(),
+    )?;
+    Ok(PreparedPlacementTransferManifest { object })
+}
+
+impl PreparedPlacementRuntimeSeed {
+    pub fn object_hash(&self) -> anyhow::Result<String> {
+        self.object.content_hash()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_placement_runtime_seed(
+    operation_id: &str,
+    chain_root_id: &str,
+    source_placement_thread_id: &str,
+    successor_placement_thread_id: &str,
+    target_site_id: &str,
+    owner_principal: &str,
+    target_launch_capsule_hash: &str,
+    launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+) -> anyhow::Result<PreparedPlacementRuntimeSeed> {
+    launch_metadata.validate()?;
+    let value =
+        serde_json::to_value(launch_metadata).context("serialize placement runtime seed")?;
+    let canonical = lillux::canonical_json(&value)
+        .context("canonicalize placement runtime seed")?
+        .into_bytes();
+    let size = u64::try_from(canonical.len()).context("placement runtime seed size overflow")?;
+    if size == 0 || size > ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES {
+        bail!(
+            "placement runtime metadata is {size} bytes; maximum is {}",
+            ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES
+        );
+    }
+    let object = ryeos_state::objects::PlacementRuntimeSeed::new(
+        operation_id.to_owned(),
+        chain_root_id.to_owned(),
+        source_placement_thread_id.to_owned(),
+        successor_placement_thread_id.to_owned(),
+        target_site_id.to_owned(),
+        owner_principal.to_owned(),
+        target_launch_capsule_hash.to_owned(),
+        lillux::sha256_hex(&canonical),
+        size,
+    )?;
+    Ok(PreparedPlacementRuntimeSeed {
+        object,
+        launch_metadata_bytes: canonical,
+    })
+}
+
+impl RemoteResumeContextRebind {
+    pub(crate) fn validate_target_project_authority(&self) -> anyhow::Result<()> {
+        self.target_project_authority.validate()?;
+        match (&self.target_project_authority, &self.target_project_context) {
+            (
+                ExecutionProjectAuthority::PinnedGeneration {
+                    display_path: Some(display_path),
+                    realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+                    ..
+                },
+                ryeos_engine::contracts::ProjectContext::LocalPath { path },
+            ) if path == display_path => {}
+            (ExecutionProjectAuthority::PinnedGeneration { .. }, _) => {
+                bail!(
+                    "remote worker adoption requires a writable pinned-COW authority resolved through its exact admitted target workspace path"
+                )
+            }
+            _ => bail!("remote worker adoption requires a pinned-COW target project authority"),
+        }
+        if let Some(identity) = &self.target_stable_project_identity {
+            identity.validate()?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn rebind_credential_profile_parameter(
+    source: &serde_json::Value,
+    expected_source_profile: &str,
+    target_profile: &str,
+) -> anyhow::Result<serde_json::Value> {
+    label_value("source credential profile", expected_source_profile)?;
+    label_value("target credential profile", target_profile)?;
+    let mut target = source.clone();
+    let object = target
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("worker execution parameters must be an object"))?;
+    match object
+        .get("credential_profile_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(profile) if profile == expected_source_profile => {}
+        Some(_) => bail!("source credential profile does not match the sealed worker input"),
+        None => bail!("worker execution parameters have no credential_profile_id"),
+    }
+    object.insert(
+        "credential_profile_id".to_owned(),
+        serde_json::Value::String(target_profile.to_owned()),
+    );
+    Ok(target)
+}
+
+pub fn chain_writer_transition_from_placement(
+    placement: &WorkerPlacementAdmissionEvidence,
+    placement_attestation_hash: String,
+    source_accounting_transfer_hash: Option<String>,
+    source_node_signer_fingerprint: String,
+    target_node_signer_fingerprint: String,
+) -> ryeos_state::objects::ChainWriterTransitionEvidence {
+    ryeos_state::objects::ChainWriterTransitionEvidence {
+        schema: ryeos_state::objects::CHAIN_WRITER_TRANSITION_SCHEMA,
+        operation_id: placement.operation_id.clone(),
+        owner_principal: placement.owner_principal.clone(),
+        chain_root_id: placement.chain_root_id.clone(),
+        origin_site_id: placement.origin_site_id.clone(),
+        source_site_id: placement.source_site_id.clone(),
+        target_site_id: placement.target_site_id.clone(),
+        source_chain_head_hash: placement.source_chain_head_hash.clone(),
+        source_node_signer_fingerprint,
+        source_placement_thread_id: placement.source_placement_thread_id.clone(),
+        source_last_event_hash: placement.source_last_event_hash.clone(),
+        successor_placement_thread_id: placement.successor_placement_thread_id.clone(),
+        placement_attestation_hash,
+        source_accounting_transfer_hash,
+        transition_subject_hash: placement.target_launch_capsule_hash.clone(),
+        target_node_signer_fingerprint,
+    }
+}
+
+/// Verify the complete source-to-target capsule transition before a target
+/// placement attestation can be issued. The outer program and every field of
+/// the execution closure remain exact except for named, independently
+/// re-admitted persistent-session capsules. Node-local project, credential,
+/// realization, and accounting changes must agree with the typed placement
+/// evidence and the target-authored runtime seed's exact resume ledger.
+pub fn validate_cross_site_capsule_transition(
+    source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    target_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    target_resume: &ResumeContext,
+    placement: &WorkerPlacementAdmissionEvidence,
+    cas: &lillux::CasStore,
+) -> anyhow::Result<()> {
+    source_capsule.validate_durable_handoff_eligibility()?;
+    target_capsule.validate_durable_handoff_eligibility()?;
+    placement.validate()?;
+    let source_request =
+        crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+            source_capsule,
+        )?;
+    let resume_rebind = RemoteResumeContextRebind {
+        source_site_id: placement.source_site_id.clone(),
+        target_site_id: placement.target_site_id.clone(),
+        target_project_context: target_resume.project_context.clone(),
+        target_project_authority: target_resume.project_authority.clone(),
+        target_stable_project_identity: target_resume.stable_project_identity.clone(),
+        target_local_overlay_root: target_resume.local_overlay_root.clone(),
+        target_original_snapshot_hash: target_resume.original_snapshot_hash.clone(),
+        target_original_pushed_head_ref: target_resume.original_pushed_head_ref.clone(),
+        target_state_root: target_resume.state_root.clone(),
+        source_credential_profile_id: source_request.worker_credential_profile_id()?.to_owned(),
+        credential_reservation: placement.credential_reservation.clone(),
+        target_operator_authority: placement.target_operator_authority.clone(),
+    };
+    let (expected_target_resume, expected_target_request) =
+        crate::thread_lifecycle::SealedRootExecutionRequest::for_remote_worker_adoption_from_capsule(
+            source_capsule,
+            &resume_rebind,
+        )?;
+    if target_resume != &expected_target_resume {
+        bail!("target resume authority differs from the capsule-derived remote rebind");
+    }
+    if !source_capsule.same_cross_site_continuation_program_admission(target_capsule)? {
+        bail!("target capsule changed immutable portable worker admission");
+    }
+    if source_capsule.exact_program_hash != placement.outer_exact_program_hash
+        || target_capsule.exact_program_hash != placement.outer_exact_program_hash
+        || target_capsule.execution_realization_hash != placement.target_execution_realization_hash
+        || target_capsule.content_hash()? != placement.target_launch_capsule_hash
+        || target_capsule.project_authority != target_resume.project_authority
+        || target_capsule.project_authority != placement.project_rebind.target_authority
+        || target_capsule.accounting_scope != placement.accounting.target_scope
+        || source_capsule.accounting_scope != placement.accounting.source_scope
+    {
+        bail!("placement evidence contradicts its source or target launch capsule");
+    }
+    if placement.owner_principal != target_resume.principal_identifier()
+        || placement.origin_site_id != target_resume.origin_site_id
+        || placement.source_site_id != resume_rebind.source_site_id
+        || placement.target_site_id != target_resume.current_site_id
+        || placement.credential_reservation != resume_rebind.credential_reservation
+        || placement.target_operator_authority != resume_rebind.target_operator_authority
+    {
+        bail!("placement evidence contradicts the exact owner/site resume transition");
+    }
+
+    if serde_json::to_value(expected_target_request)? != target_capsule.sealed_invocation {
+        bail!("target capsule invocation differs outside its typed remote rebind");
+    }
+
+    placement
+        .project_rebind
+        .validate_capsule_transition(&source_capsule.project_authority)?;
+    let source_sessions = source_capsule.admitted_persistent_session_capsules()?;
+    let target_sessions = target_capsule.admitted_persistent_session_capsules()?;
+    if target_sessions != placement.target_persistent_session_capsules
+        || source_sessions.keys().ne(target_sessions.keys())
+    {
+        bail!("placement persistent-session names or target capsules changed");
+    }
+    let mut source_programs = BTreeMap::new();
+    for (name, source_hash) in &source_sessions {
+        let source = load_persistent_capsule(cas, source_hash)?;
+        let target_hash = target_sessions
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("target omitted persistent session `{name}`"))?;
+        let target = load_persistent_capsule(cas, target_hash)?;
+        if source.exact_program_hash != target.exact_program_hash {
+            bail!("target persistent session `{name}` changed its exact program");
+        }
+        source_programs.insert(name.clone(), source.exact_program_hash);
+    }
+    if source_programs != placement.persistent_dependency_programs {
+        bail!("placement persistent dependency program map is not the source capsule set");
+    }
+    Ok(())
+}
+
+fn load_persistent_capsule(
+    cas: &lillux::CasStore,
+    hash: &str,
+) -> anyhow::Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
+    let value = cas
+        .get_object(hash)?
+        .ok_or_else(|| anyhow::anyhow!("persistent-session capsule is absent: {hash}"))?;
+    let capsule =
+        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+    if capsule.content_hash()? != hash {
+        bail!("persistent-session capsule content hash is not canonical: {hash}");
+    }
+    Ok(capsule)
+}
+
+impl CredentialGenerationReservation {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, value) in [
+            ("credential profile", self.profile_id.as_str()),
+            ("credential owner", self.owner_principal.as_str()),
+            ("credential reservation", self.reservation_id.as_str()),
+            (
+                "credential upstream session",
+                self.upstream_session_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.generation == 0 {
+            bail!("credential reservation generation must be positive");
+        }
+        hash("credential subject contract", &self.subject_contract_digest)?;
+        hash("credential subject", &self.subject_digest)
+    }
+}
+
+impl ProjectAuthorityRebind {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        hash("project route", &self.route_digest)?;
+        label_value(
+            "source stable project identity",
+            &self.source_stable_project_identity,
+        )?;
+        label_value(
+            "target stable project identity",
+            &self.target_stable_project_identity,
+        )?;
+        if self.source_stable_project_identity == self.target_stable_project_identity {
+            bail!("project rebind must name distinct directional endpoints");
+        }
+        hash(
+            "source project candidate",
+            &self.source_candidate_snapshot_hash,
+        )?;
+        hash("source project base", &self.source_base_snapshot_hash)?;
+        if let Some(head) = &self.target_expected_head_hash {
+            hash("target expected project head", head)?;
+        }
+        self.target_authority.validate()
+    }
+
+    fn validate_capsule_transition(
+        &self,
+        source: &ExecutionProjectAuthority,
+    ) -> anyhow::Result<()> {
+        use ryeos_state::objects::{PinnedProjectRealization, PinnedTerminalPublication};
+        self.validate()?;
+        source.validate()?;
+        let ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity: source_identity,
+            base_snapshot_hash: source_base,
+            realization: PinnedProjectRealization::Cow { .. },
+            environment: source_environment,
+            capability_ceiling: source_capabilities,
+            child_policy: source_child_policy,
+            ..
+        } = source
+        else {
+            bail!("cross-site worker handoff requires a pinned COW source project");
+        };
+        let ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity: target_identity,
+            base_snapshot_hash: target_base,
+            snapshot_hash: target_snapshot,
+            realization:
+                PinnedProjectRealization::Cow {
+                    terminal_publication,
+                },
+            environment: target_environment,
+            capability_ceiling: target_capabilities,
+            child_policy: target_child_policy,
+            ..
+        } = &self.target_authority
+        else {
+            bail!("cross-site worker handoff requires a pinned COW target project");
+        };
+        if source_identity != &self.source_stable_project_identity
+            || target_identity != &self.target_stable_project_identity
+            || source_base != &self.source_base_snapshot_hash
+            || target_base != source_base
+            || target_snapshot != &self.source_candidate_snapshot_hash
+            || source_capabilities != target_capabilities
+            || source_child_policy != target_child_policy
+            || !equivalent_remote_environment(source_environment, target_environment)
+        {
+            bail!("target project authority changed outside its directional endpoint rebind");
+        }
+        let expected_head = self.target_expected_head_hash.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("remote project rebind has no exact target HEAD fence")
+        })?;
+        let publication_expected = match terminal_publication {
+            PinnedTerminalPublication::RetainCurrentHead { expected_hash, .. }
+            | PinnedTerminalPublication::AdvanceHead { expected_hash, .. } => expected_hash,
+            PinnedTerminalPublication::Discard | PinnedTerminalPublication::RetainResult => {
+                bail!("remote target COW has no target project HEAD publication fence")
+            }
+        };
+        if publication_expected != expected_head {
+            bail!("target project publication authority contradicts its admitted HEAD fence");
+        }
+        Ok(())
+    }
+}
+
+fn equivalent_remote_environment(
+    source: &ryeos_state::objects::EnvironmentAuthority,
+    target: &ryeos_state::objects::EnvironmentAuthority,
+) -> bool {
+    use ryeos_state::objects::EnvironmentAuthority;
+    match (source, target) {
+        (
+            EnvironmentAuthority::ProjectOverlay {
+                include_operator_vault: source_vault,
+                name_authority: source_names,
+                ..
+            },
+            EnvironmentAuthority::ProjectOverlay {
+                include_operator_vault: target_vault,
+                name_authority: target_names,
+                ..
+            },
+        ) => source_vault == target_vault && source_names == target_names,
+        _ => source == target,
+    }
+}
+
+/// Derive the exact target-local pinned-COW authority from one admitted source
+/// authority and a configured directional project endpoint. Paths and
+/// environment-overlay identities are rebuilt for the target; immutable base,
+/// capabilities, and child policy are copied exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn build_remote_project_rebind(
+    source: &ExecutionProjectAuthority,
+    target_project_path: &std::path::Path,
+    target_site_id: &str,
+    owner_principal: &str,
+    source_candidate_snapshot_hash: &str,
+    target_expected_head_hash: &str,
+    target_project_hash: &str,
+    route_digest: &str,
+) -> anyhow::Result<(
+    ProjectAuthorityRebind,
+    StableProjectIdentity,
+    Option<PathBuf>,
+)> {
+    use ryeos_state::objects::{
+        EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+    };
+    source.validate()?;
+    hash("source candidate snapshot", source_candidate_snapshot_hash)?;
+    hash("target expected project head", target_expected_head_hash)?;
+    hash("target project hash", target_project_hash)?;
+    hash("project route", route_digest)?;
+    let ExecutionProjectAuthority::PinnedGeneration {
+        stable_project_identity: source_identity,
+        base_snapshot_hash,
+        realization: PinnedProjectRealization::Cow { .. },
+        environment,
+        capability_ceiling,
+        child_policy,
+        ..
+    } = source
+    else {
+        bail!("remote worker handoff requires a pinned COW source project");
+    };
+    if target_expected_head_hash != base_snapshot_hash {
+        bail!("target project HEAD is not the source base generation");
+    }
+    let target_identity = StableProjectIdentity::from_path(target_project_path, target_site_id)?;
+    let (target_environment, target_overlay_root) = match environment {
+        EnvironmentAuthority::ProjectOverlay {
+            include_operator_vault,
+            name_authority,
+            ..
+        } => (
+            EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: lillux::sha256_hex(
+                    format!(
+                        "live-project\0{}\0{}",
+                        target_identity.normalized_logical_key,
+                        target_project_path.display()
+                    )
+                    .as_bytes(),
+                ),
+                source_identity: format!("dotenv:{}", target_project_path.join(".env").display()),
+                include_operator_vault: *include_operator_vault,
+                name_authority: name_authority.clone(),
+            },
+            Some(target_project_path.to_path_buf()),
+        ),
+        other => (other.clone(), None),
+    };
+    let target_authority = ExecutionProjectAuthority::PinnedGeneration {
+        stable_project_identity: target_identity.normalized_logical_key.clone(),
+        display_path: Some(target_project_path.to_path_buf()),
+        base_snapshot_hash: base_snapshot_hash.clone(),
+        snapshot_hash: source_candidate_snapshot_hash.to_owned(),
+        realization: PinnedProjectRealization::Cow {
+            terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                principal_key: ryeos_state::refs::principal_storage_key(owner_principal)?
+                    .to_owned(),
+                project_hash: target_project_hash.to_owned(),
+                expected_hash: target_expected_head_hash.to_owned(),
+            },
+        },
+        environment: target_environment,
+        capability_ceiling: capability_ceiling.clone(),
+        child_policy: child_policy.clone(),
+    };
+    let rebind = ProjectAuthorityRebind {
+        route_digest: route_digest.to_owned(),
+        source_stable_project_identity: source_identity.clone(),
+        target_stable_project_identity: target_identity.normalized_logical_key.clone(),
+        source_candidate_snapshot_hash: source_candidate_snapshot_hash.to_owned(),
+        source_base_snapshot_hash: base_snapshot_hash.clone(),
+        target_expected_head_hash: Some(target_expected_head_hash.to_owned()),
+        target_authority,
+    };
+    rebind.validate_capsule_transition(source)?;
+    Ok((rebind, target_identity, target_overlay_root))
+}
+
+pub fn build_target_accounting_conservation(
+    source: Option<&crate::accounting_db::AccountingHandoffFrontier>,
+    target_ledger_identity: Option<(String, u64)>,
+    operation_id: &str,
+) -> anyhow::Result<AccountingConservation> {
+    hash("accounting handoff operation", operation_id)?;
+    let Some(source) = source else {
+        if target_ledger_identity.is_some() {
+            bail!("accounting-free placement unexpectedly selected a target ledger");
+        }
+        return Ok(AccountingConservation {
+            source_scope: None,
+            target_scope: None,
+            allocation_mode: None,
+            source_financial_high_water: 0,
+            source_charged_usd_nanos: 0,
+            source_remaining_cap_usd_nanos: None,
+            target_cap_usd_nanos: None,
+            source_remaining_directive_cap_usd_nanos: None,
+            target_directive_cap_usd_nanos: None,
+        });
+    };
+    let (target_budget_authority_site_id, epoch) = target_ledger_identity
+        .filter(|(site_id, epoch)| !site_id.is_empty() && *epoch > 0)
+        .ok_or_else(|| anyhow::anyhow!("accounted placement has no target accounting ledger"))?;
+    let target_scope = AdmittedAccountingScope {
+        budget_authority_site_id: target_budget_authority_site_id,
+        ledger_epoch: epoch,
+        execution_budget_id: format!("worker-handoff:{operation_id}"),
+        directive_budget_id: source
+            .source_scope
+            .directive_budget_id
+            .as_ref()
+            .map(|_| format!("worker-handoff-directive:{operation_id}")),
+    };
+    target_scope.validate()?;
+    let conservation = AccountingConservation {
+        source_scope: Some(source.source_scope.clone()),
+        target_scope: Some(target_scope),
+        allocation_mode: Some(source.allocation_mode.clone()),
+        source_financial_high_water: source.financial_high_water,
+        source_charged_usd_nanos: source.charged_usd_nanos,
+        source_remaining_cap_usd_nanos: source.remaining_cap_usd_nanos,
+        target_cap_usd_nanos: source.target_cap_usd_nanos,
+        source_remaining_directive_cap_usd_nanos: source.remaining_directive_cap_usd_nanos,
+        target_directive_cap_usd_nanos: source.target_directive_cap_usd_nanos,
+    };
+    conservation.validate()?;
+    Ok(conservation)
+}
+
+/// Prove that final target admission retained the exact execution substrate
+/// qualified by preflight. The full realization hash must change when the
+/// final launch authority gains its settled accounting scope; every
+/// substrate, contract, component, closure, and isolation property remains
+/// byte-exact.
+pub fn validate_target_realization_after_preflight(
+    cas: &lillux::CasStore,
+    preflight_hash: &str,
+    final_hash: &str,
+) -> anyhow::Result<()> {
+    hash("preflight target realization", preflight_hash)?;
+    hash("final target realization", final_hash)?;
+    let load =
+        |digest: &str| -> anyhow::Result<ryeos_state::objects::AdmittedExecutionRealization> {
+            let value = cas
+                .get_object(digest)?
+                .with_context(|| format!("target execution realization {digest} is absent"))?;
+            let realization =
+                ryeos_state::objects::AdmittedExecutionRealization::from_current_value(&value)?;
+            if realization.content_hash()? != digest {
+                bail!("target execution realization changed content hash");
+            }
+            Ok(realization)
+        };
+    let mut preflight = load(preflight_hash)?;
+    let final_realization = load(final_hash)?;
+    preflight.launch_authority_digest = final_realization.launch_authority_digest.clone();
+    if preflight != final_realization {
+        bail!("final target execution substrate differs from preflight");
+    }
+    Ok(())
+}
+
+impl AccountingConservation {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.source_scope.is_some() != self.target_scope.is_some() {
+            bail!("accounting handoff cannot create or discard an admitted scope");
+        }
+        if let Some(scope) = &self.source_scope {
+            scope.validate()?;
+        }
+        if let Some(scope) = &self.target_scope {
+            scope.validate()?;
+        }
+        if self.source_scope.is_none()
+            && (self.allocation_mode.is_some()
+                || self.source_financial_high_water != 0
+                || self.source_charged_usd_nanos != 0
+                || self.source_remaining_cap_usd_nanos.is_some()
+                || self.target_cap_usd_nanos.is_some()
+                || self.source_remaining_directive_cap_usd_nanos.is_some()
+                || self.target_directive_cap_usd_nanos.is_some())
+        {
+            bail!("accounting-free handoff carries financial authority");
+        }
+        if self.source_scope.is_none() {
+            return Ok(());
+        }
+        let target_execution = self
+            .target_cap_usd_nanos
+            .ok_or_else(|| anyhow::anyhow!("target accounting cap is not finite"))?;
+        if self
+            .source_remaining_cap_usd_nanos
+            .is_some_and(|source_execution| target_execution > source_execution)
+        {
+            bail!("target accounting cap exceeds source remainder");
+        }
+        let has_directive_scope = self
+            .source_scope
+            .as_ref()
+            .and_then(|scope| scope.directive_budget_id.as_ref())
+            .is_some();
+        if has_directive_scope
+            != self
+                .target_scope
+                .as_ref()
+                .and_then(|scope| scope.directive_budget_id.as_ref())
+                .is_some()
+        {
+            bail!("accounting handoff cannot create or discard a directive budget scope");
+        }
+        match self.allocation_mode.as_deref() {
+            Some("exclusive_execution") => {
+                if has_directive_scope
+                    || self.source_remaining_directive_cap_usd_nanos.is_some()
+                    || self.target_directive_cap_usd_nanos.is_some()
+                {
+                    bail!("exclusive accounting handoff carries directive authority");
+                }
+                let source_execution = self
+                    .source_remaining_cap_usd_nanos
+                    .ok_or_else(|| anyhow::anyhow!("source accounting remainder is not finite"))?;
+                if target_execution != source_execution {
+                    bail!("exclusive accounting handoff does not move the complete remainder");
+                }
+            }
+            Some("directive_slice") => {
+                let source_directive = self
+                    .source_remaining_directive_cap_usd_nanos
+                    .ok_or_else(|| anyhow::anyhow!("source directive remainder is not finite"))?;
+                let target_directive = self
+                    .target_directive_cap_usd_nanos
+                    .ok_or_else(|| anyhow::anyhow!("target directive cap is not finite"))?;
+                let expected = self
+                    .source_remaining_cap_usd_nanos
+                    .map_or(source_directive, |execution| {
+                        execution.min(source_directive)
+                    });
+                if !has_directive_scope
+                    || target_execution != target_directive
+                    || target_directive != expected
+                {
+                    bail!("directive accounting handoff does not conserve its finite allowance");
+                }
+            }
+            _ => bail!("accounted handoff has no canonical allocation mode"),
+        }
+        Ok(())
+    }
+}
+
+fn validate_common(
+    operation_id: &str,
+    owner_principal: &str,
+    chain_root_id: &str,
+    origin_site_id: &str,
+    source_site_id: &str,
+    target_site_id: &str,
+    source_thread_id: &str,
+    successor_thread_id: &str,
+    source_head_hash: &str,
+    source_event_hash: &str,
+    checkpoint_hash: &str,
+    target_capsule_hash: &str,
+) -> anyhow::Result<()> {
+    hash("handoff operation", operation_id)?;
+    for (label, value) in [
+        ("owner principal", owner_principal),
+        ("chain root", chain_root_id),
+        ("origin site", origin_site_id),
+        ("source site", source_site_id),
+        ("target site", target_site_id),
+        ("source placement", source_thread_id),
+        ("successor placement", successor_thread_id),
+    ] {
+        label_value(label, value)?;
+    }
+    if source_thread_id == successor_thread_id {
+        bail!("handoff successor must differ from its source placement");
+    }
+    for (label, value) in [
+        ("source chain head", source_head_hash),
+        ("source last event", source_event_hash),
+        ("checkpoint manifest", checkpoint_hash),
+        ("target launch capsule", target_capsule_hash),
+    ] {
+        hash(label, value)?;
+    }
+    Ok(())
+}
+
+fn validate_dependency_maps(
+    programs: &BTreeMap<String, String>,
+    capsules: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    if programs.len() > 64 || programs.keys().ne(capsules.keys()) {
+        bail!("target persistent-session capsules do not match named program dependencies");
+    }
+    for ((name, program), capsule) in programs.iter().zip(capsules.values()) {
+        label_value("persistent dependency name", name)?;
+        hash("persistent dependency program", program)?;
+        hash("target persistent-session capsule", capsule)?;
+    }
+    Ok(())
+}
+
+fn hash(label: &str, value: &str) -> anyhow::Result<()> {
+    ryeos_state::objects::thread_snapshot::validate_canonical_hash(label, value)
+}
+
+fn label_value(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.trim() != value
+        || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        bail!("{label} is not a bounded canonical label");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+    use ryeos_state::objects::{
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionLifecycleAuthority,
+        PinnedProjectRealization, PinnedTerminalPublication,
+    };
+
+    struct PreflightTestSigner {
+        signing_key: lillux::crypto::SigningKey,
+        fingerprint: String,
+    }
+
+    impl PreflightTestSigner {
+        fn new() -> Self {
+            let signing_key = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
+            let fingerprint = lillux::crypto::fingerprint(&signing_key.verifying_key());
+            Self {
+                signing_key,
+                fingerprint,
+            }
+        }
+    }
+
+    impl Signer for PreflightTestSigner {
+        fn sign(&self, data: &[u8]) -> Vec<u8> {
+            use lillux::crypto::Signer as _;
+            self.signing_key.sign(data).to_bytes().to_vec()
+        }
+
+        fn fingerprint(&self) -> &str {
+            &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
+        }
+    }
+
+    fn accounting() -> AccountingConservation {
+        AccountingConservation {
+            source_scope: None,
+            target_scope: None,
+            allocation_mode: None,
+            source_financial_high_water: 0,
+            source_charged_usd_nanos: 0,
+            source_remaining_cap_usd_nanos: None,
+            target_cap_usd_nanos: None,
+            source_remaining_directive_cap_usd_nanos: None,
+            target_directive_cap_usd_nanos: None,
+        }
+    }
+
+    #[test]
+    fn handoff_phase_cut_evidence_is_closed_and_operation_anchored() {
+        use test_support::{HandoffCrashBoundary, HandoffPhaseCutEvidence};
+
+        let operation = WorkerSessionHandoffJobOperation::new(
+            WorkerHandoffJobRole::Source,
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "fp:owner".into(),
+            "T-root".into(),
+            "site:origin".into(),
+            "site:source".into(),
+            "site:target".into(),
+            "T-source".into(),
+            "T-successor".into(),
+            "4".repeat(64),
+            "5".repeat(64),
+            "6".repeat(64),
+            "7".repeat(64),
+            "target".into(),
+            "/source/project".into(),
+            "/target/project".into(),
+            "8".repeat(64),
+            "credential:target".into(),
+            None,
+        )
+        .unwrap();
+        let evidence = HandoffPhaseCutEvidence::new(
+            HandoffCrashBoundary::SourceBeforeExportPublication,
+            &operation,
+        )
+        .unwrap();
+        let decoded: HandoffPhaseCutEvidence =
+            serde_json::from_slice(&evidence.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(decoded, evidence);
+
+        let mut unknown = serde_json::to_value(&evidence).unwrap();
+        unknown["replacement_operation"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<HandoffPhaseCutEvidence>(unknown).is_err());
+
+        let mut noncanonical = evidence;
+        noncanonical.operation_id = "A".repeat(64);
+        assert!(noncanonical.validate().is_err());
+
+        let mut changed = operation;
+        changed.source_project_path = "/different/source/project".into();
+        let changed = HandoffPhaseCutEvidence::new(
+            HandoffCrashBoundary::SourceBeforeExportPublication,
+            &changed,
+        )
+        .unwrap();
+        assert_eq!(changed.operation_id, "1".repeat(64));
+        assert_ne!(changed.operation_digest, noncanonical.operation_digest);
+    }
+
+    #[test]
+    fn accounting_refuses_cap_inflation() {
+        let mut value = accounting();
+        value.source_scope = Some(AdmittedAccountingScope {
+            budget_authority_site_id: "site:a".into(),
+            ledger_epoch: 1,
+            execution_budget_id: "budget:a".into(),
+            directive_budget_id: None,
+        });
+        value.target_scope = Some(AdmittedAccountingScope {
+            budget_authority_site_id: "site:b".into(),
+            ledger_epoch: 1,
+            execution_budget_id: "budget:b".into(),
+            directive_budget_id: None,
+        });
+        value.allocation_mode = Some("exclusive_execution".into());
+        value.source_remaining_cap_usd_nanos = Some(10);
+        value.target_cap_usd_nanos = Some(11);
+        assert!(value.validate().is_err());
+        value.target_cap_usd_nanos = Some(10);
+        assert!(value.validate().is_ok());
+
+        value.source_remaining_cap_usd_nanos = None;
+        value.target_cap_usd_nanos = None;
+        assert!(
+            value.validate().is_err(),
+            "accounted handoff must be finite"
+        );
+
+        value.source_remaining_cap_usd_nanos = Some(10);
+        value.target_cap_usd_nanos = Some(10);
+        value.allocation_mode = Some("directive_slice".into());
+        assert!(
+            value.validate().is_err(),
+            "allocation mode must match scopes"
+        );
+
+        value.allocation_mode = Some("exclusive_execution".into());
+        value.source_scope.as_mut().unwrap().directive_budget_id = Some("directive:a".into());
+        value.target_scope.as_mut().unwrap().directive_budget_id = Some("directive:b".into());
+        value.source_remaining_directive_cap_usd_nanos = Some(5);
+        value.target_directive_cap_usd_nanos = Some(5);
+        assert!(
+            value.validate().is_err(),
+            "exclusive transfer cannot carry a directive"
+        );
+    }
+
+    #[test]
+    fn accounting_requires_explicit_nullable_allocation_mode() {
+        let mut value = serde_json::to_value(accounting()).unwrap();
+        value.as_object_mut().unwrap().remove("allocation_mode");
+        let error = serde_json::from_value::<AccountingConservation>(value).unwrap_err();
+        assert!(
+            error.to_string().contains("allocation_mode"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn handoff_accounting_uses_ledger_identity_not_placement_site_identity() {
+        let frontier = crate::accounting_db::AccountingHandoffFrontier {
+            source_scope: AdmittedAccountingScope {
+                budget_authority_site_id: "S-source-ledger".into(),
+                ledger_epoch: 7,
+                execution_budget_id: "budget:source".into(),
+                directive_budget_id: Some("directive:source".into()),
+            },
+            allocation_mode: "directive_slice".into(),
+            financial_high_water: 9,
+            charged_usd_nanos: 3,
+            remaining_cap_usd_nanos: Some(17),
+            remaining_directive_cap_usd_nanos: Some(11),
+            target_cap_usd_nanos: Some(11),
+            target_directive_cap_usd_nanos: Some(11),
+        };
+        let conservation = build_target_accounting_conservation(
+            Some(&frontier),
+            Some(("S-target-ledger".into(), 12)),
+            &"a".repeat(64),
+        )
+        .unwrap();
+
+        assert_eq!(
+            conservation
+                .source_scope
+                .as_ref()
+                .unwrap()
+                .budget_authority_site_id,
+            "S-source-ledger"
+        );
+        let target = conservation.target_scope.as_ref().unwrap();
+        assert_eq!(target.budget_authority_site_id, "S-target-ledger");
+        assert_eq!(target.ledger_epoch, 12);
+        conservation.validate().unwrap();
+    }
+
+    #[test]
+    fn final_target_realization_may_change_only_launch_authority_after_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(temp.path().join("cas"));
+        let preflight = ryeos_state::objects::AdmittedExecutionRealization {
+            schema: ryeos_state::objects::EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ryeos_state::objects::ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: "1".repeat(64),
+            substrate_attestation_hash: "2".repeat(64),
+            launch_authority_digest: "3".repeat(64),
+            effective_definition_digest: "4".repeat(64),
+            artifact_identity_digest: "5".repeat(64),
+            execution_closure_digest: "6".repeat(64),
+            contract_ref: "runtime:test".to_owned(),
+            contract_digest: "7".repeat(64),
+            components: Vec::new(),
+            properties: BTreeMap::new(),
+        };
+        let preflight_hash = cas.store_object(&preflight.to_value().unwrap()).unwrap();
+        let mut final_realization = preflight.clone();
+        final_realization.launch_authority_digest = "8".repeat(64);
+        let final_hash = cas
+            .store_object(&final_realization.to_value().unwrap())
+            .unwrap();
+
+        validate_target_realization_after_preflight(&cas, &preflight_hash, &final_hash).unwrap();
+
+        final_realization.substrate_identity_hash = "9".repeat(64);
+        let changed_substrate_hash = cas
+            .store_object(&final_realization.to_value().unwrap())
+            .unwrap();
+        assert!(
+            validate_target_realization_after_preflight(
+                &cas,
+                &preflight_hash,
+                &changed_substrate_hash,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_subject_and_generation_are_both_fenced() {
+        let mut reservation = CredentialGenerationReservation {
+            profile_id: "profile-a".into(),
+            owner_principal: "owner-a".into(),
+            generation: 1,
+            reservation_id: "reservation-a".into(),
+            upstream_session_id: "upstream-a".into(),
+            subject_contract_digest: "1".repeat(64),
+            subject_digest: "2".repeat(64),
+        };
+        assert!(reservation.validate().is_ok());
+        reservation.generation = 0;
+        assert!(reservation.validate().is_err());
+    }
+
+    #[test]
+    fn abort_progress_is_terminally_distinct_from_source_commit() {
+        let mut progress = WorkerSessionHandoffProgress::planned("1".repeat(64)).unwrap();
+        progress.phase = WorkerHandoffPhase::AbortAuthorized;
+        assert!(progress.validate().is_err());
+        progress.abort_chain_head_hash = Some("2".repeat(64));
+        progress.validate().unwrap();
+
+        progress.phase = WorkerHandoffPhase::SourceCommitted;
+        progress.placement_attestation_hash = Some("3".repeat(64));
+        progress.target_runtime_seed_hash = Some("4".repeat(64));
+        progress.writer_grant_hash = Some("5".repeat(64));
+        progress.target_chain_head_hash = Some("6".repeat(64));
+        progress.credential_reservation_id = Some("reservation".into());
+        assert!(
+            progress
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("non-abort")
+        );
+    }
+
+    #[test]
+    fn source_exported_progress_is_an_exact_pre_cut_boundary() {
+        let progress = WorkerSessionHandoffProgress::source_exported("1".repeat(64)).unwrap();
+        assert_eq!(progress.phase, WorkerHandoffPhase::SourceExported);
+        assert!(progress.placement_attestation_hash.is_none());
+        assert!(progress.writer_grant_hash.is_none());
+        progress.validate().unwrap();
+    }
+
+    #[test]
+    fn every_handoff_phase_has_one_append_authority_lane() {
+        for phase in WorkerHandoffPhase::ALL {
+            assert_ne!(
+                phase.source_is_only_authorized_writer(),
+                phase.successor_is_only_authorized_writer(),
+                "{} must belong to exactly one authority lane",
+                phase.as_str()
+            );
+            if phase.target_has_adopted_writer_grant() {
+                assert!(phase.successor_is_only_authorized_writer());
+            }
+        }
+    }
+
+    #[test]
+    fn crash_boundary_inventory_covers_every_exact_seam_once() {
+        use std::collections::BTreeSet;
+
+        use test_support::{HANDOFF_CRASH_BOUNDARY_SPECS, HandoffCrashBoundary};
+
+        let covered = HANDOFF_CRASH_BOUNDARY_SPECS
+            .iter()
+            .map(|spec| spec.boundary)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(covered.len(), HANDOFF_CRASH_BOUNDARY_SPECS.len());
+        assert_eq!(
+            covered,
+            HandoffCrashBoundary::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+        serde_json::to_value(HANDOFF_CRASH_BOUNDARY_SPECS).unwrap();
+    }
+
+    #[test]
+    fn qualification_matrix_covers_every_seam_with_unique_scenarios() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use test_support::{
+            HANDOFF_ACCEPTANCE_MATRIX, HANDOFF_CRASH_BOUNDARY_SPECS, HandoffCrashBoundary,
+        };
+
+        let specs = HANDOFF_CRASH_BOUNDARY_SPECS
+            .iter()
+            .map(|spec| (spec.boundary, spec.interrupted_node))
+            .collect::<BTreeMap<_, _>>();
+        let mut ids = BTreeSet::new();
+        let mut covered = BTreeSet::new();
+        for case in HANDOFF_ACCEPTANCE_MATRIX {
+            assert!(ids.insert(case.case_id), "duplicate case {}", case.case_id);
+            covered.insert(case.boundary);
+            assert_eq!(
+                specs.get(&case.boundary),
+                Some(&case.interrupted_node),
+                "{} interrupts the wrong node",
+                case.case_id
+            );
+        }
+        assert_eq!(
+            covered,
+            HandoffCrashBoundary::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+
+        let encoded = serde_json::to_vec(HANDOFF_ACCEPTANCE_MATRIX).unwrap();
+        assert!(encoded.len() < 128 * 1024, "acceptance oracle is unbounded");
+    }
+
+    #[test]
+    fn qualification_matrix_never_derives_authority_from_progress_testimony() {
+        use test_support::{
+            AppendAuthorityLane, ExpectedHeadSigner, HANDOFF_ACCEPTANCE_MATRIX,
+            SuccessorPlacementState,
+        };
+
+        let mut observed_unadopted_source_commit = false;
+        for case in HANDOFF_ACCEPTANCE_MATRIX {
+            for snapshot in [case.at_cut, case.after_recovery] {
+                if snapshot.head_signer == ExpectedHeadSigner::TargetNode {
+                    assert_eq!(
+                        snapshot.append_authority,
+                        AppendAuthorityLane::ExactSuccessorGrant,
+                        "{}",
+                        case.case_id
+                    );
+                }
+                if snapshot.append_authority == AppendAuthorityLane::SourcePlacement {
+                    assert_eq!(
+                        snapshot.head_signer,
+                        ExpectedHeadSigner::SourceNode,
+                        "{}",
+                        case.case_id
+                    );
+                }
+                if snapshot.successor_placement == SuccessorPlacementState::PreparedOnly {
+                    assert_eq!(
+                        snapshot.append_authority,
+                        AppendAuthorityLane::SourcePlacement,
+                        "preparation must not grant append authority in {}",
+                        case.case_id
+                    );
+                }
+                if snapshot.target_phase == Some(WorkerHandoffPhase::SourceCommitted)
+                    && snapshot.head_signer == ExpectedHeadSigner::SourceNode
+                {
+                    observed_unadopted_source_commit = true;
+                }
+            }
+        }
+        assert!(
+            observed_unadopted_source_commit,
+            "the oracle must prove target progress can testify to a source cut without becoming head authority"
+        );
+    }
+
+    #[test]
+    fn qualification_matrix_jobs_and_terminal_resources_are_exact() {
+        use test_support::{
+            CredentialDisposition, DurableJobExpectation, DurableJobPhase, DurableJobResult,
+            DurableJobState, HANDOFF_ACCEPTANCE_MATRIX, StagingRootDisposition,
+            WorkspaceDisposition,
+        };
+
+        fn validate_job(case_id: &str, job: DurableJobExpectation) {
+            if job.state == DurableJobState::Absent {
+                assert_eq!(job.phase, DurableJobPhase::Absent, "{case_id}");
+                assert_eq!(job.result, DurableJobResult::Absent, "{case_id}");
+                assert!(!job.active_attempt, "{case_id}");
+            }
+            if matches!(
+                job.state,
+                DurableJobState::Completed | DurableJobState::Cancelled
+            ) {
+                assert!(!job.active_attempt, "terminal attempt in {case_id}");
+                assert!(
+                    matches!(
+                        job.result,
+                        DurableJobResult::AdoptionReceipt | DurableJobResult::AbortReceipt
+                    ),
+                    "terminal job has no receipt in {case_id}"
+                );
+            }
+        }
+
+        for case in HANDOFF_ACCEPTANCE_MATRIX {
+            for snapshot in [case.at_cut, case.after_recovery] {
+                validate_job(case.case_id, snapshot.source_job);
+                validate_job(case.case_id, snapshot.target_job);
+            }
+            let settled = case.after_recovery;
+            assert_ne!(settled.target_credential, CredentialDisposition::Reserved);
+            assert_ne!(
+                settled.workspace,
+                WorkspaceDisposition::EphemeralPreparation
+            );
+            assert_ne!(
+                settled.source_staging_roots,
+                StagingRootDisposition::ActiveJobOwned
+            );
+            assert_ne!(
+                settled.target_staging_roots,
+                StagingRootDisposition::ActiveJobOwned
+            );
+        }
+    }
+
+    #[test]
+    fn abort_response_is_bound_to_one_operation_and_chain() {
+        let operation = WorkerSessionHandoffJobOperation::new(
+            WorkerHandoffJobRole::Source,
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "fp:owner".into(),
+            "T-root".into(),
+            "site:origin".into(),
+            "site:source".into(),
+            "site:target".into(),
+            "T-source".into(),
+            "T-successor".into(),
+            "4".repeat(64),
+            "5".repeat(64),
+            "6".repeat(64),
+            "7".repeat(64),
+            "target".into(),
+            "/source/project".into(),
+            "/target/project".into(),
+            "8".repeat(64),
+            "credential:target".into(),
+            None,
+        )
+        .unwrap();
+        let request = WorkerPlacementAbortRequest {
+            operation,
+            abort_chain_head_hash: "2".repeat(64),
+        };
+        request.validate().unwrap();
+        let mut response = WorkerPlacementAbortResponse {
+            operation_id: request.operation.operation_id.clone(),
+            chain_root_id: request.operation.chain_root_id.clone(),
+            disposition: "reservation_released".into(),
+        };
+        response.validate_against(&request).unwrap();
+        response.disposition = "released_without_chain_evidence".into();
+        assert!(response.validate_against(&request).is_err());
+    }
+
+    fn preflight_request() -> WorkerPlacementPreflightRequest {
+        WorkerPlacementPreflightRequest {
+            preflight_id: "1".repeat(64),
+            owner_principal: format!("fp:{}", "e".repeat(64)),
+            chain_root_id: "T-root".into(),
+            origin_site_id: "site:a".into(),
+            source_site_id: "site:a".into(),
+            target_site_id: "site:b".into(),
+            source_placement_thread_id: "T-source".into(),
+            successor_placement_thread_id: "T-target".into(),
+            source_chain_head_hash: "2".repeat(64),
+            source_last_event_hash: "3".repeat(64),
+            source_launch_capsule_hash: "4".repeat(64),
+            target_project_path: "/target/project".into(),
+            project_route_digest: "5".repeat(64),
+            target_credential_profile_id: "profile-target".into(),
+            upstream_session_id: "upstream-session".into(),
+            credential_subject_contract_digest: "6".repeat(64),
+            credential_subject_digest: "7".repeat(64),
+            follow_delivery_reservation_attestation_hash: None,
+        }
+    }
+
+    fn preflight_evidence(
+        request: &WorkerPlacementPreflightRequest,
+    ) -> WorkerPlacementPreflightEvidence {
+        WorkerPlacementPreflightEvidence::new(
+            request,
+            "8".repeat(64),
+            BTreeMap::from([("worker".into(), "9".repeat(64))]),
+            BTreeMap::from([("worker".into(), "a".repeat(64))]),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            3,
+            crate::operator_authority::AdmittedOperatorAuthority {
+                owner_principal: request.owner_principal.clone(),
+                origin_site_id: request.origin_site_id.clone(),
+                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                grant_digest: "e".repeat(64),
+                scopes: vec!["*".to_owned()],
+            },
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn preflight_receipt_is_target_key_and_request_bound() {
+        let request = preflight_request();
+        request.validate().unwrap();
+        let mut predecessor = serde_json::to_value(&request).unwrap();
+        predecessor
+            .as_object_mut()
+            .unwrap()
+            .insert("source_launch_metadata".into(), serde_json::json!({}));
+        assert!(serde_json::from_value::<WorkerPlacementPreflightRequest>(predecessor).is_err());
+        let evidence = preflight_evidence(&request);
+        let mut missing_owner_anchor = serde_json::to_value(&evidence).unwrap();
+        missing_owner_anchor
+            .as_object_mut()
+            .unwrap()
+            .remove("target_chain_owner_anchor_hash");
+        let error =
+            serde_json::from_value::<WorkerPlacementPreflightEvidence>(missing_owner_anchor)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("target_chain_owner_anchor_hash"),
+            "unexpected error: {error}"
+        );
+        let target = PreflightTestSigner::new();
+        let attestation = evidence.sign_attestation(&target).unwrap();
+        let mut response = WorkerPlacementPreflightResponse {
+            preflight_id: request.preflight_id.clone(),
+            preflight_attestation_hash: ryeos_state::objects::canonical_value_digest(
+                &attestation.to_value(),
+            )
+            .unwrap(),
+            preflight_attestation: attestation,
+            evidence,
+        };
+        response
+            .validate_against(&request, &target.verifying_key())
+            .unwrap();
+
+        let mut wrong_owner = request.clone();
+        wrong_owner.owner_principal = "fp:other-owner".into();
+        assert!(
+            response
+                .validate_against(&wrong_owner, &target.verifying_key())
+                .is_err()
+        );
+
+        response.evidence.target_credential_generation += 1;
+        assert!(
+            response
+                .validate_against(&request, &target.verifying_key())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preflight_job_retains_only_non_authoritative_coordinates() {
+        let request = preflight_request();
+        let operation = WorkerPlacementPreflightJobOperation::from_request(
+            WorkerHandoffJobRole::Target,
+            "source-remote".into(),
+            &request,
+        )
+        .unwrap();
+        let decoded =
+            WorkerPlacementPreflightJobOperation::from_value(operation.to_value().unwrap())
+                .unwrap();
+        assert_eq!(decoded, operation);
+        assert_eq!(operation.owner_principal, request.owner_principal);
+        assert!(!operation.to_value().unwrap().to_string().contains("token"));
+    }
+
+    fn pinned_authority(
+        site: &str,
+        path: &str,
+        base: &str,
+        current: &str,
+    ) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity: format!("{site}:{path}"),
+            display_path: Some(PathBuf::from(path)),
+            base_snapshot_hash: base.to_owned(),
+            snapshot_hash: current.to_owned(),
+            realization: PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key: "a".repeat(64),
+                    project_hash: "b".repeat(64),
+                    expected_hash: base.to_owned(),
+                },
+            },
+            environment: EnvironmentAuthority::None,
+            capability_ceiling: vec!["project.read".into(), "project.write".into()],
+            child_policy: ChildProjectAuthorityPolicy::Inherit,
+        }
+    }
+
+    fn source_resume() -> ResumeContext {
+        let base = "1".repeat(64);
+        let path = PathBuf::from("/source/project");
+        ResumeContext {
+            kind: "worker_execution".into(),
+            item_ref: "worker_execution:test/session".into(),
+            ref_bindings: BTreeMap::new(),
+            launch_mode: "detached".into(),
+            parameters: serde_json::json!({"credential_profile_id":"source-profile"}),
+            project_context: ProjectContext::SnapshotHash { hash: base.clone() },
+            project_authority: pinned_authority("site:a", "/source/project", &base, &base),
+            lifecycle_authority: ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity: Some(
+                StableProjectIdentity::from_path(&path, "site:a").unwrap(),
+            ),
+            local_overlay_root: None,
+            original_snapshot_hash: Some(base.clone()),
+            original_pushed_head_ref: Some(OriginalPushedHeadRef {
+                snapshot_hash: base,
+                original_project_path: path,
+            }),
+            state_root: None,
+            current_site_id: "site:a".into(),
+            origin_site_id: "site:a".into(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "owner-a".into(),
+                scopes: vec!["execute".into()],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: vec!["project.read".into(), "project.write".into()],
+            parent_delegation_caps: None,
+            executor_ref: Some("native:worker-execution".into()),
+            runtime_ref: Some("runtime:worker-execution-runtime".into()),
+        }
+    }
+
+    fn remote_rebind() -> RemoteResumeContextRebind {
+        let base = "1".repeat(64);
+        let candidate = "2".repeat(64);
+        let path = PathBuf::from("/target/project");
+        RemoteResumeContextRebind {
+            source_site_id: "site:a".into(),
+            target_site_id: "site:b".into(),
+            target_project_context: ProjectContext::LocalPath { path: path.clone() },
+            target_project_authority: pinned_authority(
+                "site:b",
+                "/target/project",
+                &base,
+                &candidate,
+            ),
+            target_stable_project_identity: Some(
+                StableProjectIdentity::from_path(&path, "site:b").unwrap(),
+            ),
+            target_local_overlay_root: None,
+            target_original_snapshot_hash: Some(candidate.clone()),
+            target_original_pushed_head_ref: Some(OriginalPushedHeadRef {
+                snapshot_hash: candidate,
+                original_project_path: path,
+            }),
+            target_state_root: None,
+            source_credential_profile_id: "source-profile".into(),
+            credential_reservation: CredentialGenerationReservation {
+                profile_id: "target-profile".into(),
+                owner_principal: "owner-a".into(),
+                generation: 7,
+                reservation_id: "handoff-reservation".into(),
+                upstream_session_id: "upstream-session".into(),
+                subject_contract_digest: "3".repeat(64),
+                subject_digest: "4".repeat(64),
+            },
+            target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
+                owner_principal: format!("fp:{}", "e".repeat(64)),
+                origin_site_id: "site:a".into(),
+                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                grant_digest: "5".repeat(64),
+                scopes: vec!["*".into()],
+            },
+        }
+    }
+
+    #[test]
+    fn remote_resume_rebind_requires_exact_target_project_authority() {
+        let source = source_resume();
+        let rebind = remote_rebind();
+        rebind.validate_target_project_authority().unwrap();
+
+        let mut snapshot_only = remote_rebind();
+        snapshot_only.target_project_context = ProjectContext::SnapshotHash {
+            hash: "2".repeat(64),
+        };
+        assert!(
+            snapshot_only
+                .validate_target_project_authority()
+                .unwrap_err()
+                .to_string()
+                .contains("exact admitted target workspace path")
+        );
+
+        let project_rebind = ProjectAuthorityRebind {
+            route_digest: "5".repeat(64),
+            source_stable_project_identity: "site:a:/source/project".into(),
+            target_stable_project_identity: "site:b:/target/project".into(),
+            source_candidate_snapshot_hash: "2".repeat(64),
+            source_base_snapshot_hash: "1".repeat(64),
+            target_expected_head_hash: Some("1".repeat(64)),
+            target_authority: rebind.target_project_authority.clone(),
+        };
+        project_rebind
+            .validate_capsule_transition(&source.project_authority)
+            .unwrap();
+        let mut drifted_project = project_rebind;
+        if let ExecutionProjectAuthority::PinnedGeneration {
+            capability_ceiling, ..
+        } = &mut drifted_project.target_authority
+        {
+            capability_ceiling.push("node.admin".into());
+        }
+        assert!(
+            drifted_project
+                .validate_capsule_transition(&source.project_authority)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn qualification_measurement_report_is_bounded_and_canonical() {
+        use crate::worker_handoff::test_support::{
+            HandoffMeasurementRecord, HandoffMeasurementReport, HandoffObservedMeasurements,
+        };
+
+        let report = HandoffMeasurementReport {
+            schema: "ryeos.worker_handoff_qualification_report.v1".into(),
+            records: vec![HandoffMeasurementRecord {
+                schema: "ryeos.worker_handoff_qualification_record.v1".into(),
+                case_id: "portable_success".into(),
+                workload_profile_id: "portable_framed_worker_v1".into(),
+                source_site_id: "site:a".into(),
+                target_site_id: "site:b".into(),
+                object_schema_versions: BTreeMap::from([("worker_state_manifest".into(), 1)]),
+                failure_cut: None,
+                cache_state: "cold".into(),
+                object_count: 3,
+                blob_count: 2,
+                link_count: 4,
+                total_bytes: 4096,
+                largest_entry_bytes: 2048,
+                target_present_entries: 0,
+                target_present_bytes: 0,
+                observed: HandoffObservedMeasurements {
+                    closure_calculation_ms: Some(1),
+                    staging_and_transfer_ms: Some(2),
+                    closure_verification_ms: Some(3),
+                    source_publication_ms: Some(4),
+                    target_adoption_ms: Some(5),
+                    checkpoint_load_ms: Some(1),
+                    event_replay_ms: Some(6),
+                    project_materialization_ms: Some(7),
+                    worker_attach_recovery_ms: Some(8),
+                    total_handoff_recovery_ms: Some(15),
+                },
+            }],
+        };
+        let first = report.canonical_bytes().unwrap();
+        assert_eq!(first, report.canonical_bytes().unwrap());
+        assert!(first.len() <= HandoffMeasurementReport::MAX_ENCODED_BYTES);
+
+        let mut unbounded = report;
+        unbounded.records =
+            vec![unbounded.records[0].clone(); HandoffMeasurementReport::MAX_RECORDS + 1];
+        assert!(unbounded.validate().is_err());
+    }
+}

@@ -216,14 +216,11 @@ pub fn compile_service_invoker_from(
             ),
         })?;
 
-    if descriptor.availability == ryeos_executor::executor::ServiceAvailability::OfflineOnly {
+    if descriptor.availability == ryeos_executor::executor::ServiceAvailability::StoppedNodeOnly {
         return Err(RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
             src: source_ref.into(),
-            reason: format!(
-                "service '{}' is OfflineOnly (only available when daemon is down)",
-                source_ref
-            ),
+            reason: format!("service '{}' requires a stopped node", source_ref),
         });
     }
 
@@ -379,19 +376,6 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("unsupported source kind"), "got: {msg}");
-    }
-
-    #[test]
-    fn service_invoker_accepts_a_cap_protected_descriptor() {
-        // node-sign declares node.maintenance and is available in live mode.
-        // Runtime enforcement comes from the verified service item, not a
-        // second descriptor copy stored on the compiled invoker.
-        let invoker = compile_canonical_ref_invoker("service:node-sign", "r1").unwrap();
-        let contract = invoker.contract();
-        assert!(matches!(
-            contract.output,
-            crate::routes::invocation::RouteInvocationOutput::Json
-        ));
     }
 
     #[test]

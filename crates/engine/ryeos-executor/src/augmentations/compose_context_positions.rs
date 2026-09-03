@@ -54,6 +54,7 @@ pub async fn run(
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     plan_ctx: &ryeos_engine::contracts::PlanContext,
     principal_fingerprint: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
     state: &ryeos_app::state::AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_request_snapshot: Option<&Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
@@ -159,15 +160,10 @@ pub async fn run(
     );
 
     let bundle_roots: Vec<std::path::PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|parent| parent.to_path_buf())
-                .unwrap_or_else(|| r.ai_root.clone())
-        })
+        .authoritative_bundle_roots()
+        .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?
+        .into_iter()
+        .map(std::path::Path::to_path_buf)
         .collect();
     let cache_root = state
         .config
@@ -554,7 +550,9 @@ pub async fn run(
             )
             .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             runtime_verified,
-            &state.node_history_policy,
+            state
+                .node_history_policy()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             child_thread_kind.to_string(),
             BTreeMap::new(),
             None,
@@ -597,6 +595,7 @@ pub async fn run(
             None,
             Some(runtime_item_ref_string.clone()),
             verified_runtime.raw_content_digest.clone(),
+            None,
             serde_json::Value::Null,
             0,
         );
@@ -621,14 +620,33 @@ pub async fn run(
                     injection.source
                         == ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
                 });
-        let thread_auth = needs_thread_auth.then(|| {
-            state.thread_auth.mint(
+        let thread_auth = if needs_thread_auth {
+            let callback_scopes = Vec::new();
+            let callback_handler_context = handler_context
+                .map(|context| {
+                    context.narrowed_for_execution(
+                        callback_scopes.clone(),
+                        &plan_ctx.current_site_id,
+                        &plan_ctx.origin_site_id,
+                    )
+                })
+                .transpose()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+            Some(
+                state.thread_auth.mint(
                 &child_thread_id,
                 principal_fingerprint.to_string(),
-                vec!["execute".to_string()],
+                callback_scopes,
+                callback_handler_context,
+                &plan_ctx.current_site_id,
+                &plan_ctx.origin_site_id,
                 ttl,
             )
-        });
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         if let Some(thread_auth) = &thread_auth {
             lifecycle_owner.track_thread_auth_token(thread_auth.token.clone());
         }
@@ -652,7 +670,6 @@ pub async fn run(
                 socket_path: state.config.uds_path.clone(),
                 token: cap.token.clone(),
             },
-            callback_project_path: callback_project_path.clone(),
             project_root: project_path.to_path_buf(),
             runtime_config: runtime_config_snapshot.values.clone(),
             payload,
@@ -734,7 +751,11 @@ pub async fn run(
             } else {
                 None
             },
-            callback_project_path: Some(callback_project_path.clone()),
+            project_state_scope: cap
+                .provenance
+                .project_authority()
+                .project_state_scope_id()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             thread_auth_token: thread_auth.as_ref().map(|auth| auth.token.clone()),
             params: envelope.payload.clone(),
             resolution_output: None,
@@ -800,15 +821,21 @@ pub async fn run(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path,
                     project_authority: provenance.isolation_project_authority(),
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: live_access.as_ref(),
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(state.config.uds_path.as_path()),
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
+                    external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },
@@ -2367,10 +2394,7 @@ mod tests {
             app_root: temp.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: temp.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: temp.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
         let identity =
             ryeos_app::identity::NodeIdentity::create(&key_path).expect("test node identity");
@@ -2427,16 +2451,18 @@ mod tests {
             bundles: Vec::new(),
             routes: Vec::new(),
             commands: Vec::new(),
-            hosted_node_policies: Vec::new(),
-            command_registration_policy: Default::default(),
         };
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
-            isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            isolation: Arc::new(
+                ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             state_store,
             engine,
-            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+            resolution_cache: std::sync::Arc::new(
+                ryeos_app::resolution_cache::ResolutionCache::new(128),
+            ),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(Default::default()),
             identity: Arc::new(identity),
             threads,
@@ -2444,9 +2470,7 @@ mod tests {
             events,
             event_streams,
             commands,
-            callback_tokens: Arc::new(
-                ryeos_app::callback_token::CallbackCapabilityStore::new(),
-            ),
+            callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
             extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
             write_barrier: Arc::new(write_barrier),
@@ -2459,9 +2483,10 @@ mod tests {
             services: Arc::new(ryeos_app::service_registry::ServiceRegistry::new()),
             service_descriptors: &[],
             node_config: Arc::new(node_config),
-            node_history_policy: Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(
-                ),
+            node_policy: Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: Arc::new(
@@ -2477,6 +2502,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
         (temp, state)
     }
@@ -2508,7 +2536,7 @@ mod tests {
                 kind_schema_content_hash: "c".repeat(64),
                 resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                     node_policy:
-                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }),
         }

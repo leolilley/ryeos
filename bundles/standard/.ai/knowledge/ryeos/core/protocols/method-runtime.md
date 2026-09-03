@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-15T07:49:19Z:59f1606ac651ee02cb43a4c0c94081b6cafe22eb2e65b9bbe9f20508c2a262b4:r7CngsnSfoHy4Pw0XJpKtbisuzS6oPvnUAhalv3qEnop+Yde8gwP2GX1AH8XukqCssdn1gOm1XgzDSHfm6R0Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:50Z:d08e140d48698805e8b05d7fb07c74202fdbcb6d6253263d1267fafd2fb10e07:+61hfTDU+vYXWZvWeiEdlXf8aY3IHIFiOYnctSxEP6Jns5CSTpQVOa9WwdjRmbPj4XwallKMWJ3ucCxlRjQiDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
-tags: [protocol, method-runtime-v1, callbacks, methods]
-version: "1.0.0"
-description: Method runtime v1 protocol reference.
+tags: [protocol, method-runtime, callbacks, methods]
+version: "1.1.0"
+description: Method runtime protocol reference.
 ---
 
 # Protocol: method_runtime
@@ -12,10 +12,12 @@ Invariant: `method_runtime` is the signed subprocess wire selected by a
 method-bearing kind's `execution.method_dispatch.protocol`; the runtime
 registry selects only the signed implementation binary.
 
-The daemon sends a `MethodCallEnvelope` with `schema_version: 1`, containing
+The daemon sends a `MethodCallEnvelope` with `schema_version: 2`, containing
 the resolved kind and method, verified method payload, bound arguments, runtime
-configuration, project/state roots, child thread identity, and callback
-capability. The runtime returns one terminal `MethodCallResult` and must echo
+configuration, the selected process workspace, child thread identity, and
+callback capability. Durable project/state authority stays in the daemon and
+is recovered from the callback token. The runtime returns one terminal
+`MethodCallResult` and must echo
 the dispatched kind and method.
 
 The descriptor-aware producer and the runtime reject any other envelope schema

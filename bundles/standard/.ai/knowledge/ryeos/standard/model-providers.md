@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-08-03T05:24:52Z:41012d699530ec721387d2f4c2c83a77d4f8e55700ade4e62c6cfb37ee451841:85bkLUKSgPTv1WMGqprOyuDbFmw0w19W61W7Pxybrs6mkzMAsl4ouWKHP3JYPpG1BueULzxcEl3x/PBnvuJKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T13:27:39Z:c6368f5e75dc93899554c850988a34d35391d997c5823f41e02078591961bc8b:ok6Mcv2p+FeMypeVyuXNffp/K7DDeklHOAwQ6WFGva/Dv2e9MzFtzNjrt/xbKy1SeYwNojUjJ+0J2KYBN2APCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
 tags: [models, providers, routing, runtime, security]
-version: "1.3.0"
+version: "1.4.0"
 description: >
   Directive-owned model/provider launch preparation, routing tiers,
   provider configs, frozen runtime data, and adding new providers.
@@ -37,11 +37,11 @@ explicitly in the `model` slot.
 
 ## Resolution order
 
-Provider selection is owned by the pure directive launch preparer and shared
-directive core:
+Provider selection is owned by the pure directive launch preparer and the
+directive kind definition:
 
 - `ryeos-handler-bins/src/directive_launch.rs`
-- `ryeos-directive-core/src/lib.rs`
+- `crates/kinds/directive-definition/src/lib.rs`
 
 1. The preparer reads model settings from the resolved `model` binding. If it
    names `model.name`, it must also name
@@ -77,6 +77,28 @@ runtime HTTP calls.
 Provider configs control outbound URLs and auth env vars, so project-root
 provider contributions are excluded by the signed launch contract. The
 `model_providers` catalog accepts trusted bundle entries only.
+
+An admitted-local-worker provider contributes its exact signed worker as an
+opaque prepared execution dependency. Provider selection remains wholly in the
+directive launch preparer: the executor does not branch on provider, model,
+worker kind, or profile name. A workload that needs multiple exact local
+profiles authors multiple provider configs and concrete signed workers. Shared
+implementation source and realization pins may remain equal, while any signed
+worker contributor difference moves the dependency resolution, effective
+program, persistent-session pool identity, capsule, restart authority, replay
+coordinate, and comparison evidence.
+
+`ryeos validate` invokes the same bounded signed launch preparer and exact
+cached admission path used by execution. Its read-only projection reports the
+selected runtime, path-free ref-binding records, opaque execution dependencies
+keyed by their preparer-owned names, canonical refs and as-launched resolution
+digests, source readiness, exact current external-content consumer/publisher
+bindings, and node session-policy eligibility. Missing or released content is
+reported as not ready; corrupt authority fails closed. Validation never
+serializes opaque runtime data or secrets and never starts the selected
+workload, creates a session or lease, reserves capacity, publishes CAS state,
+or creates an execution thread. Live execution repeats authoritative admission
+so a later binding release or policy change cannot borrow validation authority.
 
 ## Provider-neutral reasoning policy
 

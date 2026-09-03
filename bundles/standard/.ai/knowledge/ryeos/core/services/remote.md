@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:13:19Z:4fc0c03a5bdd33cdc58625e3e574089bf8050c0ab3a66e2db60351f662fd188b:2CkACPwz3UNnNIeFAVUL4Qe48FcFBXrOsyualU7vPiy4DmaHLEz4fHKgHn3UG2CF0BsosFEEgmabCxtC6GRhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:1bb8806ec72dd18fa964f2b4784895f3fa0b45ee9e4bd7860c05a4f2674d3d01:HBn9pWFiARVkqtMHLWG3d0gRx4KXzF5hMPGurchFzFur7HVNbhbfxlHpYOa55ojV47psi2VjXpyMxjANAH+qDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -28,6 +28,7 @@ The authoritative matrix is in
 | `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote/doctor` |
 | `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
+| `remote/reconcile-project-head` | `remote.reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
@@ -40,8 +41,12 @@ The authoritative matrix is in
 
 ## Operational invariants
 
-- Outbound remote requests are signed with the local **node key**, not
-  the operator user key.
+- Outbound remote requests normally use the local **node key**. The explicit
+  configured-operator push/run mode uses the exact configured operator only
+  after local operator authentication, and the target must bind it to the
+  forwarding site with an exact-scope `remote_operator` grant. The source node
+  co-signs each exact request, and its independently admitted `remote_node`
+  grant must carry `ryeos.attest.request.forwarded-operator`.
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
@@ -52,15 +57,22 @@ The authoritative matrix is in
 - Initial remote authorization can use `admission/claim` when the target
   node has a one-time local admission token. Claiming the token creates a
   normal authorized-key grant on the target node; execution traffic still
-  uses signed requests checked against target-node grants.
+  uses signed requests checked against target-node grants. Admission and
+  online `authorize-key` are create-only and cannot replace/reclassify an
+  existing fingerprint.
 - `remote doctor` is an operator diagnostic: it combines remote discovery,
   pinned-identity checks, signed authorization probing, project binding
   checks, and next-step commands.
 - `remote push` and `remote execute` use the target node's ingest-ignore
   rules, not local ignore rules, when building a pushed manifest.
+- `remote reconcile-project-head` is the explicit full-project DAG convergence
+  operation. It requires exact expected local and remote configured-operator
+  HEADs plus an explicit `local` or `remote` content winner. It creates one
+  two-parent generation, publishes remote-first, and advances the local HEAD
+  through a durable recovery job. It never silently rebases a handoff.
 - `remote execute` is synchronous in v1: push, execute, pull, apply.
 - `remote bundle-install` is live daemon-side installation; local
-  `bundle install/remove` remain offline-only.
+  `bundle install/remove` require stopped-node authority.
 - `remote vault-*` proxies to the target node vault. In v1 the vault is
   a node-level capability-gated store, not per-principal isolated.
 

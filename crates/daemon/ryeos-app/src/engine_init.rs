@@ -16,6 +16,7 @@ use ryeos_engine::boot_validation::{
     validate_boot, validate_protocol_builder, validate_runtime_launch_handlers,
 };
 use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::effective_validators::EffectiveValidatorRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
@@ -23,7 +24,6 @@ use ryeos_engine::launch_preparers::{LaunchPreparerRegistry, LaunchPreparerRunne
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::resolution::TrustClass;
-use ryeos_engine::runtime::HostEnvBindings;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
@@ -271,30 +271,46 @@ fn load_registered_generation_under_lock(
             validate_installed_bundle_plan(app_root, &generation, &trust_store)
         })
         .context("admit installed bundle graph for isolation composition")?;
+    let policy_table = crate::node_policy::NodePolicyTable::new();
+    let policy_generation = crate::node_policy::generation::load_policy_generation(
+        app_root,
+        &trust_store,
+        &policy_table,
+    )?;
+    let policy_snapshot = crate::node_policy::compile_generation(
+        app_root,
+        &policy_table,
+        &policy_generation,
+        &crate::node_config::loader::node_identity_fingerprint(app_root)?,
+    )?;
+    let policy = policy_snapshot
+        .require::<ryeos_engine::isolation::IsolationPolicy>()?
+        .clone();
     let backend = generation.checked(&trust_store, || {
-        resolve_isolation_backend(app_root, &generation, &trust_store)
+        resolve_isolation_backend(&generation, &trust_store, &policy)
     })?;
-    let runtime = ryeos_engine::isolation::IsolationRuntime::load_with_backend(app_root, backend)
-        .map(Arc::new)
-        .map_err(anyhow::Error::from)?;
+    let runtime = ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
+        app_root,
+        policy,
+        crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+        format!("sha256:{}", policy_generation.digest()),
+        backend,
+    )
+    .map(Arc::new)
+    .map_err(anyhow::Error::from)?;
     generation.ensure_current(&trust_store)?;
     Ok((runtime, trust_store, generation))
 }
 
 pub fn resolve_isolation_backend(
-    app_root: &std::path::Path,
     generation: &VerifiedBundleGeneration,
     node_trust_store: &TrustStore,
+    policy: &ryeos_engine::isolation::IsolationPolicy,
 ) -> Result<Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>> {
-    let policy_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
-    let policy = ryeos_engine::isolation::IsolationRuntime::load_policy(app_root)
-        .with_context(|| format!("load node isolation policy {}", policy_path.display()))?;
     if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
         return Ok(None);
     }
-    let selection = policy.backend.context(
+    let selection = policy.backend.clone().context(
         "enforced isolation policy requires an explicit signed bundle backend selection",
     )?;
     let record = generation
@@ -319,29 +335,13 @@ pub fn load_prospective_isolation(
     app_root: &std::path::Path,
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+    policy_generation_digest: &str,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
-    let policy_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
-    match std::fs::symlink_metadata(&policy_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Arc::new(
-                ryeos_engine::isolation::IsolationRuntime::default(),
-            ));
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!("inspect node isolation policy {}", policy_path.display())
-            });
-        }
-    }
-    let policy = ryeos_engine::isolation::IsolationRuntime::load_policy(app_root)
-        .with_context(|| format!("load node isolation policy {}", policy_path.display()))?;
     let backend = if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
         None
     } else {
-        let selection = policy.backend.context(
+        let selection = policy.backend.clone().context(
             "enforced isolation policy requires an explicit signed bundle backend selection",
         )?;
         let mut selected = None;
@@ -374,9 +374,15 @@ pub fn load_prospective_isolation(
             "prospective ",
         )?)
     };
-    ryeos_engine::isolation::IsolationRuntime::load_with_backend(app_root, backend)
-        .map(Arc::new)
-        .map_err(anyhow::Error::from)
+    ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
+        app_root,
+        policy.clone(),
+        crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+        format!("sha256:{policy_generation_digest}"),
+        backend,
+    )
+    .map(Arc::new)
+    .map_err(anyhow::Error::from)
 }
 
 fn resolve_verified_isolation_backend(
@@ -402,8 +408,9 @@ fn resolve_verified_isolation_backend(
     if !declaration.targets.contains(&target) {
         anyhow::bail!("{diagnostic_prefix}isolation implementation omits the host target");
     }
+    let adapter_ref = format!("bin:{}", declaration.adapter);
     let adapter = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
-        &declaration.adapter,
+        &adapter_ref,
         root,
         node_trust_store,
     )
@@ -417,8 +424,9 @@ fn resolve_verified_isolation_backend(
     let mut artifact_handles = std::collections::BTreeMap::new();
     let mut artifact_digests = std::collections::BTreeMap::new();
     for (role, executable) in &declaration.artifacts {
+        let executable_ref = format!("bin:{executable}");
         let artifact = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
-            executable,
+            &executable_ref,
             root,
             node_trust_store,
         )
@@ -511,7 +519,7 @@ fn inspect_isolation_backend(
             })
             .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
         let request = AdapterInspectionRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             target,
             backend_id: declaration.id.clone(),
             artifacts,
@@ -541,6 +549,7 @@ fn inspect_isolation_backend(
                 max_open_files: Some(64),
                 max_stdout_bytes: Some(ryeos_isolation_protocol::MAX_RESPONSE_BYTES as u64),
                 max_stderr_bytes: Some(64 * 1024),
+                ..lillux::SubprocessLimits::default()
             }),
             inherited_fds: std::iter::once(adapter.clone())
                 .chain(artifact_handles.values().cloned())
@@ -592,6 +601,7 @@ pub fn build_engine(
     generation: &VerifiedBundleGeneration,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     node_trust_store: &TrustStore,
+    execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<(Engine, Arc<ryeos_engine::isolation::IsolationRuntime>)> {
     generation.checked(node_trust_store, || {
         build_engine_for_roots_with_isolation(
@@ -602,6 +612,7 @@ pub fn build_engine(
             None, // no overlay — daemon's persistent trust store wins
             isolation,
             Some(node_trust_store),
+            execution_policy,
         )
     })
 }
@@ -642,6 +653,7 @@ pub fn build_engine_for_roots(
     project_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<Engine> {
     build_engine_for_roots_with_isolation(
         config,
@@ -651,6 +663,7 @@ pub fn build_engine_for_roots(
         trust_overlay,
         isolation,
         None,
+        execution_policy,
     )
     .map(|(engine, _isolation)| engine)
 }
@@ -661,6 +674,7 @@ pub fn build_registered_engine_for_roots(
     project_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<Engine> {
     isolation
         .ensure_registered_generation_current()
@@ -690,6 +704,7 @@ pub fn build_registered_engine_for_roots(
         trust_overlay,
         isolation,
         None,
+        execution_policy,
     )?;
     guard
         .ensure_registered_generation_current()
@@ -724,6 +739,7 @@ fn build_engine_for_roots_with_isolation(
     trust_overlay: Option<&TrustStore>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     pinned_node_trust_store: Option<&TrustStore>,
+    execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<(Engine, Arc<ryeos_engine::isolation::IsolationRuntime>)> {
     // 1. Validate bundle roots exist and are readable
     if bundle_roots.is_empty() {
@@ -801,6 +817,7 @@ fn build_engine_for_roots_with_isolation(
         kinds,
         parser_dispatcher,
         composers,
+        effective_validators,
         protocol_registry,
         runtimes,
         launch_preparers,
@@ -809,17 +826,16 @@ fn build_engine_for_roots_with_isolation(
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_registered_bundle_roots(registered_bundle_roots.unwrap_or_default())
-        .with_node_config_ai_root(config.app_root.join(ryeos_engine::AI_DIR))
+        .with_node_config_root(config.app_root.clone())
         .with_isolation_generation(Arc::clone(&isolation))
         .with_trust_store(trust_store)
         .with_node_trust_store(node_trust_store)
         .with_composers(composers)
+        .with_effective_validators(effective_validators)
         .with_protocols(protocol_registry)
         .with_runtimes(runtimes)
         .with_launch_preparers(launch_preparers)
-        .with_host_env(load_host_env_passthrough_allowlist(
-            &config.tool_env_passthrough,
-        )?);
+        .with_host_env(execution_policy.host_env_bindings()?);
 
     Ok((engine, isolation))
 }
@@ -834,8 +850,16 @@ pub fn admit_node_bundle_roots(
     app_root: &std::path::Path,
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+    policy_generation_digest: &str,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
-    let prospective = load_prospective_isolation(app_root, bundle_roots, node_trust_store)?;
+    let prospective = load_prospective_isolation(
+        app_root,
+        bundle_roots,
+        node_trust_store,
+        policy,
+        policy_generation_digest,
+    )?;
     build_node_bundle_admission(bundle_roots, node_trust_store, prospective.clone())?;
     Ok(prospective)
 }
@@ -896,6 +920,7 @@ struct NodeBundleAdmission {
     kinds: KindRegistry,
     parser_dispatcher: ParserDispatcher,
     composers: ComposerRegistry,
+    effective_validators: EffectiveValidatorRegistry,
     protocol_registry: ProtocolRegistry,
     runtimes: RuntimeRegistry,
     launch_preparers: LaunchPreparerRegistry,
@@ -963,6 +988,13 @@ fn build_node_bundle_admission(
         .context("failed to load protocol descriptors from bundle roots")?;
     let composers = ComposerRegistry::from_kinds(&kinds, &handler_registry)
         .context("failed to derive composer registry from kind schemas")?;
+    let effective_validators = EffectiveValidatorRegistry::from_kinds(
+        &kinds,
+        &handler_registry,
+        isolation.clone(),
+        bundle_roots,
+    )
+    .context("failed to bind effective validators from kind schemas")?;
 
     validate_terminator_refs(&kinds, &protocol_registry)
         .context("terminator→protocol ref validation failed")?;
@@ -1012,6 +1044,7 @@ fn build_node_bundle_admission(
         kinds,
         parser_dispatcher: ParserDispatcher::new(parser_tools, handler_registry.clone()),
         composers,
+        effective_validators,
         protocol_registry,
         runtimes,
         launch_preparers,
@@ -1038,36 +1071,22 @@ fn bind_launch_preparers(
         .context("failed to bind runtime launch preparers")
 }
 
-/// Build `HostEnvBindings` from the resolved daemon config's
-/// `tool_env_passthrough` list. The `Config::load` step already
-/// handled the `RYEOS_TOOL_ENV_PASSTHROUGH` env-var override, so
-/// this function just receives the final merged list.
-fn load_host_env_passthrough_allowlist(names: &[String]) -> Result<HostEnvBindings> {
-    let bindings = HostEnvBindings::from_allowlist(names.iter().cloned())
-        .map_err(|e| anyhow::anyhow!("invalid tool_env_passthrough configuration: {e}"))?;
-    let allowed_names: Vec<&str> = bindings.allowed.iter().map(String::as_str).collect();
-    tracing::info!(
-        count = bindings.allowed.len(),
-        names = ?allowed_names,
-        "host env passthrough allowlist loaded"
-    );
-    Ok(bindings)
-}
-
-/// Walk every kind schema's terminator and verify that `Subprocess`
-/// terminators' `protocol_ref` values resolve in the protocol registry.
+/// Walk every kind schema's terminator and verify that every statically named
+/// or selector-allowlisted subprocess protocol resolves in the registry.
 fn validate_terminator_refs(kinds: &KindRegistry, protocols: &ProtocolRegistry) -> Result<()> {
     for kind_name in kinds.kinds() {
         if let Some(schema) = kinds.get(kind_name)
             && let Some(exec) = &schema.execution
-            && let Some(TerminatorDecl::Subprocess { protocol_ref }) = &exec.terminator
+            && let Some(TerminatorDecl::Subprocess { protocol }) = &exec.terminator
         {
-            protocols.require(protocol_ref).with_context(|| {
-                format!(
-                    "kind `{kind_name}` declares protocol `{protocol_ref}` \
-                     but no such protocol is registered in the protocol registry"
-                )
-            })?;
+            for protocol_ref in protocol.boot_required_refs() {
+                protocols.require(protocol_ref).with_context(|| {
+                    format!(
+                        "kind `{kind_name}` declares protocol `{protocol_ref}` \
+                         but no such protocol is registered in the protocol registry"
+                    )
+                })?;
+            }
         }
     }
     Ok(())
@@ -1078,14 +1097,10 @@ mod isolation_generation_tests {
     use super::*;
 
     #[test]
-    fn retained_generation_allows_nested_read_only_engine() {
+    fn retained_generation_operation_allows_nested_generation_read_lock() {
         let app_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("bundles"))
             .unwrap();
-        write_policy(
-            app_root.path(),
-            ryeos_engine::isolation::IsolationMode::Disabled,
-        );
         // Initialize the lock anchor the same way node setup does.
         drop(
             crate::bundle_transaction::BundleRegistryMutationLock::acquire(app_root.path())
@@ -1108,9 +1123,13 @@ mod isolation_generation_tests {
         let path = app_root.path().to_path_buf();
         let (tx, rx) = std::sync::mpsc::channel();
         let nested = std::thread::spawn(move || {
-            let result = load_locked_registered_isolation(&path)
-                .map(|_| ())
-                .map_err(|error| format!("{error:#}"));
+            // Exercise the generation-lock invariant directly. A complete
+            // nested engine requires a real signed node and bundle generation;
+            // an empty temporary root is not a valid current-schema fixture.
+            let result =
+                crate::bundle_transaction::BundleRegistryReadLock::acquire_for_composition(&path)
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:#}"));
             tx.send(result).unwrap();
         });
         let composition = rx.recv_timeout(std::time::Duration::from_secs(1));
@@ -1144,8 +1163,10 @@ mod isolation_generation_tests {
         assert!(error.to_string().contains("root identity changed"));
     }
 
-    fn write_policy(app_root: &std::path::Path, mode: ryeos_engine::isolation::IsolationMode) {
-        let mut policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
+    fn policy(
+        mode: ryeos_engine::isolation::IsolationMode,
+    ) -> ryeos_engine::isolation::IsolationPolicy {
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
         policy.mode = mode;
         if mode == ryeos_engine::isolation::IsolationMode::Enforce {
             policy.backend = Some(ryeos_isolation_protocol::IsolationBackendSelection {
@@ -1153,23 +1174,22 @@ mod isolation_generation_tests {
                 implementation: "example".to_string(),
             });
         }
-        let path = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_yaml::to_string(&policy).unwrap()).unwrap();
+        policy
     }
 
     #[test]
     fn disabled_prospective_generation_does_not_require_selected_bundle() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(
-            app_root.path(),
-            ryeos_engine::isolation::IsolationMode::Disabled,
-        );
+        let policy = policy(ryeos_engine::isolation::IsolationMode::Disabled);
 
-        let runtime = load_prospective_isolation(app_root.path(), &[], &TrustStore::empty())
-            .expect("disabled prospective generation");
+        let runtime = load_prospective_isolation(
+            app_root.path(),
+            &[],
+            &TrustStore::empty(),
+            &policy,
+            "test-policy-generation",
+        )
+        .expect("disabled prospective generation");
         assert!(!runtime.is_enforced());
         assert_eq!(
             runtime.inspection().backend.status,
@@ -1180,12 +1200,15 @@ mod isolation_generation_tests {
     #[test]
     fn enforced_prospective_generation_refuses_selected_bundle_removal() {
         let app_root = tempfile::tempdir().unwrap();
-        write_policy(
-            app_root.path(),
-            ryeos_engine::isolation::IsolationMode::Enforce,
-        );
+        let policy = policy(ryeos_engine::isolation::IsolationMode::Enforce);
 
-        let error = match load_prospective_isolation(app_root.path(), &[], &TrustStore::empty()) {
+        let error = match load_prospective_isolation(
+            app_root.path(),
+            &[],
+            &TrustStore::empty(),
+            &policy,
+            "test-policy-generation",
+        ) {
             Ok(_) => panic!("enforced prospective generation accepted a missing backend"),
             Err(error) => error.to_string(),
         };

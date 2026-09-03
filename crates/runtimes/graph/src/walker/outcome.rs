@@ -280,11 +280,18 @@ pub(super) struct ActionOkOutcome {
     pub(super) item_id: String,
     pub(super) result: Value,
     pub(super) assign: Option<Value>,
+    /// Graph-authored project observations rendered from the successful
+    /// action result and held behind the same expression commit fence.
+    pub(super) project_observations: Vec<Value>,
     pub(super) next: Option<String>,
     /// Deferred until every assignment and branch expression has
     /// succeeded, then emitted by the commit fence.
     pub(super) child_thread_id: Option<String>,
     pub(super) cache_hit: bool,
+    /// The durable effect record the daemon replayed this result from, when
+    /// it substituted a recorded result for execution.
+    pub(super) replayed_from: Option<String>,
+    pub(super) dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     /// Cache key reserved on a miss. The result is persisted only in commit,
     /// after result validation, assignment, and branch selection all succeed.
     pub(super) cache_write_key: Option<String>,
@@ -303,6 +310,7 @@ pub(super) struct ForeachDoneOutcome {
     pub(super) item_id: String,
     pub(super) cost: Option<RuntimeCost>,
     pub(super) observations: Vec<DispatchObservation>,
+    pub(super) elapsed_ms: u64,
 }
 
 pub(super) struct ForeachFailedOutcome {
@@ -324,9 +332,11 @@ pub(super) struct FollowFanoutSuspendOutcome {
 
 pub(super) struct FollowFanoutDoneOutcome {
     pub(super) results: Vec<Value>,
+    pub(super) child_thread_ids: Vec<String>,
     pub(super) statuses: Vec<FanoutItemStatus>,
     pub(super) errors: Vec<ErrorRecord>,
     pub(super) collect_key: Option<String>,
+    pub(super) collect_threads_key: Option<String>,
     pub(super) item_id: String,
     pub(super) next: Option<String>,
     pub(super) next_on_error: NextOnError,
@@ -457,6 +467,7 @@ pub(super) struct RetryScheduledOutcome {
     pub(super) delay_ms: u64,
     pub(super) elapsed_ms: u64,
     pub(super) cost: Option<RuntimeCost>,
+    pub(super) dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 pub(super) struct TerminalOutcome {
@@ -477,6 +488,12 @@ pub(super) struct GateTakenOutcome {
 }
 
 pub(super) enum StepOutcome {
+    /// The daemon may have accepted an action occurrence but its authoritative
+    /// result was not returned. The walker must exit without committing this
+    /// step so native restart re-drives the same operation ID.
+    RecoveryRequired {
+        error: String,
+    },
     ActionOk(Box<ActionOkOutcome>),
     LeafSoftError(LeafSoftErrorOutcome),
     DispatchHardError(DispatchHardErrorOutcome),
@@ -728,9 +745,11 @@ mod history_tests {
             node: "node".to_string(),
             step: 1,
             definition_ref: "graph:test/example".to_string(),
-            definition_hash: "sha256:definition".to_string(),
+            effective_definition_digest: "sha256:definition".to_string(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms: 1,
             error: None,
             cost: None,
@@ -753,9 +772,11 @@ mod history_tests {
             node: "node".to_string(),
             step: 1,
             definition_ref: "graph:test/example".to_string(),
-            definition_hash: "sha256:definition".to_string(),
+            effective_definition_digest: "sha256:definition".to_string(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms: 1,
             error: None,
             cost: Some(RuntimeCost {

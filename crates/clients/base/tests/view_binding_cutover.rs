@@ -110,6 +110,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
         "f5c876713b06bf61d23a77120c52ac0b8b97a1e617a71a8607d785dc7ef7c573",
     ),
     (
+        "view:ryeos/runs/comparison",
+        "92ead02db906229f1b0b904911a3f4f3d4cf7ff6d4d3bc639650fcd94feb19ab",
+    ),
+    (
         "view:ryeos/schedules/list",
         "cb0a1007c69df01d78813ef410fe8372f8d5c785ffaa2995dc65cdeb596a1635",
     ),
@@ -172,7 +176,7 @@ fn every_bundled_view_uses_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        32,
+        33,
         "the complete signed view inventory changed"
     );
 

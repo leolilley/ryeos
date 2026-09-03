@@ -253,7 +253,7 @@ mod tests {
                 requested_seconds: seconds,
                 effective_trust_class: CapturedEffectiveTrustClass::TrustedBundle,
                 minimum_clamp: None,
-                node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
             },
         }
     }

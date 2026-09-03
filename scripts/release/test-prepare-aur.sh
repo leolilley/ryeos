@@ -39,6 +39,16 @@ while IFS= read -r bundle; do
     cp "$bundle_root/.ai/PUBLISHER_TRUST.toml" \
         "$bundle_root/$bundle/PUBLISHER_TRUST.toml"
 done < <(ryeos_bundle_set_names full)
+mkdir -p "$bundle_root/.ai/node/init/profiles"
+while IFS= read -r node_init_profile; do
+    {
+        printf 'schema: 1\nexact_bundles:\n'
+        ryeos_bundle_set_names "$node_init_profile" | sort | sed 's/^/  - /'
+        # AUR preparation validates archive structure; the official package
+        # authoring step separately qualifies typed bodies with real RyeOS.
+        printf '%s\n' 'policies:' '  fixture_policy:' '    schema: 1'
+    } > "$bundle_root/.ai/node/init/profiles/$node_init_profile.yaml"
+done < <(ryeos_node_init_profile_names)
 tar -C "$tmp" -czf "$tmp/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     ryeos-bundles-1.2.3-x86_64
 expected_bundle="$(sha256sum "$tmp/ryeos-bundles-1.2.3-x86_64.tar.gz" | awk '{print $1}')"
@@ -61,6 +71,67 @@ grep -Fq 'ryeos-bundles-$pkgver-x86_64.tar.gz::https://github.com/leolilley/ryeo
     "$tmp/out/ryeos/PKGBUILD"
 grep -Fq "'$expected_bundle'" "$tmp/out/ryeos/PKGBUILD"
 ! grep -Fq "$expected_bundle" "$tmp/out/ryeos-mcp/PKGBUILD"
+grep -Fq 'ryeos init --node-profile full' "$tmp/out/ryeos/ryeos.install"
+
+mv "$bundle_root/.ai/node/init/profiles/hosted-workflow.yaml" \
+    "$tmp/hosted-workflow.yaml"
+tar -C "$tmp" -czf "$tmp/missing-init-profile.tar.gz" \
+    ryeos-bundles-1.2.3-x86_64
+missing_profile_sha="$(sha256sum "$tmp/missing-init-profile.tar.gz" | awk '{print $1}')"
+if PATH="$tmp/bin:$PATH" "$root/scripts/release/prepare-aur.sh" \
+    --tag v1.2.3 \
+    --archive "$tmp/v1.2.3.tar.gz" \
+    --bundle-archive "$tmp/missing-init-profile.tar.gz" \
+    --output "$tmp/missing-profile-output" \
+    --signer-fingerprint "$fingerprint" \
+    --expected-sha256 "$expected" \
+    --expected-bundle-sha256 "$missing_profile_sha" >/dev/null 2>&1; then
+    echo "expected AUR preparation to reject a missing node init profile" >&2
+    exit 1
+fi
+mv "$tmp/hosted-workflow.yaml" \
+    "$bundle_root/.ai/node/init/profiles/hosted-workflow.yaml"
+
+profile_contract_fixture="$tmp/mismatched-profile"
+mkdir -p "$profile_contract_fixture"
+cp "$bundle_root/.ai/node/init/profiles/standard.yaml" \
+    "$profile_contract_fixture/standard.yaml"
+sed -i '/^exact_bundles:$/a\  - unexpected' \
+    "$bundle_root/.ai/node/init/profiles/standard.yaml"
+profile_contract_archive="$profile_contract_fixture/ryeos-bundles-1.2.3-x86_64.tar.gz"
+tar -C "$tmp" -czf "$profile_contract_archive" \
+    ryeos-bundles-1.2.3-x86_64
+profile_contract_sha="$(sha256sum "$profile_contract_archive" | awk '{print $1}')"
+if PATH="$tmp/bin:$PATH" "$root/scripts/release/prepare-aur.sh" \
+    --tag v1.2.3 \
+    --archive "$tmp/v1.2.3.tar.gz" \
+    --bundle-archive "$profile_contract_archive" \
+    --output "$tmp/mismatched-profile-output" \
+    --signer-fingerprint "$fingerprint" \
+    --expected-sha256 "$expected" \
+    --expected-bundle-sha256 "$profile_contract_sha" >/dev/null 2>&1; then
+    echo "expected AUR preparation to reject a mismatched node init profile" >&2
+    exit 1
+fi
+mv "$profile_contract_fixture/standard.yaml" \
+    "$bundle_root/.ai/node/init/profiles/standard.yaml"
+
+mkdir "$bundle_root/.ai/node/init/legacy-seed"
+legacy_init_archive="$tmp/legacy-init-input.tar.gz"
+tar -C "$tmp" -czf "$legacy_init_archive" ryeos-bundles-1.2.3-x86_64
+legacy_init_sha="$(sha256sum "$legacy_init_archive" | awk '{print $1}')"
+if PATH="$tmp/bin:$PATH" "$root/scripts/release/prepare-aur.sh" \
+    --tag v1.2.3 \
+    --archive "$tmp/v1.2.3.tar.gz" \
+    --bundle-archive "$legacy_init_archive" \
+    --output "$tmp/legacy-init-output" \
+    --signer-fingerprint "$fingerprint" \
+    --expected-sha256 "$expected" \
+    --expected-bundle-sha256 "$legacy_init_sha" >/dev/null 2>&1; then
+    echo "expected AUR preparation to reject a parallel legacy init input" >&2
+    exit 1
+fi
+rmdir "$bundle_root/.ai/node/init/legacy-seed"
 
 if PATH="$tmp/bin:$PATH" "$root/scripts/release/prepare-aur.sh" \
     --tag v1.2.3 \

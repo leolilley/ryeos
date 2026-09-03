@@ -87,6 +87,9 @@ jobs:
       - name: Check daemon image init boundaries
         run: ./scripts/ci/test-daemon-image-init-policy.sh
 
+      - name: Check bundle-set membership
+        run: ./scripts/pkg/test-bundle-sets.sh
+
       - name: Check canonical naming
         run: ./scripts/lint-naming.sh
 
@@ -95,6 +98,9 @@ jobs:
 
       - name: Check shell terminal presentation
         run: ./scripts/pkg/test-ryeos-terminal.sh
+
+      - name: Check configured-remote qualification contract
+        run: ./scripts/dev/test-qualify-configured-remote.sh
 
       - name: Check removed compatibility vocabulary
         run: ./scripts/lint-no-content-wrap.sh
@@ -117,7 +123,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -207,7 +213,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -243,7 +249,59 @@ jobs:
           # builds; 8 MiB is the standard Rust thread-stack escape hatch and
           # leaves the production state machine unchanged.
           RUST_MIN_STACK: 8388608
-        run: ./scripts/gate.sh --refresh-bundles
+        run: ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
+
+  crash-qualification:
+    name: Crash recovery qualification
+    runs-on: ubuntu-latest
+    # The serial two-node handoff matrix takes roughly 40 minutes on the
+    # development host by itself. Keep it outside the already-near-ceiling
+    # workspace gate so neither mandatory validation lane can starve the other.
+    timeout-minutes: 120
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: crash-qualification-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Show tool versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo nextest --version
+
+      - name: Run crash recovery qualification
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+          RUST_MIN_STACK: 8388608
+        run: ./scripts/gate.sh --refresh-bundles --crash-qualification-only
+
+      - name: Retain explicit worker-handoff qualification
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: explicit-worker-handoff-qualification-${{ github.sha }}
+          path: target/qualification/explicit-worker-handoff.json
+          if-no-files-found: error
+          retention-days: 30
 
   bundle-refresh:
     name: Bundle refresh
@@ -257,7 +315,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned

@@ -21,23 +21,24 @@ impl Walker {
             item_id,
             result,
             assign,
+            project_observations,
             next,
             child_thread_id,
             cache_hit,
+            replayed_from,
+            dispatch,
             cache_write_key,
             elapsed_ms,
             cost,
         } = outcome.as_ref();
         let cache_hit = *cache_hit;
+        let replayed_from = replayed_from.clone();
         let elapsed_ms = *elapsed_ms;
         // R3 fence order:
         // graph_step_started → tool_call_start → (dispatch in run_node_body) →
-        // tool_call_result → state mutation → receipt → graph_step_completed → checkpoint
-        self.emit_graph_step_started(graph_run_id, step, current)
-            .await;
-        self.emit_tool_call_start(graph_run_id, step, current, item_id)
-            .await;
-        self.emit_tool_call_result(
+        // tool_call_result → accepted project observations → state mutation →
+        // receipt → graph_step_completed → checkpoint
+        self.emit_completed_action_call(
             graph_run_id,
             step,
             current,
@@ -50,9 +51,27 @@ impl Walker {
         // happened, but are deliberately deferred until assignment and
         // branch evaluation have both succeeded. They therefore cannot
         // make an expression-failed transition look committed.
-        if let Some(observation) =
-            DispatchObservation::from_success(item_id.to_string(), child_thread_id.clone(), result)
-        {
+        let mut observation = DispatchObservation::from_success(
+            item_id.to_string(),
+            child_thread_id.clone(),
+            result,
+            dispatch.clone(),
+        );
+        if !project_observations.is_empty() {
+            let observation = observation.get_or_insert_with(|| DispatchObservation {
+                item_id: item_id.to_string(),
+                child_thread_id: child_thread_id.clone(),
+                dispatch: dispatch.clone(),
+                milestones: Vec::new(),
+                state_anchors: Vec::new(),
+                project_observations: Vec::new(),
+                project_observations_well_formed: true,
+            });
+            observation
+                .project_observations
+                .extend(project_observations.iter().cloned());
+        }
+        if let Some(observation) = observation {
             if let Err(error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, &observation)
                 .await
@@ -111,9 +130,11 @@ impl Walker {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: Some(result_hash),
             cache_hit,
+            replayed_from,
+            dispatch: dispatch.clone(),
             elapsed_ms,
             error: None,
             cost: cost.clone(),

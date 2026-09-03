@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-03T06:49:04Z:7840fdd35b288aa257160ffc7ff4b6b5e20f4f815efd8e74bd77099f7dd08e71:m01vLTOK2BBPDIhu8zQuXPDgSCxHFtegf+A9L8wGUyQm5M9HemXxQTyAYxAuaSioEtqTxEQrPfZVvDQvbWu4Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-02T10:46:51Z:e8f32a0020be0282a4b4dec6e7501ccd21858c2309de7a89b51f9f778fb5cbd8:WijsIjnbUphGapuY6LYwKtBEVXKMeGw2deBc2uUFmg2oiRAb8rx8k974LSokpyQnFlY548uJAzlU6qd7FkM5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Execution config — system defaults
 # Override per-project: .ai/config/execution/execution.yaml
 category: "execution"
-version: "2.0.0"
-schema_version: "2.0.0"
+version: "2.1.0"
+schema_version: "2.1.0"
 
 # Defaults applied to all tool executions
 defaults:
@@ -26,22 +26,6 @@ defaults:
 #       timeout: 600
 #       cancellation_grace_secs: 30
 
-# Generic root-history default. The node's own signed config layer may replace
-# this complete block. No retention age exists in Rust; omitting all signed
-# history blocks resolves Durable as well. An optional `minimum_terminal_for`
-# bounds both the finite node default and trusted item-authored overrides; a
-# node default below that minimum is invalid at boot.
-history:
-  default_retention: durable
-  item_authored_retention: allow
-
-# Other node-scoped valves — read by the daemon at boot from bundle layers plus
-# the node's own tree (<app_root>/.ai/config/execution/execution.yaml),
-# which is the operator's overlay. Per-launch policy reads use the project
-# as overlay and never read this section, so a project cannot set
-# node-wide limits.
-# node:
-#   # Ceiling on launched-and-live launch-window members across ALL
-#   # fanouts on this node (a member is a child chain; see the graph
-#   # foreach `max_concurrency` launch window). Absent or 0 = unbounded.
-#   max_live_fanout: 16
+# Node-wide admission, retention, and host-environment authority lives only in
+# the complete current-node-signed `.ai/node/policies/` generation. This
+# bundle file contains workload execution defaults and cannot widen node policy.

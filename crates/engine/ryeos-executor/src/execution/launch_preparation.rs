@@ -41,6 +41,8 @@ const MAX_HANDLER_ERROR_DETAILS_BYTES: usize = 8 * 1024;
 const MAX_REF_BINDINGS: usize = 32;
 const MAX_REF_BINDING_NAME_BYTES: usize = 64;
 const MAX_REF_BINDING_VALUE_BYTES: usize = 2_048;
+const MAX_EXECUTION_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CONTENT_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +67,20 @@ pub struct PreparedRuntimeLaunch {
     pub required_secrets: Vec<PreparedSecret>,
     pub runtime_facts: BTreeMap<String, Value>,
     pub binding_records: BTreeMap<String, RefBindingLaunchRecord>,
+    /// Exact composed executable dependencies selected by the kind-owned
+    /// preparer and resolved by the engine before the outer capsule is minted.
+    /// Generic launch code treats names and payloads mechanically; consumers
+    /// interpret only dependencies they own.
+    pub execution_dependencies: BTreeMap<String, PreparedExecutionDependency>,
+    /// Path-free retained bound items whose exact pinned external
+    /// realizations contribute to named execution dependencies. Selection is
+    /// kind-owned; generic launch code applies only the signed mechanical
+    /// policy and never interprets workload configuration fields.
+    pub content_dependencies: BTreeMap<String, PreparedContentDependency>,
+    /// Session capsules admitted from execution dependencies before the outer
+    /// launch capsule is minted. Keys remain preparer-owned opaque dependency
+    /// names; generic launch code validates and retains only their hashes.
+    pub admitted_sessions: BTreeMap<String, String>,
     /// Exact signed configuration contributors that influenced launch
     /// preparation. The prepared values remain sealed in `runtime_data`; this
     /// list exists so recovery can apply current signer revocation without
@@ -72,56 +88,174 @@ pub struct PreparedRuntimeLaunch {
     pub config_contributors: Vec<LaunchConfigContributorWire>,
     /// Validated financial authority sealed with this launch, exactly as
     /// declared by the runtime launch contract. `None` for runtimes whose
-    /// contract declares no direct paid provider work.
+    /// contract declares no direct financial boundary.
     pub financial_authority: Option<PreparedFinancialAuthority>,
+    /// Kind-owned external-effect authority emitted by launch preparation.
+    /// Its family is opaque to generic launch code, which validates, seals,
+    /// and transports the mechanical contract without interpreting it.
+    pub external_effect_authority: Option<ryeos_effect_contract::AdmittedExternalEffectAuthority>,
 }
 
-/// The executor-validated, canonicalized financial authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PreparedFinancialAuthority {
-    /// Always `"provider_accounting_authority_v1"` in this version.
-    pub kind: String,
-    /// The exact validated authority payload (canonical value form). Opaque
-    /// past the validation boundary: generic code consumes the typed fields
-    /// below, never this payload's structure.
-    pub authority: Value,
-    /// sha-256 of the canonical JSON of `authority`.
-    pub authority_digest: String,
-    /// Kind-neutral admission fact extracted during strict validation: what
-    /// class of spend bound this authority seals. This is the only property
-    /// the executor may branch on.
-    pub spend_bound: SealedSpendBound,
+pub struct PreparedContentDependency {
+    pub binding: String,
+    pub canonical_ref: String,
+    pub resolution: ryeos_engine::resolution::RetainedResolutionOutput,
+    pub targets: Vec<String>,
+    pub executable_search: Vec<ryeos_handler_protocol::ExecutableSearchPathEntryWire>,
+    pub external_content_policy: ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
 }
 
-/// Generic classification of a sealed spend bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum SealedSpendBound {
-    /// Mechanically proven paid maximum — hard-spend eligible.
-    Paid,
-    /// Explicitly-free contract — hard-spend eligible at exact zero.
-    ExplicitlyFree,
-    /// Declared bound without mechanical proof — ineligible for hard spend.
-    AdvisoryOnly,
-}
-
-impl SealedSpendBound {
-    pub const fn hard_spend_eligible(self) -> bool {
-        matches!(self, Self::Paid | Self::ExplicitlyFree)
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Paid => "paid",
-            Self::ExplicitlyFree => "explicitly_free",
-            Self::AdvisoryOnly => "advisory_only",
+impl PreparedContentDependency {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !valid_ref_binding_name(&self.binding) {
+            anyhow::bail!("prepared content dependency binding is not canonical");
         }
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
+        if canonical.to_string() != self.canonical_ref
+            || canonical.suffix.is_some()
+            || self.resolution.root_ref() != self.canonical_ref
+            || self.targets.is_empty()
+            || self.targets.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            anyhow::bail!("prepared content dependency identity is inconsistent");
+        }
+        let restored = self.resolution.restore();
+        if restored.root.source_space == ryeos_engine::contracts::ItemSpace::Node
+            || restored.effective_trust_class == ryeos_engine::resolution::TrustClass::TrustedNode
+            || restored.root.signer_fingerprint.is_none()
+        {
+            anyhow::bail!("prepared content dependency is not signed portable content");
+        }
+        if self.external_content_policy.max_declarations == 0 {
+            anyhow::bail!("prepared content dependency has no declaration ceiling");
+        }
+        let mut searches = BTreeSet::new();
+        for entry in &self.executable_search {
+            if entry.realization_id.is_empty()
+                || entry.realization_id.len() > 64
+                || !entry.realization_id.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                || (entry.relative_directory != "."
+                    && ryeos_state::objects::validate_canonical_project_relative_path(
+                        &entry.relative_directory,
+                    )
+                    .is_err())
+                || !searches.insert((
+                    entry.realization_id.as_str(),
+                    entry.relative_directory.as_str(),
+                ))
+            {
+                anyhow::bail!("prepared executable-search entry is not canonical");
+            }
+        }
+        Ok(())
     }
 }
 
-pub const FINANCIAL_AUTHORITY_KIND_PROVIDER_ACCOUNTING_V1: &str =
-    "provider_accounting_authority_v1";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedExecutionDependency {
+    pub canonical_ref: String,
+    pub resolution: ryeos_engine::resolution::ResolutionOutput,
+    /// Engine-verified root facts required to compile the already-captured
+    /// definition into a direct mechanical plan. The root bytes themselves
+    /// come from `resolution.root.raw_content`; this projection never grants
+    /// permission to reopen `source_path` after admission.
+    pub subject: PreparedExecutionDependencySubject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedExecutionDependencySubject {
+    pub source_path: std::path::PathBuf,
+    pub source_space: ryeos_engine::contracts::ItemSpace,
+    pub source_root: ryeos_engine::contracts::ItemSourceRoot,
+    pub resolved_from: String,
+    pub materialized_project_root: Option<std::path::PathBuf>,
+    pub subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
+    pub raw_content_digest: String,
+    pub content_hash: String,
+    pub signature_header: Option<ryeos_engine::contracts::SignatureHeader>,
+    pub source_format: ryeos_engine::contracts::ResolvedSourceFormat,
+    pub metadata: ryeos_engine::contracts::ItemMetadata,
+    pub signer: Option<ryeos_engine::contracts::SignerFingerprint>,
+    pub trust_class: ryeos_engine::contracts::TrustClass,
+}
+
+impl PreparedExecutionDependency {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
+        if canonical.to_string() != self.canonical_ref
+            || canonical.suffix.is_some()
+            || self.resolution.root.resolved_ref != self.canonical_ref
+            || self.resolution.root.source_path != self.subject.source_path
+            || self.resolution.root.source_space != self.subject.source_space
+            || self.resolution.root.source_root != self.subject.source_root
+            || self.resolution.root.raw_content_digest != self.subject.raw_content_digest
+            || self.resolution.root.source_content_digest != self.subject.content_hash
+            || self.resolution.root.signer_fingerprint
+                != self.subject.signer.as_ref().map(|signer| signer.0.clone())
+            || self.subject.subject_resolution_authority
+                != ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+            || self.subject.materialized_project_root.is_some()
+        {
+            anyhow::bail!("prepared execution dependency root authority is inconsistent");
+        }
+        if self.subject.source_space != ryeos_engine::contracts::ItemSpace::Bundle
+            || self.resolution.effective_trust_class
+                != ryeos_engine::resolution::TrustClass::TrustedBundle
+            || self.subject.trust_class != ryeos_engine::contracts::TrustClass::Trusted
+        {
+            anyhow::bail!("prepared execution dependency is not exact trusted-bundle content");
+        }
+        if lillux::sha256_hex(self.resolution.root.raw_content.as_bytes())
+            != self.subject.raw_content_digest
+        {
+            anyhow::bail!("prepared execution dependency root bytes changed");
+        }
+        Ok(())
+    }
+
+    /// Rebuild the engine's verified-root carrier strictly from the captured
+    /// launch authority. Plan compilation must pair this with
+    /// `resolution.root.raw_content`; it must never read `source_path`.
+    pub fn captured_verified_subject(
+        &self,
+    ) -> anyhow::Result<ryeos_engine::contracts::VerifiedItem> {
+        self.validate()?;
+        let canonical_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
+        Ok(ryeos_engine::contracts::VerifiedItem {
+            resolved: ryeos_engine::contracts::ResolvedItem {
+                canonical_ref: canonical_ref.clone(),
+                kind: canonical_ref.kind,
+                source_path: self.subject.source_path.clone(),
+                source_space: self.subject.source_space,
+                source_root: self.subject.source_root.clone(),
+                resolved_from: self.subject.resolved_from.clone(),
+                shadowed: Vec::new(),
+                probed_absent: Vec::new(),
+                materialized_project_root: self.subject.materialized_project_root.clone(),
+                subject_resolution_authority: self.subject.subject_resolution_authority.clone(),
+                raw_content_digest: self.subject.raw_content_digest.clone(),
+                content_hash: self.subject.content_hash.clone(),
+                signature_header: self.subject.signature_header.clone(),
+                source_format: self.subject.source_format.clone(),
+                metadata: self.subject.metadata.clone(),
+            },
+            signer: self.subject.signer.clone(),
+            trust_class: self.subject.trust_class,
+            pinned_version: None,
+        })
+    }
+}
+
+pub type PreparedFinancialAuthority = ryeos_accounting::AdmittedFinancialAuthority;
+pub use ryeos_accounting::SpendBoundClass as SealedSpendBound;
 const MAX_FINANCIAL_AUTHORITY_BYTES: usize = 64 * 1024;
 
 pub struct PrepareRuntimeLaunchRequest<'a> {
@@ -201,8 +335,10 @@ struct PreparedRuntimeLaunchInputs {
     primary: LaunchPreparedItemWire,
     binding_wires: BTreeMap<String, LaunchPreparedItemWire>,
     binding_records: BTreeMap<String, RefBindingLaunchRecord>,
+    binding_resolutions: BTreeMap<String, ryeos_engine::resolution::ResolutionOutput>,
     config_inputs: BTreeMap<String, LaunchConfigSnapshotWire>,
     config_dependency_proof: ryeos_engine::launch_config::LaunchConfigDependencyProof,
+    principal: EffectivePrincipal,
 }
 
 struct OwnedPreparedResolutionCacheContext {
@@ -625,7 +761,7 @@ fn launch_config_snapshot_cache() -> &'static crate::resolved_config_cache::Snap
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
 }
 
-fn load_launch_config_set_under_current_authority(
+pub(crate) fn load_launch_config_set_under_current_authority(
     declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
     roots: &ResolutionRoots,
     parsers: &ParserDispatcher,
@@ -990,6 +1126,7 @@ fn prepare_runtime_launch_inputs(
     let scopes = principal_scopes(request.principal);
     let mut binding_wires = BTreeMap::new();
     let mut binding_records = BTreeMap::new();
+    let mut binding_resolutions = BTreeMap::new();
     let ref_binding_resolution_timer = request
         .ref_binding_resolution_timings
         .map(|timings| timings.nested("background_dispatch", "ref_binding_resolution"));
@@ -1042,6 +1179,7 @@ fn prepare_runtime_launch_inputs(
             },
         );
         binding_wires.insert(name.clone(), prepared_item_wire(&resolution)?);
+        binding_resolutions.insert(name.clone(), resolution.as_ref().clone());
     }
     drop(ref_binding_resolution_timer);
 
@@ -1066,8 +1204,10 @@ fn prepare_runtime_launch_inputs(
         primary: prepared_item_wire(request.primary)?,
         binding_wires,
         binding_records,
+        binding_resolutions,
         config_inputs: config_set.snapshots.clone(),
         config_dependency_proof: config_set.dependency_proof.clone(),
+        principal: request.principal.clone(),
     })
 }
 
@@ -1079,10 +1219,15 @@ fn resolve_binding_closure(
     let Some(cache_context) = request.resolution_cache else {
         let project_root = request
             .roots
-            .ordered
-            .iter()
-            .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
-            .and_then(|root| root.ai_root.parent())
+            .authoritative_project_root()
+            .map_err(|error| {
+                preparation_error_with_binding(
+                    "ref_binding_resolution_authority_invalid",
+                    error.to_string(),
+                    LaunchPrepareErrorClass::Internal,
+                    Some(name.to_owned()),
+                )
+            })?
             .map(std::path::Path::to_path_buf);
         match request.subject_resolution_authority {
             ryeos_engine::contracts::SubjectResolutionAuthority::Projectless => {
@@ -1118,7 +1263,7 @@ fn resolve_binding_closure(
             }
         }
         let (output, probed_absent) =
-            ryeos_engine::resolution::run_resolution_pipeline_with_probes(
+            ryeos_engine::resolution::run_effective_item_pipeline_with_probes(
                 canonical,
                 &request.engine.kinds,
                 request.parsers,
@@ -1200,7 +1345,7 @@ fn resolve_binding_closure(
             })?;
         let resolution = match project_content {
             Some((project_root, content)) => {
-                ryeos_engine::resolution::run_resolution_pipeline_with_probes_under_project_authority(
+                ryeos_engine::resolution::run_effective_item_pipeline_with_probes_under_project_authority(
                     canonical,
                     &request.engine.kinds,
                     request.parsers,
@@ -1211,7 +1356,7 @@ fn resolve_binding_closure(
                     content,
                 )
             }
-            None => ryeos_engine::resolution::run_resolution_pipeline_with_probes(
+            None => ryeos_engine::resolution::run_effective_item_pipeline_with_probes(
                 canonical,
                 &request.engine.kinds,
                 request.parsers,
@@ -1393,7 +1538,11 @@ fn finish_runtime_launch_preparation_parts(
             runtime_data: BTreeMap::new(),
             required_secrets: Vec::new(),
             runtime_facts: BTreeMap::new(),
+            execution_dependencies: BTreeMap::new(),
+            content_dependencies: BTreeMap::new(),
             financial_authority: ryeos_handler_protocol::FinancialAuthorityResultWire::None,
+            external_effect_authority:
+                ryeos_handler_protocol::ExternalEffectAuthorityResultWire::None,
         },
         LaunchPreparationDecl::Handler { config, .. } => {
             let handler_request = LaunchPrepareRequest {
@@ -1416,8 +1565,18 @@ fn finish_runtime_launch_preparation_parts(
     };
 
     validate_result(contract, ref_bindings, &inputs.config_inputs, &mut result)?;
+    let execution_dependencies =
+        resolve_execution_dependencies(engine, contract, inputs, result.execution_dependencies)?;
+    let content_dependencies = resolve_content_dependencies(
+        contract,
+        inputs,
+        &execution_dependencies,
+        result.content_dependencies,
+    )?;
     let config_contributors = collect_config_contributors(&inputs.config_inputs);
     let financial_authority = validate_financial_authority(contract, result.financial_authority)?;
+    let external_effect_authority =
+        validate_external_effect_authority(contract, result.external_effect_authority)?;
     Ok(PreparedRuntimeLaunch {
         runtime_data: result.runtime_data,
         required_secrets: result
@@ -1430,9 +1589,440 @@ fn finish_runtime_launch_preparation_parts(
             .collect(),
         runtime_facts: result.runtime_facts,
         binding_records: inputs.binding_records.clone(),
+        execution_dependencies,
+        content_dependencies,
+        admitted_sessions: BTreeMap::new(),
         config_contributors,
         financial_authority,
+        external_effect_authority,
     })
+}
+
+fn resolve_execution_dependencies(
+    engine: &ryeos_engine::engine::Engine,
+    contract: &ryeos_engine::runtime_registry::LaunchContractDecl,
+    inputs: &PreparedRuntimeLaunchInputs,
+    requests: BTreeMap<String, ryeos_handler_protocol::LaunchExecutionDependencyRequestWire>,
+) -> Result<BTreeMap<String, PreparedExecutionDependency>, DispatchError> {
+    let policy = &contract.execution_dependencies;
+    if requests.len() > usize::from(policy.max_dependencies) {
+        return Err(preparation_error(
+            "execution_dependency_limit_exceeded",
+            format!(
+                "launch preparer requested {} execution dependencies, exceeding the signed maximum {}",
+                requests.len(),
+                policy.max_dependencies
+            ),
+            LaunchPrepareErrorClass::Internal,
+        ));
+    }
+    let mut resolved = BTreeMap::new();
+    let mut aggregate_bytes = 0usize;
+    for (name, request) in requests {
+        if name.is_empty()
+            || name.len() > MAX_REF_BINDING_NAME_BYTES
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(preparation_error(
+                "execution_dependency_name_invalid",
+                format!("execution dependency name `{name}` is not a bounded identifier"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&request.item_ref)
+            .map_err(|error| {
+                preparation_error(
+                    "execution_dependency_ref_invalid",
+                    format!("execution dependency `{name}` has an invalid item ref: {error}"),
+                    LaunchPrepareErrorClass::Configuration,
+                )
+            })?;
+        if canonical.to_string() != request.item_ref || canonical.suffix.is_some() {
+            return Err(preparation_error(
+                "execution_dependency_ref_invalid",
+                format!("execution dependency `{name}` must use an unsuffixed canonical item ref"),
+                LaunchPrepareErrorClass::Configuration,
+            ));
+        }
+        if !policy
+            .allowed_kinds
+            .iter()
+            .any(|kind| kind == &canonical.kind)
+        {
+            return Err(preparation_error(
+                "execution_dependency_kind_denied",
+                format!(
+                    "execution dependency `{name}` kind `{}` is outside the signed allow-list",
+                    canonical.kind
+                ),
+                LaunchPrepareErrorClass::Configuration,
+            ));
+        }
+        // Execution dependencies are currently constrained by the signed
+        // runtime contract validator to exact trusted-bundle subjects. Resolve
+        // them projectlessly as well: a project overlay must not influence the
+        // executable chain of a bundle worker merely because a project item
+        // selected it.
+        let project_root = None;
+        let project_context = ryeos_engine::contracts::ProjectContext::None;
+        let plan_context = ryeos_engine::contracts::PlanContext {
+            requested_by: inputs.principal.clone(),
+            project_context,
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+            current_site_id: "launch-preparation".to_owned(),
+            origin_site_id: "launch-preparation".to_owned(),
+            execution_hints: Default::default(),
+            validate_only: true,
+        };
+        let resolved_subject = engine.resolve(&plan_context, &canonical).map_err(|error| {
+            preparation_error(
+                "execution_dependency_resolution_failed",
+                format!("execution dependency `{name}` failed root resolution: {error}"),
+                LaunchPrepareErrorClass::Configuration,
+            )
+        })?;
+        let verified_subject = engine
+            .verify(&plan_context, resolved_subject)
+            .map_err(|error| {
+                preparation_error(
+                    "execution_dependency_verification_failed",
+                    format!("execution dependency `{name}` failed root verification: {error}"),
+                    LaunchPrepareErrorClass::Configuration,
+                )
+            })?;
+        let resolution = engine
+            .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                item_ref: canonical.clone(),
+                expected_kind: None,
+                project_root,
+                subject_resolution_authority:
+                    ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+            })
+            .map_err(|error| {
+                preparation_error(
+                    "execution_dependency_resolution_failed",
+                    format!("execution dependency `{name}` failed resolution: {error}"),
+                    LaunchPrepareErrorClass::Configuration,
+                )
+            })?;
+        let space = match resolution.root.source_space {
+            ryeos_engine::contracts::ItemSpace::Bundle => {
+                ryeos_engine::runtime_registry::LaunchItemSpace::Bundle
+            }
+            ryeos_engine::contracts::ItemSpace::Project => {
+                ryeos_engine::runtime_registry::LaunchItemSpace::Project
+            }
+            ryeos_engine::contracts::ItemSpace::Node => {
+                ryeos_engine::runtime_registry::LaunchItemSpace::Node
+            }
+        };
+        if !policy.allowed_spaces.contains(&space)
+            || !policy
+                .allowed_trust
+                .contains(&resolution.effective_trust_class)
+        {
+            return Err(preparation_error(
+                "execution_dependency_authority_denied",
+                format!(
+                    "execution dependency `{name}` resolved under source/trust authority outside the signed allow-list"
+                ),
+                LaunchPrepareErrorClass::Configuration,
+            ));
+        }
+        if verified_subject.resolved.raw_content_digest != resolution.root.raw_content_digest
+            || verified_subject.resolved.content_hash != resolution.root.source_content_digest
+            || verified_subject.resolved.source_space != resolution.root.source_space
+            || verified_subject.resolved.canonical_ref.to_string() != resolution.root.resolved_ref
+        {
+            return Err(preparation_error(
+                "execution_dependency_resolution_diverged",
+                format!(
+                    "execution dependency `{name}` verified root differs from its composed resolution"
+                ),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let subject = PreparedExecutionDependencySubject {
+            source_path: verified_subject.resolved.source_path.clone(),
+            source_space: verified_subject.resolved.source_space,
+            source_root: verified_subject.resolved.source_root.clone(),
+            resolved_from: verified_subject.resolved.resolved_from.clone(),
+            materialized_project_root: verified_subject.resolved.materialized_project_root.clone(),
+            subject_resolution_authority: verified_subject
+                .resolved
+                .subject_resolution_authority
+                .clone(),
+            raw_content_digest: verified_subject.resolved.raw_content_digest.clone(),
+            content_hash: verified_subject.resolved.content_hash.clone(),
+            signature_header: verified_subject.resolved.signature_header.clone(),
+            source_format: verified_subject.resolved.source_format.clone(),
+            metadata: verified_subject.resolved.metadata.clone(),
+            signer: verified_subject.signer.clone(),
+            trust_class: verified_subject.trust_class,
+        };
+        let dependency = PreparedExecutionDependency {
+            canonical_ref: resolution.root.resolved_ref.clone(),
+            resolution,
+            subject,
+        };
+        dependency.validate().map_err(|error| {
+            preparation_error(
+                "execution_dependency_capture_invalid",
+                format!("execution dependency `{name}` capture is invalid: {error}"),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        let bytes = serde_json::to_vec(&dependency)
+            .map_err(|error| {
+                preparation_error(
+                    "execution_dependency_serialize_failed",
+                    error.to_string(),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?
+            .len();
+        aggregate_bytes = aggregate_bytes.checked_add(bytes).ok_or_else(|| {
+            preparation_error(
+                "execution_dependency_size_exceeded",
+                "execution dependency size overflow",
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        if aggregate_bytes > MAX_EXECUTION_DEPENDENCY_BYTES {
+            return Err(preparation_error(
+                "execution_dependency_size_exceeded",
+                format!(
+                    "execution dependencies exceed the daemon limit of {MAX_EXECUTION_DEPENDENCY_BYTES} bytes"
+                ),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        resolved.insert(name, dependency);
+    }
+    Ok(resolved)
+}
+
+fn resolve_content_dependencies(
+    contract: &ryeos_engine::runtime_registry::LaunchContractDecl,
+    inputs: &PreparedRuntimeLaunchInputs,
+    execution_dependencies: &BTreeMap<String, PreparedExecutionDependency>,
+    requests: BTreeMap<String, ryeos_handler_protocol::LaunchContentDependencyRequestWire>,
+) -> Result<BTreeMap<String, PreparedContentDependency>, DispatchError> {
+    let policy = &contract.content_dependencies;
+    if requests.len() > usize::from(policy.max_dependencies) {
+        return Err(preparation_error(
+            "content_dependency_limit_exceeded",
+            format!(
+                "launch preparer requested {} content dependencies, exceeding the signed maximum {}",
+                requests.len(),
+                policy.max_dependencies
+            ),
+            LaunchPrepareErrorClass::Internal,
+        ));
+    }
+    let external_policy = policy.external_content.as_ref();
+    let mut prepared = BTreeMap::new();
+    let mut aggregate_bytes = 0usize;
+    for (name, request) in requests {
+        if !valid_ref_binding_name(&name)
+            || name != request.binding
+            || !policy.allowed_bindings.contains(&request.binding)
+        {
+            return Err(preparation_error(
+                "content_dependency_binding_denied",
+                format!("content dependency `{name}` is not an admitted ref binding"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let resolution = inputs
+            .binding_resolutions
+            .get(&request.binding)
+            .ok_or_else(|| {
+                preparation_error(
+                    "content_dependency_binding_missing",
+                    format!("content dependency `{name}` selected an absent resolved binding"),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+        let binding_record = &inputs.binding_records[&request.binding];
+        if binding_record.canonical_ref != resolution.root.resolved_ref
+            || binding_record.resolution != resolution.as_launched_digest()
+        {
+            return Err(preparation_error(
+                "content_dependency_binding_diverged",
+                format!("content dependency `{name}` differs from its bound authority"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        if request.targets.is_empty()
+            || request.targets.len() > usize::from(policy.max_targets_per_dependency)
+            || request.targets.windows(2).any(|pair| pair[0] >= pair[1])
+            || request
+                .targets
+                .iter()
+                .any(|target| !execution_dependencies.contains_key(target))
+        {
+            return Err(preparation_error(
+                "content_dependency_target_invalid",
+                format!("content dependency `{name}` has an invalid target set"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        if request.executable_search.len() > usize::from(policy.max_executable_search_entries) {
+            return Err(preparation_error(
+                "content_dependency_search_limit_exceeded",
+                format!("content dependency `{name}` exceeds its executable-search ceiling"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let external_policy = external_policy.ok_or_else(|| {
+            preparation_error(
+                "content_dependency_policy_missing",
+                "content dependency was produced under a disabled external-content policy",
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        let synthetic_contract = external_policy.declaration_contract();
+        let declarer =
+            ryeos_engine::external_content::declaring_authority(resolution).map_err(|error| {
+                preparation_error(
+                    "content_dependency_authority_invalid",
+                    format!("content dependency `{name}` has invalid declaring authority: {error}"),
+                    LaunchPrepareErrorClass::Configuration,
+                )
+            })?;
+        let declarations = ryeos_engine::external_content::declarations_from_composed(
+            &resolution.composed.composed,
+            Some(&synthetic_contract),
+            declarer,
+        )
+        .map_err(|error| {
+            preparation_error(
+                "content_dependency_declaration_invalid",
+                format!("content dependency `{name}` declaration is invalid: {error}"),
+                LaunchPrepareErrorClass::Configuration,
+            )
+        })?
+        .ok_or_else(|| {
+            preparation_error(
+                "content_dependency_declaration_missing",
+                format!("content dependency `{name}` has no external_content declaration"),
+                LaunchPrepareErrorClass::Configuration,
+            )
+        })?;
+        if declarations.is_empty()
+            || declarations.iter().any(|declaration| {
+                declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                    || declaration.locator.is_some()
+                    || declaration.digest.is_none()
+            })
+        {
+            return Err(preparation_error(
+                "content_dependency_declaration_nonportable",
+                format!(
+                    "content dependency `{name}` must use at least one locator-free pinned declaration"
+                ),
+                LaunchPrepareErrorClass::Configuration,
+            ));
+        }
+        let dependency = PreparedContentDependency {
+            binding: request.binding,
+            canonical_ref: resolution.root.resolved_ref.clone(),
+            resolution: ryeos_engine::resolution::RetainedResolutionOutput::capture(resolution),
+            targets: request.targets,
+            executable_search: request.executable_search,
+            external_content_policy: external_policy.clone(),
+        };
+        dependency.validate().map_err(|error| {
+            preparation_error(
+                "content_dependency_capture_invalid",
+                format!("content dependency `{name}` capture is invalid: {error}"),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        aggregate_bytes = aggregate_bytes
+            .checked_add(
+                serde_json::to_vec(&dependency)
+                    .map_err(|error| {
+                        preparation_error(
+                            "content_dependency_serialize_failed",
+                            error.to_string(),
+                            LaunchPrepareErrorClass::Internal,
+                        )
+                    })?
+                    .len(),
+            )
+            .ok_or_else(|| {
+                preparation_error(
+                    "content_dependency_size_exceeded",
+                    "content dependency size overflow",
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+        if aggregate_bytes > MAX_CONTENT_DEPENDENCY_BYTES {
+            return Err(preparation_error(
+                "content_dependency_size_exceeded",
+                format!(
+                    "content dependencies exceed the daemon limit of {MAX_CONTENT_DEPENDENCY_BYTES} bytes"
+                ),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        prepared.insert(name, dependency);
+    }
+    Ok(prepared)
+}
+
+fn validate_external_effect_authority(
+    contract: &ryeos_engine::runtime_registry::LaunchContractDecl,
+    result: ryeos_handler_protocol::ExternalEffectAuthorityResultWire,
+) -> Result<Option<ryeos_effect_contract::AdmittedExternalEffectAuthority>, DispatchError> {
+    use ryeos_engine::runtime_registry::ExternalEffectAuthorityDecl;
+    use ryeos_handler_protocol::ExternalEffectAuthorityResultWire;
+
+    match (contract.external_effect_authority, result) {
+        (ExternalEffectAuthorityDecl::None, ExternalEffectAuthorityResultWire::None) => Ok(None),
+        (
+            ExternalEffectAuthorityDecl::External,
+            ExternalEffectAuthorityResultWire::External { authority },
+        ) => {
+            validate_json_value(
+                "external_effect_authority",
+                &authority,
+                MAX_RUNTIME_FACT_BYTES,
+            )?;
+            let authority: ryeos_effect_contract::AdmittedExternalEffectAuthority =
+                serde_json::from_value(authority).map_err(|error| {
+                    preparation_error(
+                        "external_effect_authority_invalid",
+                        format!("external-effect authority does not decode strictly: {error}"),
+                        LaunchPrepareErrorClass::Internal,
+                    )
+                })?;
+            authority.validate().map_err(|error| {
+                preparation_error(
+                    "external_effect_authority_invalid",
+                    format!("external-effect authority failed validation: {error}"),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+            Ok(Some(authority))
+        }
+        (declared, produced) => Err(preparation_error(
+            "external_effect_authority_mismatch",
+            format!(
+                "launch contract declares external-effect authority {declared:?} but preparation produced {}",
+                match produced {
+                    ExternalEffectAuthorityResultWire::None => "none",
+                    ExternalEffectAuthorityResultWire::External { .. } => "external",
+                }
+            ),
+            LaunchPrepareErrorClass::Internal,
+        )),
+    }
 }
 
 fn prepared_launch_skeleton_key(
@@ -1544,55 +2134,23 @@ fn validate_financial_authority(
     match (contract.financial_authority, result) {
         (FinancialAuthorityDecl::None, FinancialAuthorityResultWire::None) => Ok(None),
         (
-            FinancialAuthorityDecl::ProviderAccountingAuthorityV1,
-            FinancialAuthorityResultWire::ProviderAccountingAuthorityV1 { authority },
+            FinancialAuthorityDecl::Accounting,
+            FinancialAuthorityResultWire::Accounting { authority },
         ) => {
             validate_json_value(
                 "financial_authority",
                 &authority,
                 MAX_FINANCIAL_AUTHORITY_BYTES,
             )?;
-            let decoded: ryeos_accounting::ProviderAccountingAuthority =
-                serde_json::from_value(authority.clone()).map_err(|error| {
+            ryeos_accounting::admit_financial_authority(authority)
+                .map_err(|error| {
                     preparation_error(
                         "financial_authority_invalid",
-                        format!("financial authority does not decode strictly: {error}"),
+                        format!("financial authority failed strict admission: {error}"),
                         LaunchPrepareErrorClass::Internal,
                     )
-                })?;
-            decoded.validate().map_err(|error| {
-                preparation_error(
-                    "financial_authority_invalid",
-                    format!("financial authority failed validation: {error}"),
-                    LaunchPrepareErrorClass::Internal,
-                )
-            })?;
-            let spend_bound = match &decoded.spend_bound {
-                ryeos_accounting::SpendBoundAuthority::Paid { .. } => SealedSpendBound::Paid,
-                ryeos_accounting::SpendBoundAuthority::ExplicitlyFree { .. } => {
-                    SealedSpendBound::ExplicitlyFree
-                }
-                ryeos_accounting::SpendBoundAuthority::AdvisoryOnly => {
-                    SealedSpendBound::AdvisoryOnly
-                }
-            };
-            // Re-encode the typed value so the sealed canonical form cannot
-            // carry byte-level variance the strict decode ignored.
-            let canonical_value = serde_json::to_value(&decoded)
-                .map_err(|error| DispatchError::Internal(error.into()))?;
-            let canonical = lillux::canonical_json(&canonical_value).map_err(|error| {
-                preparation_error(
-                    "financial_authority_invalid",
-                    format!("financial authority is not canonical JSON: {error}"),
-                    LaunchPrepareErrorClass::Internal,
-                )
-            })?;
-            Ok(Some(PreparedFinancialAuthority {
-                kind: FINANCIAL_AUTHORITY_KIND_PROVIDER_ACCOUNTING_V1.to_owned(),
-                authority: canonical_value,
-                authority_digest: lillux::sha256_hex(canonical.as_bytes()),
-                spend_bound,
-            }))
+                })
+                .map(Some)
         }
         (declared, produced) => Err(preparation_error(
             "financial_authority_mismatch",
@@ -1601,8 +2159,7 @@ fn validate_financial_authority(
                  produced {}",
                 match produced {
                     FinancialAuthorityResultWire::None => "none",
-                    FinancialAuthorityResultWire::ProviderAccountingAuthorityV1 { .. } =>
-                        "provider_accounting_authority_v1",
+                    FinancialAuthorityResultWire::Accounting { .. } => "accounting",
                 }
             ),
             LaunchPrepareErrorClass::Internal,

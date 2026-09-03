@@ -190,6 +190,18 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             });
         }
     };
+    let node_policy =
+        crate::node_descriptors::load_verified_policy_snapshot(&app_root).map_err(|error| {
+            CliError::Local {
+                detail: format!("load verified node policy: {error:#}"),
+            }
+        })?;
+    let command_registration = node_policy
+        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .map_err(|error| CliError::Local {
+            detail: format!("load command-registration policy: {error:#}"),
+        })?;
+    let command_registration_policy = command_registration.runtime_policy();
 
     // `--project` and `--no-project` are global selectors when written before
     // the command, while descriptor binding also accepts them after the
@@ -197,9 +209,27 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // so every dispatch path observes one data-driven project policy.
     let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
 
+    // Node-registered client handlers own local byte-oriented UX that cannot
+    // be represented as an `/execute` JSON result. The verified command is
+    // still only routing: the handler's signed daemon requests carry the
+    // operator authority and are independently authorized server-side.
+    if let Some(result) = try_dispatch_client_handler(
+        &dispatch_rest,
+        &app_root,
+        snapshot,
+        &command_registration_policy,
+    )
+    .await?
+    {
+        let mut presenter = Presenter::for_console(console);
+        print_result(result, &mut presenter, &cli.rest, 0)?;
+        return Ok(());
+    }
+
     // 5. Descriptor-driven offline dispatch.
-    //    For commands whose service descriptor declares availability: offline,
-    //    run the in-process handler. Returns None to fall through to daemon.
+    //    Local/stopped-node services run through the local descriptor path;
+    //    dual-mode services prefer the live daemon and fall back only when the
+    //    node is provably stopped. Returns None to fall through to daemon.
     let mut presenter = Presenter::for_console(console);
 
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
@@ -226,8 +256,12 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     //    service-schema `project` field, while global `-p/--project` before
     //    the command remains supported by clap above.
 
-    let mut resolved =
-        resolve_command_for_daemon(&dispatch_rest, snapshot, cli.project.as_deref())?;
+    let mut resolved = resolve_command_for_daemon(
+        &dispatch_rest,
+        snapshot,
+        &command_registration_policy,
+        cli.project.as_deref(),
+    )?;
     let mut presenter = Presenter::for_console(console);
     let item_ref_for_contract = resolved.item_ref.clone();
     normalize_resolved_parameters(
@@ -242,9 +276,14 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
         "parameters": resolved.parameters,
+        "validate_only": resolved.validate_only,
         "execution_policy": execution_policy_value(
             resolved.project_path.is_some(),
             resolved.async_launch,
+            resolved.pin_project_at_admission,
+            resolved.pin_current_head_at_admission,
+            resolved.retain_child_results,
+            resolved.exclude_operator_vault,
         ),
     });
     if let Some(project_path) = &resolved.project_path {
@@ -308,6 +347,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     let stream_live = should_stream_direct_execute(
         resolved.direct_execute,
         resolved.async_launch,
+        resolved.validate_only,
         resolved.state_root.is_some(),
         want_stream,
     );
@@ -327,8 +367,40 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     } else {
         "/execute"
     };
+    let launch_id = resolved
+        .async_launch
+        .then(|| format!("L-{}", uuid::Uuid::new_v4().simple()));
+    if let Some(launch_id) = launch_id.as_ref() {
+        body["launch_id"] = Value::String(launch_id.clone());
+        // Publish the recovery coordinate before network contact. If the CLI
+        // is interrupted after the daemon accepts but before it acknowledges,
+        // the terminal/log still retains the exact owner-bound lookup key.
+        console.info(&crate::tty::Diagnostic::info(format!(
+            "launch request coordinate (pending daemon acknowledgement): {launch_id}"
+        )))?;
+    }
     let rendered_lines = presenter.loading(&command_label, route_path)?;
-    let result = post_to_daemon(&app_root, route_path, &body).await?;
+    let result = match post_to_daemon(&app_root, route_path, &body).await {
+        Ok(result) => result,
+        Err(error) if launch_id.is_some() && accepted_launch_delivery_is_uncertain(&error) => {
+            let launch_id = launch_id.expect("guarded accepted launch id");
+            return Err(CliError::Local {
+                detail: format!(
+                    "{error}; launch acknowledgement was not received. Retain request coordinate {launch_id}: the request may still be in flight or accepted. Query the authenticated owner route GET /launches/{launch_id}; a missing status while the original request is still in flight does not prove rejection, so do not relaunch from that observation"
+                ),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(expected_launch_id) = launch_id.as_deref()
+        && result.get("launch_id").and_then(Value::as_str) != Some(expected_launch_id)
+    {
+        return Err(CliError::Local {
+            detail: format!(
+                "accepted launch response did not echo caller-retained request coordinate {expected_launch_id}; query the authenticated owner route GET /launches/{expected_launch_id}. Do not relaunch unless that exact request is known not to have been accepted"
+            ),
+        });
+    }
 
     // A service may resolve to a live stream rather than a buffered value: the
     // daemon mediates by returning a stream descriptor (the signed SSE route to
@@ -357,16 +429,124 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     Ok(())
 }
 
-fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
+async fn try_dispatch_client_handler(
+    rest: &[String],
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
+) -> Result<Option<Value>, CliError> {
+    let registry = CommandRegistry::from_records(&snapshot.commands, command_registration_policy)
+        .map_err(|error| CliError::Local {
+        detail: format!("load verified node commands: {error:#}"),
+    })?;
+    let Ok(matched) = registry.resolve(rest) else {
+        return Ok(None);
+    };
+    let CommandDispatch::LocalHandler { handler, .. } = &matched.command.dispatch else {
+        return Ok(None);
+    };
+    let parameters =
+        bind_command_parameters_for_daemon(&rest[matched.consumed..], &matched.command)?;
+    match handler.as_str() {
+        "artifact_export" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "artifact-export.yaml",
+            )?;
+            crate::client_handlers::export_artifact(app_root, &parameters)
+                .await
+                .map(Some)
+        }
+        other => Err(CliError::Local {
+            detail: format!("unknown verified local client handler `{other}`"),
+        }),
+    }
+}
+
+fn authorize_exact_core_client_handler(
+    command: &CommandDef,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    source_name: &str,
+) -> Result<(), CliError> {
+    let core = snapshot
+        .bundles
+        .iter()
+        .find(|bundle| bundle.name == "core")
+        .ok_or_else(|| CliError::Local {
+            detail: "node has no uniquely registered core bundle".to_string(),
+        })?;
+    if snapshot
+        .bundles
+        .iter()
+        .filter(|bundle| bundle.name == "core")
+        .count()
+        != 1
+    {
+        return Err(CliError::Local {
+            detail: "node has contradictory core bundle registrations".to_string(),
+        });
+    }
+    let expected = core.path.join(".ai/node/commands").join(source_name);
+    if command.provenance.origin != ryeos_runtime::CommandOrigin::InstalledBundle
+        || command.source_file != expected
+    {
+        return Err(CliError::Local {
+            detail: "local client handler authority is not the exact registered core command"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn accepted_launch_delivery_is_uncertain(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::Dispatch(crate::error::CliDispatchError::Transport(
+            crate::error::CliTransportError::Unreachable { .. }
+                | crate::error::CliTransportError::BodyDecode { .. }
+        ))
+    ) || matches!(
+        error,
+        CliError::Dispatch(crate::error::CliDispatchError::Transport(
+            crate::error::CliTransportError::HttpError { status, .. }
+        )) if *status == 408 || *status >= 500
+    )
+}
+
+fn execution_policy_value(
+    project_backed: bool,
+    accepted: bool,
+    pin_project_at_admission: bool,
+    pin_current_head_at_admission: bool,
+    retain_child_results: bool,
+    exclude_operator_vault: bool,
+) -> Value {
     let response = if accepted {
         ryeos_app::execution_policy::ExecutionResponse::Accepted
     } else {
         ryeos_app::execution_policy::ExecutionResponse::Wait
     };
-    let policy = if project_backed {
+    let policy = if pin_current_head_at_admission {
+        ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(response)
+    } else if pin_project_at_admission {
+        ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(response)
+    } else if project_backed {
         ryeos_app::execution_policy::ExecutionPolicy::local_live(response)
     } else {
         ryeos_app::execution_policy::ExecutionPolicy::projectless(response)
+    };
+    let policy = if retain_child_results {
+        policy
+            .retain_child_results()
+            .expect("CLI validates retained child results require a project")
+    } else {
+        policy
+    };
+    let policy = if exclude_operator_vault {
+        policy.exclude_operator_vault()
+    } else {
+        policy
     };
     serde_json::to_value(policy).expect("typed execution policy serialization cannot fail")
 }
@@ -374,10 +554,11 @@ fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
 fn should_stream_direct_execute(
     direct_execute: bool,
     async_launch: bool,
+    validate_only: bool,
     has_state_root: bool,
     want_stream: bool,
 ) -> bool {
-    direct_execute && !async_launch && !has_state_root && want_stream
+    direct_execute && !async_launch && !validate_only && !has_state_root && want_stream
 }
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
@@ -526,10 +707,7 @@ async fn follow_stream_descriptor(
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let headers = signer.sign("GET", path, &[], &discovered.principal_id)?;
-    let url = format!(
-        "{}{path}",
-        discovered.effective_base_url.trim_end_matches('/')
-    );
+    let url = format!("{}{path}", discovered.base_url.trim_end_matches('/'));
 
     let mut terminal: Option<Result<(), StreamTerminalFailure>> = None;
     presenter.stream_with_previous(
@@ -584,6 +762,20 @@ struct CliResolvedExecute {
     parameters: Value,
     project_path: Option<PathBuf>,
     async_launch: bool,
+    /// Capture the complete local project at admission and execute from a
+    /// retained daemon-owned COW generation.
+    pin_project_at_admission: bool,
+    /// Resolve the caller's principal project HEAD at admission and execute
+    /// from a retained daemon-owned COW generation.
+    pin_current_head_at_admission: bool,
+    /// Give project-backed child roots independent COW generations retained
+    /// for explicit owner disposition.
+    retain_child_results: bool,
+    /// Exclude the operator vault from project-environment resolution.
+    exclude_operator_vault: bool,
+    /// Typed command-dispatch intent. Validation uses the existing no-spawn
+    /// execution boundary and is never inferred from item parameters.
+    validate_only: bool,
     /// True when this is the `execute` command (`direct_execute_item_ref`) —
     /// the only path that streams a live execution log.
     direct_execute: bool,
@@ -610,6 +802,10 @@ struct CliResolvedExecute {
 #[derive(Default)]
 struct ResolvedControlFlags {
     async_launch: bool,
+    pin_project_at_admission: bool,
+    pin_current_head_at_admission: bool,
+    retain_child_results: bool,
+    exclude_operator_vault: bool,
     stream: Option<bool>,
     debug_raw: bool,
     call_method: Option<String>,
@@ -621,12 +817,13 @@ struct ResolvedControlFlags {
 fn resolve_command_for_daemon(
     rest: &[String],
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
     default_project: Option<&Path>,
 ) -> Result<CliResolvedExecute, CliError> {
     resolve_command_for_daemon_with_commands(
         rest,
         &snapshot.commands,
-        &snapshot.command_registration_policy.policy,
+        command_registration_policy,
         default_project,
     )
 }
@@ -666,6 +863,12 @@ fn resolve_command_for_daemon_with_commands(
         matched.command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
     );
+    let validate_only = match &matched.command.dispatch {
+        CommandDispatch::DirectExecuteItemRef { validate_only, .. } => *validate_only,
+        CommandDispatch::Group
+        | CommandDispatch::LocalHandler { .. }
+        | CommandDispatch::ExecuteRef { .. } => false,
+    };
     // Strip the command's DECLARED control flags (from data) and route them.
     // Commands that declare none get a no-op, so non-execute commands are
     // unaffected; the execute command declares --async/--method/--args/etc.
@@ -695,8 +898,54 @@ fn resolve_command_for_daemon_with_commands(
         CommandDispatch::DirectExecuteItemRef { .. } => &tail[1..],
         _ => &tail,
     };
+    crate::project_resolve::reject_bound_project_parameter_flag(
+        parameter_tail,
+        matched
+            .command
+            .project
+            .as_ref()
+            .and_then(|project| project.bind_parameter.as_deref()),
+    )?;
     let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
     let project_path = apply_project_policy(&matched.command, &mut parameters, default_project)?;
+    if control.pin_project_at_admission && project_path.is_none() {
+        return Err(CliError::Local {
+            detail:
+                "--pin-project requires a project root; it cannot be combined with --no-project"
+                    .to_string(),
+        });
+    }
+    if control.pin_current_head_at_admission && project_path.is_none() {
+        return Err(CliError::Local {
+            detail:
+                "--current-head requires a project root; it cannot be combined with --no-project"
+                    .to_string(),
+        });
+    }
+    if control.retain_child_results && project_path.is_none() {
+        return Err(CliError::Local {
+            detail: "--retain-child-results requires a project root; it cannot be combined with --no-project"
+                .to_string(),
+        });
+    }
+    if control.pin_project_at_admission && control.pin_current_head_at_admission {
+        return Err(CliError::Local {
+            detail: "capture-live and current-HEAD project sources are mutually exclusive"
+                .to_string(),
+        });
+    }
+    if control.pin_project_at_admission && control.state_root.is_some() {
+        return Err(CliError::Local {
+            detail: "--pin-project cannot be combined with --state-root; the pinned generation owns runtime state"
+                .to_string(),
+        });
+    }
+    if control.pin_current_head_at_admission && control.state_root.is_some() {
+        return Err(CliError::Local {
+            detail: "--current-head cannot be combined with --state-root; the pinned generation owns runtime state"
+                .to_string(),
+        });
+    }
     // Absolutize (not canonicalize — the daemon creates it on demand) the
     // state-root override against the CLI's cwd, which the daemon cannot see.
     let state_root = control
@@ -717,6 +966,11 @@ fn resolve_command_for_daemon_with_commands(
         parameters,
         project_path,
         async_launch: control.async_launch,
+        pin_project_at_admission: control.pin_project_at_admission,
+        pin_current_head_at_admission: control.pin_current_head_at_admission,
+        retain_child_results: control.retain_child_results,
+        exclude_operator_vault: control.exclude_operator_vault,
+        validate_only,
         direct_execute,
         stream: control.stream,
         debug_raw: control.debug_raw,
@@ -809,11 +1063,12 @@ fn strip_declared_control_flags(
     declared: &[ryeos_runtime::CommandControlFlag],
 ) -> Result<ResolvedControlFlags, CliError> {
     use ryeos_runtime::ControlFlagBinding as Bind;
-    let mut routes: std::collections::HashMap<&str, Bind> = std::collections::HashMap::new();
+    let mut routes: std::collections::HashMap<&str, &ryeos_runtime::CommandControlFlag> =
+        std::collections::HashMap::new();
     for cf in declared {
-        routes.insert(cf.flag.as_str(), cf.binding);
+        routes.insert(cf.flag.as_str(), cf);
         for alias in &cf.aliases {
-            routes.insert(alias.as_str(), cf.binding);
+            routes.insert(alias.as_str(), cf);
         }
     }
 
@@ -829,10 +1084,11 @@ fn strip_declared_control_flags(
             Some((name, value)) => (name, Some(value.to_string())),
             None => (rest, None),
         };
-        let Some(&binding) = routes.get(name) else {
+        let Some(&control_flag) = routes.get(name) else {
             out.push(token);
             continue;
         };
+        let binding = control_flag.binding;
         if binding.takes_value() {
             let value = match inline {
                 Some(value) => value,
@@ -850,10 +1106,12 @@ fn strip_declared_control_flags(
                 }
                 Bind::StateRoot => flags.state_root = Some(value),
                 Bind::RefBinding => {
-                    let (binding_name, item_ref) =
-                        value.split_once('=').ok_or_else(|| CliError::Local {
+                    let (binding_name, item_ref) = match control_flag.ref_binding_name.as_deref() {
+                        Some(binding_name) => (binding_name, value.as_str()),
+                        None => value.split_once('=').ok_or_else(|| CliError::Local {
                             detail: format!("--{name} requires name=canonical-ref, got '{value}'"),
-                        })?;
+                        })?,
+                    };
                     validate_ref_binding_name(binding_name)?;
                     if item_ref.is_empty() {
                         return Err(CliError::Local {
@@ -902,6 +1160,10 @@ fn strip_declared_control_flags(
             }
             match binding {
                 Bind::LaunchModeAccepted => flags.async_launch = true,
+                Bind::PinProjectAtAdmission => flags.pin_project_at_admission = true,
+                Bind::PinCurrentHeadAtAdmission => flags.pin_current_head_at_admission = true,
+                Bind::RetainChildResults => flags.retain_child_results = true,
+                Bind::ExcludeOperatorVault => flags.exclude_operator_vault = true,
                 Bind::DebugRaw => flags.debug_raw = true,
                 Bind::StreamOn => {
                     if flags.stream == Some(false) {
@@ -1051,6 +1313,15 @@ fn apply_project_policy(
     let obj = parameters.as_object_mut().ok_or_else(|| {
         CliError::ProjectResolution("command parameters must be a JSON object".into())
     })?;
+    if let Some(bind_parameter) = project.bind_parameter.as_ref()
+        && bind_parameter != "project"
+        && obj.contains_key(bind_parameter)
+    {
+        return Err(CliError::ProjectResolution(format!(
+            "--{} is runtime-bound from the command's project selector; use --project <path> instead",
+            bind_parameter.replace('_', "-")
+        )));
+    }
     let no_project = obj
         .remove("no_project")
         .and_then(|value| value.as_bool())
@@ -1301,15 +1572,14 @@ async fn post_to_daemon(
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
 
-    // Discover the daemon's principal_id (audience) and the effective base URL
-    // after any redirects. Signed dispatch targets that base directly — never
-    // a redirect, which could downgrade the POST and break the signature.
+    // Discover the daemon's principal_id at the exact validated base URL.
+    // Discovery and signed dispatch both refuse redirects.
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
     let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
 
-    let url = format!("{}{}", discovered.effective_base_url, route_path);
+    let url = format!("{}{}", discovered.base_url, route_path);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
 }
@@ -1334,7 +1604,7 @@ async fn post_to_daemon_streaming(
     let route_path = "/execute/stream";
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
     let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
-    let url = format!("{}{route_path}", discovered.effective_base_url);
+    let url = format!("{}{route_path}", discovered.base_url);
 
     // Track the explicit terminal outcome: `Some(Ok)` success, `Some(Err)`
     // failure, `None` means the stream ended without any terminal event.
@@ -1399,7 +1669,7 @@ async fn post_to_daemon_streaming(
     })?;
     let result_path = format!("/threads/{tid}");
     let headers = signer.sign("GET", &result_path, &[], &discovered.principal_id)?;
-    let url = format!("{}{result_path}", discovered.effective_base_url);
+    let url = format!("{}{result_path}", discovered.base_url);
     let payload = crate::transport::http::get_json(&url, &headers)
         .await
         .map_err(|e| CliError::Local {
@@ -1437,11 +1707,12 @@ fn thread_get_payload_to_execute_result(payload: Value) -> Value {
 }
 
 fn print_result(
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
     presenter: &mut Presenter,
     command_tokens: &[String],
     previous_lines: usize,
 ) -> Result<(), CliError> {
+    surface_continuation_identity(&mut payload);
     let command = command_tokens.join(" ");
     let machine_failure = crate::tty::structured_result_failure(&payload);
     match presenter.structured_result(&command, &payload, previous_lines)? {
@@ -1471,6 +1742,50 @@ fn print_result(
     match machine_failure {
         Some(detail) => Err(CliError::Reported { detail }),
         None => Ok(()),
+    }
+}
+
+/// `/execute` returns durable thread identity beside the authored result. The
+/// plain CLI normally unwraps that result for script-friendly output, but doing
+/// so for a continued segment would discard the only exact way to follow its
+/// successor. Copy only the continuation coordinates into the displayed result;
+/// they remain presentation evidence and never enter execution/effect records.
+fn surface_continuation_identity(payload: &mut Value) {
+    let Some((is_continued, thread_id, chain_root_id, successor_thread_id)) = payload
+        .get("thread")
+        .and_then(Value::as_object)
+        .map(|thread| {
+            (
+                thread.get("status").and_then(Value::as_str) == Some("continued"),
+                thread.get("thread_id").cloned(),
+                thread.get("chain_root_id").cloned(),
+                thread
+                    .get("successor_thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+        })
+    else {
+        return;
+    };
+    if !is_continued {
+        return;
+    }
+
+    let Some(result) = payload.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(thread_id) = thread_id {
+        result.insert("thread_id".to_string(), thread_id);
+    }
+    if let Some(chain_root_id) = chain_root_id {
+        result.insert("chain_root_id".to_string(), chain_root_id);
+    }
+    if let Some(successor_thread_id) = successor_thread_id {
+        result.insert(
+            "successor_thread_id".to_string(),
+            Value::String(successor_thread_id),
+        );
     }
 }
 
@@ -1514,11 +1829,111 @@ mod tests {
         // Project selection is deliberately absent from this decision: both
         // project-backed and projectless direct execution use the same live
         // route when the execution controls permit it.
-        assert!(should_stream_direct_execute(true, false, false, true));
-        assert!(!should_stream_direct_execute(false, false, false, true));
-        assert!(!should_stream_direct_execute(true, true, false, true));
-        assert!(!should_stream_direct_execute(true, false, true, true));
-        assert!(!should_stream_direct_execute(true, false, false, false));
+        assert!(should_stream_direct_execute(
+            true, false, false, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            false, false, false, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, true, false, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, false, true, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, false, false, true, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn accepted_launch_reports_coordinate_only_for_uncertain_delivery() {
+        use crate::error::{CliDispatchError, CliTransportError};
+
+        assert!(accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+            CliDispatchError::Transport(CliTransportError::Unreachable {
+                bind: "http://127.0.0.1:7400/execute/launch".to_string(),
+                detail: "connection closed".to_string(),
+            })
+        )));
+        assert!(accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+            CliDispatchError::Transport(CliTransportError::BodyDecode {
+                detail: "empty body".to_string(),
+            })
+        )));
+        for status in [408, 500, 504] {
+            assert!(accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+                CliDispatchError::Transport(CliTransportError::HttpError {
+                    status,
+                    body: "uncertain".to_string(),
+                })
+            )));
+        }
+        assert!(!accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+            CliDispatchError::Transport(CliTransportError::HttpError {
+                status: 400,
+                body: "refused".to_string(),
+            })
+        )));
+        assert!(!accepted_launch_delivery_is_uncertain(&CliError::Local {
+            detail: "request never submitted".to_string(),
+        }));
+    }
+
+    #[test]
+    fn continued_plain_result_retains_exact_chain_coordinates() {
+        let mut payload = serde_json::json!({
+            "thread": {
+                "thread_id": "T-root",
+                "chain_root_id": "T-root",
+                "status": "continued",
+                "successor_thread_id": "T-successor"
+            },
+            "result": {
+                "success": false,
+                "status": "continued",
+                "result": null
+            }
+        });
+
+        surface_continuation_identity(&mut payload);
+
+        assert_eq!(
+            payload.pointer("/result/thread_id"),
+            Some(&serde_json::json!("T-root"))
+        );
+        assert_eq!(
+            payload.pointer("/result/chain_root_id"),
+            Some(&serde_json::json!("T-root"))
+        );
+        assert_eq!(
+            payload.pointer("/result/successor_thread_id"),
+            Some(&serde_json::json!("T-successor"))
+        );
+        assert_eq!(
+            payload.pointer("/result/status"),
+            Some(&serde_json::json!("continued"))
+        );
+    }
+
+    #[test]
+    fn ordinary_terminal_result_is_not_given_execution_identity() {
+        let mut payload = serde_json::json!({
+            "thread": {
+                "thread_id": "T-complete",
+                "chain_root_id": "T-complete",
+                "status": "completed",
+                "successor_thread_id": null
+            },
+            "result": {"answer": 42}
+        });
+
+        let original = payload.clone();
+        surface_continuation_identity(&mut payload);
+        assert_eq!(payload, original);
     }
 
     #[test]
@@ -1540,11 +1955,15 @@ mod tests {
         let mut tail = vec![
             "item:x".to_string(),
             "--async".to_string(),
+            "--retain-child-results".to_string(),
+            "--no-operator-vault".to_string(),
             "--no-stream".to_string(),
             "--keep".to_string(),
         ];
         let flags = strip_declared_control_flags(&mut tail, &cf).unwrap();
         assert!(flags.async_launch);
+        assert!(flags.retain_child_results);
+        assert!(flags.exclude_operator_vault);
         assert_eq!(flags.stream, Some(false));
         // Non-control tokens survive untouched.
         assert_eq!(tail, vec!["item:x".to_string(), "--keep".to_string()]);
@@ -1698,6 +2117,42 @@ mod tests {
     }
 
     #[test]
+    fn declared_input_overlays_positional_identity_slots() {
+        let mut cmd = command(
+            &["worker", "command"],
+            vec![vec![
+                ("session_id", CommandArgumentKind::String),
+                ("idempotency_key", CommandArgumentKind::String),
+                ("route_id", CommandArgumentKind::String),
+            ]],
+            CommandProjectResolution::None,
+        );
+        cmd.parameter_binding = Some(ryeos_runtime::CommandParameterBinding {
+            mode: ryeos_runtime::CommandParameterBindingMode::TailObject,
+            input_flag: Some("input".into()),
+            single_json_object_arg: true,
+            flag_key_normalization: ryeos_runtime::FlagKeyNormalization::HyphenToUnderscore,
+        });
+        let tail = s(&[
+            "T-one",
+            "command-one",
+            "session.start",
+            "--input",
+            r#"{"payload":{}}"#,
+        ]);
+
+        let bound = crate::arg_bind::bind_declared_shortcuts(&tail, &cmd)
+            .expect("declared input binding")
+            .expect("declared input shortcut");
+        assert_eq!(bound["session_id"], "T-one");
+        assert_eq!(bound["idempotency_key"], "command-one");
+        assert_eq!(bound["route_id"], "session.start");
+        assert_eq!(bound["payload"], serde_json::json!({}));
+        assert!(bound.get("input").is_none());
+        assert!(bound.get("_args").is_none());
+    }
+
+    #[test]
     fn strip_project_control_flags_removes_all_forms() {
         // bare `-p`/`--project` consume their following value
         assert_eq!(
@@ -1745,42 +2200,88 @@ mod tests {
                 flag: "async".into(),
                 help: "Accepted/background launch; returns a thread_id".into(),
                 binding: B::LaunchModeAccepted,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "stream".into(),
                 help: "Force the live execution stream on".into(),
                 binding: B::StreamOn,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "no-stream".into(),
                 help: "Print the buffered JSON result instead of streaming".into(),
                 binding: B::StreamOff,
+                ref_binding_name: None,
                 aliases: vec!["json".into()],
             },
             F {
                 flag: "debug-raw".into(),
                 help: "Attach a debug block to the result".into(),
                 binding: B::DebugRaw,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
+                flag: "pin-project".into(),
+                help: "Capture the project at admission and execute from a retained COW generation"
+                    .into(),
+                binding: B::PinProjectAtAdmission,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
+                flag: "current-head".into(),
+                help:
+                    "Execute from the current principal project HEAD in a retained COW generation"
+                        .into(),
+                binding: B::PinCurrentHeadAtAdmission,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
+                flag: "retain-child-results".into(),
+                help: "Retain independent private COW results for project-backed child roots"
+                    .into(),
+                binding: B::RetainChildResults,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
+                flag: "no-operator-vault".into(),
+                help: "Exclude the operator vault from project-environment authority".into(),
+                binding: B::ExcludeOperatorVault,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "method".into(),
                 help: "Method selector for method-dispatch kinds (call.method)".into(),
                 binding: B::CallMethod,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "args".into(),
                 help: "Method args as a JSON object (call.args)".into(),
                 binding: B::CallArgs,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
+                flag: "state-root".into(),
+                help: "Place runtime state under an explicit path".into(),
+                binding: B::StateRoot,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "ref-binding".into(),
                 help: "Bind a secondary execution ref".into(),
                 binding: B::RefBinding,
+                ref_binding_name: None,
                 aliases: vec![],
             },
         ]
@@ -1821,6 +2322,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fixed_ref_binding_flag_routes_its_value_under_the_declared_name() {
+        use ryeos_runtime::{CommandControlFlag as F, ControlFlagBinding as B};
+        let controls = [F {
+            flag: "environment".into(),
+            help: "Select environment".into(),
+            binding: B::RefBinding,
+            ref_binding_name: Some("environment".into()),
+            aliases: vec![],
+        }];
+        let mut tail = s(&[
+            "profile",
+            "--environment",
+            "config:codex/environments/default",
+        ]);
+        let flags = strip_declared_control_flags(&mut tail, &controls).unwrap();
+        assert_eq!(tail, s(&["profile"]));
+        assert_eq!(
+            flags.ref_bindings.get("environment").map(String::as_str),
+            Some("config:codex/environments/default")
+        );
+    }
+
     fn direct_execute_command() -> CommandDef {
         CommandDef {
             name: "execute".into(),
@@ -1853,6 +2377,7 @@ mod tests {
             }),
             dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                 item_ref_arg: "item_ref".into(),
+                validate_only: false,
                 availability: ryeos_runtime::CommandAvailability::Both,
             },
             source_file: PathBuf::new(),
@@ -1861,9 +2386,41 @@ mod tests {
     }
 
     #[test]
+    fn local_artifact_handler_requires_exact_registered_core_command() {
+        let root = tempfile::tempdir().unwrap();
+        let core = root.path().join("core");
+        let expected = core.join(".ai/node/commands/artifact-export.yaml");
+        let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            bundles: vec![ryeos_app::node_config::BundleRecord {
+                name: "core".into(),
+                path: core,
+                source_file: root.path().join("core-registration.yaml"),
+            }],
+            routes: Vec::new(),
+            commands: Vec::new(),
+        };
+        let mut command = direct_execute_command();
+        command.source_file = expected;
+        command.provenance.origin = ryeos_runtime::CommandOrigin::InstalledBundle;
+        authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml").unwrap();
+
+        command.provenance.origin = ryeos_runtime::CommandOrigin::SourceLocal;
+        assert!(
+            authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml")
+                .is_err()
+        );
+        command.provenance.origin = ryeos_runtime::CommandOrigin::InstalledBundle;
+        command.source_file = root.path().join("other/artifact-export.yaml");
+        assert!(
+            authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn live_project_execute_is_daemon_owned_and_restart_recoverable() {
-        let wait = execution_policy_value(true, false);
-        let accepted = execution_policy_value(true, true);
+        let wait = execution_policy_value(true, false, false, false, false, false);
+        let accepted = execution_policy_value(true, true, false, false, false, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
@@ -1876,8 +2433,8 @@ mod tests {
 
     #[test]
     fn projectless_execute_can_be_restart_recoverable() {
-        let wait = execution_policy_value(false, false);
-        let accepted = execution_policy_value(false, true);
+        let wait = execution_policy_value(false, false, false, false, false, false);
+        let accepted = execution_policy_value(false, true, false, false, false, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
@@ -1885,6 +2442,57 @@ mod tests {
         }
         assert_eq!(wait["response"], "wait");
         assert_eq!(accepted["response"], "accepted");
+    }
+
+    #[test]
+    fn pinned_local_execute_captures_to_cow_and_retains_result() {
+        let policy = execution_policy_value(true, false, true, false, false, false);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "restart_recoverable");
+        assert_eq!(policy["project"]["kind"], "pinned");
+        assert_eq!(policy["project"]["source"]["kind"], "capture_live");
+        assert_eq!(policy["project"]["source"]["scope"], "full_project");
+        assert_eq!(policy["project"]["realization"]["kind"], "cow");
+        assert_eq!(
+            policy["project"]["realization"]["terminal_publication"]["kind"],
+            "retain_result"
+        );
+    }
+
+    #[test]
+    fn pinned_current_head_execute_retains_exact_publication_boundary() {
+        let policy = execution_policy_value(true, true, false, true, false, false);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "restart_recoverable");
+        assert_eq!(policy["response"], "accepted");
+        assert_eq!(policy["project"]["kind"], "pinned");
+        assert_eq!(policy["project"]["source"]["kind"], "current_head");
+        assert_eq!(policy["project"]["realization"]["kind"], "cow");
+        assert_eq!(
+            policy["project"]["realization"]["terminal_publication"]["kind"],
+            "retain_current_head"
+        );
+    }
+
+    #[test]
+    fn retained_child_results_compile_to_private_cow_without_head_grant() {
+        let policy = execution_policy_value(true, true, false, true, true, false);
+        assert_eq!(policy["project"]["child_policy"]["kind"], "pin_at_spawn");
+        assert_eq!(
+            policy["project"]["child_policy"]["realization"],
+            "cow_retain_result"
+        );
+        assert_eq!(
+            policy["project"]["realization"]["terminal_publication"]["kind"],
+            "retain_current_head"
+        );
+    }
+
+    #[test]
+    fn operator_vault_can_be_explicitly_removed_from_project_environment() {
+        let policy = execution_policy_value(true, true, false, true, true, true);
+        assert_eq!(policy["environment"]["kind"], "project_overlay");
+        assert_eq!(policy["environment"]["include_operator_vault"], false);
     }
 
     #[test]
@@ -1938,6 +2546,28 @@ mod tests {
     }
 
     #[test]
+    fn direct_execute_preserves_typed_validation_intent() {
+        let mut command = direct_execute_command();
+        let ryeos_runtime::CommandDispatch::DirectExecuteItemRef { validate_only, .. } =
+            &mut command.dispatch
+        else {
+            panic!("fixture must use direct_execute_item_ref");
+        };
+        *validate_only = true;
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "graph:test/run"]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(resolved.validate_only);
+        assert!(resolved.parameters.get("validate").is_none());
+    }
+
+    #[test]
     fn direct_execute_uses_global_project_default() {
         let tmp = tempfile::tempdir().unwrap();
         let commands = vec![direct_execute_command()];
@@ -1951,6 +2581,166 @@ mod tests {
 
         assert_eq!(resolved.item_ref, "tool:test/run");
         assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn runtime_bound_project_parameter_cannot_override_project_selector() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut command = direct_execute_command();
+        command.project.as_mut().unwrap().bind_parameter = Some("project_path".into());
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--project-path",
+                "/tmp/other-project",
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        ) {
+            Ok(_) => panic!("injected runtime project binding must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("--project-path is a runtime-bound service field")
+        );
+    }
+
+    #[test]
+    fn project_named_binding_accepts_canonical_project_selector() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut command = command(
+            &["remote", "push"],
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Required,
+        );
+        command.project.as_mut().unwrap().bind_parameter = Some("project".into());
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "remote",
+                "push",
+                "hosted",
+                "--project",
+                &tmp.path().to_string_lossy(),
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.project_path, None);
+        assert_eq!(resolved.parameters["remote"], "hosted");
+        assert_eq!(
+            resolved.parameters["project"],
+            tmp.path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+    }
+
+    #[test]
+    fn direct_execute_pin_project_is_typed_control_not_item_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--pin-project",
+                "graph:test/run",
+                "--profile",
+                "fast",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+
+        assert!(resolved.pin_project_at_admission);
+        assert!(!resolved.pin_current_head_at_admission);
+        assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+        assert_eq!(resolved.parameters["profile"], "fast");
+        assert!(resolved.parameters.get("pin_project").is_none());
+    }
+
+    #[test]
+    fn direct_execute_current_head_is_typed_control_not_item_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--current-head",
+                "graph:test/run",
+                "--profile",
+                "fast",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+
+        assert!(!resolved.pin_project_at_admission);
+        assert!(resolved.pin_current_head_at_admission);
+        assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+        assert_eq!(resolved.parameters["profile"], "fast");
+        assert!(resolved.parameters.get("current_head").is_none());
+    }
+
+    #[test]
+    fn direct_execute_pin_project_requires_project_authority() {
+        let commands = vec![direct_execute_command()];
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--pin-project", "graph:test/run", "--no-project"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        ) {
+            Ok(_) => panic!("projectless pinned execution must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("--pin-project requires a project root")
+        );
+    }
+
+    #[test]
+    fn direct_execute_pin_project_refuses_caller_owned_state_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--pin-project",
+                "--state-root",
+                ".runtime",
+                "graph:test/run",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        ) {
+            Ok(_) => panic!("pinned execution with caller-owned state must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("--pin-project cannot be combined with --state-root")
+        );
     }
 
     #[test]
@@ -2196,6 +2986,73 @@ mod tests {
                 "/tmp",
             ])
         );
+    }
+
+    #[test]
+    fn signed_remote_execute_command_binds_qualification_objects() {
+        let mut command: CommandDef = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/remote-execute.yaml"
+        )))
+        .expect("signed remote-execute command descriptor");
+        command.name = "remote-execute".to_string();
+        let project = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "remote",
+                "execute",
+                "stronger",
+                "tool:qualification/run",
+                "--ref-bindings",
+                r#"{"model":"worker:models/qualified"}"#,
+                "--parameters",
+                r#"{"probe":true}"#,
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(project.path()),
+        )
+        .unwrap();
+        let service: Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/services/remote/execute.yaml"
+        )))
+        .expect("signed remote-execute service descriptor");
+        let contract = InvocationInputContract::from_lightweight_schema_value(&service["schema"])
+            .unwrap()
+            .unwrap();
+        let parameters = ryeos_runtime::arg_binder::normalize_params_with_contract(
+            resolved.parameters,
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.item_ref, "service:remote/execute");
+        assert!(resolved.ref_bindings.is_empty());
+        assert_eq!(parameters["remote"], "stronger");
+        assert_eq!(parameters["item_ref"], "tool:qualification/run");
+        assert_eq!(
+            parameters["ref_bindings"],
+            serde_json::json!({"model": "worker:models/qualified"})
+        );
+        assert_eq!(parameters["parameters"], serde_json::json!({"probe": true}));
+        assert_eq!(parameters["execution_policy"]["schema_version"], 2);
+        assert_eq!(
+            parameters["execution_policy"]["project"]["source"]["scope"],
+            "full_project"
+        );
+        assert_eq!(
+            parameters["project"],
+            project
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(parameters.get("no_stream").is_none());
+        assert!(parameters.get("_args").is_none());
     }
 
     #[test]

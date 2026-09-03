@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-03T06:49:26Z:ecf23d244d5384382e58371618fd3b4dcf64f0761c031ee6af543ba6e6035922:SQAyTjc3UNIe/UOkk/EVwSLxb2YTFERE0b+sB351zXh+3giY/OcC4Q4hT+4zHlGpdmWmvwVFFiuT3EwC3sK5CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-01T00:15:48Z:35a31f321759af37f5af4b1755b80774a1680bfff94a21c8382812badef04c9e:5BNKvD+MgtyP2hjfgELhBncg4GRVzVeTjsC3OE/MMfLvaqK5GP312KlZHfxErCQ880Y3znWn5rHVXScO06q6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-runtime
-abi_version: "v2"
+abi_version: "v3"
+native_resume: true
 required_caps:
   - runtime.execute
 launch_contract:
@@ -69,8 +70,24 @@ launch_contract:
         - trusted_bundle
         - trusted_project
         - trusted_node
+  execution_dependencies:
+    max_dependencies: 1
+    allowed_kinds:
+      - worker
+    allowed_spaces:
+      - bundle
+    allowed_trust:
+      - trusted_bundle
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
   financial_authority:
-    kind: provider_accounting_authority_v1
+    kind: accounting
+  external_effect_authority:
+    kind: external
   secret_policy:
     max_requirements: 4
     allowed_names:

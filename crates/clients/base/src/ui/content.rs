@@ -105,6 +105,10 @@ pub struct ViewBinding {
     pub sections: Vec<SectionBinding>,
     #[serde(default)]
     pub refresh: Value,
+    /// Shared renderer-neutral field controls. The complete mapping composes
+    /// atomically so a child cannot inherit half of a cursor authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_state: Option<FieldStateBinding>,
     /// The view item's canonical ref (provenance chrome).
     #[serde(default)]
     pub view_ref: Option<String>,
@@ -180,6 +184,55 @@ pub struct SelectionBinding {
     pub change: Option<String>,
     #[serde(default)]
     pub activate: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldStateBinding {
+    pub cursor_scope: FieldCursorScopeBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldCursorScopeBinding {
+    pub id: String,
+    pub subject: Vec<String>,
+}
+
+impl FieldCursorScopeBinding {
+    fn validate(&self) -> Result<(), String> {
+        let mut chars = self.id.bytes();
+        if self.id.len() > 64
+            || !chars.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            || !chars.all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            return Err("field cursor scope id must match [a-z][a-z0-9_-]{0,63}".to_string());
+        }
+        if self.subject.is_empty() || self.subject.len() > 16 {
+            return Err("field cursor scope subject must contain 1..=16 bindings".to_string());
+        }
+        let mut seen = BTreeSet::new();
+        for binding in &self.subject {
+            let Some(path) = binding.strip_prefix("@facet:") else {
+                return Err(format!(
+                    "field cursor scope subject binding `{binding}` is not a facet binding"
+                ));
+            };
+            if path.is_empty()
+                || binding.len() > 256
+                || binding.trim() != binding
+                || binding.chars().any(char::is_control)
+                || !seen.insert(binding)
+            {
+                return Err(
+                    "field cursor scope subject bindings must be bounded and unique".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A singular transient input buffer declared on a view binding. Not a
@@ -1229,7 +1282,38 @@ fn source_contract_error(binding: &ViewBinding) -> Option<String> {
             ));
         }
     }
+    if let Some(field_state) = &binding.field_state {
+        if binding.widget != "field" {
+            return Some("field_state is valid only on field views".to_string());
+        }
+        if let Err(error) = field_state.cursor_scope.validate() {
+            return Some(error);
+        }
+        if !binding
+            .sources
+            .values()
+            .any(|source| value_contains_exact_string(&source.params, "@field:cursor"))
+        {
+            return Some(
+                "field cursor scope requires a source cursor parameter bound to @field:cursor"
+                    .to_string(),
+            );
+        }
+    }
     None
+}
+
+fn value_contains_exact_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(value) => value == needle,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_exact_string(value, needle)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_exact_string(value, needle)),
+        _ => false,
+    }
 }
 
 /// Semantic validation: a `target:` declaration is only meaningful on an
@@ -1254,36 +1338,60 @@ pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
 /// single hint kind or a list of hint kinds.
 pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
 
-/// Returns a degradation reason when a `refresh:` rule names a key outside the
-/// known set — a typo (e.g. `on_face`) that would otherwise silently never
-/// refresh. Surfaced as the same class of binding error the parser produces, so
-/// the tile shows the mistake instead of quietly not updating.
+/// Returns a degradation reason when a `refresh:` rule is not the closed
+/// mapping grammar. Shape, keys, and values all fail visibly; an authored
+/// scalar or malformed trigger must never become a silently inert liveness
+/// policy.
 pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
-    let invalid_keys = |refresh: &Value| {
-        refresh
-            .as_object()
-            .into_iter()
-            .flat_map(|object| object.keys())
+    let rule_error = |scope: &str, refresh: &Value| {
+        if refresh.is_null() {
+            return None;
+        }
+        let Some(object) = refresh.as_object() else {
+            return Some(format!("invalid {scope} refresh: expected a mapping"));
+        };
+        let unknown = object
+            .keys()
             .filter(|key| !REFRESH_KEYS.contains(&key.as_str()))
             .cloned()
-            .collect::<Vec<_>>()
-    };
-    let unknown = invalid_keys(&binding.refresh);
-    if !unknown.is_empty() {
-        return Some(format!(
-            "invalid view binding: unknown refresh key(s) {}; expected one of: {}",
-            unknown.join(", "),
-            REFRESH_KEYS.join(", ")
-        ));
-    }
-    for (channel, source) in &binding.sources {
-        let unknown = invalid_keys(&source.refresh);
+            .collect::<Vec<_>>();
         if !unknown.is_empty() {
             return Some(format!(
-                "invalid source '{channel}' refresh key(s) {}; expected one of: {}",
+                "invalid {scope} refresh key(s) {}; expected one of: {}",
                 unknown.join(", "),
                 REFRESH_KEYS.join(", ")
             ));
+        }
+        if object
+            .get("on_facet")
+            .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+        {
+            return Some(format!(
+                "invalid {scope} refresh.on_facet: expected a non-empty string"
+            ));
+        }
+        if let Some(value) = object.get("on_hint") {
+            let valid = value.as_str().is_some_and(|value| !value.is_empty())
+                || value.as_array().is_some_and(|values| {
+                    !values.is_empty()
+                        && values
+                            .iter()
+                            .all(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                });
+            if !valid {
+                return Some(format!(
+                    "invalid {scope} refresh.on_hint: expected a non-empty string or list of non-empty strings"
+                ));
+            }
+        }
+        None
+    };
+    if let Some(error) = rule_error("view binding", &binding.refresh) {
+        return Some(error);
+    }
+    for (channel, source) in &binding.sources {
+        if let Some(error) = rule_error(&format!("source '{channel}'"), &source.refresh) {
+            return Some(error);
         }
     }
     None
@@ -1349,36 +1457,38 @@ pub fn resolve_affordance_invoke(
         return None;
     }
     let invoke = affordance.get("invoke")?;
-    // A producer knowing the placeholder namespace is not enough: the
-    // selected record must actually contain every declared value. Treat an
-    // unresolved path as a non-activation so a null selection never erases a
-    // previously valid facet and strands its dependent source unfetched.
-    for field in ["value", "merge", "args"] {
-        if invoke
-            .get(field)
-            .is_some_and(|template| has_unresolved_placeholder(template, payload))
-        {
-            return None;
-        }
-    }
     match invoke.get("plane").and_then(Value::as_str)? {
-        "ui" => Some(AffordanceInvoke::Ui {
-            facet: invoke.get("facet").and_then(Value::as_str)?.to_string(),
-            value: invoke
-                .get("value")
-                .map(|value| substitute_payload(value, payload)),
-            merge: invoke
-                .get("merge")
-                .map(|merge| substitute_payload(merge, payload)),
-            open_view: invoke
-                .get("open_view")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            drill: invoke
-                .get("drill")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }),
+        "ui" => {
+            // Facet writes are local state replacement/merge operations. A
+            // missing runtime value must refuse the activation so it cannot
+            // erase valid routing state with null. Service arguments differ:
+            // their signed service schema owns required-vs-optional fields.
+            for field in ["value", "merge"] {
+                if invoke
+                    .get(field)
+                    .is_some_and(|template| has_unresolved_placeholder(template, payload))
+                {
+                    return None;
+                }
+            }
+            Some(AffordanceInvoke::Ui {
+                facet: invoke.get("facet").and_then(Value::as_str)?.to_string(),
+                value: invoke
+                    .get("value")
+                    .map(|value| substitute_payload(value, payload)),
+                merge: invoke
+                    .get("merge")
+                    .map(|merge| substitute_payload(merge, payload)),
+                open_view: invoke
+                    .get("open_view")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                drill: invoke
+                    .get("drill")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        }
         "rye" => {
             // A `ref:` selects the service-invocation form (args → `/execute`
             // parameters); otherwise it's grammar-token dispatch.
@@ -1467,6 +1577,46 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
         };
         out.insert(view_ref.clone(), binding);
     }
+    let mut declared = BTreeMap::<String, Vec<String>>::new();
+    let mut divergent = BTreeSet::new();
+    for binding in out.values() {
+        let Some(scope) = binding
+            .field_state
+            .as_ref()
+            .map(|state| &state.cursor_scope)
+        else {
+            continue;
+        };
+        match declared.get(&scope.id) {
+            Some(subject) if subject != &scope.subject => {
+                divergent.insert(scope.id.clone());
+            }
+            Some(_) => {}
+            None => {
+                declared.insert(scope.id.clone(), scope.subject.clone());
+            }
+        }
+    }
+    for binding in out.values_mut() {
+        if let Some(scope) = binding
+            .field_state
+            .as_ref()
+            .map(|state| &state.cursor_scope)
+            && divergent.contains(&scope.id)
+        {
+            let view_ref = binding
+                .view_ref
+                .clone()
+                .unwrap_or_else(|| "view".to_string());
+            *binding = ViewBinding::degraded(
+                &view_ref,
+                format!(
+                    "field cursor scope `{}` has divergent subject declarations",
+                    scope.id
+                ),
+            );
+        }
+    }
     out
 }
 
@@ -1474,6 +1624,80 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn field_cursor_scope_is_strict_and_requires_a_cursor_bound_field_source() {
+        let valid: ViewBinding = serde_json::from_value(json!({
+            "widget": "field",
+            "sources": {
+                "execution": {
+                    "ref": "service:test/field",
+                    "params": {"cursor": "@field:cursor"}
+                }
+            },
+            "field_state": {
+                "cursor_scope": {
+                    "id": "solve-replay",
+                    "subject": ["@facet:selection.thread_id"]
+                }
+            }
+        }))
+        .unwrap();
+        assert!(source_contract_error(&valid).is_none());
+
+        let mut no_cursor = valid.clone();
+        no_cursor.sources.get_mut("execution").unwrap().params = json!({});
+        assert!(
+            source_contract_error(&no_cursor)
+                .unwrap()
+                .contains("@field:cursor")
+        );
+
+        let mut malformed = valid;
+        malformed.field_state.as_mut().unwrap().cursor_scope.subject =
+            vec!["selection.thread_id".to_string()];
+        assert!(
+            source_contract_error(&malformed)
+                .unwrap()
+                .contains("facet binding")
+        );
+    }
+
+    #[test]
+    fn one_scope_id_cannot_claim_divergent_subjects_on_the_same_surface() {
+        let views = views_from_surface(Some(&json!({
+            "views": {
+                "view:test/one": {
+                    "widget": "field",
+                    "sources": {"default": {
+                        "ref": "service:test/one",
+                        "params": {"cursor": "@field:cursor"}
+                    }},
+                    "field_state": {"cursor_scope": {
+                        "id": "shared",
+                        "subject": ["@facet:selection.thread_id"]
+                    }}
+                },
+                "view:test/two": {
+                    "widget": "field",
+                    "sources": {"default": {
+                        "ref": "service:test/two",
+                        "params": {"cursor": "@field:cursor"}
+                    }},
+                    "field_state": {"cursor_scope": {
+                        "id": "shared",
+                        "subject": ["@facet:selection.definition_digest"]
+                    }}
+                }
+            }
+        })));
+        assert!(views.values().all(|binding| {
+            binding
+                .degraded
+                .as_deref()
+                .is_some_and(|reason| reason.contains("divergent subject declarations"))
+        }));
+    }
 
     fn threads_binding() -> ViewBinding {
         serde_json::from_value(json!({
@@ -1838,6 +2062,53 @@ mod tests {
             "a typo'd refresh key degrades visibly, not silently: {:?}",
             b.degraded
         );
+    }
+
+    #[test]
+    fn malformed_refresh_shapes_and_values_degrade_visibly() {
+        for (refresh, expected) in [
+            (json!("thread"), "expected a mapping"),
+            (json!({"on_facet": []}), "refresh.on_facet"),
+            (json!({"on_hint": []}), "refresh.on_hint"),
+            (json!({"on_hint": ["thread", 7]}), "refresh.on_hint"),
+        ] {
+            let surface = json!({
+                "views": {
+                    "view:ryeos/bad-refresh": {
+                        "widget": "text",
+                        "refresh": refresh
+                    }
+                }
+            });
+            let binding = views_from_surface(Some(&surface))
+                .remove("view:ryeos/bad-refresh")
+                .unwrap();
+            assert!(
+                binding
+                    .degraded
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(expected)),
+                "malformed refresh must degrade visibly: {:?}",
+                binding.degraded
+            );
+        }
+
+        let source_surface = json!({
+            "views": {
+                "view:ryeos/bad-source-refresh": {
+                    "widget": "text",
+                    "sources": {
+                        "default": {"ref": "service:test", "refresh": true}
+                    }
+                }
+            }
+        });
+        let binding = views_from_surface(Some(&source_surface))
+            .remove("view:ryeos/bad-source-refresh")
+            .unwrap();
+        assert!(binding.degraded.as_deref().is_some_and(|reason| {
+            reason.contains("source 'default'") && reason.contains("expected a mapping")
+        }));
     }
 
     #[test]
@@ -2340,6 +2611,34 @@ mod tests {
             AffordanceInvoke::Service {
                 item_ref: "service:commands/submit".into(),
                 args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
+                notice: None,
+            }
+        );
+    }
+
+    #[test]
+    fn service_affordance_preserves_missing_optional_arguments_as_null() {
+        let affordance = json!({
+            "invoke": {
+                "plane": "rye",
+                "ref": "service:test/watch-child",
+                "args": {
+                    "thread_id": "{record.thread_id}",
+                    "child_thread_id": "{record.child_thread_id}"
+                }
+            }
+        });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&json!({"thread_id": "T-parent"})),
+        )
+        .expect("the signed service schema decides whether a null argument is optional");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Service {
+                item_ref: "service:test/watch-child".into(),
+                args: json!({"thread_id": "T-parent", "child_thread_id": null}),
                 notice: None,
             }
         );

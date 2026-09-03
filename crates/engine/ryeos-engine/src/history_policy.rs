@@ -6,24 +6,14 @@
 //! contract. It never reads `metadata.extra` or switches on a kind or item ref.
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::{
-    fs::File,
-    io::Read,
-    os::fd::{AsRawFd, FromRawFd},
-    os::unix::ffi::OsStrExt,
-};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config_loading::ConfigLoadContext;
 use crate::contracts::{ItemSpace, TrustClass, VerifiedItem};
 use crate::error::EngineError;
-use crate::item_resolution::parse_signature_header;
 use crate::kind_registry::{KindRegistry, KindSchema};
 use crate::resolution::{ResolutionOutput, TrustClass as ResolutionTrustClass};
-use crate::trust::{content_hash_after_signature, verify_item_signature_with_hash};
 
 /// Deserialize a nullable field while still requiring its key to be present.
 /// The resolved policy is a closed current-format contract; a missing signer
@@ -36,7 +26,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-pub const NODE_HISTORY_POLICY_CONFIG: &str = "config/execution/execution.yaml";
+pub const NODE_HISTORY_POLICY_CONFIG: &str = ".ai/node/policies/thread_history.yaml";
 
 /// Concrete history behavior captured on a newly-created root chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,19 +65,15 @@ struct AuthoredHistoryDocument {
     retention: TerminalRetentionDocument,
 }
 
-/// Auditable authority for the node-wide default and clamp.
+/// Auditable authority for the node-wide default and clamp. Thread-history
+/// policy is mandatory, so provenance always names one signed policy item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum NodeHistoryPolicyProvenance {
-    /// No signed node block existed. This built-in carries no age: Durable,
-    /// authored trusted overrides allowed, and no minimum clamp.
-    MissingConfig,
-    SignedConfig {
-        path: PathBuf,
-        space: ItemSpace,
-        content_hash: String,
-        signer_fingerprint: String,
-    },
+#[serde(deny_unknown_fields)]
+pub struct NodeHistoryPolicyProvenance {
+    pub path: PathBuf,
+    pub space: ItemSpace,
+    pub content_hash: String,
+    pub signer_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,19 +87,18 @@ pub struct ResolvedNodeThreadHistoryPolicy {
 }
 
 impl ResolvedNodeThreadHistoryPolicy {
-    pub fn durable_without_config() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_policy() -> Self {
         Self {
             item_authored_retention: ItemAuthoredRetentionMode::Allow,
             default_retention: ThreadHistoryRetention::Durable,
             minimum_terminal_for_seconds: None,
-            provenance: NodeHistoryPolicyProvenance::MissingConfig,
+            provenance: NodeHistoryPolicyProvenance::test_policy(),
         }
     }
 
     fn validate(&self) -> Result<(), EngineError> {
-        if let NodeHistoryPolicyProvenance::SignedConfig { path, .. } = &self.provenance
-            && path != Path::new(NODE_HISTORY_POLICY_CONFIG)
-        {
+        if self.provenance.path != Path::new(NODE_HISTORY_POLICY_CONFIG) {
             return Err(invalid_node_policy(format!(
                 "signed node history provenance path must be exactly `{NODE_HISTORY_POLICY_CONFIG}`"
             )));
@@ -129,6 +114,18 @@ impl ResolvedNodeThreadHistoryPolicy {
             )));
         }
         Ok(())
+    }
+}
+
+impl NodeHistoryPolicyProvenance {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_policy() -> Self {
+        Self {
+            path: PathBuf::from(NODE_HISTORY_POLICY_CONFIG),
+            space: ItemSpace::Node,
+            content_hash: "11".repeat(32),
+            signer_fingerprint: "22".repeat(32),
+        }
     }
 }
 
@@ -170,10 +167,47 @@ pub struct ResolvedThreadHistoryPolicy {
     pub source: PolicyProvenance,
 }
 
+/// Durable representation of a successful execution result. `Full` is the
+/// built-in default; `DigestOnly` must be selected by a trusted item through a
+/// kind-declared composed field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadResultRetention {
+    Full,
+    DigestOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResultPolicyProvenance {
+    DefaultFull,
+    ItemAuthored {
+        composed_path: String,
+        effective_trust_class: ResolutionTrustClass,
+    },
+}
+
+/// Verified, kind-agnostic durable-result contract carried through root
+/// admission. Its identity fields make a digest-only terminal self-describing
+/// without embedding the sensitive live response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedThreadResultPolicy {
+    pub retention: ThreadResultRetention,
+    pub canonical_item_ref: String,
+    pub item_content_hash: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub item_signer_fingerprint: Option<String>,
+    pub item_trust_class: TrustClass,
+    pub kind_schema_content_hash: String,
+    pub source: ResultPolicyProvenance,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedLaunchPolicy {
     pub history: ResolvedThreadHistoryPolicy,
+    pub result: ResolvedThreadResultPolicy,
 }
 
 /// Input available at the normal verified-composition boundary. Callers pass
@@ -185,182 +219,6 @@ pub struct ResolveLaunchPolicyInput<'a> {
     pub effective_trust_class: ResolutionTrustClass,
     pub kinds: &'a KindRegistry,
     pub node_history: &'a ResolvedNodeThreadHistoryPolicy,
-}
-
-/// Load the highest-precedence signed node history block. Missing config is a
-/// built-in Durable policy with no Rust age cutoff.
-///
-/// `ctx.roots` must be rooted at the node app tree, followed by bundle roots;
-/// an executed project's tree must not be allowed to change node GC policy.
-pub fn load_node_thread_history_policy(
-    ctx: &ConfigLoadContext<'_>,
-) -> Result<ResolvedNodeThreadHistoryPolicy, EngineError> {
-    let config_kind = ctx
-        .kinds
-        .get("config")
-        .ok_or_else(|| invalid_node_policy("config kind is not registered"))?;
-
-    for root in &ctx.roots.ordered {
-        let path = root.ai_root.join(NODE_HISTORY_POLICY_CONFIG);
-        let raw = match read_optional_regular_file_no_follow(&path) {
-            Ok(Some(raw)) => raw,
-            Ok(None) => continue,
-            Err(error) => {
-                return Err(invalid_node_policy(format!(
-                    "could not read {}: {error:#}",
-                    path.display()
-                )));
-            }
-        };
-        let raw = String::from_utf8(raw).map_err(|error| {
-            invalid_node_policy(format!("could not read {}: {error}", path.display()))
-        })?;
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| format!(".{value}"))
-            .ok_or_else(|| {
-                invalid_node_policy(format!(
-                    "node history policy path has no declared extension: {}",
-                    path.display()
-                ))
-            })?;
-        let extension_spec = config_kind.spec_for(&extension).ok_or_else(|| {
-            invalid_node_policy(format!(
-                "config kind has no extension declaration for `{extension}`"
-            ))
-        })?;
-        let parsed = ctx.parsers.dispatch(
-            &extension_spec.parser,
-            &raw,
-            Some(&path),
-            &extension_spec.signature,
-        )?;
-        let Some(policy_value) = parsed.get("history") else {
-            continue;
-        };
-
-        // This block authorizes destructive retirement, so the selected layer
-        // must be signed by the active node trust store.
-        let header = parse_signature_header(&raw, &extension_spec.signature).ok_or_else(|| {
-            invalid_node_policy(format!(
-                "node history policy {} is unsigned",
-                path.display()
-            ))
-        })?;
-        let actual_hash = content_hash_after_signature(&raw, &extension_spec.signature)
-            .ok_or_else(|| {
-                invalid_node_policy(format!("could not hash node policy {}", path.display()))
-            })?;
-        let (trust, signer) =
-            verify_item_signature_with_hash(&actual_hash, &header, ctx.trust_store)?;
-        if trust != TrustClass::Trusted {
-            return Err(EngineError::UntrustedSigner {
-                canonical_ref: path.display().to_string(),
-                fingerprint: header.signer_fingerprint,
-            });
-        }
-        let signer_fingerprint = signer
-            .map(|value| value.0)
-            .ok_or_else(|| invalid_node_policy("trusted policy has no signer fingerprint"))?;
-        let provenance = NodeHistoryPolicyProvenance::SignedConfig {
-            path: PathBuf::from(NODE_HISTORY_POLICY_CONFIG),
-            space: root.space,
-            content_hash: actual_hash,
-            signer_fingerprint,
-        };
-        return resolve_node_thread_history_policy(policy_value.clone(), provenance);
-    }
-
-    Ok(ResolvedNodeThreadHistoryPolicy::durable_without_config())
-}
-
-#[cfg(unix)]
-fn read_optional_regular_file_no_follow(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
-    use std::path::Component;
-
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("node history policy path has no filename"))?;
-    let file_name = std::ffi::CString::new(file_name.as_bytes())?;
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let start = if parent.is_absolute() { "/" } else { "." };
-    let start = std::ffi::CString::new(start).expect("static path contains no NUL");
-    let descriptor = unsafe {
-        libc::open(
-            start.as_ptr(),
-            libc::O_RDONLY
-                | libc::O_DIRECTORY
-                | libc::O_NOFOLLOW
-                | libc::O_CLOEXEC
-                | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let mut directory = unsafe { File::from_raw_fd(descriptor) };
-    for component in parent.components() {
-        let component = match component {
-            Component::RootDir | Component::CurDir => continue,
-            Component::Normal(component) => component,
-            Component::ParentDir | Component::Prefix(_) => {
-                anyhow::bail!("node history policy path contains an unsafe parent component")
-            }
-        };
-        let component = std::ffi::CString::new(component.as_bytes())?;
-        let descriptor = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY
-                    | libc::O_DIRECTORY
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-            )
-        };
-        if descriptor < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::NotFound {
-                // The policy is optional in every resolution root. Most
-                // bundles do not carry config/execution, so an absent parent
-                // is the same optional miss as an absent execution.yaml leaf.
-                return Ok(None);
-            }
-            // A symlink, non-directory component, or inaccessible parent is
-            // not an optional miss and must remain fail-closed.
-            return Err(error.into());
-        }
-        directory = unsafe { File::from_raw_fd(descriptor) };
-    }
-    let descriptor = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            file_name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(None);
-        }
-        return Err(error.into());
-    }
-    let mut file = unsafe { File::from_raw_fd(descriptor) };
-    if !file.metadata()?.file_type().is_file() {
-        anyhow::bail!("node history policy source is not a regular file");
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
-}
-
-#[cfg(not(unix))]
-fn read_optional_regular_file_no_follow(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
-    let _ = path;
-    anyhow::bail!("secure no-follow node history policy loading is unavailable on this platform")
 }
 
 pub fn resolve_node_thread_history_policy(
@@ -598,15 +456,73 @@ fn resolve_launch_policy_with_schema(
             Some(signer)
         }
     };
+    let result_declaration = kind_schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.result_policy.as_ref());
+    let result_authored =
+        result_declaration.and_then(|declaration| composed_value.get(&declaration.composed_path));
+    let (result_retention, result_source) = match (result_declaration, result_authored) {
+        (Some(declaration), Some(value)) => {
+            let retention = match value.as_str() {
+                Some("full") => ThreadResultRetention::Full,
+                Some("digest_only") => ThreadResultRetention::DigestOnly,
+                _ => {
+                    return Err(EngineError::InvalidMetadata {
+                        canonical_ref: canonical_item_ref.clone(),
+                        reason: format!(
+                            "invalid authored result policy at `{}`",
+                            declaration.composed_path
+                        ),
+                    });
+                }
+            };
+            if retention == ThreadResultRetention::DigestOnly
+                && (verified_item.trust_class != TrustClass::Trusted
+                    || !matches!(
+                        effective_trust_class,
+                        ResolutionTrustClass::TrustedBundle | ResolutionTrustClass::TrustedProject
+                    ))
+            {
+                return Err(EngineError::InvalidMetadata {
+                    canonical_ref: canonical_item_ref.clone(),
+                    reason: format!(
+                        "digest-only result retention at `{}` requires an effectively trusted signed item",
+                        declaration.composed_path
+                    ),
+                });
+            }
+            (
+                retention,
+                ResultPolicyProvenance::ItemAuthored {
+                    composed_path: declaration.composed_path.clone(),
+                    effective_trust_class,
+                },
+            )
+        }
+        _ => (
+            ThreadResultRetention::Full,
+            ResultPolicyProvenance::DefaultFull,
+        ),
+    };
     Ok(ResolvedLaunchPolicy {
         history: ResolvedThreadHistoryPolicy {
             retention,
+            canonical_item_ref: canonical_item_ref.clone(),
+            item_content_hash: verified_item.resolved.content_hash.clone(),
+            item_signer_fingerprint: item_signer_fingerprint.clone(),
+            item_trust_class: verified_item.trust_class,
+            kind_schema_content_hash: kind_schema_content_hash.to_string(),
+            source,
+        },
+        result: ResolvedThreadResultPolicy {
+            retention: result_retention,
             canonical_item_ref,
             item_content_hash: verified_item.resolved.content_hash.clone(),
             item_signer_fingerprint,
             item_trust_class: verified_item.trust_class,
             kind_schema_content_hash: kind_schema_content_hash.to_string(),
-            source,
+            source: result_source,
         },
     })
 }
@@ -692,7 +608,7 @@ mod tests {
         ItemMetadata, ResolvedItem, ResolvedSourceFormat, SignatureEnvelope, SignatureHeader,
         SignerFingerprint,
     };
-    use crate::kind_registry::{ExecutionSchema, ThreadHistoryPolicyDecl};
+    use crate::kind_registry::{ExecutionSchema, ThreadHistoryPolicyDecl, ThreadResultPolicyDecl};
 
     fn node_policy(
         mode: ItemAuthoredRetentionMode,
@@ -703,7 +619,7 @@ mod tests {
             item_authored_retention: mode,
             default_retention,
             minimum_terminal_for_seconds: minimum,
-            provenance: NodeHistoryPolicyProvenance::MissingConfig,
+            provenance: NodeHistoryPolicyProvenance::test_policy(),
         }
     }
 
@@ -714,6 +630,9 @@ mod tests {
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/test/example.yaml"),
                 source_space: ItemSpace::Bundle,
+                source_root: crate::contracts::ItemSourceRoot::Bundle {
+                    name: "core".to_string(),
+                },
                 resolved_from: "bundle:core".to_string(),
                 shadowed: Vec::new(),
                 probed_absent: Vec::new(),
@@ -754,7 +673,9 @@ mod tests {
             extraction_rules: HashMap::new(),
             resolution: Vec::new(),
             effective_trust: Default::default(),
+            content: None,
             execution: Some(ExecutionSchema {
+                effect_class_ceiling: None,
                 aliases: HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,
@@ -763,10 +684,16 @@ mod tests {
                 history_policy: opted_in.then(|| ThreadHistoryPolicyDecl {
                     composed_path: "history".to_string(),
                 }),
+                result_policy: None,
                 method_dispatch: None,
                 methods: Default::default(),
                 augmentation_methods: Default::default(),
                 launch_augmentations: Vec::new(),
+                hooks: None,
+                external_content: None,
+                source_closure: None,
+                effective_validator: None,
+                persistent_session: None,
             }),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
             composer: "handler:identity".to_string(),
@@ -776,6 +703,14 @@ mod tests {
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
         }
+    }
+
+    fn kind_schema_with_result_policy() -> KindSchema {
+        let mut schema = kind_schema(false);
+        schema.execution.as_mut().unwrap().result_policy = Some(ThreadResultPolicyDecl {
+            composed_path: "result_retention".to_string(),
+        });
+        schema
     }
 
     fn resolve(
@@ -811,13 +746,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_node_config_is_durable_without_an_age() {
-        let policy = ResolvedNodeThreadHistoryPolicy::durable_without_config();
+    fn test_policy_is_explicit_signed_durable_authority() {
+        let policy = ResolvedNodeThreadHistoryPolicy::test_policy();
         assert_eq!(policy.default_retention, ThreadHistoryRetention::Durable);
         assert_eq!(policy.minimum_terminal_for_seconds, None);
         assert_eq!(
             policy.provenance,
-            NodeHistoryPolicyProvenance::MissingConfig
+            NodeHistoryPolicyProvenance::test_policy()
         );
     }
 
@@ -842,6 +777,63 @@ mod tests {
             resolved.history.source,
             PolicyProvenance::NodeDefault { .. }
         ));
+    }
+
+    #[test]
+    fn result_retention_is_kind_declared_and_defaults_to_full() {
+        let item = verified_item(TrustClass::Trusted);
+        let node = ResolvedNodeThreadHistoryPolicy::test_policy();
+
+        let absent = resolve(&item, &json!({}), &kind_schema_with_result_policy(), &node).unwrap();
+        assert_eq!(absent.result.retention, ThreadResultRetention::Full);
+        assert!(matches!(
+            absent.result.source,
+            ResultPolicyProvenance::DefaultFull
+        ));
+
+        let declared = resolve(
+            &item,
+            &json!({"result_retention":"digest_only"}),
+            &kind_schema_with_result_policy(),
+            &node,
+        )
+        .unwrap();
+        assert_eq!(declared.result.retention, ThreadResultRetention::DigestOnly);
+        assert_eq!(declared.result.canonical_item_ref, "service:test/example");
+        assert!(matches!(
+            declared.result.source,
+            ResultPolicyProvenance::ItemAuthored {
+                ref composed_path,
+                effective_trust_class: ResolutionTrustClass::TrustedBundle,
+            } if composed_path == "result_retention"
+        ));
+
+        let undeclared = resolve(
+            &item,
+            &json!({"result_retention":"digest_only"}),
+            &kind_schema(false),
+            &node,
+        )
+        .unwrap();
+        assert_eq!(undeclared.result.retention, ThreadResultRetention::Full);
+    }
+
+    #[test]
+    fn digest_only_result_retention_requires_effective_trust() {
+        let node = ResolvedNodeThreadHistoryPolicy::test_policy();
+        let unsigned = verified_item(TrustClass::Unsigned);
+        let error = resolve(
+            &unsigned,
+            &json!({"result_retention":"digest_only"}),
+            &kind_schema_with_result_policy(),
+            &node,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("effectively trusted signed item")
+        );
     }
 
     #[test]
@@ -958,7 +950,7 @@ mod tests {
     #[test]
     fn untrusted_item_cannot_request_terminal_retention() {
         let item = verified_item(TrustClass::Unsigned);
-        let node = ResolvedNodeThreadHistoryPolicy::durable_without_config();
+        let node = ResolvedNodeThreadHistoryPolicy::test_policy();
         let error = resolve(
             &item,
             &json!({"history": {"retention": {"terminal_for": "1d"}}}),
@@ -972,7 +964,7 @@ mod tests {
     #[test]
     fn untrusted_composed_ancestor_cannot_supply_terminal_retention() {
         let item = verified_item(TrustClass::Trusted);
-        let node = ResolvedNodeThreadHistoryPolicy::durable_without_config();
+        let node = ResolvedNodeThreadHistoryPolicy::test_policy();
         let error = resolve_launch_policy_with_schema(
             &item,
             &json!({"history": {"retention": {"terminal_for": "1d"}}}),
@@ -988,7 +980,7 @@ mod tests {
     #[test]
     fn undeclared_kind_does_not_read_a_history_field() {
         let item = verified_item(TrustClass::Trusted);
-        let node = ResolvedNodeThreadHistoryPolicy::durable_without_config();
+        let node = ResolvedNodeThreadHistoryPolicy::test_policy();
         let resolved = resolve(
             &item,
             &json!({"history": {"retention": {"terminal_for": "1d"}}}),
@@ -1014,6 +1006,7 @@ mod tests {
                 resolved_ref: item.resolved.canonical_ref.to_string(),
                 source_path: item.resolved.source_path.clone(),
                 source_space: item.resolved.source_space,
+                source_root: item.resolved.source_root.clone(),
                 trust_class: ResolutionTrustClass::TrustedBundle,
                 signer_fingerprint: item.signer.as_ref().map(|signer| signer.0.clone()),
                 alias_resolution: None,
@@ -1036,7 +1029,7 @@ mod tests {
             &item,
             &resolution,
             &KindRegistry::empty(),
-            &ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            &ResolvedNodeThreadHistoryPolicy::test_policy(),
         )
         .unwrap_err();
         assert!(
@@ -1054,7 +1047,7 @@ mod tests {
                 "item_authored_retention": "allow",
                 "minimum_terminal_for": "7d"
             }),
-            NodeHistoryPolicyProvenance::MissingConfig,
+            NodeHistoryPolicyProvenance::test_policy(),
         )
         .unwrap();
         assert_eq!(
@@ -1072,7 +1065,7 @@ mod tests {
                 "item_authored_retention": "allow",
                 "minimum_terminal_for": "7d"
             }),
-            NodeHistoryPolicyProvenance::MissingConfig,
+            NodeHistoryPolicyProvenance::test_policy(),
         )
         .unwrap_err();
 
@@ -1082,15 +1075,15 @@ mod tests {
     }
 
     #[test]
-    fn signed_node_policy_provenance_requires_the_canonical_relative_config_path() {
+    fn signed_node_policy_provenance_requires_the_canonical_policy_path() {
         let error = resolve_node_thread_history_policy(
             json!({
                 "default_retention": "durable",
                 "item_authored_retention": "allow",
                 "minimum_terminal_for": null
             }),
-            NodeHistoryPolicyProvenance::SignedConfig {
-                path: PathBuf::from("/app/.ai/config/execution/execution.yaml"),
+            NodeHistoryPolicyProvenance {
+                path: PathBuf::from("/app/.ai/node/policies/thread_history.yaml"),
                 space: ItemSpace::Project,
                 content_hash: "11".repeat(32),
                 signer_fingerprint: "22".repeat(32),
@@ -1101,7 +1094,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("must be exactly `config/execution/execution.yaml`")
+                .contains("must be exactly `.ai/node/policies/thread_history.yaml`")
         );
     }
 
@@ -1132,51 +1125,5 @@ mod tests {
             );
             policy.validate().unwrap();
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn node_history_policy_reader_rejects_a_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.yaml");
-        let link = dir.path().join("policy.yaml");
-        std::fs::write(&target, b"history: {}\n").unwrap();
-        symlink(&target, &link).unwrap();
-        assert!(read_optional_regular_file_no_follow(&link).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn node_history_policy_reader_rejects_a_symlinked_parent() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real");
-        let linked = dir.path().join("linked");
-        std::fs::create_dir(&real).unwrap();
-        std::fs::write(real.join("policy.yaml"), b"history: {}\n").unwrap();
-        symlink(&real, &linked).unwrap();
-        assert!(read_optional_regular_file_no_follow(&linked.join("policy.yaml")).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn node_history_policy_reader_treats_a_missing_leaf_as_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let policy = dir.path().join("config/execution/execution.yaml");
-        std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
-
-        assert_eq!(read_optional_regular_file_no_follow(&policy).unwrap(), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn node_history_policy_reader_treats_missing_optional_parents_as_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let policy = dir.path().join("config/execution/execution.yaml");
-
-        assert_eq!(read_optional_regular_file_no_follow(&policy).unwrap(), None);
     }
 }

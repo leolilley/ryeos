@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:26Z:e48684447e189aaf61ecee038f4682c9af95cc00f1c95d592b73ed8477ce23b8:rlsdpJ4kCcmpBF8GADgMAqQj3stbbWU9d7hF/lmc1IQOPjy490XJv4jnvRLjVAJfKIAyEJEhACrdlIArhtL3Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:23Z:777357db8c0ffe58e5c4bb996fb1b36490c317d053320d2f446884fd14738c82:2rnmEqwYJLH6hqoZYz6CpuTWnlMigV2S5CJlRiyo+uVa5NbuYYpSWH31wP+7Z/JA4gRP4D09ABNIohX7xeWpBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -40,6 +40,9 @@ composer_config:
     - name: refresh
       strategy: dict_merge_root_last
       expect_value_type: mapping
+    - name: field_state
+      strategy: replace_root_last
+      expect_value_type: mapping
 
 composed_value_contract:
   root_type: mapping
@@ -61,5 +64,8 @@ composed_value_contract:
       type: single
       prim: sequence
     refresh:
+      type: single
+      prim: mapping
+    field_state:
       type: single
       prim: mapping

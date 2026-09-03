@@ -13,7 +13,7 @@
 //!
 //! Phase / cardinality: `DecorateSpec` / `FirstWins`. Cancellation
 //! policy must be unambiguous; the FIRST chain element that declares
-//! the block wins, matching how `verify_deps` resolves chain
+//! the block wins, matching other single-owner runtime declarations
 //! conflicts.
 //!
 //! ## YAML shapes accepted
@@ -363,6 +363,10 @@ mod tests {
             resolved_ref: "widget:demo".into(),
             kind: "widget".into(),
             source_path: PathBuf::from("/tmp/demo.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "native_async": block.clone() }),
         }];
         let chain = chain_override.unwrap_or(chain);
@@ -386,6 +390,7 @@ mod tests {
             node_trust_store: &trust,
             project_root: None,
             project_authority: None,
+            sealed_content: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };
@@ -565,6 +570,10 @@ mod tests {
                 resolved_ref: "widget:my/app/item".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/item.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({}),
             },
             ChainIntermediate {
@@ -572,6 +581,10 @@ mod tests {
                 resolved_ref: "widget:my/runtimes/native".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/runtime.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({ "native_async": block.clone() }),
             },
         ];
@@ -596,6 +609,10 @@ mod tests {
                 resolved_ref: "widget:my/app/item".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/item.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({}),
             },
             ChainIntermediate {
@@ -603,6 +620,10 @@ mod tests {
                 resolved_ref: "widget:my/runtimes/native".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/runtime.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({ "native_async": block.clone() }),
             },
         ];

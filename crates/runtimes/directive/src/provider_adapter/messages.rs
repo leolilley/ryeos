@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::directive::{
-    AssistantToolCallsPlacement, MessageSchemas, ProviderMessage, SystemMessageMode, TextPlacement,
+use crate::directive::ProviderMessage;
+use ryeos_directive_definition::{
+    AssistantToolCallsPlacement, MessageSchemas, SystemMessageMode, TextPlacement,
     ToolResultWrapMode,
 };
 
@@ -351,9 +352,8 @@ fn wrap_content(content: Value, _content_key: &str, template: Option<&Value>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{
-        MessageSchemas, ProviderMessage, SystemMessageConfig, ToolResultConfig,
-    };
+    use crate::directive::ProviderMessage;
+    use ryeos_directive_definition::{MessageSchemas, SystemMessageConfig, ToolResultConfig};
     use ryeos_tracing::test as trace_test;
 
     fn sample_messages() -> Vec<ProviderMessage> {
@@ -577,7 +577,6 @@ mod tests {
 
     #[test]
     fn system_message_extracted_for_body_field_mode() {
-        use crate::directive::SystemMessageConfig;
         let msgs = vec![
             ProviderMessage {
                 role: "system".to_string(),
@@ -966,7 +965,7 @@ mod tests {
             assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
             text_block_template: None,
             tool_call_block_template: None,
-            system_message: Some(crate::directive::SystemMessageConfig {
+            system_message: Some(SystemMessageConfig {
                 mode: SystemMessageMode::BodyField,
                 field: Some("system".to_string()),
                 template: None,

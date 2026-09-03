@@ -74,7 +74,7 @@ fn plant_child_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     // `output:` sets GraphResult.result — the child's terminal envelope `result`.
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: work
@@ -107,7 +107,7 @@ fn plant_parent_follow_graph(project_dir: &Path, signer: &SigningKey) -> anyhow:
     // the authored value rather than the graph runtime's internal GraphResult
     // envelope. `done` re-returns it so the successor's persisted result carries
     // the sentinel iff the follow result was consumed correctly.
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -141,6 +141,87 @@ config:
 "#;
     let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(graphs_dir.join("parent.yaml"), signed)?;
+    Ok(())
+}
+
+/// A project-writing tool used to prove that a pinned COW generation may move
+/// before the graph reaches its first follow boundary.
+fn plant_project_mutating_tool(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let tool_dir = project_dir.join(".ai/tools/mutate");
+    std::fs::create_dir_all(&tool_dir)?;
+    let body = r#"# ryeos-tool:
+#   category: mutate
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+
+import json
+import pathlib
+import sys
+
+params = json.loads(sys.stdin.read())
+pathlib.Path(params["project_path"]).joinpath("follow-generation-moved.txt").write_text(
+    "moved before follow\n", encoding="utf-8"
+)
+print(json.dumps({"mutated": True}))
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(tool_dir.join("mutate.py"), signed)?;
+    Ok(())
+}
+
+/// `mutate (ordinary tool) -> fetch (follow) -> mark -> done`. This is the
+/// minimal shape that exercises a follow successor after the pinned COW
+/// workspace has a new operational generation.
+fn plant_mutating_parent_follow_graph(
+    project_dir: &Path,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.mutate/mutate
+      - ryeos.execute.graph.child
+config:
+  start: mutate
+  nodes:
+    mutate:
+      node_type: action
+      action:
+        item_id: "tool:mutate/mutate"
+        ref_bindings: {}
+        params: {}
+      next:
+        type: unconditional
+        to: fetch
+    fetch:
+      node_type: action
+      follow: true
+      action:
+        item_id: "graph:child"
+        ref_bindings: {}
+        params: {}
+      assign:
+        child_ran: "${result.child_ran}"
+      next:
+        type: unconditional
+        to: mark
+    mark:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - to: done
+    done:
+      node_type: return
+      output:
+        child_ran: "${state.child_ran}"
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("parent_mutating.yaml"), signed)?;
     Ok(())
 }
 
@@ -415,6 +496,180 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_child_graph(project.path(), &fixture.publisher).expect("plant child graph");
+    plant_parent_follow_graph(project.path(), &fixture.publisher).expect("plant parent graph");
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "graph:parent",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("execute pinned parent");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.pointer("/result/status").and_then(Value::as_str),
+        Some("continued"),
+        "pinned parent must cross the follow handoff: {body:#}"
+    );
+    let parent_thread_id = body
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .expect("parent thread id")
+        .to_string();
+
+    let runtime_db = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let runtime = rusqlite::Connection::open(runtime_db).expect("open runtime database");
+    let owned_workspaces: i64 = runtime
+        .query_row(
+            "SELECT COUNT(*) FROM execution_workspace \
+             WHERE thread_id = ?1 AND launch_owner IS NOT NULL",
+            [&parent_thread_id],
+            |row| row.get(0),
+        )
+        .expect("read parent workspace owner");
+    assert_eq!(
+        owned_workspaces, 1,
+        "the durable parent must own its pinned workspace before follow"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let events = all_events(&h.state_path);
+        let child_done = threads_that_ran(&events, "work")
+            .into_iter()
+            .any(|thread| thread_has_event(&events, &thread, "thread_completed"));
+        let successor_done = threads_that_ran(&events, "mark").into_iter().any(|thread| {
+            thread != parent_thread_id && thread_has_event(&events, &thread, "thread_completed")
+        });
+        if child_done && successor_done {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "pinned follow did not complete (child_done={child_done}, \
+                 successor_done={successor_done})\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_child_graph(project.path(), &fixture.publisher).expect("plant child graph");
+    plant_project_mutating_tool(project.path(), &fixture.publisher)
+        .expect("plant project-mutating tool");
+    plant_mutating_parent_follow_graph(project.path(), &fixture.publisher)
+        .expect("plant mutating parent graph");
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "graph:parent_mutating",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("execute pinned mutating parent");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    if body.pointer("/result/status").and_then(Value::as_str) != Some("continued") {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!(
+            "the pinned parent must suspend after its ordinary tool step: {body:#}\n\
+             --- daemon stderr ---\n{stderr}"
+        );
+    }
+    let parent_thread_id = body
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .expect("parent thread id")
+        .to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let events = all_events(&h.state_path);
+        let child_done = threads_that_ran(&events, "work")
+            .into_iter()
+            .any(|thread| thread_has_event(&events, &thread, "thread_completed"));
+        let successor_done = threads_that_ran(&events, "mark").into_iter().any(|thread| {
+            thread != parent_thread_id && thread_has_event(&events, &thread, "thread_completed")
+        });
+        if child_done && successor_done {
+            let threads = all_threads(&h.state_path);
+            let parent = threads
+                .iter()
+                .find(|thread| thread.thread_id == parent_thread_id)
+                .expect("parent projection");
+            let successor = threads
+                .iter()
+                .find(|thread| {
+                    thread.upstream_thread_id.as_deref() == Some(parent_thread_id.as_str())
+                        && thread.chain_root_id == parent.chain_root_id
+                })
+                .expect("follow-resume successor");
+            assert_eq!(
+                successor.base_project_snapshot_hash, parent.result_project_snapshot_hash,
+                "the successor must resume from the exact generation frozen at follow"
+            );
+            assert!(
+                successor.admitted_launch_capsule_hash.is_some(),
+                "the resumed segment must retain an admitted capsule"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "pinned follow after project mutation did not complete \
+                 (child_done={child_done}, successor_done={successor_done})\n\
+                 events={events:#?}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 // ══ #25 daemon e2e: child failure routes the parent into on_error ══════════════
 
 /// A CHILD graph that FAILS: its action dispatches an item the child has no cap for
@@ -423,7 +678,7 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
 fn plant_failing_child_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: boom
@@ -449,7 +704,7 @@ config:
 fn plant_parent_on_error_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -584,7 +839,7 @@ async fn graph_follow_child_failure_routes_parent_on_error() {
 fn plant_seq_child_a(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: worka
@@ -626,7 +881,7 @@ Reply with a short acknowledgement.
 fn plant_parent_sequential_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -831,8 +1086,10 @@ fn plant_mock_provider(
     let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"
@@ -896,7 +1153,7 @@ Say hello.
 fn plant_parent_cost_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:

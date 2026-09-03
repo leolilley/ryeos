@@ -1,7 +1,9 @@
-# ryeos:signed:2026-08-03T07:50:04Z:f438a149e49701fa7582b236d3f8b22179439799c7515df90cc615161b6fa7a9:HIa8LyJNXkafdWTLe/cNol5h8oUygi66T1AzdwpFknFb+EWPVKYsmIqKmBzdVcduoQhx97hcA17zbQawiBGuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:26Z:0bfd8a303c1cd4530ba4896ef45c2492b3b7d5effd7d539d199b9a718858ddb0:vJ8ztEJwXiRDSPC9xLXavtbYX241dlIkP14GW9iqZYQ+kF35XNppysdArUpfQgSlRd/S1cEl63OyALCLpHPlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
-base_url: "https://api.deepseek.com"
+transport:
+  kind: remote_http
+  base_url: "https://api.deepseek.com"
 auth:
   env_var: DEEPSEEK_API_KEY
   header_name: Authorization

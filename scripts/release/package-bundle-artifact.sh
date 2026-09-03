@@ -108,6 +108,34 @@ assert_official_trust_metadata() {
 
 assert_official_trust_metadata "$source_dir/.ai/PUBLISHER_TRUST.toml"
 
+ryeos_validate_node_init_root "$source_dir/.ai/node/init" || {
+    ryeos_term_fail "source-root node init namespace is not closed"
+    exit 2
+}
+node_init_profile_dir="$source_dir/.ai/node/init/profiles"
+[[ -d "$node_init_profile_dir" && ! -L "$node_init_profile_dir" ]] || {
+    ryeos_term_fail "source root is missing a safe node init-profile directory"
+    exit 2
+}
+unsupported_node_init_profile="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+[[ -z "$unsupported_node_init_profile" ]] || {
+    ryeos_term_fail "node init-profile inventory contains an unsafe entry: $unsupported_node_init_profile"
+    exit 2
+}
+expected_node_init_profiles="$(ryeos_node_init_profile_file_names | sort)"
+actual_node_init_profiles="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+[[ "$actual_node_init_profiles" == "$expected_node_init_profiles" ]] || {
+    ryeos_term_fail "node init-profile inventory is incomplete or unsupported"
+    exit 2
+}
+while IFS= read -r node_init_profile_name; do
+    ryeos_validate_node_init_profile \
+        "$node_init_profile_name" "$node_init_profile_dir/$node_init_profile_name.yaml" || {
+        ryeos_term_fail "node init-profile contract is invalid: $node_init_profile_name"
+        exit 2
+    }
+done < <(ryeos_node_init_profile_names)
+
 tmp="$(mktemp -d)"
 archive_tmp="$output.tmp.$$"
 checksum="$output.sha256"
@@ -137,7 +165,12 @@ while IFS= read -r bundle; do
         ryeos_term_fail "full bundle set is missing $bundle/.ai"
         exit 2
     }
-    assert_official_trust_metadata "$bundle_source/PUBLISHER_TRUST.toml"
+    # populate publishes one shared trust doc at the source root (asserted
+    # above); per-bundle docs are optional and asserted only when a bundle
+    # still ships one.
+    if [[ -f "$bundle_source/PUBLISHER_TRUST.toml" ]]; then
+        assert_official_trust_metadata "$bundle_source/PUBLISHER_TRUST.toml"
+    fi
     cp -a "$bundle_source" "$stage/$bundle"
 done < <(ryeos_bundle_set_names full)
 
@@ -188,11 +221,50 @@ while IFS= read -r -d '' staged_path; do
     fi
 done < <(find "$stage" -print0)
 
-# Do not pass --trust-file here. This proves the staged source set validates
-# solely under the official public key embedded in the qualified RyeOS binary.
+# Do not pass --trust-file here. First prove that a fresh node refuses absence
+# of an explicit init profile; then prove the full distribution's exact
+# same-named profile solely under the official public key embedded in the
+# qualified RyeOS binary.
 verify_app_root="$tmp/verify-app"
-ryeos_term_update "verifying staged source set" "production init preflight"
-"$ryeos_bin" init --non-interactive --app-root "$verify_app_root" --source "$stage" >/dev/null
+ryeos_term_update "verifying explicit policy requirement" "production init preflight"
+if "$ryeos_bin" init \
+    --non-interactive \
+    --app-root "$verify_app_root" \
+    --source "$stage" >/dev/null 2>&1; then
+    ryeos_term_fail "fresh production init accepted an absent node init profile"
+    exit 2
+fi
+
+node_init_profile="$(ryeos_bundle_set_node_init_profile full)"
+policy_verify_app_root="$tmp/verify-profile-$node_init_profile"
+ryeos_term_update "verifying staged node init profile" "$node_init_profile"
+"$ryeos_bin" init \
+    --non-interactive \
+    --app-root "$policy_verify_app_root" \
+    --source "$stage" \
+    --node-profile "$node_init_profile" >/dev/null
+
+selected_node_init_profile="$stage/.ai/node/init/profiles/$node_init_profile.yaml"
+expected_node_policies="$(
+    ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+        | sed 's/$/.yaml/' \
+        | sort
+)"
+policy_directory="$policy_verify_app_root/.ai/node/policies"
+[[ -n "$expected_node_policies" && -d "$policy_directory" && ! -L "$policy_directory" ]] || {
+    ryeos_term_fail "node init profile $node_init_profile produced no safe policy generation"
+    exit 2
+}
+unsafe_policy="$(find "$policy_directory" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+[[ -z "$unsafe_policy" ]] || {
+    ryeos_term_fail "node init profile $node_init_profile produced an unsafe entry: $unsafe_policy"
+    exit 2
+}
+actual_node_policies="$(find "$policy_directory" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+[[ "$actual_node_policies" == "$expected_node_policies" ]] || {
+    ryeos_term_fail "node init profile $node_init_profile produced the wrong policy generation"
+    exit 2
+}
 
 mkdir -p "$(dirname "$output")"
 ryeos_term_update "writing deterministic archive" "$(basename "$output")"

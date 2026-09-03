@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:b2e2ea6a17abdf120882260d70c11bd8ff87a177044cc18e43aee277922bf8f3:hnxygOr0ujbHiqACvm+Rqi8+w5Vjm7lpFxzSZOoE0vzpep8puGKZNS3Iso0zVhnQ5SdTU7F0TbD6Yy8asqrwAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T12:38:43Z:30f245110bb9357bedb39d9cb943088087e72f0b6b7d1854c884414e97890c84:0Mfa9wH5GpqkCKSJJIQgAlZh366K0yJh8BATVPNuvWLiU3+E5Oh9IBM92Md9zXFD6Jc0ulTpedADZVGIJwieCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -36,12 +36,13 @@ to the node key.
 
 ## Node (daemon) key
 
-The node key signs outbound remote requests, signs authorized-key TOMLs,
-produces the node public identity document, and anchors the node
-self-trust doc. Daemon startup never auto-regenerates it, because doing
-so would invalidate operator trust and remote authorizations.
+The node key normally signs outbound remote requests, signs authorized-key
+TOMLs, produces the node public identity document, and anchors the node
+self-trust doc. Daemon startup never auto-regenerates it, because doing so
+would invalidate operator trust and remote authorizations.
 
-Remote operations authorize the caller's node key, not the user's CLI key:
+Ordinary remote operations authorize the caller's node key, not the user's
+CLI key:
 
 ```text
 CLI --[user key]--> local daemon --[node key]--> remote daemon
@@ -55,6 +56,20 @@ Daemon startup may repair the local user's authorized-key entry after
 `ryeos init` has created the required keys and trust docs, but the daemon
 never writes user trust.
 
+An opt-in `remote_operator` grant is the narrow exception for an
+operator-owned workflow forwarded by another RyeOS node. The source request is
+still signed by that source node's configured operator key, while the target
+retains only its public key in a node-signed grant constrained to one canonical
+`origin_site_id` and concrete scopes. The
+target separately admits the source node key as `remote_node` with
+`ryeos.attest.request.forwarded-operator`; it must co-sign the exact primary
+request. Only the two verified grants plus that co-signature create
+authenticated remote origin. A caller header cannot create or remove it.
+The source operator private key never moves to the target. The target's own
+local operator remains a separate `local_client` for local maintenance.
+Because grants are keyed by fingerprint, every target-side use of the source
+key is remote and fails without the source-node proof.
+
 ## Vault X25519
 
 Vault X25519 is separate from the Ed25519 node identity, so node-key
@@ -63,6 +78,10 @@ vault rewrap flows.
 
 ## Request authentication
 
-Local CLI requests are signed with the user key and verified against the
-local authorized-keys store. Remote daemon-to-daemon requests are signed
-with the caller node key and verified by the remote authorized-keys store.
+Local CLI requests are signed with the user key and verified against the local
+authorized-keys store. Ordinary daemon-to-daemon requests are signed with the
+caller node key. Explicit configured-operator forwarding is instead signed by
+that operator key and co-signed by the source node key. The target requires an
+exact `remote_operator` allowed-site grant and an exact `remote_node`
+forwarding-attestation grant. In both cases, authenticated origin comes from
+verified key/grant evidence, never an unsigned caller claim.

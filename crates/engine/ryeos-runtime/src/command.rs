@@ -287,6 +287,10 @@ pub struct CommandControlFlag {
     pub help: String,
     /// Where the flag's value lands.
     pub binding: ControlFlagBinding,
+    /// For `ref_binding`, bind the flag's value directly under this declared
+    /// name. When absent, the generic `name=canonical-ref` value form is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_binding_name: Option<String>,
     /// Additional spellings that bind identically, e.g. `json` for `no_stream`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
@@ -307,6 +311,18 @@ pub enum ControlFlagBinding {
     StreamOff,
     /// Presence → request the debug block on the result.
     DebugRaw,
+    /// Presence → capture the complete local project at admission and run
+    /// from a daemon-owned copy-on-write generation.
+    PinProjectAtAdmission,
+    /// Presence → resolve the caller's already-published principal project
+    /// HEAD at admission and run from a daemon-owned copy-on-write generation.
+    PinCurrentHeadAtAdmission,
+    /// Presence → authorize project-backed child roots to receive independent
+    /// private COW generations retained for explicit owner disposition.
+    RetainChildResults,
+    /// Presence → exclude the operator vault from an otherwise ordinary
+    /// project-environment overlay.
+    ExcludeOperatorVault,
     /// Takes a value → request `call.method` (string).
     CallMethod,
     /// Takes a value → request `call.args` (parsed JSON object).
@@ -374,6 +390,9 @@ pub enum CommandDispatch {
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
+        /// Dispatches through the existing pre-spawn validation boundary when
+        /// true. This is command intent, never an item input named `validate`.
+        validate_only: bool,
         #[serde(default)]
         availability: CommandAvailability,
     },
@@ -390,7 +409,8 @@ pub enum CommandAvailability {
     #[default]
     Auto,
     Daemon,
-    Offline,
+    Local,
+    StoppedNode,
     Both,
 }
 
@@ -424,6 +444,14 @@ pub enum CommandRegistryError {
     },
     #[error("command '{name}' marks undeclared argument field '{field}' as sensitive")]
     UndeclaredSensitiveField { name: String, field: String },
+    #[error("command '{name}' control flag '--{flag}' has invalid fixed ref binding '{binding}'")]
+    InvalidControlRefBinding {
+        name: String,
+        flag: String,
+        binding: String,
+    },
+    #[error("command '{name}' control flag '--{flag}' sets ref_binding_name for a non-ref binding")]
+    MisplacedControlRefBinding { name: String, flag: String },
     #[error("no command matches tokens {tokens:?}")]
     NoMatch { tokens: Vec<String> },
 }
@@ -543,8 +571,43 @@ fn validate_command(
             });
         }
     }
+    for flag in &record.control_flags {
+        match (flag.binding, flag.ref_binding_name.as_deref()) {
+            (ControlFlagBinding::RefBinding, Some(binding)) if !valid_ref_binding_name(binding) => {
+                return Err(CommandRegistryError::InvalidControlRefBinding {
+                    name: record.name.clone(),
+                    flag: flag.flag.clone(),
+                    binding: binding.to_string(),
+                });
+            }
+            (ControlFlagBinding::RefBinding, _) => {}
+            (_, Some(_)) => {
+                return Err(CommandRegistryError::MisplacedControlRefBinding {
+                    name: record.name.clone(),
+                    flag: flag.flag.clone(),
+                });
+            }
+            (_, None) => {}
+        }
+    }
     validate_registration_caps(record, policy)?;
     Ok(())
+}
+
+fn valid_ref_binding_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.split('_').enumerate().all(|(index, segment)| {
+            !segment.is_empty()
+                && segment.chars().enumerate().all(|(char_index, ch)| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() && (index > 0 || char_index > 0)
+                })
+                && (index > 0
+                    || segment
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase()))
+        })
 }
 
 fn validate_tokens(name: &str, tokens: &[String]) -> Result<(), CommandRegistryError> {
@@ -765,6 +828,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            validate_only: false,
             availability: CommandAvailability::Both,
         };
 
@@ -780,6 +844,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            validate_only: false,
             availability: CommandAvailability::Both,
         };
         record
@@ -802,6 +867,7 @@ mod tests {
         });
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            validate_only: false,
             availability: CommandAvailability::Both,
         };
 
@@ -823,6 +889,27 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn direct_execute_item_ref_requires_explicit_validation_intent() {
+        let mut record = command("demo", &["demo"]);
+        record.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            validate_only: true,
+            availability: CommandAvailability::Both,
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["dispatch"]["validate_only"], true);
+
+        let mut missing = value;
+        missing["dispatch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("validate_only");
+        let error = serde_json::from_value::<CommandDef>(missing).unwrap_err();
+        assert!(error.to_string().contains("validate_only"));
     }
 
     #[test]

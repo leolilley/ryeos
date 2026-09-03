@@ -72,6 +72,22 @@ pub async fn handle(
     {
         return Err(in_process_stop_refusal_error(refusal, &req.thread_id));
     }
+    let mut hosted_root_terminalization = if state
+        .state_store
+        .dedicated_session(&req.thread_id)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .is_some()
+    {
+        Some(
+            ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+                &state.state_store,
+                &req.thread_id,
+            )
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     // Atomically close the attach window before deciding whether there is a
     // process to signal. If attach won the StateStore lock first, its immutable
@@ -134,6 +150,15 @@ pub async fn handle(
         json!({"pgid": null, "note": "no_process_to_kill"})
     };
 
+    if hosted_root_terminalization.is_some() {
+        ryeos_app::dedicated_session_service::abort_session_for_root_stop(&state, &req.thread_id)
+            .map_err(|error| {
+            HandlerError::Conflict(format!(
+                "hosted session could not be safely settled before root cancellation: {error:#}"
+            ))
+        })?;
+    }
+
     // Finalize via ThreadLifecycleService so scheduler fire records
     // get updated correctly (a raw state_store call would skip that).
     //
@@ -183,6 +208,9 @@ pub async fn handle(
             }
         }
     };
+    if let Some(terminalization) = hosted_root_terminalization.as_mut() {
+        terminalization.commit();
+    }
 
     // `finalize_thread` persists then publishes the `thread_cancelled`
     // event, so live subscribers receive it directly.
@@ -212,6 +240,9 @@ pub async fn handle(
         ))
     })?
     .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    if !queued_cancelled.is_empty() {
+        ryeos_executor::execution::launch::kick_launch_window_after_discard(&state);
+    }
     for root in &queued_cancelled {
         ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, root);
     }
@@ -231,11 +262,11 @@ pub async fn handle(
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —
     // kick the parent resume live so it does not wait for the next daemon restart.
     // A no-op for a non-follow thread.
-    ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+    ryeos_executor::execution::launch::kick_launch_window_for_terminal(
         &state,
         &finalized.chain_root_id,
     );
-    ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+    ryeos_executor::execution::launch::kick_follow_resume_if_ready(
         &state,
         &finalized.chain_root_id,
     );

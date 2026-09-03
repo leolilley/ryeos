@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
+use crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY;
 use crate::identity::NodeIdentity;
 
 const PROVENANCE_MARKER: &str = "ryeos:authored:";
@@ -71,10 +72,20 @@ impl RuntimeItemAuthorService {
         thread_auth: &ThreadAuthState,
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
+        // The callback's item-specific grant is not by itself authority to
+        // mutate a live project. Preserve the caller's independently admitted
+        // project-write ceiling across pinned execution, while keeping the
+        // runtime confined to its immutable/COW project view.
+        authorizer
+            .authorize(
+                cap.provenance.project_authority().capability_ceiling(),
+                &AuthorizationPolicy::require(LIVE_PROJECT_WRITE_CAPABILITY),
+            )
+            .context("runtime item authoring requires admitted caller project-write authority")?;
         let project_root = cap
             .provenance
-            .durable_live_write_root("project")
-            .context("runtime item authoring requires durable live-project write authority")?;
+            .durable_item_publication_root("project")
+            .context("runtime item authoring requires durable project publication authority")?;
         if params.content.contains(PROVENANCE_MARKER) {
             bail!("runtime-authored item content must not contain `{PROVENANCE_MARKER}`");
         }
@@ -502,9 +513,76 @@ fn write_atomic(
             target.display()
         );
     }
-    parent
-        .atomic_write_if_same(target_name, incumbent, content.as_bytes(), 0o644)
-        .with_context(|| format!("atomically publish authored item {}", target.display()))
+    if content.len() as u64 > ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES {
+        bail!("runtime-authored item exceeds the item source byte limit");
+    }
+    let expected = incumbent
+        .map(|file| -> Result<_> {
+            let observation = lillux::observe_open_regular_file(file)?;
+            if observation.full_permission_mode()? & 0o7000 != 0 {
+                bail!("runtime authoring refuses set-id or sticky permission bits");
+            }
+            let mut descriptor = file.try_clone()?;
+            let bytes = lillux::read_open_regular_file_stable_bounded(
+                &mut descriptor,
+                &observation,
+                ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+            )?;
+            Ok((observation, bytes))
+        })
+        .transpose()?;
+    let mode = expected
+        .as_ref()
+        .map(|(observation, _)| observation.permission_mode())
+        .transpose()?
+        .unwrap_or(0o644);
+    let validation = expected.as_ref().map(|(observation, bytes)| {
+        let observation = observation.clone();
+        let bytes = bytes.clone();
+        move |current: &std::fs::File| {
+            let current_observation = lillux::observe_open_regular_file(current)?;
+            if !current_observation.matches_quarantined_incumbent(&observation) {
+                bail!("runtime-authored item metadata changed before publication");
+            }
+            let mut current = current.try_clone()?;
+            let current = lillux::read_open_regular_file_stable_bounded(
+                &mut current,
+                &current_observation,
+                ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+            )?;
+            if current != bytes {
+                bail!("runtime-authored item bytes changed before publication");
+            }
+            Ok(())
+        }
+    });
+    parent.ensure_path_binding()?;
+    let result = match validation {
+        Some(validate) => parent.replace_bytes_if_matches_atomic(
+            target_name,
+            incumbent,
+            validate,
+            content.as_bytes(),
+            mode,
+        ),
+        None => parent.replace_bytes_if_matches_atomic(
+            target_name,
+            None,
+            |_| Ok(()),
+            content.as_bytes(),
+            mode,
+        ),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.namespace_committed() => parent.sync().map_err(|sync_error| {
+            anyhow!(
+                "runtime-authored item was committed, but durability remains uncertain after retrying the parent barrier; do not repeat the mutation blindly: {error}; {sync_error:#}"
+            )
+        }),
+        Err(error) => Err(anyhow!(error))
+            .with_context(|| format!("atomically publish authored item {}", target.display())),
+    }
 }
 
 /// Per-target keyed lock registry for the author read-compare-commit critical

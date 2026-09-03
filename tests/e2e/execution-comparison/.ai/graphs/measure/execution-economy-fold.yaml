@@ -1,0 +1,197 @@
+version: "1.0.0"
+category: measure
+description: "Evaluate one terminal graph thread under the signed execution-economy frame"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.service.threads/get
+      - ryeos.execute.service.items/effective
+      - ryeos.execute.service.threads/receipts
+config:
+  start: validate_inputs
+  config_schema:
+    type: object
+    required: [subject_thread, frame_digest]
+    properties:
+      subject_thread:
+        type: string
+      frame_digest:
+        type: string
+  nodes:
+    validate_inputs:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: >-
+              keys(inputs) == ["frame_digest", "subject_thread"] &&
+              length(inputs.subject_thread) > 0 &&
+              length(inputs.subject_thread) <= 256 &&
+              matches(inputs.frame_digest, "^[0-9a-f]{64}$")
+            to: observe_thread
+          - to: refuse_invalid_inputs
+
+    observe_thread:
+      action:
+        item_id: "service:threads/get"
+        ref_bindings: {}
+        params:
+          thread_id: "${inputs.subject_thread}"
+      assign:
+        thread_view: "${result}"
+        pin_thread: "${dispatch.action_digest}"
+      next:
+        type: conditional
+        branches:
+          - when: "result != null"
+            to: validate_thread
+          - to: refuse_thread_unavailable
+
+    validate_thread:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: >-
+              state.thread_view.thread.kind == "graph_run" &&
+              state.thread_view.thread.status == "completed" &&
+              exists(state.thread_view.thread.project_root) &&
+              state.thread_view.thread.project_root != null
+            to: validate_cost
+          - to: refuse_thread_ineligible
+
+    validate_cost:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: >-
+              exists(state.thread_view.facets["cost.output_tokens"]) &&
+              type(state.thread_view.facets["cost.output_tokens"]) == "string" &&
+              matches(state.thread_view.facets["cost.output_tokens"], "^(0|[1-9][0-9]*)$")
+            to: load_frame
+          - to: refuse_cost_unavailable
+
+    load_frame:
+      action:
+        item_id: "service:items/effective"
+        ref_bindings: {}
+        params:
+          canonical_ref: "knowledge:measure/execution-economy"
+          expected_kind: "knowledge"
+          project_path: "${state.thread_view.thread.project_root}"
+      assign:
+        frame_ref: "${result.canonical_ref}"
+        frame_version: "${result.composed_value.version ?? null}"
+        frame_trusted: "${result.trusted}"
+        frame_trust_class: "${result.trust_class}"
+        frame_digest: "${result.provenance.root.raw_content_digest}"
+        frame_source_digest: "${result.provenance.root.source_content_digest}"
+        frame_signer: "${result.provenance.root.signer_fingerprint}"
+        frame_value: "${result.composed_value.frame ?? null}"
+        pin_frame: "${dispatch.action_digest}"
+      next:
+        type: unconditional
+        to: validate_frame
+
+    validate_frame:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: >-
+              state.frame_trusted == true &&
+              state.frame_trust_class == "trusted_project" &&
+              state.frame_ref == "knowledge:measure/execution-economy" &&
+              state.frame_digest == inputs.frame_digest &&
+              state.frame_version == "1.0.0" &&
+              state.frame_value != null &&
+              exists(state.frame_value.subject) &&
+              state.frame_value.subject == "thread" &&
+              exists(state.frame_value.observations) &&
+              state.frame_value.observations == ["service:threads/get", "service:items/effective", "service:threads/receipts"] &&
+              exists(state.frame_value.weights.tokens_per_completed_step) &&
+              type(state.frame_value.weights.tokens_per_completed_step) == "number" &&
+              state.frame_value.weights.tokens_per_completed_step > 0 &&
+              exists(state.frame_value.verdict_schema.completed_steps) &&
+              state.frame_value.verdict_schema.completed_steps == "integer" &&
+              exists(state.frame_value.verdict_schema.total_output_tokens) &&
+              state.frame_value.verdict_schema.total_output_tokens == "integer" &&
+              exists(state.frame_value.verdict_schema.tokens_per_completed_step) &&
+              state.frame_value.verdict_schema.tokens_per_completed_step == "number"
+            to: observe_receipts
+          - to: refuse_frame
+
+    observe_receipts:
+      action:
+        item_id: "service:threads/receipts"
+        ref_bindings: {}
+        params:
+          thread_id: "${inputs.subject_thread}"
+      assign:
+        completed_steps: "${result.count ?? 0}"
+        pin_receipts: "${dispatch.action_digest}"
+      next:
+        type: conditional
+        branches:
+          - when: "result != null && result.count > 0"
+            to: verdict
+          - to: refuse_no_steps
+
+    verdict:
+      node_type: return
+      output:
+        frame_ref: "${state.frame_ref}"
+        frame_version: "${state.frame_version}"
+        frame_digest: "${state.frame_digest}"
+        frame_source_digest: "${state.frame_source_digest}"
+        frame_signer: "${state.frame_signer}"
+        subject_thread: "${inputs.subject_thread}"
+        verdict:
+          completed_steps: "${state.completed_steps}"
+          total_output_tokens: '${number(state.thread_view.facets["cost.output_tokens"])}'
+          tokens_per_completed_step: '${(number(state.thread_view.facets["cost.output_tokens"]) / state.completed_steps) * state.frame_value.weights.tokens_per_completed_step}'
+        observation_actions:
+          thread_action_digest: "${state.pin_thread}"
+          frame_action_digest: "${state.pin_frame}"
+          receipts_action_digest: "${state.pin_receipts}"
+        fold:
+          definition_ref: "${run.definition_ref}"
+          effective_definition_digest: "${run.effective_definition_digest}"
+          graph_run_id: "${run.graph_run_id}"
+
+    refuse_thread_unavailable:
+      node_type: return
+      output:
+        verdict: null
+        refused: "subject thread is unavailable to this principal"
+
+    refuse_invalid_inputs:
+      node_type: return
+      output:
+        verdict: null
+        refused: "measurement input must contain one bounded subject_thread and one lowercase frame_digest"
+
+    refuse_thread_ineligible:
+      node_type: return
+      output:
+        verdict: null
+        refused: "subject must be a completed graph thread with project authority"
+
+    refuse_frame:
+      node_type: return
+      output:
+        verdict: null
+        refused: "measurement frame is untrusted, differs from the sealed expected digest, or violates the execution-economy schema"
+
+    refuse_cost_unavailable:
+      node_type: return
+      output:
+        verdict: null
+        refused: "subject has no authoritative canonical output-token cost"
+
+    refuse_no_steps:
+      node_type: return
+      output:
+        verdict: null
+        refused: "subject has no durable completed graph steps"

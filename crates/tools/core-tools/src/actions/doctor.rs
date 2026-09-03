@@ -444,14 +444,21 @@ fn import_one(
         IsolationLaunchContext {
             project_path,
             project_authority: IsolationProjectAuthority::ReadOnly,
+            filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling:
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
             checkpoint_dir: None,
+            checkpoint_authority: None,
             daemon_socket_path: None,
             bundle_roots: isolation_bundle_roots,
             node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             verified_code: &isolation_verified_code,
             verified_command: None,
+            external_read_only_mounts: &[],
+            target_channel: None,
             item_ref,
             thread_id: "offline-doctor",
         },

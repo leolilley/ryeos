@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-29T01:42:39Z:d293c9cbf286fbd2eb94751f1b5b1c6324dc3dd134e4b50c153b5d28b8aed569:FH3uOqr7U1vpZ1mxeFud4eAkIERy2wcyd/xhNBMCChSmmR2PTtq9RNCenFaIXHnfm5rU8jJozjvoFue8GlSDDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-02T02:25:04Z:04e5b742ca532562bc6d48ff2b3c8bd9cbd1f7463d38ce6f731a1cf08f1cdb01:wVR/FHW+sb6hPdkb22ofXkz/X2vhzxqgyK3u9iH9G3GHg7nGtklINIpm3p8VSR+DMG/0i4yuRRZKrk8gKjFUCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.4.1"
+version: "1.4.4"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -20,12 +20,17 @@ test, refresh bundles, or install this checkout locally.
 | Full gate | `./scripts/gate.sh` |
 | Rebuild/sign bundles only | `./scripts/gate.sh --refresh-bundles --no-tests` |
 | Rebuild/sign bundles, then run full gate | `./scripts/gate.sh --refresh-bundles` |
+| Rebuild/sign bundles, then run only the serial crash-qualification matrices | `./scripts/gate.sh --refresh-bundles --crash-qualification-only` |
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 | Verify core/standard source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
+| Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/standard` |
+| Stronger-host build and configured-remote qualification | See `development/remote-development-and-qualification.md` |
 
-Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
+Prereqs: Rust stable, `cargo-nextest`, Python 3, Linux, and usually `HOSTNAME`
+set. The configured-remote qualification helper additionally uses Git,
+`realpath`, and the standard GNU hashing/find utilities named in its runbook.
 
 ## Canonical gate
 
@@ -46,6 +51,20 @@ refresh without the test gate:
 ./scripts/gate.sh --refresh-bundles --no-tests
 ```
 
+A full refreshed gate also runs the directive native-resume and explicit
+cross-site worker-handoff crash matrices. The handoff matrix is deliberately
+serial and takes roughly 40 minutes on the development host. CI therefore
+runs the ordinary workspace suite and crash qualification as separate jobs:
+
+```bash
+./scripts/gate.sh --refresh-bundles --skip-crash-qualification
+./scripts/gate.sh --refresh-bundles --crash-qualification-only
+```
+
+Both jobs remain mandatory. The split prevents either validation lane from
+consuming the other's timeout; it does not reduce the matrix or its retained
+qualification report.
+
 ## Bundle refresh rules
 
 Run `scripts/populate-bundles.sh` through the explicit
@@ -60,9 +79,9 @@ directly:
 ```
 
 `--all` is required — populate refuses to rebuild the whole bundle set
-implicitly (exits 2 otherwise). Use `--crates "<crate ...>"` to rebuild only
-what changed (e.g. `--crates ryeos-core-tools`), and `--jobs N` to cap parallelism if
-a full release build runs the machine out of memory.
+implicitly (exits 2 otherwise). Use `--crates "<Cargo package ...>"` to rebuild
+only selected packages (e.g. `--crates ryeosd`), and `--jobs N` to cap
+parallelism if a full release build runs the machine out of memory.
 
 It does all of this as one atomic authoring refresh:
 
@@ -138,8 +157,9 @@ explicitly:
   --populate --all --trust-source-publishers
 ```
 
-Use `--populate --crates "<crate ...>"` instead when only named bundle-owned
-binaries need rebuilding.
+Use `--populate --crates "<Cargo package ...>"` when only selected packages
+need rebuilding. This also covers node-only packages such as `ryeosd`; every
+unselected bundle payload retains its existing exact artifact generation.
 
 ### Clean-cut execution-state upgrades
 
@@ -215,5 +235,6 @@ work around it by adding kind-specific CLI dispatch logic.
 |---|---|---|
 | `scripts/gate.sh` | canonical validation | nextest by default; builds/signs bundles first only with `--refresh-bundles` |
 | `scripts/populate-bundles.sh` | bundle authoring refresh | derived state only; safe to rerun |
+| `scripts/dev/qualify-configured-remote.sh` | generic full-project remote round-trip probe | requires an already-running, configured, exactly authorized remote with the exact binding; retains integrity-only operational evidence outside the project |
 | `scripts/pkg/install-local-direct.sh` | fast local packaged install | uses `/usr/bin` + `/usr/share/ryeos`; populates only with explicit `--populate` |
 | `scripts/smoke-execute-stream.sh` | signed `/execute/stream` SSE smoke | needs URL, key, audience |

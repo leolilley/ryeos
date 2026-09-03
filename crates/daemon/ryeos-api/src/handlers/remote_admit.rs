@@ -1,6 +1,5 @@
 //! `remote/admit` — claim a one-time admission token on a configured remote.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -27,12 +26,6 @@ pub struct Request {
     /// Capabilities to request. Must be permitted by the target node's token file.
     #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
     pub scopes: Vec<String>,
-    /// Optional local project path for project-level remote config layering.
-    #[serde(default, alias = "project")]
-    pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag.
-    #[serde(default)]
-    pub no_project: bool,
 }
 
 fn default_remote() -> String {
@@ -40,28 +33,14 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let project = if req.no_project {
-        None
-    } else {
-        req.project_path.as_deref()
-    };
-    let remotes = config::load_remotes_layered(&state.config.app_root, project)?;
+    // Admission tokens are credentials delivered by a target operator. Only
+    // operator-owned remote configuration may select where that credential is
+    // released; a synchronized project must never shadow this coordinate.
+    let remotes = config::load_remotes(&state.config.app_root)?;
     let remote_cfg = config::get_remote(&remotes, &req.remote)?;
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     let live_identity = client.get_public_key().await?;
-    live_identity.validate_identity_binding()?;
-    let pinned_fingerprint = remote_cfg
-        .pinned_signing_key()
-        .map(|key| lillux::crypto::fingerprint(&key))?;
-    if live_identity.principal_id != remote_cfg.principal_id
-        || live_identity.signing_key != remote_cfg.signing_key
-        || live_identity.fingerprint != pinned_fingerprint
-    {
-        anyhow::bail!(
-            "remote '{}' identity mismatch before admission claim; refusing to send admission token",
-            req.remote,
-        );
-    }
+    live_identity.validate_configured_identity(&remote_cfg)?;
 
     let local_public_key = format!(
         "ed25519:{}",

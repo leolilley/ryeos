@@ -7,7 +7,8 @@
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
 #     scripts/pkg/bundle-sets.sh (full = core, central-auth, standard, web,
-#     browser, ryeos-ui, hosted-node; the lean sets are subsets).
+#     browser, ryeos-ui, hosted-node, codex, local-inference; the lean sets are
+#     subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -28,42 +29,56 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, standard, web, browser, ryeos-ui, hosted-node).
+central-auth, standard, web, browser, ryeos-ui, hosted-node, codex,
+local-inference).
 
 Options:
-  --populate            Run scripts/populate-bundles.sh first (expensive; rebuilds
-                        bundle-owned release binaries and republishes bundles)
+  --populate            Run scripts/populate-bundles.sh first. Requires either a
+                        targeted --crates package list or explicit --all.
   --no-init             Install files but do not run ryeos init
   --no-daemon-restart   Do not stop/restart an already-running daemon
-  --keep-shadows        Do not move /usr/local/bin or ~/.local/bin RyeOS shadows
+  --keep-shadows        Do not move /usr/local/bin, ~/.local/bin, or the invoking
+                        user's Cargo-home bin shadows of installed RyeOS binaries
   --trust-source-publishers
                         Explicitly trust the publisher documents copied from
                         this checkout. Required to initialize dev/custom-signed
                         bundles; never enabled automatically.
+  --reset-node-policy-generation
+                        Explicitly replace an obsolete complete node-policy
+                        generation from this bundle set's signed init profile.
+                        Requires init and preserves all non-policy node state.
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: ryeos-dev)
-  --bundle-set SET      Bundle set to populate/install: full, standard
-                        (core+standard), hosted-node, or hosted-workflow
-                        (core+standard+hosted-node)
+  --bundle-set SET      Bundle set to populate/install: full,
+                        full-sandbox (full plus the separately built optional
+                        isolation backend), standard
+                        (core+central-auth+standard), hosted-node
+                        (core+central-auth+hosted-node), or hosted-workflow
+                        (core+central-auth+standard+hosted-node+codex). Every
+                        set selects its exact same-named publisher-authored
+                        node init profile for first policy publication; an
+                        existing signed generation is preserved.
                         (default: full)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
-  --crates "A B C"      With --populate, rebuild only these crates (e.g.
-                        --crates ryeos-core-tools to refresh just core-tools). Other
-                        bundle binaries must already exist in target/release.
+  --crates "A B C"      With --populate, rebuild only these Cargo packages (e.g.
+                        --crates ryeosd for a daemon-only source correction).
+                        Unselected bundle payloads retain their existing exact
+                        artifact generation and must already be built.
   --all                 With --populate, rebuild the whole bundle set. Required to
                         do a full rebuild — --populate refuses to build everything
                         implicitly (that full release build is what exhausts memory).
   -h, --help            Show this help
 
-Default behavior is incremental: install already-built binaries and bundle
-sources, stop any already-running daemon, move stale PATH shadows aside, run
-ryeos init using only the compiled official-publisher trust root, then restart
-the daemon if it was running before the install. Development/custom publisher
-documents require --trust-source-publishers. Pass --populate only when bundle
-artifacts actually need to be regenerated.
+Default behavior installs already-built user binaries and exact, closed source
+bundle generations without rebuilding or republishing their payloads. It stops
+any already-running daemon, moves stale PATH shadows aside, runs ryeos init
+using only the compiled official-publisher trust root, then restarts the daemon
+if it was running before the install. Development/custom publisher documents
+require --trust-source-publishers. Use --populate --crates ... for the focused
+development loop; reserve --populate --all for release/E2E qualification.
 EOF
 }
 
@@ -97,6 +112,33 @@ invoking_user="${SUDO_USER:-$(id -un)}"
 # sudo and would silently point app-root fallbacks at root's data dir.
 invoking_user_home="$(getent passwd "$invoking_user" | cut -d: -f6)"
 
+# Resolve Cargo's user-owned bin directory from the same login environment used
+# for bundle population. Cargo home is configurable and on RyeOS development
+# hosts is commonly XDG-aligned rather than ~/.cargo. Hard-coding ~/.cargo would
+# leave the actual stale binary ahead of /usr/bin and make an otherwise complete
+# install fail only at the final PATH check.
+invoking_user_shell="$(getent passwd "$invoking_user" | cut -d: -f7)"
+[[ -x "$invoking_user_shell" ]] || invoking_user_shell="/bin/sh"
+if [[ "$invoking_user" != "$(id -un)" ]]; then
+    # Ask the login environment to execute only the external `env` command.
+    # Parameter expansion syntax is shell-specific (fish/nushell are valid
+    # passwd shells), so the installer parses the exported value itself.
+    invoking_user_environment="$(
+        sudo -H -u "$invoking_user" "$invoking_user_shell" -lc env
+    )"
+    invoking_user_cargo_home="$(
+        printf '%s\n' "$invoking_user_environment" |
+            sed -n 's/^CARGO_HOME=//p' |
+            tail -n 1
+    )"
+    [[ -n "$invoking_user_cargo_home" ]] || \
+        invoking_user_cargo_home="$invoking_user_home/.cargo"
+else
+    invoking_user_cargo_home="${CARGO_HOME:-$invoking_user_home/.cargo}"
+fi
+[[ "$invoking_user_cargo_home" == /* ]] || \
+    die "invoking user's Cargo home is not absolute: $invoking_user_cargo_home"
+
 # Run `ryeos <args>` with a timeout, as the invoking user when under sudo so it
 # targets that user's app-root. `timeout` wraps the external command (sudo or
 # ryeos), never a shell function.
@@ -119,40 +161,28 @@ ryeos_status_quick() {
     RYEOS_TTY=never ryeos_user 10 node status 2>/dev/null || true
 }
 
-bundle_payload_bins() {
-    case "$1" in
-        core)
-            printf '%s\n' \
-                rye-parser-yaml-document \
-                rye-parser-yaml-header-document \
-                rye-parser-regex-kv \
-                rye-composer-identity \
-                ryeos-core-tools
-            ;;
-        standard)
-            printf '%s\n' \
-                ryeos-directive-runtime \
-                ryeos-directive-launch-preparer \
-                ryeos-graph-runtime \
-                ryeos-knowledge-runtime \
-                rye-composer-extends-chain \
-                rye-composer-graph-permissions
-            ;;
-        ryeos-ui)
-            printf '%s\n' ryeos-tui web
-            ;;
-        web)
-            printf '%s\n' ryeos-web-tools
-            ;;
-        browser)
-            printf '%s\n' ryeos-browser-tools
-            ;;
-    esac
-}
+# Build only the init-profile portion of init. The distribution mapping is
+# first-publication authority; any existing occupant is preserved so RyeOS can
+# validate it as one complete signed generation. In particular, an empty file,
+# link, or partial directory never triggers a profile fallback.
+build_install_init_profile_args() {
+    local policy_generation_path="$1"
+    local mapped_profile="$2"
+    local replace_generation="$3"
 
-publisher_fingerprint_from_trust_doc() {
-    local trust_file="$1"
-    sed -n 's/^fingerprint *= *"\([^"]*\)".*/\1/p' "$trust_file" | head -n1
+    [[ -n "$mapped_profile" ]] || return 1
+    INSTALL_INIT_PROFILE_ARGS=()
+    INSTALL_PUBLISH_INITIAL_POLICY=0
+    if [[ "$replace_generation" == "1" ]]; then
+        INSTALL_INIT_PROFILE_ARGS=(
+            --node-profile "$mapped_profile"
+            --replace-node-policy-generation
+            --confirm-node-policy-generation-replacement
+        )
+    elif [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
+        INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile")
+        INSTALL_PUBLISH_INITIAL_POLICY=1
+    fi
 }
 
 # Refuse a non-official key in a source publisher document before stopping the
@@ -259,6 +289,28 @@ validate_selected_source_publisher_trust() {
     done
 }
 
+require_closed_source_bundle_payloads() {
+    local repo_root="$1"
+    shift
+    local name bundle_root
+    local -a incomplete=()
+
+    for name in "$@"; do
+        bundle_root="$repo_root/bundles/$name"
+        if [[ ! -s "$bundle_root/.ai/refs/bundles/manifest" \
+            || ! -d "$bundle_root/.ai/objects" ]]; then
+            incomplete+=("$name")
+        fi
+    done
+
+    if (( ${#incomplete[@]} > 0 )); then
+        ryeos_term_fail "source bundle payload is not published for: ${incomplete[*]}"
+        ryeos_term_info "refusing to replace installed bundles with source trees that lack their closed manifest/object payload"
+        ryeos_term_info "rerun with --populate and an explicit --crates or --all scope"
+        return 1
+    fi
+}
+
 # Build init trust arguments from the exact source boundary the installer
 # selected and validated. The result intentionally excludes every other
 # document that might already exist below the packaged share directory.
@@ -276,89 +328,13 @@ collect_selected_source_trust_args() {
     SELECTED_SOURCE_TRUST_ARGS=(--trust-file "$root_trust_file")
     for name in "$@"; do
         trust_file="$installed_share_dir/$name/PUBLISHER_TRUST.toml"
-        [[ -f "$trust_file" ]] && \
+        if [[ -f "$trust_file" ]]; then
             SELECTED_SOURCE_TRUST_ARGS+=(--trust-file "$trust_file")
+        fi
     done
-}
-
-operator_fingerprint() {
-    local key_path="${init_app_root:-$invoking_user_home/.local/share/ryeos}/.ai/config/keys/signing/private_key.pem"
-    [[ -s "$key_path" ]] || return 1
-    openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
-        | tail -c 32 \
-        | sha256sum \
-        | cut -d' ' -f1
-}
-
-refresh_installed_bundle_payload() {
-    local name="$1"
-    local dest="$share_dir/$name"
-    local bin_dest="$dest/.ai/bin/x86_64-unknown-linux-gnu"
-    local bins=()
-    local b
-    local trust_fp operator_fp
-
-    while IFS= read -r b; do
-        [[ -n "$b" ]] && bins+=("$b")
-    done < <(bundle_payload_bins "$name")
-    [[ ${#bins[@]} -gt 0 ]] || return 0
-
-    [[ -x "$target_dir/ryeos-core-tools" ]] || \
-        die "bundle payload refresh requires built binary: $target_dir/ryeos-core-tools"
-    [[ -f "$dest/PUBLISHER_TRUST.toml" ]] || \
-        die "bundle payload refresh requires trust doc: $dest/PUBLISHER_TRUST.toml"
-    trust_fp="$(publisher_fingerprint_from_trust_doc "$dest/PUBLISHER_TRUST.toml")"
-    operator_fp="$(operator_fingerprint || true)"
-    if [[ -z "$operator_fp" || "$trust_fp" != "$operator_fp" ]]; then
-        ryeos_term_note "skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
-        return 0
-    fi
-
-    ryeos_term_info "refreshing $name bundle payload"
-    sudo mkdir -p "$bin_dest"
-    for b in "${bins[@]}"; do
-        [[ -x "$target_dir/$b" ]] || die "bundle payload binary missing: $target_dir/$b"
-        sudo install -Dm755 "$target_dir/$b" "$bin_dest/$b"
-    done
-
-    case "$name" in
-        core)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            ;;
-        standard)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$share_dir/core" \
-                --registry-root "$share_dir/core" \
-                --registry-root "$share_dir/standard" \
-                --owner "$owner" >/dev/null
-            ;;
-        ryeos-ui)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --registry-root "$share_dir/standard" \
-                --owner "$owner" >/dev/null
-            ;;
-        web)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            ;;
-        browser)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
-                "$target_dir/ryeos-core-tools" build "$dest" \
-                --registry-root "$share_dir/core" \
-                --owner "$owner" >/dev/null
-            ;;
-    esac
+    # Per-bundle docs are optional under the shared-root trust model; the
+    # trailing test above must not decide this function's exit status.
+    return 0
 }
 
 pid_from_status() {
@@ -464,11 +440,12 @@ run_init=1
 restart_daemon=1
 cleanup_shadows=1
 trust_source_publishers=0
+reset_node_policy_generation=0
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
 bundle_set="full"
 jobs=""            # forwarded to populate as cargo -j N
-crates=""          # forwarded to populate to rebuild only these crates
+crates=""          # forwarded to populate to rebuild only these Cargo packages
 populate_all=0     # explicit opt-in to rebuild the whole bundle set
 
 while [[ $# -gt 0 ]]; do
@@ -493,6 +470,10 @@ while [[ $# -gt 0 ]]; do
             trust_source_publishers=1
             shift
             ;;
+        --reset-node-policy-generation)
+            reset_node_policy_generation=1
+            shift
+            ;;
         --key)
             [[ $# -ge 2 ]] || die "--key requires a path"
             key="$2"
@@ -514,7 +495,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --crates)
-            [[ $# -ge 2 ]] || die "--crates requires a space-separated crate list"
+            [[ $# -ge 2 ]] || die "--crates requires a space-separated Cargo package list"
             crates="$2"
             shift 2
             ;;
@@ -534,16 +515,35 @@ done
 
 cd "$repo_root"
 
+if [[ -n "$crates" && $populate_all -eq 1 ]]; then
+    die "--crates and --all are mutually exclusive build scopes"
+fi
+if [[ $run_populate -eq 0 && ( -n "$crates" || $populate_all -eq 1 ) ]]; then
+    die "--crates and --all require --populate"
+fi
+if [[ $reset_node_policy_generation -eq 1 && $run_init -eq 0 ]]; then
+    die "--reset-node-policy-generation cannot be combined with --no-init"
+fi
+
 bundle_names=()
 while IFS= read -r _bundle_name; do
     bundle_names+=("$_bundle_name")
 done < <(ryeos_bundle_set_names "$bundle_set") || true
 if [[ ${#bundle_names[@]} -eq 0 ]]; then
-    die "--bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
+    die "--bundle-set must be 'full', 'full-sandbox', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
 fi
+if ! node_init_profile="$(ryeos_bundle_set_node_init_profile "$bundle_set")"; then
+    die "could not resolve node init profile for bundle set: $bundle_set"
+fi
+[[ -n "$node_init_profile" ]] || die "bundle set has no explicit node init profile: $bundle_set"
 bundle_names_csv=$(IFS=,; printf '%s\n' "${bundle_names[*]}")
 
-if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
+# Every selected source bundle must already carry its exact closed manifest and
+# object graph. Source-only optional bundles are not exempt from install
+# integrity merely because they stage no Rust binary.
+closed_payload_bundle_names=("${bundle_names[@]}")
+
+if [[ "$bundle_set" != "full" && "$bundle_set" != "full-sandbox" && $run_init -eq 0 ]]; then
     ryeos_term_warn "--no-init installs lean sources only; existing local initialized state is not rewritten"
 fi
 
@@ -562,16 +562,18 @@ required_bins=(
     ryeos
 )
 
-# PKGBUILD installs lillux when a full package build has produced it, but
-# populate-bundles.sh does not currently build it. Treat it as optional for
-# this fast direct-copy helper so the CLI/init path is not blocked.
+# A complete `--populate --all` now builds lillux with the other user-facing
+# binaries. Focused population may legitimately retain no prior lillux build,
+# so this direct-copy development helper still treats it as optional rather
+# than broadening a targeted repair into another package build.
 optional_bins=(lillux)
+installed_user_bins=("${required_bins[@]}")
 
 if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     # Be explicit about scope — never trigger a full workspace rebuild implicitly.
     if [[ -z "$crates" && $populate_all -eq 0 ]]; then
-        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools), or --all to rebuild the whole '$bundle_set' set"
+        die "--populate needs an explicit scope: pass --crates \"<Cargo package ...>\" for a focused rebuild (e.g. --crates ryeosd), or --all to rebuild the whole '$bundle_set' set"
     fi
     ryeos_term_begin INSTALL "populating bundles"
     populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")
@@ -629,6 +631,45 @@ if [[ $run_init -eq 1 ]]; then
         || die "source publisher trust policy rejected initialization"
 fi
 
+# A failed/interrupted population can leave authored source plus binaries but
+# no derived manifest/object closure. Installing that tree would destroy a
+# previously bootable installed payload and can never pass prospective init.
+# Refuse before stopping the daemon or replacing anything; only the publisher
+# build may recreate this closed evidence.
+require_closed_source_bundle_payloads "$repo_root" "${closed_payload_bundle_names[@]}" \
+    || die "selected source bundle set is incomplete"
+
+# Validate the complete shared source-root seed closure before stopping a live
+# daemon or replacing installed files. Every distribution carries these seeds
+# and selects exactly the same-named seed through the mapping above.
+for name in "${bundle_names[@]}"; do
+    [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
+done
+[[ -d "$repo_root/bundles/.ai" && ! -L "$repo_root/bundles/.ai" ]] || \
+    die "missing or unsafe source-root seed data: bundles/.ai"
+[[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" && ! -L "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
+    die "missing or unsafe source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
+ryeos_validate_node_init_root "$repo_root/bundles/.ai/node/init" || \
+    die "source-root node init namespace is not closed"
+node_init_profile_dir="$repo_root/bundles/.ai/node/init/profiles"
+[[ -d "$node_init_profile_dir" && ! -L "$node_init_profile_dir" ]] || \
+    die "missing or unsafe source-root node init-profile directory: $node_init_profile_dir"
+unsupported_node_init_profile="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+[[ -z "$unsupported_node_init_profile" ]] || \
+    die "source-root node init-profile inventory contains an unsafe entry: $unsupported_node_init_profile"
+hardlinked_node_init_profile="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)"
+[[ -z "$hardlinked_node_init_profile" ]] || \
+    die "source-root node init-profile inventory contains a multiply-linked file: $hardlinked_node_init_profile"
+expected_node_init_profiles="$(ryeos_node_init_profile_file_names | sort)"
+actual_node_init_profiles="$(find "$node_init_profile_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+[[ "$actual_node_init_profiles" == "$expected_node_init_profiles" ]] || \
+    die "source-root node init-profile inventory is incomplete or unsupported"
+while IFS= read -r node_init_profile_name; do
+    ryeos_validate_node_init_profile \
+        "$node_init_profile_name" "$node_init_profile_dir/$node_init_profile_name.yaml" || \
+        die "source-root node init-profile contract is invalid: $node_init_profile_name"
+done < <(ryeos_node_init_profile_names)
+
 daemon_was_running=0
 if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
     if stop_daemon_for_install; then
@@ -645,6 +686,7 @@ done
 # they now live exclusively inside bundles under /usr/share/ryeos/.
 stale_bins=(
     ryeos-core-tools
+    ryeos-session-exec
     ryeos-tui
     ryeos-directive-runtime
     ryeos-directive-launch-preparer
@@ -655,6 +697,7 @@ stale_bins=(
     rye-parser-regex-kv
     rye-composer-extends-chain
     rye-composer-graph-permissions
+    ryeos-graph-effective-validator
     rye-composer-identity
 )
 for b in "${stale_bins[@]}"; do
@@ -664,16 +707,11 @@ for b in "${stale_bins[@]}"; do
     fi
 done
 
-for name in "${bundle_names[@]}"; do
-    [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
-done
-[[ -d "$repo_root/bundles/.ai" ]] || die "missing source-root seed data: bundles/.ai"
-[[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
-    die "missing source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
-[[ -f "$repo_root/bundles/.ai/node/init/command-registration/default.yaml" ]] || \
-    die "missing source-root command-registration seed: bundles/.ai/node/init/command-registration/default.yaml"
-[[ -f "$repo_root/bundles/.ai/node/init/bundle-registration-grants/default.yaml" ]] || \
-    die "missing source-root bundle-registration-grants seed: bundles/.ai/node/init/bundle-registration-grants/default.yaml"
+# Pre-authorize sudo before any spinner owns the terminal; a password prompt
+# raised under the progress UI is invisible and times out.
+if [[ $(id -u) -ne 0 ]]; then
+    sudo -v || die "sudo authorization is required for /usr installs"
+fi
 
 ryeos_term_begin INSTALL "installing binaries"
 for b in "${required_bins[@]}"; do
@@ -682,6 +720,7 @@ done
 for b in "${optional_bins[@]}"; do
     if [[ -x "$target_dir/$b" ]]; then
         sudo install -Dm755 "$target_dir/$b" "$bin_dir/$b"
+        installed_user_bins+=("$b")
     else
         ryeos_term_note "optional binary not built, skipping: $b"
     fi
@@ -720,11 +759,13 @@ for name in "${bundle_names[@]}"; do
         sudo install -Dm644 "$bundle_dir/README.md" \
             "$doc_dir/$name/README.md"
     fi
-done
-for name in "${bundle_names[@]}"; do
-    if [[ $run_populate -eq 0 ]]; then
-        refresh_installed_bundle_payload "$name"
-    fi
+    for pinned_contract in "$bundle_dir"/PINNED-*.md; do
+        [[ -f "$pinned_contract" ]] || continue
+        sudo install -Dm644 "$pinned_contract" \
+            "$doc_dir/$name/$(basename "$pinned_contract")"
+        [[ -s "$doc_dir/$name/$(basename "$pinned_contract")" ]] || \
+            die "failed to install $name pinned workload contract"
+    done
 done
 sudo chown -R root:root "$share_dir"
 
@@ -733,27 +774,40 @@ if [[ $cleanup_shadows -eq 1 ]]; then
     stamp="$(date +%Y%m%d%H%M%S)"
     user_backup_dir="$invoking_user_home/.local/bin/ryeos-shadow-backups-$stamp"
     made_user_backup=0
-    for b in "${required_bins[@]}" "${optional_bins[@]}"; do
+    for b in "${installed_user_bins[@]}"; do
         if [[ -e "/usr/local/bin/$b" || -L "/usr/local/bin/$b" ]]; then
             sudo mv "/usr/local/bin/$b" "/usr/local/bin/$b.bak.$stamp"
         fi
         if [[ -e "$invoking_user_home/.local/bin/$b" || -L "$invoking_user_home/.local/bin/$b" ]]; then
             if [[ $made_user_backup -eq 0 ]]; then
-                mkdir -p "$user_backup_dir"
+                sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir"
                 made_user_backup=1
             fi
-            mv "$invoking_user_home/.local/bin/$b" "$user_backup_dir/$b"
+            sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir/local-bin"
+            sudo -H -u "$invoking_user" mv \
+                "$invoking_user_home/.local/bin/$b" "$user_backup_dir/local-bin/$b"
+        fi
+        if [[ -e "$invoking_user_cargo_home/bin/$b" || -L "$invoking_user_cargo_home/bin/$b" ]]; then
+            if [[ $made_user_backup -eq 0 ]]; then
+                sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir"
+                made_user_backup=1
+            fi
+            sudo -H -u "$invoking_user" mkdir -p "$user_backup_dir/cargo-bin"
+            sudo -H -u "$invoking_user" mv \
+                "$invoking_user_cargo_home/bin/$b" "$user_backup_dir/cargo-bin/$b"
         fi
     done
 fi
 
 hash -r 2>/dev/null || true
 
-resolved="$(command -v ryeos || true)"
-if [[ "$resolved" != "$bin_dir/ryeos" ]]; then
-    type -a ryeos 2>/dev/null || true
-    die "expected ryeos on PATH to resolve to $bin_dir/ryeos, got: ${resolved:-not found}"
-fi
+for b in "${installed_user_bins[@]}"; do
+    resolved="$(command -v "$b" || true)"
+    if [[ "$resolved" != "$bin_dir/$b" ]]; then
+        type -a "$b" 2>/dev/null || true
+        die "expected $b on PATH to resolve to $bin_dir/$b, got: ${resolved:-not found}"
+    fi
+done
 
 if [[ $run_init -eq 1 ]]; then
     # The node lives in the INVOKING USER's XDG data dir, not root's. Run init as that
@@ -763,38 +817,22 @@ if [[ $run_init -eq 1 ]]; then
     init_as=()
     [[ "$invoking_user" != "$(id -un)" ]] && init_as=(sudo -H -u "$invoking_user")
     ryeos_term_update "initializing node state" "user $invoking_user"
-    ryeos_term_suspend
     state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
-    for path in "$state_root/.ai/bundles"/*; do
-        [[ -d "$path/.ai" ]] || continue
-        name="$(basename "$path")"
-        keep=0
-        for bundle_name in "${bundle_names[@]}"; do
-            if [[ "$name" == "$bundle_name" ]]; then
-                keep=1
-                break
-            fi
-        done
-        if [[ $keep -eq 0 ]]; then
-            ryeos_term_note "removing stale initialized bundle: $path"
-            rm -rf "$path"
-        fi
-    done
-    for path in "$state_root/.ai/node/bundles"/*.yaml; do
-        [[ -f "$path" ]] || continue
-        name="$(basename "$path" .yaml)"
-        keep=0
-        for bundle_name in "${bundle_names[@]}"; do
-            if [[ "$name" == "$bundle_name" ]]; then
-                keep=1
-                break
-            fi
-        done
-        if [[ $keep -eq 0 ]]; then
-            ryeos_term_note "removing stale initialized bundle registration: $path"
-            rm -f "$path"
-        fi
-    done
+    policy_generation_path="$state_root/.ai/node/policies"
+    if [[ $reset_node_policy_generation -eq 1 ]]; then
+        [[ -e "$policy_generation_path" && ! -L "$policy_generation_path" ]] || \
+            die "--reset-node-policy-generation requires an existing safe policy generation"
+    fi
+    build_install_init_profile_args \
+        "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" || \
+        die "could not resolve init-profile arguments"
+    if [[ $reset_node_policy_generation -eq 1 ]]; then
+        ryeos_term_note "replacing obsolete signed node policy generation during initialization"
+    elif [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 1 ]]; then
+        ryeos_term_note "publishing initial signed node policy generation"
+    else
+        ryeos_term_note "preserving existing signed node policy generation"
+    fi
     trust_args=()
     if [[ $trust_source_publishers -eq 1 ]]; then
         # Pin only the source-root and selected bundle documents validated
@@ -808,7 +846,9 @@ if [[ $run_init -eq 1 ]]; then
     if [[ -n "$init_app_root" ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
+    init_args+=("${INSTALL_INIT_PROFILE_ARGS[@]}")
     init_status=0
+    ryeos_term_suspend
     "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}" || init_status=$?
     if (( init_status != 0 )); then
         ryeos_term_end failure "INSTALL FAILED" "initializing node state · exit status $init_status"
@@ -817,11 +857,37 @@ if [[ $run_init -eq 1 ]]; then
 
     ryeos_term_end success INSTALL "node state initialized"
     ryeos_term_begin VERIFY "initialized bundle state"
-    state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     for name in "${bundle_names[@]}"; do
         test -d "$state_root/.ai/bundles/$name/.ai" || \
             die "initialized $name bundle missing from $state_root"
     done
+    if [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 1 ]]; then
+        selected_node_init_profile="$share_dir/.ai/node/init/profiles/$node_init_profile.yaml"
+        expected_node_policies="$(
+            ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+                | sed 's/$/.yaml/' \
+                | sort
+        )"
+        node_policy_dir="$state_root/.ai/node/policies"
+        [[ -n "$expected_node_policies" && -d "$node_policy_dir" && ! -L "$node_policy_dir" ]] || \
+            die "selected node init profile was not materialized under $node_policy_dir"
+        unsafe_node_policy="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+        [[ -z "$unsafe_node_policy" ]] || \
+            die "materialized node-policy generation contains an unsafe entry: $unsafe_node_policy"
+        actual_node_policies="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+        [[ "$actual_node_policies" == "$expected_node_policies" ]] || \
+            die "materialized node-policy generation does not match $node_init_profile"
+    else
+        node_policy_dir="$policy_generation_path"
+        [[ -d "$node_policy_dir" && ! -L "$node_policy_dir" ]] || \
+            die "existing node-policy generation is not a safe directory: $node_policy_dir"
+        unsafe_node_policy="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+        [[ -z "$unsafe_node_policy" ]] || \
+            die "existing node-policy generation contains an unsafe entry: $unsafe_node_policy"
+        actual_node_policies="$(find "$node_policy_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+        [[ -n "$actual_node_policies" ]] || \
+            die "existing node-policy generation is empty: $node_policy_dir"
+    fi
     if [[ "$bundle_set" == "hosted-node" ]]; then
         for name in standard ryeos-ui web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
@@ -848,7 +914,7 @@ if [[ $run_init -eq 1 ]]; then
                 die "initialized central-host state unexpectedly contains $name registration"
         done
     fi
-    if [[ "$bundle_set" == "full" ]]; then
+    if [[ "$bundle_set" == "full" || "$bundle_set" == "full-sandbox" ]]; then
         grep -q '^  execute: client:ryeos/tui$' \
             "$state_root/.ai/bundles/ryeos-ui/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"

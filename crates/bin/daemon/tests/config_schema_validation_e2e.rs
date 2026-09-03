@@ -129,7 +129,7 @@ fn build_plan_rejects_params_violating_config_schema() {
     // count: "five" violates the schema (string vs integer).
     let bad_params = serde_json::json!({ "count": "five" });
 
-    let result = engine.build_plan(&ctx, &verified, &bad_params, &ctx.execution_hints);
+    let result = engine.build_plan(&ctx, &verified, &bad_params, &ctx.execution_hints, None);
 
     let _ = fs::remove_dir_all(&project_dir);
 
@@ -157,7 +157,7 @@ fn build_plan_accepts_params_conforming_to_config_schema() {
 
     let good_params = serde_json::json!({ "count": 1 });
 
-    let result = engine.build_plan(&ctx, &verified, &good_params, &ctx.execution_hints);
+    let result = engine.build_plan(&ctx, &verified, &good_params, &ctx.execution_hints, None);
 
     let _ = fs::remove_dir_all(&project_dir);
 

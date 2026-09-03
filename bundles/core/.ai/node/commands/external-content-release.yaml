@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-11T02:28:07Z:29f4a1ab5b7f8c8f395ae2205d972242e062a2874ed7bcf71a66126d68ae029e:vN0J17IRSx23UgB34FVuBBXwirziMEDetfT7SW0ysnrUWhKy3aznIRIlQzx7IoY0MLt227ZXYRsxKxNkF/7KCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, release]
+description: Release an external-content consumer binding
+forms:
+  - slots:
+      - field: binding_id
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/release

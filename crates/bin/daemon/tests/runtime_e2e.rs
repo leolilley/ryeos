@@ -757,6 +757,70 @@ config:
     drop(project);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_graph_validate_is_threadless_and_never_enters_the_runtime() {
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let dir = project.path().join(".ai/graphs/validate_only");
+    std::fs::create_dir_all(&dir).expect("create project graph dir");
+    let body = r#"version: "1.0.0"
+category: validate_only
+description: "threadless managed validation fixture"
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output: {ok: true}
+"#;
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
+    std::fs::write(dir.join("threadless.yaml"), signed).expect("write project graph");
+
+    let (status, response) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "graph:validate_only/threadless",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "validate_only": true,
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("post validation request");
+    assert_eq!(status, reqwest::StatusCode::OK, "response={response:#}");
+    assert_eq!(response.get("validated"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        response.get("item_ref"),
+        Some(&serde_json::json!("graph:validate_only/threadless"))
+    );
+    assert!(response.get("thread").is_none(), "response={response:#}");
+
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    if projection_path.exists() {
+        let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
+            .expect("open projection db");
+        let threads = ryeos_state::queries::list_threads(&db, 100).expect("list threads");
+        assert!(
+            threads
+                .iter()
+                .all(|thread| thread.item_ref != "graph:validate_only/threadless"),
+            "validate_only created a durable graph thread: {threads:#?}"
+        );
+    }
+}
+
 // ── 6. Grep gate: zero kind-name branching in dispatch code ────────────
 
 #[test]

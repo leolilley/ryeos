@@ -20,7 +20,7 @@ use ryeos_state::{
     SyncJobAttemptState, SyncJobState, SyncJobUpdate,
 };
 
-const DEFAULT_POLICY: &str = "local-node-v1";
+const DEFAULT_POLICY: &str = super::admission_submit::LOCAL_ADMISSION_POLICY;
 const DEFAULT_LIMIT: usize = 500;
 const DEFAULT_MAX_IMPORTS: usize = 50;
 const MAX_IMPORTS: usize = 500;
@@ -99,7 +99,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     })?;
     let expected_signer = lillux::crypto::fingerprint(&expected_key);
     let expected_issuer = format!("fp:{expected_signer}");
-    let ids = create_batch_job(&state, &remote_cfg.name)?;
+    let ids = create_batch_job(&state, &remote_cfg.name, &req.policy)?;
     let mut progress = BatchProgress::new();
 
     let result: Result<Value> = async {
@@ -190,17 +190,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     expected_attestation_hash: Some(head.target_hash.clone()),
                     source_peer: Some(remote_cfg.name.clone()),
                     job_id: Some(ids.job_id.clone()),
-                    closure_options: ObjectsClosureRequestOptions {
-                        max_objects: req.max_objects,
-                        max_blobs: req.max_blobs,
-                        max_object_bytes: req.max_object_bytes,
-                        max_total_object_bytes: req.max_total_object_bytes,
-                        max_blob_bytes: req.max_blob_bytes,
-                        max_total_blob_bytes: req.max_total_blob_bytes,
-                        max_response_bytes: req.max_response_bytes,
-                        max_links_per_object: req.max_links_per_object,
-                        allow_incomplete: false,
-                    },
+                    closure_options:
+                        crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
+                            &state,
+                            ObjectsClosureRequestOptions {
+                                max_objects: req.max_objects,
+                                max_blobs: req.max_blobs,
+                                max_object_bytes: req.max_object_bytes,
+                                max_total_object_bytes: req.max_total_object_bytes,
+                                max_blob_bytes: req.max_blob_bytes,
+                                max_total_blob_bytes: req.max_total_blob_bytes,
+                                max_response_bytes: req.max_response_bytes,
+                                max_links_per_object: req.max_links_per_object,
+                                allow_incomplete: false,
+                                allow_untransported_large_objects: false,
+                            },
+                        )?,
                 },
             )
             .await?;
@@ -242,13 +247,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 }
 
-fn create_batch_job(state: &Arc<AppState>, peer: &str) -> Result<SyncJobIds> {
+fn create_batch_job(state: &Arc<AppState>, peer: &str, policy: &str) -> Result<SyncJobIds> {
     let job_id = format!("remote-sync-admissions:{}", uuid::Uuid::new_v4());
     let attempt_id = format!("remote-sync-admissions-attempt:{}", uuid::Uuid::new_v4());
     state.state_store.with_state_db(|db| {
         db.create_sync_job(&NewSyncJob {
             job_id: job_id.clone(),
             operation_type: "remote_sync_admitted_heads".to_string(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "remote_sync_admitted_heads",
+                "peer": peer,
+                "policy": policy,
+            }),
             peer: Some(peer.to_string()),
             roots: Vec::new(),
             heads: Vec::new(),

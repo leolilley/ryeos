@@ -75,6 +75,21 @@ pub struct FieldPlaybackState {
     pub awaiting: Option<FieldEventRefState>,
 }
 
+/// Shared replay state for all field instances declaring one signed cursor
+/// scope on the mounted surface. Per-view local cursor values are mirrors for
+/// VM composition; this is the authoritative transition/fencing state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldCursorScopeState {
+    pub cursor: FieldCursorState,
+    pub playback: FieldPlaybackState,
+    #[serde(default)]
+    pub subject_fingerprint: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub pending_source_keys: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldExpansionState {
     pub max_depth: u16,

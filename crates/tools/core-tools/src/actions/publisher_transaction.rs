@@ -11,6 +11,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+
+const PUBLISHER_TRAVERSAL: lillux::DirectoryTraversalBudget =
+    lillux::DirectoryTraversalBudget::new(1_000_000, 128);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublisherExchangeRecovery {
+    live_identity: lillux::PinnedDirectoryIdentity,
+    staging_identity: lillux::PinnedDirectoryIdentity,
+}
 
 /// Run `author` against a private copy of `bundle_root`, then atomically make
 /// the completed copy live.
@@ -48,23 +59,69 @@ pub(super) fn with_staged_bundle_generation<T>(
     let _lock = lillux::ExclusiveFileLock::acquire(&lock_target)
         .with_context(|| format!("lock publisher bundle {}", bundle_root.display()))?;
 
-    let staging = create_staging_directory(parent, &bundle_root)?;
-    let mut cleanup = StagingCleanup::new(staging.clone());
+    let pinned_parent = lillux::PinnedDirectory::open(parent)?
+        .ok_or_else(|| anyhow!("publisher bundle parent is unavailable"))?;
+    let (staging, pinned_staging) = create_staging_directory(&pinned_parent, &bundle_root)?;
+    let recovery_marker = publisher_recovery_marker(parent, bundle_name);
+    let pinned_live = pinned_parent
+        .open_child_directory(bundle_root.file_name().expect("bundle name checked"))?
+        .ok_or_else(|| anyhow!("publisher live generation is unavailable"))?;
+    let mut cleanup = StagingCleanup::new(
+        pinned_parent.try_clone()?,
+        staging
+            .file_name()
+            .expect("staging name checked")
+            .to_owned(),
+        pinned_staging.try_clone()?,
+    );
 
-    copy_tree_contents(&bundle_root, &staging).with_context(|| {
-        format!(
-            "stage publisher generation {} -> {}",
-            bundle_root.display(),
-            staging.display()
-        )
-    })?;
+    pinned_live
+        .copy_contents_to_filtered(&pinned_staging, PUBLISHER_TRAVERSAL, |relative| {
+            let relative = canonical_publisher_relative_path(relative)?;
+            Ok(ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&relative))
+        })
+        .with_context(|| {
+            format!(
+                "stage publisher generation {} -> {}",
+                bundle_root.display(),
+                staging.display()
+            )
+        })?;
 
     let result = author(&staging)?;
-    lillux::sync_tree_durable(&staging)
+    ensure_no_floor_excluded_content(&staging, Path::new(""))?;
+    pinned_staging
+        .sync_tree_bounded(PUBLISHER_TRAVERSAL)
         .with_context(|| format!("flush staged publisher generation {}", staging.display()))?;
+    pinned_live.ensure_path_binding()?;
+    pinned_staging.ensure_path_binding()?;
+    let recovery = PublisherExchangeRecovery {
+        live_identity: pinned_live.identity()?,
+        staging_identity: pinned_staging.identity()?,
+    };
+    lillux::atomic_write_private(
+        &recovery_marker,
+        &serde_json::to_vec(&recovery).context("serialize publisher exchange recovery marker")?,
+    )
+    .context("publish publisher exchange recovery marker")?;
 
-    if let Err(error) = lillux::atomic_exchange_paths(&bundle_root, &staging) {
+    if let Err(error) = pinned_parent.exchange_child_directories_if_same(
+        bundle_root.file_name().expect("bundle name checked"),
+        &pinned_live,
+        staging.file_name().expect("staging name checked"),
+        &pinned_staging,
+    ) {
+        if error.namespace_requires_recovery() {
+            cleanup.disarm();
+            return Err(error).with_context(|| {
+                format!(
+                    "publisher exchange committed an ambiguous namespace; recovery marker retained at {}",
+                    recovery_marker.display()
+                )
+            });
+        }
         if !error.namespace_committed() {
+            let _ = remove_recovery_marker_exact(&recovery_marker);
             return Err(error).with_context(|| {
                 format!(
                     "atomically publish staged generation {} -> {}",
@@ -81,14 +138,72 @@ pub(super) fn with_staged_bundle_generation<T>(
             error = %error,
             "publisher generation committed but parent-directory durability is uncertain"
         );
+        if let Err(sync_error) = pinned_parent.sync() {
+            cleanup.disarm();
+            return Err(anyhow!(
+                "publisher generation was committed, but the parent-directory durability barrier remains uncertain after retry; recovery marker retained at {} and the publication must be recovered before retrying: {error}; {sync_error:#}",
+                recovery_marker.display()
+            ));
+        }
     }
+    // The pinned staging descriptor now names the committed live generation;
+    // pre-commit cleanup must never touch it after the exchange boundary.
+    cleanup.disarm();
 
-    if let Err(error) = lillux::remove_dir_all_durable(&staging) {
+    if let Err(error) = restore_floor_excluded_content(&staging, &bundle_root, Path::new("")) {
         tracing::warn!(
+            old_generation = %staging.display(),
+            live_generation = %bundle_root.display(),
+            error = %error,
+            "publisher generation committed but local excluded content remains in the recoverable old generation"
+        );
+        cleanup.disarm();
+        return Err(error).with_context(|| {
+            format!(
+                "publisher generation committed, but local excluded content was not restored; recovery marker retained at {} and the publication must be recovered before retrying",
+                recovery_marker.display()
+            )
+        });
+    }
+    if let Err(error) = remove_recovery_marker_exact(&recovery_marker) {
+        tracing::warn!(
+            path = %recovery_marker.display(),
+            error = %error,
+            "publisher generation committed but recovery-marker cleanup failed"
+        );
+    }
+    match pinned_parent.open_child_directory(staging.file_name().expect("staging name checked")) {
+        Ok(Some(old_generation)) => {
+            if let Err(error) = old_generation
+                .remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL)
+                .and_then(|_| {
+                    pinned_parent
+                        .remove_empty_child_if_same(
+                            staging.file_name().expect("staging name checked"),
+                            &old_generation,
+                        )
+                        .and_then(|removed| {
+                            if removed {
+                                Ok(())
+                            } else {
+                                bail!("old publisher generation remained non-empty")
+                            }
+                        })
+                })
+            {
+                tracing::warn!(
+                    path = %staging.display(),
+                    error = %error,
+                    "publisher generation committed but previous-generation cleanup failed"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
             path = %staging.display(),
             error = %error,
-            "publisher generation committed but previous-generation cleanup failed"
-        );
+            "publisher generation committed but previous-generation cleanup could not be inspected"
+        ),
     }
     cleanup.disarm();
     Ok(result)
@@ -120,104 +235,291 @@ pub(super) fn roots_for_staged_generation(
         .collect()
 }
 
-fn create_staging_directory(parent: &Path, bundle_root: &Path) -> Result<PathBuf> {
+fn create_staging_directory(
+    parent: &lillux::PinnedDirectory,
+    bundle_root: &Path,
+) -> Result<(PathBuf, lillux::PinnedDirectory)> {
     let name = bundle_root
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("publisher bundle root has no UTF-8 directory name"))?;
 
-    let staging = parent.join(format!(".{name}.publish-staging"));
-    match fs::symlink_metadata(&staging) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+    let staging_name = std::ffi::OsString::from(format!(".{name}.publish-staging"));
+    let staging = parent.path().join(&staging_name);
+    let recovery_marker = publisher_recovery_marker(parent.path(), name);
+    match parent.entry_no_follow(&staging_name)? {
+        Some(entry) => {
+            if entry.entry_type != lillux::PinnedEntryType::Directory {
                 bail!(
                     "stale publisher staging {} is not a real directory",
                     staging.display()
                 );
             }
-            lillux::remove_dir_all_durable(&staging)
-                .with_context(|| format!("remove stale publisher staging {}", staging.display()))?;
+            recover_stale_staging(bundle_root, &staging, &recovery_marker)?;
+            let stale = parent
+                .open_child_directory(&staging_name)?
+                .ok_or_else(|| anyhow!("stale publisher staging disappeared"))?;
+            stale.ensure_path_binding()?;
+            stale.remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL)?;
+            if !parent.remove_empty_child_if_same(&staging_name, &stale)? {
+                bail!("stale publisher staging remained non-empty");
+            }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("inspect publisher staging {}", staging.display()));
+        None => {
+            remove_recovery_marker_exact(&recovery_marker)?;
         }
     }
-    fs::create_dir(&staging)
-        .with_context(|| format!("create publisher staging {}", staging.display()))?;
-    Ok(staging)
+    let pinned = parent.create_child(&staging_name, 0o755)?;
+    Ok((staging, pinned))
 }
 
-fn copy_tree_contents(source: &Path, destination: &Path) -> Result<()> {
-    let metadata =
-        fs::symlink_metadata(source).with_context(|| format!("inspect {}", source.display()))?;
-    for entry in sorted_dir_entries(source)? {
-        copy_tree_entry(&entry.path(), &destination.join(entry.file_name()))?;
-    }
-    preserve_timestamps(destination, &metadata)?;
-    fs::set_permissions(destination, metadata.permissions())
-        .with_context(|| format!("set permissions on {}", destination.display()))?;
-    Ok(())
+fn publisher_recovery_marker(parent: &Path, bundle_name: &str) -> PathBuf {
+    parent
+        .join(".publisher-locks")
+        .join(format!("{bundle_name}.exchange-recovery.json"))
 }
 
-fn copy_tree_entry(source: &Path, destination: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("inspect publisher input {}", source.display()))?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        bail!(
-            "publisher input contains a symlink at {}; publish requires a self-contained tree",
-            source.display()
-        );
-    }
-    if file_type.is_dir() {
-        fs::create_dir(destination)
-            .with_context(|| format!("create staged directory {}", destination.display()))?;
-        copy_tree_contents(source, destination)?;
-        return Ok(());
-    }
-    if file_type.is_file() {
-        fs::copy(source, destination).with_context(|| {
+fn recover_stale_staging(bundle_root: &Path, staging: &Path, recovery_marker: &Path) -> Result<()> {
+    let recovery = match PublisherExchangeRecovery::load(recovery_marker)? {
+        Some(recovery) => recovery,
+        None => return Ok(()),
+    };
+
+    if recovery.exchange_committed(bundle_root, staging)? {
+        restore_floor_excluded_content(staging, bundle_root, Path::new("")).with_context(|| {
             format!(
-                "copy publisher input {} -> {}",
-                source.display(),
-                destination.display()
+                "restore excluded content from committed publisher generation {}",
+                staging.display()
             )
         })?;
-        preserve_timestamps(destination, &metadata)?;
-        return Ok(());
+    } else if !recovery.exchange_not_committed(bundle_root, staging)? {
+        bail!(
+            "publisher exchange recovery identities do not match live {} and staging {}; refusing ambiguous recovery",
+            bundle_root.display(),
+            staging.display()
+        );
     }
 
-    bail!(
-        "publisher input contains a non-regular filesystem entry at {}",
-        source.display()
-    )
-}
-
-/// `fs::copy` preserves permissions but not timestamps. Keeping timestamps for
-/// untouched files is part of the publisher contract: bundle preflight rejects
-/// source files newer than their signed manifest, and an idempotent publish
-/// must not make every source look newly modified merely because it was staged.
-fn preserve_timestamps(destination: &Path, source_metadata: &fs::Metadata) -> Result<()> {
-    let times =
-        fs::FileTimes::new()
-            .set_accessed(source_metadata.accessed().with_context(|| {
-                format!("read source access time for {}", destination.display())
-            })?)
-            .set_modified(source_metadata.modified().with_context(|| {
-                format!(
-                    "read source modification time for {}",
-                    destination.display()
-                )
-            })?);
-    fs::File::open(destination)
-        .with_context(|| format!("open staged path {}", destination.display()))?
-        .set_times(times)
-        .with_context(|| format!("preserve timestamps on {}", destination.display()))?;
+    remove_recovery_marker_exact(recovery_marker)
+        .context("retire recovered publisher exchange marker")?;
     Ok(())
 }
 
+fn remove_recovery_marker_exact(recovery_marker: &Path) -> Result<()> {
+    let Some(parent_path) = recovery_marker.parent() else {
+        bail!("publisher recovery marker has no parent");
+    };
+    let Some(parent) = lillux::PinnedDirectory::open(parent_path)? else {
+        return Ok(());
+    };
+    let name = recovery_marker
+        .file_name()
+        .ok_or_else(|| anyhow!("publisher recovery marker has no file name"))?;
+    if let Some(file) = parent.open_regular(name, false)? {
+        parent
+            .remove_if_same_atomic(name, &file)
+            .map_err(|error| anyhow!(error))?;
+    }
+    Ok(())
+}
+
+impl PublisherExchangeRecovery {
+    #[cfg(all(test, target_os = "linux"))]
+    fn capture(live: &Path, staging: &Path) -> Result<Self> {
+        Ok(Self {
+            live_identity: publisher_tree_identity(live)?,
+            staging_identity: publisher_tree_identity(staging)?,
+        })
+    }
+
+    fn load(path: &Path) -> Result<Option<Self>> {
+        let Some(bytes) = lillux::read_optional_regular_file_bounded_no_follow(path, 4096)? else {
+            return Ok(None);
+        };
+        let recovery = serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "decode publisher exchange recovery marker {}",
+                path.display()
+            )
+        })?;
+        Ok(Some(recovery))
+    }
+
+    fn exchange_committed(&self, live: &Path, staging: &Path) -> Result<bool> {
+        Ok(publisher_tree_identity(live)? == self.staging_identity
+            && publisher_tree_identity(staging)? == self.live_identity)
+    }
+
+    fn exchange_not_committed(&self, live: &Path, staging: &Path) -> Result<bool> {
+        Ok(publisher_tree_identity(live)? == self.live_identity
+            && publisher_tree_identity(staging)? == self.staging_identity)
+    }
+}
+
+fn publisher_tree_identity(path: &Path) -> Result<lillux::PinnedDirectoryIdentity> {
+    require_real_directory(path, "publisher generation")?;
+    let directory = lillux::PinnedDirectory::open(path)?
+        .ok_or_else(|| anyhow!("publisher generation is unavailable"))?;
+    directory.identity()
+}
+
+fn ensure_no_floor_excluded_content(root: &Path, relative_root: &Path) -> Result<()> {
+    let root = lillux::PinnedDirectory::open(root)?
+        .ok_or_else(|| anyhow!("staged publisher generation is unavailable"))?;
+    let mut remaining = PUBLISHER_TRAVERSAL.max_entries;
+    ensure_no_floor_excluded_content_open(&root, relative_root, 0, &mut remaining)?;
+    root.ensure_path_binding()?;
+    Ok(())
+}
+
+fn ensure_no_floor_excluded_content_open(
+    root: &lillux::PinnedDirectory,
+    relative_root: &Path,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<()> {
+    if depth > 128 {
+        bail!("publisher tree exceeds its traversal depth bound");
+    }
+    let entries = root.entries_no_follow_bounded(*remaining)?;
+    *remaining = remaining
+        .checked_sub(entries.len())
+        .ok_or_else(|| anyhow!("publisher validation entry budget underflow"))?;
+    for entry in entries {
+        let relative = relative_root.join(&entry.name);
+        let relative_string = canonical_publisher_relative_path(&relative)?;
+        if ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&relative_string) {
+            bail!("publisher authoring created floor-excluded content at {relative_string}");
+        }
+        match entry.entry_type {
+            lillux::PinnedEntryType::Directory => {
+                let child = root
+                    .open_child_directory(&entry.name)?
+                    .ok_or_else(|| anyhow!("publisher directory disappeared during validation"))?;
+                ensure_no_floor_excluded_content_open(&child, &relative, depth + 1, remaining)?;
+                root.ensure_entry_observation(&entry)?;
+            }
+            lillux::PinnedEntryType::Regular => {
+                root.ensure_entry_observation(&entry)?;
+            }
+            other => bail!(
+                "publisher generation contains unsupported {other:?} entry at {relative_string}"
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn restore_floor_excluded_content(
+    old_root: &Path,
+    live_root: &Path,
+    _relative_root: &Path,
+) -> Result<()> {
+    let old = lillux::PinnedDirectory::open(old_root)?
+        .ok_or_else(|| anyhow!("old publisher generation is unavailable"))?;
+    let live = lillux::PinnedDirectory::open(live_root)?
+        .ok_or_else(|| anyhow!("live publisher generation is unavailable"))?;
+    let mut remaining = PUBLISHER_TRAVERSAL.max_entries;
+    restore_floor_excluded_content_open(&old, &live, Path::new(""), 0, &mut remaining)?;
+    old.sync()?;
+    live.sync()?;
+    Ok(())
+}
+
+fn restore_floor_excluded_content_open(
+    old: &lillux::PinnedDirectory,
+    live: &lillux::PinnedDirectory,
+    relative_root: &Path,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<()> {
+    if depth > 128 {
+        bail!("publisher excluded-content restoration exceeds its depth bound");
+    }
+    let entries = old.entries_no_follow_bounded(*remaining)?;
+    *remaining = remaining
+        .checked_sub(entries.len())
+        .ok_or_else(|| anyhow!("publisher restoration entry budget underflow"))?;
+    for entry in entries {
+        let relative = relative_root.join(&entry.name);
+        let relative_string = canonical_publisher_relative_path(&relative)?;
+        if ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&relative_string) {
+            match old.move_child_if_same_noreplace_to(&entry, live) {
+                Ok(true) => {}
+                Ok(false) => bail!(
+                    "publisher excluded-content restoration refused occupied destination at {relative_string}"
+                ),
+                Err(error) if error.namespace_committed() => {
+                    tracing::warn!(
+                        path = %relative_string,
+                        error = %error,
+                        "publisher excluded content was restored but directory durability is uncertain"
+                    );
+                    old.sync().with_context(|| {
+                        format!(
+                            "excluded content was restored at {relative_string}, but the old nested parent remains durability-uncertain"
+                        )
+                    })?;
+                    live.sync().with_context(|| {
+                        format!(
+                            "excluded content was restored at {relative_string}, but the live nested parent remains durability-uncertain"
+                        )
+                    })?;
+                }
+                Err(error) => return Err(anyhow!(error)),
+            }
+            continue;
+        }
+        if entry.entry_type == lillux::PinnedEntryType::Directory {
+            let old_child = old
+                .open_child_directory(&entry.name)?
+                .ok_or_else(|| anyhow!("old publisher directory disappeared during restoration"))?;
+            // Generated publisher content (most notably CAS fanout
+            // directories) is expected to differ between generations.  A
+            // directory present only in the old generation may nevertheless
+            // contain a nested floor-excluded local entry that must survive
+            // publication.  Create a descriptor-pinned scaffold while
+            // walking that subtree, then remove it again when there was
+            // nothing local to restore.  This preserves excluded descendants
+            // without copying any superseded generated content into the new
+            // generation.
+            let (live_child, created_scaffold) = match live.open_child_directory(&entry.name)? {
+                Some(child) => (child, false),
+                None => (live.create_child(&entry.name, entry.mode & 0o777)?, true),
+            };
+            restore_floor_excluded_content_open(
+                &old_child,
+                &live_child,
+                &relative,
+                depth + 1,
+                remaining,
+            )?;
+            if created_scaffold {
+                // A restored descendant keeps the scaffold non-empty.  An
+                // empty scaffold represented only obsolete generated content
+                // and must not alter the committed generation.
+                let _ = live.remove_empty_child_if_same(&entry.name, &live_child)?;
+            }
+            old.ensure_entry_observation(&entry)?;
+        }
+    }
+    // Every recursion frame is a recovery boundary. An excluded entry may
+    // already have moved during a prior committed-but-uncertain attempt, so a
+    // later recovery cannot rely on seeing that entry again to rediscover the
+    // two parent directories whose rename must be sealed.
+    old.sync()?;
+    live.sync()?;
+    Ok(())
+}
+
+fn canonical_publisher_relative_path(relative: &Path) -> Result<String> {
+    relative
+        .to_str()
+        .ok_or_else(|| anyhow!("publisher input path is not valid UTF-8"))
+        .map(|value| value.replace('\\', "/"))
+}
+
+#[cfg(all(test, target_os = "linux"))]
 fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {
     let mut entries = fs::read_dir(path)
         .with_context(|| format!("read {}", path.display()))?
@@ -237,23 +539,40 @@ fn require_real_directory(path: &Path, label: &str) -> Result<()> {
 }
 
 struct StagingCleanup {
-    path: Option<PathBuf>,
+    parent: lillux::PinnedDirectory,
+    name: std::ffi::OsString,
+    directory: lillux::PinnedDirectory,
+    armed: bool,
 }
 
 impl StagingCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
+    fn new(
+        parent: lillux::PinnedDirectory,
+        name: std::ffi::OsString,
+        directory: lillux::PinnedDirectory,
+    ) -> Self {
+        Self {
+            parent,
+            name,
+            directory,
+            armed: true,
+        }
     }
 
     fn disarm(&mut self) {
-        self.path = None;
+        self.armed = false;
     }
 }
 
 impl Drop for StagingCleanup {
     fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = fs::remove_dir_all(path);
+        if self.armed {
+            let _ = self
+                .directory
+                .remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL);
+            let _ = self
+                .parent
+                .remove_empty_child_if_same(&self.name, &self.directory);
         }
     }
 }
@@ -261,6 +580,19 @@ impl Drop for StagingCleanup {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    fn write_recovery_marker(
+        parent: &Path,
+        bundle_name: &str,
+        recovery: PublisherExchangeRecovery,
+    ) {
+        fs::create_dir_all(parent.join(".publisher-locks")).unwrap();
+        lillux::atomic_write_private(
+            &publisher_recovery_marker(parent, bundle_name),
+            &serde_json::to_vec(&recovery).unwrap(),
+        )
+        .unwrap();
+    }
 
     fn sibling_staging_entries(parent: &Path, bundle_name: &str) -> Vec<PathBuf> {
         let name = format!(".{bundle_name}.publish-staging");
@@ -344,6 +676,28 @@ mod tests {
     }
 
     #[test]
+    fn publisher_staging_uses_the_shared_durable_capture_floor() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::create_dir_all(bundle.join("src")).unwrap();
+        fs::write(bundle.join("src/item"), b"authored").unwrap();
+        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+
+        with_staged_bundle_generation(&bundle, |staging| {
+            assert!(!staging.join(".venv").exists());
+            assert_eq!(fs::read(staging.join("src/item"))?, b"authored");
+            Ok(())
+        })
+        .expect("floor-excluded dependency trees must not enter publisher staging");
+
+        assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert_eq!(fs::read(bundle.join("src/item")).unwrap(), b"authored");
+    }
+
+    #[test]
     fn next_publish_recovers_a_stale_private_staging_tree() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("bundle");
@@ -365,5 +719,101 @@ mod tests {
 
         assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"new");
         assert!(!stale.exists());
+    }
+
+    #[test]
+    fn committed_exchange_recovery_restores_local_excluded_content() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        let staging = temp.path().join(".bundle.publish-staging");
+        fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::write(bundle.join("generation"), b"old").unwrap();
+        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("generation"), b"committed").unwrap();
+
+        let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
+        write_recovery_marker(temp.path(), "bundle", recovery);
+        lillux::atomic_exchange_paths(&bundle, &staging).unwrap();
+
+        with_staged_bundle_generation(&bundle, |next| {
+            assert_eq!(fs::read(next.join("generation"))?, b"committed");
+            assert!(!next.join(".venv").exists());
+            fs::write(next.join("generation"), b"next")?;
+            Ok(())
+        })
+        .expect("next publish should recover the committed exchange first");
+
+        assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
+        assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
+    }
+
+    #[test]
+    fn committed_exchange_recovery_tolerates_changed_generated_directories() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        let staging = temp.path().join(".bundle.publish-staging");
+        fs::create_dir_all(bundle.join(".ai/objects/old/fanout")).unwrap();
+        fs::write(bundle.join(".ai/objects/old/fanout/object"), b"old").unwrap();
+        fs::create_dir_all(bundle.join("tools/.venv/bin")).unwrap();
+        symlink("/usr/bin/python", bundle.join("tools/.venv/bin/python")).unwrap();
+
+        fs::create_dir_all(staging.join(".ai/objects/new/fanout")).unwrap();
+        fs::write(staging.join(".ai/objects/new/fanout/object"), b"new").unwrap();
+        fs::create_dir(staging.join("tools")).unwrap();
+
+        let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
+        write_recovery_marker(temp.path(), "bundle", recovery);
+        lillux::atomic_exchange_paths(&bundle, &staging).unwrap();
+
+        with_staged_bundle_generation(&bundle, |next| {
+            assert!(next.join(".ai/objects/new/fanout/object").exists());
+            assert!(!next.join(".ai/objects/old").exists());
+            assert!(
+                !next.join("tools/.venv").exists(),
+                "excluded local content must stay outside publisher authoring"
+            );
+            Ok(())
+        })
+        .expect("changed generated directories must not prevent recovery");
+
+        assert!(bundle.join(".ai/objects/new/fanout/object").exists());
+        assert!(!bundle.join(".ai/objects/old").exists());
+        assert!(bundle.join("tools/.venv/bin/python").is_symlink());
+        assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
+    }
+
+    #[test]
+    fn uncommitted_exchange_recovery_discards_excluded_staging_content() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        let staging = temp.path().join(".bundle.publish-staging");
+        fs::create_dir(&bundle).unwrap();
+        fs::write(bundle.join("generation"), b"live").unwrap();
+        fs::create_dir_all(staging.join(".venv/bin")).unwrap();
+        fs::write(staging.join("generation"), b"never-committed").unwrap();
+        symlink("/usr/bin/python", staging.join(".venv/bin/python")).unwrap();
+
+        let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
+        write_recovery_marker(temp.path(), "bundle", recovery);
+
+        with_staged_bundle_generation(&bundle, |next| {
+            assert_eq!(fs::read(next.join("generation"))?, b"live");
+            assert!(!next.join(".venv").exists());
+            fs::write(next.join("generation"), b"next")?;
+            Ok(())
+        })
+        .expect("uncommitted staging should be discarded before the next publish");
+
+        assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
+        assert!(!bundle.join(".venv").exists());
+        assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 }

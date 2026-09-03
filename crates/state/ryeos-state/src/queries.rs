@@ -717,7 +717,14 @@ pub fn get_thread_result(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<ThreadResultRow>> {
-    let max_content_bytes = crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES;
+    let max_content_bytes = crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES;
+    // Current thread/result identity columns are much smaller than this
+    // allowance. Keeping a separate overhead budget avoids rejecting a result
+    // exactly at its content ceiling while still bounding the complete SQLite
+    // row before materialization.
+    let max_row_bytes = max_content_bytes
+        .checked_add(64 * 1024)
+        .context("thread result row byte maximum overflow")?;
     let lengths = db
         .connection()
         .query_row(
@@ -768,14 +775,16 @@ pub fn get_thread_result(
             "thread {thread_id} result and error total {total_bytes} bytes; maximum is {max_content_bytes}"
         );
     }
-    if row_bytes > max_content_bytes {
+    if row_bytes > max_row_bytes {
         anyhow::bail!(
-            "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_content_bytes}"
+            "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_row_bytes}"
         );
     }
 
     let max_content_bytes_sql = i64::try_from(max_content_bytes)
         .context("thread result byte maximum exceeds SQLite i64")?;
+    let max_row_bytes_sql =
+        i64::try_from(max_row_bytes).context("thread result row maximum exceeds SQLite i64")?;
     let mut stmt = db
         .connection()
         .prepare(
@@ -791,12 +800,12 @@ pub fn get_thread_result(
                    + COALESCE(length(result), 0) \
                    + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
                    + COALESCE(length(CAST(error AS BLOB)), 0) \
-                   + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?2",
+                   + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?3",
         )
         .context("prepare get_thread_result")?;
     let row = stmt
         .query_row(
-            rusqlite::params![thread_id, max_content_bytes_sql],
+            rusqlite::params![thread_id, max_content_bytes_sql, max_row_bytes_sql],
             ThreadResultRow::from_row,
         )
         .optional()
@@ -1785,6 +1794,58 @@ pub fn latest_thread_events(
     Ok(events)
 }
 
+/// Return the newest generic state-anchor milestone on one placement thread.
+///
+/// This uses the ordinary durable event projection and its
+/// `(thread_id, event_type, thread_seq)` index.  The JSON predicate is applied
+/// only to that thread's milestone rows; no chain replay or parallel
+/// checkpoint registry is involved.
+pub fn latest_state_anchor_event(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events \
+             WHERE thread_id = ?1 \
+               AND event_type = 'milestone' \
+               AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
+             ORDER BY thread_seq DESC \
+             LIMIT 1",
+            [thread_id],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query latest_state_anchor_event")
+}
+
+/// Newest generic state anchor across all continuation placements of one
+/// stable execution chain.
+pub fn latest_chain_state_anchor_event(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events \
+             WHERE chain_root_id = ?1 \
+               AND event_type = 'milestone' \
+               AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
+             ORDER BY chain_seq DESC \
+             LIMIT 1",
+            [chain_root_id],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query latest_chain_state_anchor_event")
+}
+
 /// Latest durable events across every thread on the node — the node-wide
 /// activity feed. Append order (`event_id` is the autoincrement insert
 /// order), returned oldest-first after the reverse so feeds read
@@ -2455,6 +2516,120 @@ pub fn get_provider_attempt_budget_transition_identity(
         .context("query provider attempt budget transition identity")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectObservationIdentity {
+    pub observation_id: String,
+    pub chain_root_id: String,
+    pub thread_id: String,
+    pub source_definition_ref: String,
+    pub source_effective_definition_digest: String,
+    pub namespace: String,
+    pub stable_id: String,
+    pub payload_fingerprint: String,
+    pub event_hash: String,
+    pub chain_seq: i64,
+}
+
+pub fn get_project_observation_identity(
+    db: &ProjectionDb,
+    observation_id: &str,
+) -> anyhow::Result<Option<ProjectObservationIdentity>> {
+    db.connection()
+        .query_row(
+            "SELECT observation_id, chain_root_id, thread_id,
+                    source_definition_ref, source_effective_definition_digest,
+                    namespace, stable_id, payload_fingerprint, event_hash, chain_seq
+             FROM project_observation_once
+             WHERE observation_id = ?1",
+            [observation_id],
+            |row| {
+                Ok(ProjectObservationIdentity {
+                    observation_id: row.get(0)?,
+                    chain_root_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    source_definition_ref: row.get(3)?,
+                    source_effective_definition_digest: row.get(4)?,
+                    namespace: row.get(5)?,
+                    stable_id: row.get(6)?,
+                    payload_fingerprint: row.get(7)?,
+                    event_hash: row.get(8)?,
+                    chain_seq: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .context("query project observation identity")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCallObservationIdentity {
+    pub observation_id: String,
+    pub chain_root_id: String,
+    pub thread_id: String,
+    pub turn: u32,
+    pub attempt_number: u32,
+    pub effect_coordinate_digest: String,
+    pub source: String,
+    pub answer_digest: String,
+    pub record_hash: String,
+    pub publication: String,
+    pub event_hash: String,
+    pub chain_seq: i64,
+}
+
+pub fn get_provider_call_observation_identity(
+    db: &ProjectionDb,
+    observation_id: &str,
+) -> anyhow::Result<Option<ProviderCallObservationIdentity>> {
+    db.connection()
+        .query_row(
+            "SELECT observation_id, chain_root_id, thread_id, turn,
+                    attempt_number, effect_coordinate_digest, source,
+                    answer_digest, record_hash, publication, event_hash, chain_seq
+             FROM provider_call_observation_once
+            WHERE observation_id = ?1",
+            [observation_id],
+            |row| {
+                let raw_turn = row.get::<_, i64>(3)?;
+                let turn = u32::try_from(raw_turn)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, raw_turn))?;
+                let raw_attempt_number = row.get::<_, i64>(4)?;
+                let attempt_number = u32::try_from(raw_attempt_number)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_attempt_number))?;
+                Ok(ProviderCallObservationIdentity {
+                    observation_id: row.get(0)?,
+                    chain_root_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    turn,
+                    attempt_number,
+                    effect_coordinate_digest: row.get(5)?,
+                    source: row.get(6)?,
+                    answer_digest: row.get(7)?,
+                    record_hash: row.get(8)?,
+                    publication: row.get(9)?,
+                    event_hash: row.get(10)?,
+                    chain_seq: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+        .context("query provider-call observation identity")
+}
+
+pub fn get_event_by_hash(db: &ProjectionDb, event_hash: &str) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
+                    event_type, durability, ts, prev_chain_event_hash,
+                    prev_thread_event_hash, payload
+             FROM events WHERE event_hash = ?1",
+            [event_hash],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query event by hash")
+}
+
 /// Bounded filter for the accounting summary/drill-down service. Money is
 /// aggregated in integer nanos; identifiers stay in bounded detail rows.
 #[derive(Debug, Clone, Default)]
@@ -2802,7 +2977,7 @@ mod tests {
                 item_trust_class: CapturedItemTrustClass::Trusted,
                 kind_schema_content_hash: "33".repeat(32),
                 resolved_from: CapturedPolicyProvenance::NodeDefault {
-                    node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                    node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }));
         }
@@ -3101,8 +3276,7 @@ mod tests {
     #[test]
     fn get_thread_result_rejects_oversized_blob_before_reading_it() {
         let db = test_db();
-        let oversized =
-            i64::try_from(crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1).unwrap();
+        let oversized = i64::try_from(crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 1).unwrap();
         db.connection()
             .execute(
                 "INSERT INTO thread_results \
@@ -3115,6 +3289,25 @@ mod tests {
         let error = get_thread_result(&db, "T-large").unwrap_err();
         assert!(error.to_string().contains("result is"));
         assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn get_thread_result_accepts_content_larger_than_one_event() {
+        let db = test_db();
+        let content = vec![b'x'; crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1];
+        db.connection()
+            .execute(
+                "INSERT INTO thread_results \
+                 (thread_id, chain_root_id, status, result, updated_at) \
+                 VALUES ('T-result', 'chain-A', 'completed', ?1, 'now')",
+                [&content],
+            )
+            .unwrap();
+
+        let row = get_thread_result(&db, "T-result")
+            .unwrap()
+            .expect("result row");
+        assert_eq!(row.result.as_deref(), Some(content.as_slice()));
     }
 
     #[test]
@@ -3354,6 +3547,48 @@ mod tests {
         assert_eq!(latest.len(), 2);
         assert_eq!(latest[0].chain_seq, 3);
         assert_eq!(latest[1].chain_seq, 4);
+    }
+
+    #[test]
+    fn latest_state_anchor_uses_the_existing_milestone_event_index() {
+        let db = test_db();
+        let conn = db.connection();
+        for (seq, kind) in [
+            (1_i64, "state_anchor"),
+            (2, "ordinary_milestone"),
+            (3, "state_anchor"),
+        ] {
+            let event_hash = format!("{seq:064x}");
+            let payload = serde_json::to_vec(&serde_json::json!({"kind":kind})).unwrap();
+            conn.execute(
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-A', ?, 'T-1', ?, 'milestone', 'durable', '2026-01-01T00:00:00Z', ?)",
+                rusqlite::params![event_hash, seq, seq, payload],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 4, 'T-2', 1, 'milestone', 'durable', '2026-01-01T00:00:00Z', ?)",
+            rusqlite::params!["f".repeat(64), serde_json::to_vec(&serde_json::json!({"kind":"state_anchor"})).unwrap()],
+        )
+        .unwrap();
+
+        let latest = latest_state_anchor_event(&db, "T-1")
+            .unwrap()
+            .expect("latest anchor");
+        assert_eq!(latest.chain_seq, 3);
+        assert_eq!(latest.event_hash, format!("{:064x}", 3));
+        assert!(
+            latest_state_anchor_event(&db, "T-missing")
+                .unwrap()
+                .is_none()
+        );
+        let chain_latest = latest_chain_state_anchor_event(&db, "chain-A")
+            .unwrap()
+            .expect("chain anchor");
+        assert_eq!(chain_latest.thread_id, "T-2");
+        assert_eq!(chain_latest.chain_seq, 4);
     }
 
     #[test]

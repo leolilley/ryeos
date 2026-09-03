@@ -7,6 +7,9 @@
 pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
+pub mod effective_program_projection;
+pub(crate) mod execution_realization;
+pub(crate) mod external_content;
 pub mod ingest;
 pub mod launch;
 pub(crate) mod launch_claim;
@@ -14,15 +17,23 @@ pub mod launch_envelope;
 pub mod launch_preparation;
 pub mod lillux_bridge;
 pub mod limits;
+pub mod persistent_session;
 pub(crate) mod prepared_launch_cache;
 pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;
+pub(crate) mod source_closure;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;
 pub mod thread_meta;
 pub mod workspace;
+
+/// Arm node-owned mechanics for fallback copies into private admitted-input
+/// roots. The signed policy is loaded by the daemon composition root.
+pub fn arm_private_materialization_copy_limit(limit: u64) -> anyhow::Result<()> {
+    external_content::arm_private_materialization_copy_limit(limit)
+}
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -140,23 +151,7 @@ where
 /// The recovery lease remains live across asynchronous launch; each synchronous
 /// mutation phase acquires the shared guard before its write permit and holds
 /// both through durable staged-root publication.
-pub(crate) struct PendingCasPublication {
-    authority: ryeos_state::PinnedStateAuthority,
-    staged_roots: Option<ryeos_state::StagedCasRootLease>,
-}
-
-impl PendingCasPublication {
-    fn publish(mut self) -> Result<()> {
-        let guard = self.authority.acquire_shared_guard()?;
-        self.authority.ensure_guard(&guard)?;
-        self.staged_roots
-            .as_mut()
-            .expect("pending CAS publication always owns staged roots")
-            .finish_admitted(&guard)?;
-        self.staged_roots.take();
-        Ok(())
-    }
-}
+pub(crate) type PendingCasPublication = ryeos_state::PendingCasPublication;
 
 /// A result snapshot whose newly-written closure remains a durable temporary
 /// GC root until the caller binds the snapshot into authoritative thread/head
@@ -182,24 +177,22 @@ impl PendingProjectResult {
     }
 }
 
-impl Drop for PendingCasPublication {
-    fn drop(&mut self) {
-        let Some(staged_roots) = self.staged_roots.as_mut() else {
-            return;
-        };
-        match self.authority.acquire_shared_guard() {
-            Ok(guard) => {
-                if let Err(error) = staged_roots.finish_admitted(&guard) {
-                    tracing::warn!(%error, "failed to discard staged CAS publication roots");
-                }
-            }
-            Err(error) => {
-                // Fail closed: keep the durable recovery roots and their lease
-                // record for GC rather than falling back to a path-rebound
-                // guard in `StagedCasRootLease::drop`.
-                tracing::warn!(%error, "abandoning staged CAS roots under pinned-authority failure");
-            }
-        }
+/// A managed runtime's result generation captured while its terminal callback
+/// is still a synchronous execution barrier. The inner staged publication is
+/// intentionally opaque outside the executor: the daemon may read the exact
+/// snapshot identity and may release its recovery roots only after that same
+/// identity is present in authoritative terminal state.
+pub struct PreparedManagedRuntimeProjectResult {
+    pending: PendingProjectResult,
+}
+
+impl PreparedManagedRuntimeProjectResult {
+    pub fn snapshot_hash(&self) -> &str {
+        self.pending.snapshot_hash()
+    }
+
+    pub fn publish(self) -> Result<()> {
+        self.pending.publish()
     }
 }
 
@@ -232,7 +225,7 @@ impl CapturedProjectGeneration {
 pub(crate) fn pinned_state_authority(
     state: &ryeos_app::state::AppState,
 ) -> Result<ryeos_state::PinnedStateAuthority> {
-    state.state_store.with_state_db(|db| db.pinned_authority())
+    state.state_store.pinned_state_authority()
 }
 
 /// Capture a live project tree as an immutable CAS snapshot for durable
@@ -302,6 +295,12 @@ pub(crate) fn derive_pinned_child_authority(
                     terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
                 }
             }
+            ryeos_state::objects::PinnedChildProjectRealization::CowRetainResult => {
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication:
+                        ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+                }
+            }
         },
         environment,
         capability_ceiling,
@@ -328,7 +327,7 @@ pub(crate) fn capture_live_project_tree(
     authority.ensure_guard(&guard)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = authority.cas_store()?;
     let mut staged_roots = authority
@@ -361,10 +360,7 @@ pub(crate) fn capture_live_project_tree(
     Ok(StagedProjectTree {
         hash,
         policy_hash,
-        publication: PendingCasPublication {
-            authority,
-            staged_roots: Some(staged_roots),
-        },
+        publication: PendingCasPublication::new(authority, staged_roots),
     })
 }
 
@@ -378,33 +374,26 @@ pub(crate) fn capture_tree_project_snapshot(
     source: &str,
     mut publication: PendingCasPublication,
 ) -> Result<CapturedProjectGeneration> {
-    let guard = publication.authority.acquire_shared_guard()?;
-    publication.authority.ensure_guard(&guard)?;
+    let guard = publication.authority().acquire_shared_guard()?;
+    publication.authority().ensure_guard(&guard)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
-    let cas = publication.authority.cas_store()?;
+    let cas = publication.authority().cas_store()?;
     ryeos_state::project_materialization::VerifiedProjectTreeClosure::load(
         &cas,
         &tree_hash,
         &policy_hash,
     )?;
     publication
-        .staged_roots
-        .as_mut()
-        .expect("pending CAS publication always owns staged roots")
+        .staged_roots_mut()
         .protect_object_hash_admitted(&guard, &tree_hash)?;
     publication
-        .staged_roots
-        .as_mut()
-        .expect("pending CAS publication always owns staged roots")
+        .staged_roots_mut()
         .protect_object_hash_admitted(&guard, &policy_hash)?;
     let hash = store_project_snapshot(
-        publication
-            .staged_roots
-            .as_mut()
-            .expect("pending CAS publication always owns staged roots"),
+        publication.staged_roots_mut(),
         &guard,
         &cas,
         tree_hash.clone(),
@@ -437,18 +426,33 @@ fn store_project_snapshot(
     staged_roots.store_object_admitted(guard, cas, &snapshot.to_value())
 }
 
-/// Materialize one immutable snapshot lower tree without copying payload bytes
-/// per snapshot or per launch. Content inodes are keyed by blob digest *and*
-/// normalized mode; snapshot and launch trees contain only hard links to those
-/// daemon-private immutable inodes.
+/// Select how an immutable snapshot becomes visible to one execution.
 ///
-/// The returned tree must never be exposed writable. Normal durable execution
-/// presents it as the read-only lower of a verified workspace overlay.
-pub fn checkout_project_lower(
+/// A shared cache and the canonical project supplied to an enforced CoW
+/// backend remain read-only, so both may safely share verified content inodes.
+/// Disabled isolation executes directly in its daemon-owned project, making
+/// that tree writable; it must receive independent inodes materialized from
+/// CAS instead of links into the immutable cache.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProjectMaterialization<'a> {
+    SharedReadOnly,
+    EnforcedCowProject(&'a Path),
+    PrivateWritableWorkspace {
+        target_dir: &'a Path,
+        budget: Option<&'a external_content::PrivateMaterializationBudget>,
+    },
+}
+
+/// Materialize one immutable snapshot for the selected execution boundary.
+/// Content inodes in shared/read-only trees are keyed by blob digest and
+/// normalized mode. Writable private workspaces receive byte-identical but
+/// inode-independent files so one execution can never mutate another
+/// execution's snapshot authority.
+pub(crate) fn checkout_project_snapshot(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     snapshot_hash: &str,
-    target_dir: Option<&Path>,
+    materialization: ProjectMaterialization<'_>,
     cache: &MaterializationCache,
 ) -> Result<(
     PathBuf,
@@ -504,16 +508,40 @@ pub fn checkout_project_lower(
         }
         construction?;
     }
-    let realized_path = if let Some(target_dir) = target_dir {
-        let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
-        for (relative, project_file) in project_files {
-            let content = cache.ensure_content_file(&cas, project_file)?;
-            let (parent, name) = pinned_output_parent(&target_root, relative)?;
-            content.link_to(&parent, &name)?;
+    let realized_path = match materialization {
+        ProjectMaterialization::SharedReadOnly => cache.cache_dir(snapshot_hash),
+        ProjectMaterialization::EnforcedCowProject(target_dir) => {
+            let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+            for (relative, project_file) in project_files {
+                let content = cache.ensure_content_file(&cas, project_file)?;
+                let (parent, name) = pinned_output_parent(&target_root, relative)?;
+                content.link_to(&parent, &name)?;
+            }
+            target_dir.to_path_buf()
         }
-        target_dir.to_path_buf()
-    } else {
-        cache.cache_dir(snapshot_hash)
+        ProjectMaterialization::PrivateWritableWorkspace { target_dir, budget } => {
+            let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+            let owned_budget;
+            let budget = match budget {
+                Some(budget) => budget,
+                None => {
+                    owned_budget = external_content::private_materialization_budget()?;
+                    &owned_budget
+                }
+            };
+            for (relative, project_file) in project_files {
+                let content = cache.ensure_content_file(&cas, project_file)?;
+                let (parent, name) = pinned_output_parent(&target_root, relative)?;
+                budget.materialize_regular(
+                    &parent,
+                    &name,
+                    content.descriptor(),
+                    project_file.size,
+                    project_file.normalized_mode,
+                )?;
+            }
+            target_dir.to_path_buf()
+        }
     };
     let materialization = match ryeos_state::PinnedProjectMaterialization::verify_from_closure(
         authority,
@@ -522,7 +550,7 @@ pub fn checkout_project_lower(
         &realized_path,
     ) {
         Ok(materialization) => materialization,
-        Err(error) if target_dir.is_none() => {
+        Err(error) if matches!(materialization, ProjectMaterialization::SharedReadOnly) => {
             // A valid marker beside a mutated generation is not authority.
             // Rebuild once beneath the still-held construction lock, then
             // mint the proof from the rebuilt descriptor tree.
@@ -560,7 +588,7 @@ pub fn checkout_project_lower(
     Ok((realized_path, lease, materialization))
 }
 
-fn pinned_output_parent(
+pub(super) fn pinned_output_parent(
     root: &lillux::secure_fs::PinnedDirectory,
     relative: &str,
 ) -> Result<(lillux::secure_fs::PinnedDirectory, OsString)> {
@@ -590,6 +618,23 @@ fn pinned_output_parent(
 
 // ── Fold-back ───────────────────────────────────────────────────────
 
+fn admitted_operational_shadow_paths(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+) -> Result<Vec<String>> {
+    let Some(evidence) = state.state_store.admitted_program_evidence(thread_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut paths = external_content::admitted_realization_mounts(&evidence.resolution)?;
+    if let Some(source_mount) = source_closure::admitted_source_mount(state, &evidence.resolution)?
+    {
+        paths.push(source_mount);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Capture the authoritative post-execution tree under the exact immutable
 /// policy that produced the base generation.
 pub(crate) struct FoldBackOutputsParams<'a> {
@@ -603,6 +648,7 @@ pub(crate) struct FoldBackOutputsParams<'a> {
     pub policy_hash: &'a str,
     pub base_snapshot_hash: &'a str,
     pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
+    pub operational_shadow_paths: &'a [String],
 }
 
 pub(crate) fn fold_back_outputs(
@@ -619,6 +665,7 @@ pub(crate) fn fold_back_outputs(
         policy_hash,
         base_snapshot_hash,
         workspace_record,
+        operational_shadow_paths,
     } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
@@ -635,54 +682,67 @@ pub(crate) fn fold_back_outputs(
     let policy = closure.policy();
 
     let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
-    if !layout.lower.is_dir() || !layout.upper.is_dir() || !layout.work.is_dir() {
-        anyhow::bail!(
-            "authoritative fold-back requires a verified COW workspace, got {}",
-            working_dir.display()
-        );
-    }
+    let lifecycle_operation = if isolation.is_enforced() {
+        ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff
+    } else {
+        // A disabled node has no mount namespace or overlay adapter. Re-run
+        // the exact native Create check to pin the same private project,
+        // then capture the complete mutable project tree below.
+        ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create
+    };
     let lifecycle = isolation
         .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
-            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
+            operation: lifecycle_operation,
             workspace_id,
             launch_owner,
-            lower_snapshot: base_snapshot_hash,
-            lower_path: &layout.lower,
-            upper_path: &layout.upper,
-            work_path: &layout.work,
+            base_snapshot: base_snapshot_hash,
+            project_path: &layout.project,
         })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(
-        &lifecycle.response.pinned_root_identities,
+        &lifecycle.evidence.pinned_root_identities,
     )?)?;
     if workspace_record.workspace_id != workspace_id
-        || workspace_record.lower_snapshot != base_snapshot_hash
+        || workspace_record.base_snapshot != base_snapshot_hash
         || workspace_record.launch_owner.as_deref() != Some(launch_owner)
-        || workspace_record.backend_id.as_deref() != Some(lifecycle.response.backend_id.as_str())
+        || workspace_record.backend_id.as_deref() != Some(lifecycle.evidence.backend_id.as_str())
         || workspace_record.backend_version.as_deref()
-            != Some(lifecycle.response.backend_version.as_str())
+            != Some(lifecycle.evidence.backend_version.as_str())
         || workspace_record.pinned_root_identities.as_deref() != Some(pinned.as_str())
         || workspace_record.mount_identity.as_deref()
-            != Some(lifecycle.response.mount_identity.as_str())
+            != Some(lifecycle.evidence.mount_identity.as_str())
     {
         anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
     }
-    let Some(new_tree) = workspace::apply_workspace_delta(
-        authority,
-        cas_mutation_guard,
-        &mut staged_roots,
-        &lifecycle.upper,
-        pre_tree,
-        policy,
-        &lifecycle.response.mutations,
-    )?
-    else {
+    let new_tree = if isolation.is_enforced() {
+        let mutation_content = lifecycle.mutation_content.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("workspace adapter omitted its pinned mutation-content root")
+        })?;
+        workspace::apply_workspace_delta(
+            authority,
+            cas_mutation_guard,
+            &mut staged_roots,
+            mutation_content,
+            pre_tree,
+            policy,
+            &lifecycle.evidence.mutations,
+        )?
+    } else {
+        let project = lillux::PinnedDirectory::open(&layout.project)?
+            .ok_or_else(|| anyhow::anyhow!("daemon-private workspace project disappeared"))?;
+        let captured = ingest::ingest_project_tree_with_operational_exclusions(
+            authority,
+            cas_mutation_guard,
+            &project,
+            policy,
+            operational_shadow_paths,
+        )?;
+        (captured != *pre_tree).then_some(captured)
+    };
+    let Some(new_tree) = new_tree else {
         return Ok((
             None,
-            PendingCasPublication {
-                authority: authority.try_clone()?,
-                staged_roots: Some(staged_roots),
-            },
+            PendingCasPublication::new(authority.try_clone()?, staged_roots),
         ));
     };
     let new_hash =
@@ -696,10 +756,7 @@ pub(crate) fn fold_back_outputs(
 
     Ok((
         Some(new_hash),
-        PendingCasPublication {
-            authority: authority.try_clone()?,
-            staged_roots: Some(staged_roots),
-        },
+        PendingCasPublication::new(authority.try_clone()?, staged_roots),
     ))
 }
 
@@ -717,7 +774,9 @@ pub(crate) fn fold_back_outputs(
 pub(crate) fn advance_after_foldback(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
-    state_db: &ryeos_state::StateDb,
+    state_store: &ryeos_app::state_store::StateStore,
+    thread_id: &str,
+    launch_owner: &str,
     signer: &dyn Signer,
     principal_key: &str,
     project_path_hash: &str,
@@ -727,9 +786,6 @@ pub(crate) fn advance_after_foldback(
     publication: &mut PendingCasPublication,
 ) -> Result<String> {
     authority.ensure_guard(cas_mutation_guard)?;
-    state_db
-        .pinned_authority()?
-        .ensure_guard(cas_mutation_guard)?;
     let new_snapshot_hash = store_foldback_snapshot(
         authority,
         cas_mutation_guard,
@@ -738,7 +794,9 @@ pub(crate) fn advance_after_foldback(
         publication,
     )?;
 
-    state_db.advance_project_head_ref(
+    state_store.advance_project_head_ref_owned(
+        thread_id,
+        launch_owner,
         principal_key,
         project_path_hash,
         &new_snapshot_hash,
@@ -778,11 +836,11 @@ pub(crate) fn store_foldback_snapshot(
         created_at: lillux::time::iso8601_now(),
         source: "workspace_foldback".to_string(),
     };
-    publication
-        .staged_roots
-        .as_mut()
-        .expect("pending foldback publication owns staged roots")
-        .store_object_admitted(cas_mutation_guard, &cas, &snapshot.to_value())
+    publication.staged_roots_mut().store_object_admitted(
+        cas_mutation_guard,
+        &cas,
+        &snapshot.to_value(),
+    )
 }
 
 /// Seal the exact generation visible at a synchronous runtime callback
@@ -792,7 +850,7 @@ pub(crate) fn store_foldback_snapshot(
 pub(crate) fn seal_callback_workspace_generation(
     state: &ryeos_app::state::AppState,
     thread_id: &str,
-    effective_lower: &Path,
+    effective_project: &Path,
     base_snapshot_hash: &str,
 ) -> Result<PendingProjectResult> {
     let authority = pinned_state_authority(state)?;
@@ -803,7 +861,7 @@ pub(crate) fn seal_callback_workspace_generation(
         base_snapshot_hash,
     )?
     .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
-    let workspace = workspace::WorkspaceLayout::from_lower(effective_lower)?;
+    let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
         .root
         .file_name()
@@ -820,8 +878,8 @@ pub(crate) fn seal_callback_workspace_generation(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
-    if record.lower_snapshot != base_snapshot_hash {
-        anyhow::bail!("callback workspace lower snapshot contradicts its resume base");
+    if record.base_snapshot != base_snapshot_hash {
+        anyhow::bail!("callback workspace base snapshot contradicts its resume base");
     }
     match record.state {
         WorkspaceState::Active => state.state_store.transition_execution_workspace_owned(
@@ -850,8 +908,9 @@ pub(crate) fn seal_callback_workspace_generation(
     }
     let permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire callback generation write permit: {error}"))?;
+    let operational_shadow_paths = admitted_operational_shadow_paths(state, thread_id)?;
     let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
         authority: &authority,
         cas_mutation_guard: &guard,
@@ -863,6 +922,7 @@ pub(crate) fn seal_callback_workspace_generation(
         policy_hash: &snapshot.effective_policy_hash,
         base_snapshot_hash,
         workspace_record: &record,
+        operational_shadow_paths: &operational_shadow_paths,
     })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
@@ -893,10 +953,226 @@ pub(crate) fn seal_callback_workspace_generation(
     })
 }
 
+/// Seal the result generation required by a managed runtime's terminal
+/// project authority. This runs before terminal state commits and while the
+/// runtime is blocked in its authenticated callback, so no process in the
+/// execution group can mutate the generation between capture and admission.
+///
+/// `Discard` owns a COW workspace but deliberately publishes no generation;
+/// its workspace is destroyed after the runtime process has exited. Borrowed
+/// children never settle the workspace owned by their parent.
+pub async fn prepare_managed_runtime_terminal_project_result(
+    state: &ryeos_app::state::AppState,
+    capability: &ryeos_app::callback_token::CallbackCapability,
+    reported_status: &ryeos_engine::contracts::ThreadTerminalStatus,
+) -> Result<Option<PreparedManagedRuntimeProjectResult>> {
+    let provenance = &capability.provenance;
+    if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
+    {
+        return Ok(None);
+    }
+    let terminal_publication = provenance
+        .project_authority()
+        .terminal_publication()
+        .ok_or_else(|| {
+            anyhow::anyhow!("managed COW runtime has no terminal publication authority")
+        })?
+        .clone();
+    if matches!(
+        terminal_publication,
+        ryeos_state::objects::PinnedTerminalPublication::Discard
+    ) {
+        return Ok(None);
+    }
+
+    let base_snapshot_hash = provenance
+        .pinned_snapshot_hash()
+        .ok_or_else(|| anyhow::anyhow!("managed COW runtime has no admitted base generation"))?
+        .to_string();
+    let effective_path = provenance.effective_path().to_path_buf();
+    let thread_id = capability.thread_id.clone();
+    let launch_owner = capability
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("managed runtime callback has no launch owner"))?
+        .to_string();
+    state
+        .state_store
+        .assert_launch_owner(&thread_id, &launch_owner)?;
+
+    let capture_state = state.clone();
+    let capture_thread_id = thread_id.clone();
+    let pending = run_bounded_project_capture(move || {
+        seal_callback_workspace_generation(
+            &capture_state,
+            &capture_thread_id,
+            &effective_path,
+            &base_snapshot_hash,
+        )
+    })
+    .await?;
+
+    let authoritative_status = state
+        .threads
+        .get_thread(&thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("managed runtime thread disappeared during finalization"))?
+        .status;
+    let is_continuation_segment = *reported_status
+        == ryeos_engine::contracts::ThreadTerminalStatus::Continued
+        || authoritative_status == ryeos_state::objects::ThreadStatus::Continued.as_str();
+    if !is_continuation_segment
+        && let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+            head_ref,
+            expected_hash,
+        } = &terminal_publication
+    {
+        advance_head_to_frozen_runtime_result(
+            state,
+            &thread_id,
+            &launch_owner,
+            head_ref,
+            expected_hash,
+            pending.snapshot_hash(),
+        )?;
+    }
+
+    Ok(Some(PreparedManagedRuntimeProjectResult { pending }))
+}
+
+/// Seal a retained generation after the supervisor has proved the managed
+/// runtime process dead but before fallback terminal state is written. This is
+/// the crash/timeout counterpart to the synchronous callback barrier above;
+/// it must never be used while an execution process remains attached.
+pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
+    state: &ryeos_app::state::AppState,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &str,
+) -> Result<Option<String>> {
+    if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
+    {
+        return Ok(None);
+    }
+    let terminal_publication = provenance
+        .project_authority()
+        .terminal_publication()
+        .ok_or_else(|| {
+            anyhow::anyhow!("managed COW runtime has no terminal publication authority")
+        })?;
+    if matches!(
+        terminal_publication,
+        ryeos_state::objects::PinnedTerminalPublication::Discard
+    ) {
+        return Ok(None);
+    }
+    state
+        .state_store
+        .assert_execution_process_detached_owned(thread_id, launch_owner)?;
+
+    let layout = workspace::WorkspaceLayout::from_project(provenance.effective_path())?;
+    let workspace_id = layout
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("execution workspace id is not valid UTF-8"))?;
+    let mut record = state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow::anyhow!("execution workspace journal row is missing"))?;
+    if record.thread_id.as_deref() != Some(thread_id)
+        || record.launch_owner.as_deref() != Some(launch_owner)
+    {
+        anyhow::bail!("stopped managed workspace belongs to another execution owner");
+    }
+    match record.state {
+        WorkspaceState::Ready | WorkspaceState::Active => {
+            state.state_store.transition_execution_workspace_owned(
+                workspace_id,
+                thread_id,
+                launch_owner,
+                &[record.state],
+                WorkspaceState::Freezing,
+                None,
+            )?;
+            record = state
+                .state_store
+                .execution_workspace(workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("execution workspace disappeared while freezing"))?;
+        }
+        WorkspaceState::Freezing => {}
+        state => anyhow::bail!("stopped managed workspace cannot freeze from state {state}"),
+    }
+    let snapshot_hash = recover_interrupted_workspace_freeze(state, &record)?;
+    if let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+        head_ref,
+        expected_hash,
+    } = terminal_publication
+    {
+        advance_head_to_frozen_runtime_result(
+            state,
+            thread_id,
+            launch_owner,
+            head_ref,
+            expected_hash,
+            &snapshot_hash,
+        )?;
+    }
+    Ok(Some(snapshot_hash))
+}
+
+fn advance_head_to_frozen_runtime_result(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    head_ref: &str,
+    expected_hash: &str,
+    result_snapshot_hash: &str,
+) -> Result<()> {
+    let mut components = head_ref.split('/');
+    let (Some("projects"), Some(principal_key), Some(project_hash), Some("head"), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        anyhow::bail!("managed runtime advance-head authority has a non-canonical ref");
+    };
+    let canonical_component = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !canonical_component(principal_key) || !canonical_component(project_hash) {
+        anyhow::bail!("managed runtime advance-head authority has a non-canonical identity");
+    }
+
+    let authority = pinned_state_authority(state)?;
+    let cas_guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&cas_guard)?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
+    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    state.state_store.advance_project_head_ref_owned(
+        thread_id,
+        launch_owner,
+        principal_key,
+        project_hash,
+        result_snapshot_hash,
+        expected_hash,
+        &signer,
+        &cas_guard,
+    )
+}
+
 /// Complete a write-ahead callback freeze whose runtime owner died after the
 /// workspace entered `freezing` but before its snapshot binding committed.
-/// The dead process makes the upper layer stable; the exact captured adapter
-/// replays FreezeAndDiff against the preserved journal identity.
+/// The dead process makes the backend-owned mutation state stable; the exact
+/// captured adapter replays FreezeAndDiff against the preserved journal
+/// identity.
 pub fn recover_interrupted_workspace_freeze(
     state: &ryeos_app::state::AppState,
     record: &ryeos_app::runtime_db::WorkspaceRecord,
@@ -920,13 +1196,14 @@ pub fn recover_interrupted_workspace_freeze(
     let cas = authority.cas_store()?;
     let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
         &cas,
-        &record.lower_snapshot,
+        &record.base_snapshot,
     )?
     .ok_or_else(|| anyhow::anyhow!("freezing workspace base snapshot is absent"))?;
     let permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire recovery freeze write permit: {error}"))?;
+    let operational_shadow_paths = admitted_operational_shadow_paths(state, thread_id)?;
     let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
         authority: &authority,
         cas_mutation_guard: &guard,
@@ -936,18 +1213,19 @@ pub fn recover_interrupted_workspace_freeze(
         working_dir: Path::new(&record.root_path),
         pre_tree_hash: &base.project_tree_hash,
         policy_hash: &base.effective_policy_hash,
-        base_snapshot_hash: &record.lower_snapshot,
+        base_snapshot_hash: &record.base_snapshot,
         workspace_record: record,
+        operational_shadow_paths: &operational_shadow_paths,
     })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
             &authority,
             &guard,
             &tree_hash,
-            &record.lower_snapshot,
+            &record.base_snapshot,
             &mut publication,
         )?,
-        None => record.lower_snapshot.clone(),
+        None => record.base_snapshot.clone(),
     };
     drop(permit);
     state.state_store.bind_frozen_execution_workspace(
@@ -1050,10 +1328,114 @@ pub(crate) fn ensure_control_tree_unchanged(
 #[cfg(test)]
 mod pinned_child_authority_tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
-        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization,
+        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization, ProjectFile,
+        ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_private_workspaces_do_not_share_snapshot_cache_inodes() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let state_root = tempfile::tempdir().unwrap();
+        let state_db =
+            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+                .unwrap();
+        let authority = state_db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let cas = authority.cas_store().unwrap();
+
+        let bytes = b"immutable snapshot bytes\n";
+        let blob_hash = cas.store_blob(bytes).unwrap();
+        let project_file = ProjectFile {
+            blob_hash,
+            size: bytes.len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let file_hash = cas.store_object(&project_file.to_value()).unwrap();
+        let tree = ProjectTree {
+            files: BTreeMap::from([("vendor/runtime/stable.txt".to_owned(), file_hash)]),
+        };
+        let tree_hash = cas.store_object(&tree.to_value()).unwrap();
+        let policy = ProjectSnapshotPolicy::from_matcher(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            &ryeos_state::ignore::matcher_from_builtins(),
+        )
+        .unwrap();
+        let policy_hash = cas.store_object(&policy.to_value()).unwrap();
+        let snapshot = ProjectSnapshot {
+            project_tree_hash: tree_hash,
+            effective_policy_hash: policy_hash,
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: "2026-08-11T00:00:00Z".to_owned(),
+            source: "private-workspace-test".to_owned(),
+        };
+        let snapshot_hash = cas.store_object(&snapshot.to_value()).unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = MaterializationCache::new(cache_root.path().to_path_buf());
+
+        let (shared_path, _shared_lease, shared) = checkout_project_snapshot(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            ProjectMaterialization::SharedReadOnly,
+            &cache,
+        )
+        .unwrap();
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let first_budget = external_content::PrivateMaterializationBudget::new(1024);
+        let second_budget = external_content::PrivateMaterializationBudget::new(1024);
+        let (first_path, _first_lease, _first) = checkout_project_snapshot(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            ProjectMaterialization::PrivateWritableWorkspace {
+                target_dir: first_root.path(),
+                budget: Some(&first_budget),
+            },
+            &cache,
+        )
+        .unwrap();
+        let (second_path, _second_lease, second) = checkout_project_snapshot(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            ProjectMaterialization::PrivateWritableWorkspace {
+                target_dir: second_root.path(),
+                budget: Some(&second_budget),
+            },
+            &cache,
+        )
+        .unwrap();
+
+        let relative = Path::new("vendor/runtime/stable.txt");
+        let shared_file = shared_path.join(relative);
+        let first_file = first_path.join(relative);
+        let second_file = second_path.join(relative);
+        assert_ne!(
+            std::fs::metadata(&shared_file).unwrap().ino(),
+            std::fs::metadata(&first_file).unwrap().ino(),
+            "a writable workspace must not share the immutable cache inode"
+        );
+        assert_ne!(
+            std::fs::metadata(&first_file).unwrap().ino(),
+            std::fs::metadata(&second_file).unwrap().ino(),
+            "two writable workspaces must not share one another's inode"
+        );
+
+        std::fs::write(&first_file, b"first workspace mutation\n").unwrap();
+        assert_eq!(std::fs::read(&shared_file).unwrap(), bytes);
+        assert_eq!(std::fs::read(&second_file).unwrap(), bytes);
+        shared.ensure_path_binding().unwrap();
+        second.ensure_path_binding().unwrap();
+    }
 
     #[test]
     fn pin_at_spawn_preserves_the_sealed_parent_capability_ceiling() {
@@ -1085,5 +1467,40 @@ mod pinned_child_authority_tests {
             panic!("pin-at-spawn must produce pinned authority");
         };
         assert_eq!(capability_ceiling, vec!["sealed.project.cap".to_string()]);
+    }
+
+    #[test]
+    fn pin_at_spawn_can_retain_a_private_child_result_without_head_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = ExecutionProjectAuthority::live(
+            root.path().canonicalize().unwrap(),
+            "project:test".to_string(),
+            LiveProjectAccess::ReadWrite,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+
+        let child = derive_pinned_child_authority(
+            &parent,
+            "a".repeat(64),
+            PinnedChildProjectRealization::CowRetainResult,
+        )
+        .unwrap();
+        let ExecutionProjectAuthority::PinnedGeneration {
+            realization:
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication,
+                },
+            ..
+        } = child
+        else {
+            panic!("retained child policy must produce a private COW authority");
+        };
+        assert_eq!(
+            terminal_publication,
+            ryeos_state::objects::PinnedTerminalPublication::RetainResult
+        );
     }
 }

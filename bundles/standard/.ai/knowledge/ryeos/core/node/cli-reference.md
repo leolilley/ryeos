@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-22T02:33:53Z:bbbac0c04584ce7e3b40d614f385a20c86278de3a3da8cf7ce717736f1ec11bf:tXeRkquOLVk4oNxZlBuloa3Y+3Qk9xTjGBH3IBq4SJ2tPInFMd3gZ+5Kh9mpyV7KtlYsE117dborPwL1fKr+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:2eff75cf9344fc6f04aa3d127acca4b00a44ab126a331a67e6b77e995795ec27:TJbmSjxGcMh5Gb0SNCMbs+VOS7qA0oeoFnjj2emwi3Fm8yDRiQhuQ7J1gx4c3LwnKiQWsyc1mBrnv2VtAVVpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.3.0"
+version: "3.5.1"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -13,8 +13,8 @@ description: >
 The `ryeos` CLI has two execution paths:
 
 1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
-   `node status`, `node doctor`, `node gc`, `trust pin`, `authorize-key`,
-   `publish`, and local vault maintenance verbs.
+   `node status`, `node doctor`, the `node reset ...` family, `trust pin`,
+   `authorize-key`, `publish`, and local vault maintenance verbs.
 2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
    HTTP to a running daemon.
 
@@ -26,14 +26,21 @@ Daemon-backed dispatch is preflighted with local lifecycle status unless
 ### `ryeos init`
 
 ```bash
-ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...]
+ryeos init [--node-profile <name>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
 ```
 
-Packaged installs use `/usr/share/ryeos` by default, so plain
-`ryeos init` is sufficient. Development usage:
+Packaged installs use `/usr/share/ryeos` by default. The full package selects
+its exact complete seed explicitly:
 
 ```bash
-ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --node-profile full
+```
+
+Fresh init refuses an absent selector; bundle presence never implies one.
+Development usage:
+
+```bash
+ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`
@@ -82,16 +89,47 @@ and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md).
 
-### `ryeos node gc`
+### `ryeos node reset execution-history`
 
 ```bash
-ryeos node gc --discard-thread-history [--dry-run | --confirm-discard-thread-history] [--sweep-cas] [--json] [--app-root <dir>]
+ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--json] [--app-root <dir>]
 ```
 
-Runs the explicit offline all-thread-history retirement while the daemon is
-stopped. Mutation requires the confirmation flag. Interactive terminals show
-typed maintenance phases and exact retired-head counts; `--json` and redirected
-calls emit no terminal control sequences. See [Maintenance GC](../services/maintenance-gc.md).
+Runs the explicit offline execution-history epoch retirement while the daemon
+is stopped. It is a destructive schema/authority reset, not storage garbage
+collection. Mutation requires `--confirm`; principal and deployed project HEADs
+are included only with both project-head flags. Interactive terminals show
+typed reset phases and exact retired-head counts; `--json` and redirected calls
+emit no terminal control sequences. Restart the daemon and use ordinary
+`ryeos maintenance gc` later to reclaim newly unreachable storage. See
+[Maintenance GC](../services/maintenance-gc.md).
+
+The other clean-cut reset scopes share the same namespace and require the
+daemon to be stopped:
+
+```bash
+ryeos node reset authorization --confirm
+ryeos node reset replay-indexes --confirm
+ryeos node reset external-content-bindings [--dry-run | --confirm]
+ryeos node reset policy-generation --node-profile <name> --confirm [--source <dir>] [--trust-file <file>]...
+```
+
+Each reset names one authority/schema epoch. None is a storage-reclamation
+shortcut, and none broadens into another reset scope implicitly.
+
+`policy-generation` is the clean-cut path for a node whose complete signed
+policy generation predates the current registered section set. It verifies a
+publisher-signed init profile from the selected source root, treats that
+profile's `exact_bundles` as the prospective complete bundle inventory, and
+runs with the built-in trust roots plus every explicitly repeated
+`--trust-file`; it then
+runs the corresponding installs/removals and complete node-signed policy cut
+inside the same locked init. The preceding completion record is durably
+invalidated before the first mutation; a new signed fence is written only
+after the operation completes, and startup refuses an absent or contradictory
+fence. The cut preserves node identity, vault credentials, projects, and
+execution history while deliberately retiring predecessor policy
+customization.
 
 ## Other local operator verbs
 
@@ -104,6 +142,8 @@ calls emit no terminal control sequences. See [Maintenance GC](../services/maint
 ## Core daemon-backed verbs
 
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.
+- `ryeos content pin <ref> --id <declaration>` — atomically complete a signed
+  external-content pin through the daemon-owned, local-operator authoring path.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
 - `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.

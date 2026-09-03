@@ -12,6 +12,50 @@ use crate::routes::invocation::{
 };
 use crate::routes::limits::RouteLimiter;
 
+fn dispatcher_timeout_is_disabled(timeout: Duration) -> bool {
+    timeout == Duration::ZERO
+}
+
+async fn await_handler_response(
+    task: tokio::task::JoinHandle<Result<Response, crate::route_error::RouteDispatchError>>,
+    timeout: Duration,
+) -> Response {
+    if dispatcher_timeout_is_disabled(timeout) {
+        match task.await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => e.into_response(),
+            Err(join_error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "error": format!("route handler task failed: {join_error}"),
+                })),
+            )
+                .into_response(),
+        }
+    } else {
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(Ok(resp))) => resp,
+            Ok(Ok(Err(e))) => e.into_response(),
+            Ok(Err(join_error)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "error": format!("route handler task failed: {join_error}"),
+                })),
+            )
+                .into_response(),
+            Err(_) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                axum::Json(serde_json::json!({
+                    "error": "request timed out waiting for a response; the request \
+                              continues server-side — check the thread's status for \
+                              its real outcome",
+                })),
+            )
+                .into_response(),
+        }
+    }
+}
+
 pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Request) -> Response {
     route_dispatcher_from_ingress(State(api_state), request, Instant::now()).await
 }
@@ -189,53 +233,55 @@ pub async fn route_dispatcher_from_ingress(
 
     let route_ref = route.clone();
 
-    let is_streaming = route_ref.response_mode.is_streaming();
-    let no_timeout = is_streaming && limiter.timeout == Duration::ZERO;
-
-    if no_timeout {
-        match route_ref
+    // `timeout_ms: 0` is an explicit response-mode contract: the dispatcher
+    // must not abandon the response future.  This is not limited to streaming
+    // transports.  In particular, accepted execution waits only for the
+    // durable launch handoff, while the launched work remains bounded by its
+    // own signed execution limits.
+    // Every response handler runs behind a task boundary. Dropping the HTTP
+    // request (including a client disconnect) must abandon only the response,
+    // never cancel admission or execution after authority has started moving.
+    let task = tokio::spawn(async move {
+        route_ref
             .response_mode
             .handle(&route_ref, route_dispatch_ctx)
             .await
-        {
-            Ok(resp) => resp,
-            Err(e) => e.into_response(),
-        }
-    } else {
-        // The timeout bounds the CLIENT's wait, never the work: the handler
-        // runs in its own task, so hitting the route timeout (or the client
-        // disconnecting) abandons only the response. Cancelling the handler
-        // future itself would drop it mid-execution and fire finalize-on-drop
-        // guards — failing threads whose runtime children were still running
-        // toward success, leaving contradictory terminal events in one braid.
-        // Execution work is bounded by its own limits (thread duration,
-        // runtime timeouts), not by how long an HTTP caller waited.
-        let task = tokio::spawn(async move {
-            route_ref
-                .response_mode
-                .handle(&route_ref, route_dispatch_ctx)
-                .await
+    });
+
+    // A non-zero timeout bounds the CLIENT's wait, never the work: hitting it
+    // abandons only the task handle. Cancelling the handler future itself
+    // would fire finalize-on-drop guards and could contradict runtime children
+    // still working toward success. A zero timeout waits for the response-mode
+    // contract instead; accepted execution uses that to return its durable
+    // root handoff before the HTTP response can finish.
+    await_handler_response(task, limiter.timeout).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_timeout_disables_dispatcher_abandonment_for_any_response_transport() {
+        assert!(dispatcher_timeout_is_disabled(Duration::ZERO));
+        assert!(!dispatcher_timeout_is_disabled(Duration::from_millis(1)));
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_waits_for_a_durable_accepted_response() {
+        let task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok((
+                StatusCode::ACCEPTED,
+                axum::Json(serde_json::json!({
+                    "status": "accepted",
+                    "thread_id": "T-01234567-abcd-ef01-2345-6789abcdef01",
+                })),
+            )
+                .into_response())
         });
 
-        match tokio::time::timeout(limiter.timeout, task).await {
-            Ok(Ok(Ok(resp))) => resp,
-            Ok(Ok(Err(e))) => e.into_response(),
-            Ok(Err(join_error)) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({
-                    "error": format!("route handler task failed: {join_error}"),
-                })),
-            )
-                .into_response(),
-            Err(_) => (
-                StatusCode::GATEWAY_TIMEOUT,
-                axum::Json(serde_json::json!({
-                    "error": "request timed out waiting for a response; the request \
-                              continues server-side — check the thread's status for \
-                              its real outcome",
-                })),
-            )
-                .into_response(),
-        }
+        let response = await_handler_response(task, Duration::ZERO).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 }

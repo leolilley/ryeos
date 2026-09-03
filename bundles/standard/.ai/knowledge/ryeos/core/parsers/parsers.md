@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-02T09:07:49Z:c8981a3022ef35d27489575e0f53b68bcb6d805583c633eadfde6b1622956738:MXbolZuhEu67xjlt0+Den07RNJGcTrwTXoiQexS/9g0GSgITC+tz7STEXFZx/RJFpyQiNA6HLaO2Vqjj7jnFAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:32Z:7b3ae3dedb1ef1794898f97f940235a2de47e937d8e6fd95f98c4a8d118bb2e4:PB6Df1iDycNetskyJwqrovEFnmUs/gprrpFERm0IenfIuGtbvUOKiF8QAfvZ8KGvG8grsAn0tIimgIPu39IlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:578da9a3092b96b72a3914815df0bb04b95d3d8e1fd328d777d86d9a67c7a900:4c/7joPzCtkgJiYd+/tNnsWztoe1FPVMIIBl6tjFjHyO5HDZyURr4D1WQj03hJwu8pdiXe1QGp4kvpQyT9IiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 category: ryeos/core
@@ -73,8 +73,8 @@ Handlers are the executable backends that parsers delegate to:
 | `yaml-header-document`         | parser   | Parse YAML header + body (markdown/comment headers) |
 | `regex-kv`                     | parser   | Extract key-value pairs via regex         |
 | `extends-chain`                | composer | Resolve inheritance chains               |
-| `graph-permissions`            | composer | Lift graph permissions into policy facts  |
 | `identity`                     | composer | No-op pass-through                       |
+| `graph-effective-validator`    | effective validator | Validate fully composed graph semantics |
 
 ## Result caching
 

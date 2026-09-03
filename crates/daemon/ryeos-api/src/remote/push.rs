@@ -113,6 +113,108 @@ pub async fn push_snapshot_generation(
     finish_staged_roots(authority, &mut staged_roots, operation)
 }
 
+/// Upload and publish one already-admitted descendant generation through an
+/// upload session that was opened by the caller.
+///
+/// Unlike [`push_snapshot_generation`], this accepts a project DAG merge with
+/// more than one direct parent. The destination-issued previous HEAD must
+/// still occur in the candidate's verified history. The complete candidate
+/// closure is collected locally, so every additional parent and its reachable
+/// content is transferred rather than being treated as destination state.
+pub async fn push_descendant_snapshot_with_session(
+    client: &RemoteClient,
+    authority: &PinnedStateAuthority,
+    snapshot_hash: &str,
+    project_path_for_ref: &str,
+    upload_session: ObjectsPutResponse,
+) -> Result<PushResult> {
+    let expected_previous_hash = upload_session
+        .expected_previous_hash
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("descendant publication requires an existing remote HEAD")
+        })?;
+    let local_cas = authority.cas_store()?;
+    if !crate::handlers::project_apply_snapshot::snapshot_history_contains(
+        &local_cas,
+        snapshot_hash,
+        expected_previous_hash,
+    )? {
+        anyhow::bail!(
+            "snapshot {snapshot_hash} does not descend from the server-issued previous HEAD {expected_previous_hash}"
+        );
+    }
+    let snapshot_value = local_cas
+        .get_object(snapshot_hash)?
+        .ok_or_else(|| anyhow::anyhow!("project snapshot {snapshot_hash} is absent"))?;
+    let snapshot = ProjectSnapshot::from_value(&snapshot_value)?;
+    let tree_value = local_cas
+        .get_object(&snapshot.project_tree_hash)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project tree {} for snapshot {snapshot_hash} is absent",
+                snapshot.project_tree_hash
+            )
+        })?;
+    let tree = ProjectTree::from_value(&tree_value)?;
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
+    let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        &local_cas,
+        [snapshot_hash.to_owned()],
+        limits,
+    )?;
+    if !report.is_complete() || !report.large_object_hashes.is_empty() {
+        anyhow::bail!("descendant project snapshot upload closure is incomplete: {report:?}");
+    }
+    let upload_closure = SnapshotCasClosure {
+        object_hashes: report.object_hashes.into_iter().collect(),
+        blob_hashes: report.blob_hashes.into_iter().collect(),
+    };
+    let recovery = authority.require_recovery()?;
+    let mut staged_roots = {
+        let guard = authority.acquire_shared_guard()?;
+        let mut roots =
+            recovery.begin_staged_cas_roots_admitted(&guard, "remote-push-descendant")?;
+        roots.protect_cas_closure_admitted(
+            &guard,
+            upload_closure.object_hashes.iter().map(String::as_str),
+            upload_closure.blob_hashes.iter().map(String::as_str),
+        )?;
+        roots
+    };
+
+    let operation = async {
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
+            snapshot_hash,
+            project_path_for_ref,
+            upload_session,
+        )
+        .await?;
+        client
+            .push_head(
+                project_path_for_ref,
+                snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+        Ok(PushResult {
+            snapshot_hash: snapshot_hash.to_owned(),
+            tree_hash: snapshot.project_tree_hash,
+            tree_entries: tree.files.len(),
+            tree,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
+}
+
 /// Build, upload, and stage an AI-only project snapshot.
 ///
 /// Unlike [`push_project`], this captures the curated `.ai` allow-list rather

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-13T07:32:09Z:a912f4390b2cddf257373e7f859e7b87721c7fbdc26f757c6fb8cc08b7834b50:I27HbfnHEJZgPWQtC7krDHRFwMEJgfoi2Y1MFqkMtKtkVNcM9yLb+JTsP+8ZIGumCDOJBCjl4L66QHyiy0/4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/core
+name: graph-effective-validator
+kind: handler
+serves: effective_validator
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-effective-validator
+abi_version: "v3"
+required_caps: []
+description: "Strict semantic validator for a fully composed graph"

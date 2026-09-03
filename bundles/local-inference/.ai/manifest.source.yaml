@@ -1,0 +1,9 @@
+name: local-inference
+version: "0.1.0"
+description: "Optional admitted local-model workers and provider routes"
+requires_kinds:
+  - config
+  - directive
+  - knowledge
+  - worker
+uses_kinds: []

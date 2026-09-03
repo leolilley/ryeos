@@ -9,9 +9,12 @@
 !*/.ai/knowledge/
 !*/.ai/knowledge/**
 */.ai/knowledge/agent/
+!*/.ai/graphs/
+!*/.ai/graphs/**
 !*/.ai/tools/
 !*/.ai/tools/**
 !execute-stream-latency/run-latency-matrix.mjs
 __pycache__/
 !*/outputs/
 !*/outputs/.gitkeep
+!execution-comparison/README.md

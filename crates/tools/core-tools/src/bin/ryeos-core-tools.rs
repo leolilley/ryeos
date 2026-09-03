@@ -253,6 +253,16 @@ enum Cmd {
         /// printed).
         #[arg(long)]
         merge_scopes: bool,
+
+        /// Bind this operator key to an authenticated forwarding RyeOS site.
+        /// Emits a remote_operator grant and rejects wildcard scopes.
+        #[arg(long)]
+        origin_site_id: Option<String>,
+
+        /// Explicitly permit an incumbent grant's principal class or origin
+        /// to change. Use only while the daemon is stopped.
+        #[arg(long)]
+        allow_semantic_conversion: bool,
     },
 
     /// Mint a one-time node-local admission token for remote bootstrap.
@@ -598,20 +608,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             scopes,
             label,
             merge_scopes,
-        } => {
-            let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
-                "--scopes required, comma-separated, in canonical form. \
-                 Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
-            ))?;
-            run_authorize_client(
-                app_root,
-                public_key,
-                scopes,
-                label,
-                merge_scopes,
-                cli.stdin_json,
-            )
-        }
+            origin_site_id,
+            allow_semantic_conversion,
+        } => run_authorize_client(
+            app_root,
+            public_key,
+            scopes,
+            label,
+            merge_scopes,
+            origin_site_id,
+            allow_semantic_conversion,
+            cli.stdin_json,
+        ),
         Cmd::AdmissionToken {
             app_root,
             scopes,
@@ -1083,19 +1091,35 @@ fn run_doctor(
     })
     .context("load config for offline doctor engine")?;
     let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root);
+    let policy_snapshot = (|| -> anyhow::Result<_> {
+        let trust = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)?;
+        ryeos_app::node_policy::load_snapshot(
+            &app_root,
+            &trust,
+            &ryeos_app::node_policy::NodePolicyTable::new(),
+        )
+    })();
     // A failed engine build is non-fatal: the static checks still run and the
     // import dry-run reports `unavailable` (e.g. when doctoring a bundle that
     // provides its own parsers, where the offline engine can't bootstrap them).
-    let engine = match &isolation {
-        Ok(isolation) => ryeos_app::engine_init::build_engine_for_roots(
-            &config,
-            &dependency_roots,
-            Some(&source_path),
-            None,
-            std::sync::Arc::clone(isolation),
-        ),
-        Err(error) => Err(anyhow::anyhow!(
+    let engine = match (&isolation, &policy_snapshot) {
+        (Ok(isolation), Ok(snapshot)) => snapshot
+            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .and_then(|execution_policy| {
+                ryeos_app::engine_init::build_engine_for_roots(
+                    &config,
+                    &dependency_roots,
+                    Some(&source_path),
+                    None,
+                    std::sync::Arc::clone(isolation),
+                    execution_policy,
+                )
+            }),
+        (Err(error), _) => Err(anyhow::anyhow!(
             "node isolation policy unavailable for engine handlers: {error}"
+        )),
+        (_, Err(error)) => Err(anyhow::anyhow!(
+            "node execution policy unavailable for engine handlers: {error}"
         )),
     };
     let engine_err = engine
@@ -1668,12 +1692,35 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizeClientStdinParams {
+    #[serde(default)]
+    app_root: Option<String>,
+    public_key: String,
+    scopes: String,
+    #[serde(default = "default_authorize_client_label")]
+    label: String,
+    #[serde(default)]
+    merge_scopes: bool,
+    #[serde(default)]
+    origin_site_id: Option<String>,
+    #[serde(default)]
+    allow_semantic_conversion: bool,
+}
+
+fn default_authorize_client_label() -> String {
+    "cli-authorized".to_string()
+}
+
 fn run_authorize_client(
     app_root: Option<String>,
     public_key: Option<String>,
-    scopes: String,
+    scopes: Option<String>,
     label: String,
     merge_scopes: bool,
+    origin_site_id: Option<String>,
+    allow_semantic_conversion: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
@@ -1682,29 +1729,44 @@ fn run_authorize_client(
     };
 
     let params = if stdin_json {
-        let val = read_stdin_json()?;
-        let ssd = val["app_root"].as_str().map(String::from);
-        let pk = val["public_key"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("public_key required"))?
-            .to_string();
-        let sc = val["scopes"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
-            .to_string();
-        let lb = val["label"]
-            .as_str()
-            .unwrap_or("cli-authorized")
-            .to_string();
-        (ssd, pk, sc, lb)
+        let value: AuthorizeClientStdinParams = serde_json::from_value(read_stdin_json()?)?;
+        (
+            value.app_root,
+            value.public_key,
+            value.scopes,
+            value.label,
+            value.merge_scopes,
+            value.origin_site_id,
+            value.allow_semantic_conversion,
+        )
     } else {
         let pk = public_key.ok_or_else(|| anyhow::anyhow!("--public-key required"))?;
-        (app_root, pk, scopes, label)
+        let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
+            "--scopes required, comma-separated, in canonical form. \
+             Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
+        ))?;
+        (
+            app_root,
+            pk,
+            scopes,
+            label,
+            merge_scopes,
+            origin_site_id,
+            allow_semantic_conversion,
+        )
     };
 
-    let (ssd, pk_b64, scopes_str, label) = params;
+    let (
+        app_root,
+        pk_b64,
+        scopes_str,
+        label,
+        merge_scopes,
+        origin_site_id,
+        allow_semantic_conversion,
+    ) = params;
 
-    let app_root = resolve_app_root(ssd)?;
+    let app_root = resolve_app_root(app_root)?;
 
     let pk_bytes = base64::engine::general_purpose::STANDARD
         .decode(&pk_b64)
@@ -1741,6 +1803,8 @@ fn run_authorize_client(
         label,
         allow_wildcard: false, // core-tools is not the bootstrap path
         merge: merge_scopes,
+        origin_site_id,
+        allow_semantic_conversion,
     })?;
 
     if !result.dropped_scopes.is_empty() {
@@ -1752,6 +1816,18 @@ fn run_authorize_client(
             dropped = result.dropped_scopes.join(", "),
         );
     }
+    if result.previous_principal_class.as_deref() != Some(result.principal_class.as_str())
+        || result.previous_origin_site_id != result.origin_site_id
+    {
+        eprintln!(
+            "authorized-key semantic transition for {fp}: class {old_class:?} -> {new_class}, origin {old_origin:?} -> {new_origin:?}",
+            fp = result.fingerprint,
+            old_class = result.previous_principal_class,
+            new_class = result.principal_class,
+            old_origin = result.previous_origin_site_id,
+            new_origin = result.origin_site_id,
+        );
+    }
 
     println!(
         "{}",
@@ -1760,6 +1836,10 @@ fn run_authorize_client(
             "path": result.path.to_string_lossy(),
             "merged": result.merged,
             "dropped_scopes": result.dropped_scopes,
+            "previous_principal_class": result.previous_principal_class,
+            "previous_origin_site_id": result.previous_origin_site_id,
+            "principal_class": result.principal_class,
+            "origin_site_id": result.origin_site_id,
         }))?
     );
 
@@ -1863,6 +1943,35 @@ mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn authorize_client_stdin_contract_carries_transition_authority() {
+        let params: AuthorizeClientStdinParams = serde_json::from_value(serde_json::json!({
+            "public_key": "ZmFrZQ==",
+            "scopes": "scope:a,scope:b",
+            "origin_site_id": "site:source",
+            "allow_semantic_conversion": true,
+            "merge_scopes": true
+        }))
+        .unwrap();
+
+        assert_eq!(params.label, "cli-authorized");
+        assert_eq!(params.origin_site_id.as_deref(), Some("site:source"));
+        assert!(params.allow_semantic_conversion);
+        assert!(params.merge_scopes);
+    }
+
+    #[test]
+    fn authorize_client_stdin_contract_rejects_unknown_fields() {
+        let error = serde_json::from_value::<AuthorizeClientStdinParams>(serde_json::json!({
+            "public_key": "ZmFrZQ==",
+            "scopes": "scope:a",
+            "principal_class": "remote_operator"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
+    }
 
     struct InstalledFixture {
         _tmp: tempfile::TempDir,

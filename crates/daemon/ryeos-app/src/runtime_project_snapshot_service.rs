@@ -165,9 +165,7 @@ impl RuntimeProjectSnapshotService {
         let canonical = project_path
             .to_str()
             .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
-        let authority = state
-            .state_store
-            .with_state_db(|db| db.pinned_authority())?;
+        let authority = state.state_store.pinned_state_authority()?;
         let cas = authority.cas_store()?;
         let ctx = SnapshotContext {
             state: SnapshotState::Live(state),
@@ -234,7 +232,21 @@ pub fn offline_status(
         .to_str()
         .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
     let project_hash = ryeos_state::refs::deployed_project_key(canonical);
-    let ignore_matcher = crate::ignore::load_from_app_root(&config.app_root)?;
+    let node_trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config(),
+    )
+    .context("load node trust for exact ingest-ignore policy")?;
+    let node_policy = crate::node_policy::load_snapshot(
+        &config.app_root,
+        &node_trust_store,
+        &crate::node_policy::NodePolicyTable::new(),
+    )
+    .context("compile exact node policy generation for snapshot status")?;
+    let ignore_matcher = node_policy
+        .require::<crate::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+        .matcher
+        .clone();
     let ctx = SnapshotContext {
         state: SnapshotState::Offline(&state_db),
         ignore_matcher: &ignore_matcher,
@@ -399,7 +411,7 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     let guard = ctx.authority.acquire_shared_guard()?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow!("cannot acquire snapshot write permit: {error}"))?;
     let (initial_head, _) = heads(ctx)?;
     let current = initial_head
@@ -459,29 +471,29 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     };
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
     let signer = NodeIdentitySigner::from_identity(&state.identity);
-    state.state_store.with_state_db(|db| {
-        let locked_head = db.read_project_head(&ctx.principal_key, &ctx.project_hash)?;
-        if locked_head != initial_head {
-            bail!("project head changed while creating snapshot; rerun snapshot create");
-        }
-        match initial_head.as_deref() {
-            Some(current) => db.advance_project_head_ref(
-                &ctx.principal_key,
-                &ctx.project_hash,
-                &snapshot_hash,
-                current,
-                &signer,
-                &guard,
-            ),
-            None => db.write_project_head_ref(
-                &ctx.principal_key,
-                &ctx.project_hash,
-                &snapshot_hash,
-                &signer,
-                &guard,
-            ),
-        }
-    })?;
+    let locked_head = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(&ctx.principal_key, &ctx.project_hash))?;
+    if locked_head != initial_head {
+        bail!("project head changed while creating snapshot; rerun snapshot create");
+    }
+    match initial_head.as_deref() {
+        Some(current) => state.state_store.advance_project_head_ref(
+            &ctx.principal_key,
+            &ctx.project_hash,
+            &snapshot_hash,
+            current,
+            &signer,
+            &guard,
+        ),
+        None => state.state_store.write_project_head_ref(
+            &ctx.principal_key,
+            &ctx.project_hash,
+            &snapshot_hash,
+            &signer,
+            &guard,
+        ),
+    }?;
     Ok(json!({
         "kind": "snapshot_create",
         "project_path": ctx.project_path,

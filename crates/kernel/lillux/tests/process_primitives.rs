@@ -10,9 +10,10 @@
 #![cfg(unix)]
 
 use lillux::{
-    OutputLimitExceeded, SubprocessLimits, SubprocessRequest, configure_subprocess_limits,
-    is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd, sealed_memfd, spawn,
-    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
+    CooperativeChildTermination, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
+    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
+    sealed_memfd, spawn, spawn_detached, supervised_launcher_status_pipe,
+    validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -77,6 +78,59 @@ fn run_writes_stdin_to_child() {
 }
 
 #[test]
+fn running_process_exposes_only_a_bounded_stderr_diagnostic_tail() {
+    let mut request = sh(&[
+        "-c",
+        "printf prefix >&2; printf '%03000d' 0 >&2; printf diagnostic-tail >&2; sleep 2",
+    ]);
+    request.envs = path_env();
+    let running = spawn(request).expect("spawn diagnostic process");
+    let mut diagnostic = None;
+    for _ in 0..50 {
+        diagnostic = running.stderr_diagnostic_tail();
+        if diagnostic
+            .as_deref()
+            .is_some_and(|value| value.contains("diagnostic-tail"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let diagnostic = diagnostic.expect("captured stderr diagnostic");
+    assert!(diagnostic.contains("diagnostic-tail"));
+    assert!(!diagnostic.contains("prefix"));
+    assert!(diagnostic.len() < 2_200);
+    running.abort();
+}
+
+#[test]
+fn bounded_natural_exit_wait_preserves_running_ownership_or_returns_output() {
+    let mut exiting = sh(&["-c", "printf natural-exit >&2; exit 9"]);
+    exiting.envs = path_env();
+    let exited = match spawn(exiting)
+        .expect("spawn exiting process")
+        .wait_for_natural_exit(std::time::Duration::from_secs(2))
+    {
+        Ok(exited) => exited,
+        Err(running) => {
+            running.abort();
+            panic!("process did not exit within the bounded wait")
+        }
+    };
+    assert_eq!(exited.exit_code, 9);
+    assert!(exited.stderr.contains("natural-exit"));
+
+    let mut alive = sh(&["-c", "sleep 2"]);
+    alive.envs = path_env();
+    let running = spawn(alive).expect("spawn running process");
+    let running = match running.wait_for_natural_exit(std::time::Duration::from_millis(20)) {
+        Ok(_) => panic!("process exited before the bounded ownership check"),
+        Err(running) => running,
+    };
+    running.abort();
+}
+
+#[test]
 fn run_installs_max_open_files_before_exec() {
     let mut request = sh(&["-c", "ulimit -n"]);
     request.limits = Some(SubprocessLimits {
@@ -88,6 +142,48 @@ fn run_installs_max_open_files_before_exec() {
 
     assert!(result.success, "stderr: {}", result.stderr);
     assert_eq!(result.stdout.trim(), "64");
+}
+
+#[test]
+fn run_installs_memory_cpu_and_process_limits_before_exec() {
+    let mut request = sh(&[
+        "-c",
+        "printf '%s\\n' \"$(ulimit -v)\" \"$(ulimit -t)\" \"$(ulimit -u)\"",
+    ]);
+    request.limits = Some(SubprocessLimits {
+        max_address_space_bytes: Some(256 * 1024 * 1024),
+        max_cpu_seconds: Some(3),
+        max_processes: Some(512),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["262144", "3", "512"]
+    );
+}
+
+#[test]
+fn validation_rejects_zero_kernel_resource_limits() {
+    for limits in [
+        SubprocessLimits {
+            max_address_space_bytes: Some(0),
+            ..SubprocessLimits::default()
+        },
+        SubprocessLimits {
+            max_cpu_seconds: Some(0),
+            ..SubprocessLimits::default()
+        },
+        SubprocessLimits {
+            max_processes: Some(0),
+            ..SubprocessLimits::default()
+        },
+    ] {
+        assert!(validate_subprocess_limits(Some(&limits)).is_err());
+    }
 }
 
 #[test]
@@ -369,6 +465,7 @@ fn inherited_stdio_retains_supervised_target_identity_and_cleanup() {
         max_open_files: Some(64),
         max_stdout_bytes: None,
         max_stderr_bytes: None,
+        ..SubprocessLimits::default()
     });
     let result = run_inherited_stdio(request);
 
@@ -446,6 +543,56 @@ fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
 
     assert!(
         result.stderr.contains("invalid JSON status document"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn bubblewrap_namespace_identity_fields_are_accepted_but_remain_closed() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "sleep 30 & target=$!; printf '{{\"child-pid\":%s,\"ipc-namespace\":1,\"mnt-namespace\":2,\"net-namespace\":3,\"uts-namespace\":4}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let running = spawn(request).expect("known Bubblewrap status fields must be accepted");
+    running.abort();
+
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script =
+        format!("printf '{{\"child-pid\":123,\"unexpected-namespace\":1}}\\n' >&{status_fd}");
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+    let Err(result) = spawn(request) else {
+        panic!("unknown launcher status fields must still fail closed");
+    };
+    assert!(result.stderr.contains("unknown field"), "{}", result.stderr);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn launcher_stderr_is_retained_when_status_closes_before_target_identity() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let mut request = sh(&["-c", "printf 'backend setup failed\\n' >&2"]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("a launcher without target identity must refuse the spawn");
+    };
+    assert!(result.stderr.contains("status channel reached EOF"));
+    assert!(
+        result.stderr.contains("backend setup failed"),
         "{}",
         result.stderr
     );
@@ -599,4 +746,81 @@ fn is_alive_false_for_unused_pid() {
 fn kill_reports_already_dead_for_unused_pid() {
     let method = kill(2_000_000_000, 0.1).expect("kill");
     assert_eq!(method, "already_dead");
+}
+
+#[test]
+fn cooperative_child_termination_sends_sigterm_without_escalation() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    struct ChildCleanup(std::process::Child);
+    impl Drop for ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut child = ChildCleanup(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()
+            .expect("spawn cooperative-termination fixture"),
+    );
+    let authority =
+        CooperativeChildTermination::for_child(&child.0).expect("pin exact child identity");
+
+    let pending = authority
+        .request()
+        .expect("request cooperative termination");
+    let status = child.0.wait().expect("reap terminated child");
+
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    assert!(pending.has_exited().expect("observe exact child exit"));
+}
+
+#[test]
+fn cooperative_child_termination_exposes_natural_exit_without_forcing_it() {
+    use std::io::BufRead as _;
+
+    struct ChildCleanup(std::process::Child);
+    impl Drop for ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut child = ChildCleanup(
+        std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap 'sleep 0.25; exit 0' TERM; echo ready; while :; do :; done",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn delayed cooperative-termination fixture"),
+    );
+    let mut ready = String::new();
+    std::io::BufReader::new(child.0.stdout.take().expect("fixture stdout"))
+        .read_line(&mut ready)
+        .expect("read fixture readiness");
+    assert_eq!(ready, "ready\n");
+    let authority =
+        CooperativeChildTermination::for_child(&child.0).expect("pin exact child identity");
+
+    let started = std::time::Instant::now();
+    let pending = authority
+        .request()
+        .expect("request delayed cooperative termination");
+    assert!(
+        !pending
+            .has_exited()
+            .expect("observe live terminating child")
+    );
+    std::thread::sleep(std::time::Duration::from_millis(75));
+    assert!(!pending.has_exited().expect("preserve cooperative grace"));
+    child.0.wait().expect("reap cooperatively terminated child");
+
+    assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    assert!(pending.has_exited().expect("observe natural child exit"));
 }

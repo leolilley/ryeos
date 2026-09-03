@@ -1,0 +1,84 @@
+# ryeos:signed:2026-08-29T10:19:43Z:611f1f791b146ed9d43a51f704e35d8e367f64a883446f3f5ebf9d6a49153f3d:KU2REscwzBom+0+jfZFY2qPlQOsOgKZ1QaffUmhvFzR5OVxmEGMIJPTSpy+m7inZdWBNnt792qhaC8fC+MrlBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+schema: ryeos.external_content_activation.v3
+consumer_ref: worker:codex/hosted
+sources:
+  - id: codex-package
+    url: https://releases.openai.com/codex/releases/0.147.0/codex-package-x86_64-unknown-linux-musl.tar.gz
+    archive_format: tar_gzip
+    sha256: bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda
+    maximum_compressed_bytes: 134217728
+    maximum_expanded_bytes: 335544320
+    maximum_entries: 64
+    members:
+      - path: bin/codex
+        disposition: import
+        sha256: cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40
+        maximum_bytes: 268435456
+        executable: true
+      - path: bin/codex-code-mode-host
+        disposition: import
+        sha256: 00ecf5d040865b97884c488883abd342581c2a432debe7a54e4646bceee3d2d6
+        maximum_bytes: 67108864
+        executable: true
+      - path: codex-package.json
+        disposition: verify_only
+        sha256: 00f66f11cc7d5c4133d500b4aae6ed4975608d6b040eefd56dc1ff343566e8cf
+        maximum_bytes: 4096
+        executable: false
+      - path: codex-path/rg
+        disposition: import
+        sha256: e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849
+        maximum_bytes: 8388608
+        executable: true
+      - path: codex-resources/bwrap
+        disposition: import
+        sha256: 77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c
+        maximum_bytes: 1048576
+        executable: true
+      - path: codex-resources/zsh/bin/zsh
+        disposition: import
+        sha256: 67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3
+        maximum_bytes: 2097152
+        executable: true
+components:
+  - id: codex
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: bin/codex
+          target: null
+  - id: codex-code-mode-host
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: bin/codex-code-mode-host
+          target: null
+  - id: codex-bwrap
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-resources/bwrap
+          target: null
+  - id: codex-zsh
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-resources/zsh/bin/zsh
+          target: null
+  - id: codex-rg
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-path/rg
+          target: null

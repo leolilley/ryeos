@@ -1,0 +1,48 @@
+# ryeos:signed:2026-08-27T09:10:45Z:cd7aa94278408b45c06ae989143ed3698a1862c992305efcddad09fc585e33c1:4qblYIwbSsonoEVujMRADwq5T/KII3mXNne4sG4RMcLhKJgumpVzL5ZP4ljLQmTW/6WKxKeZe8pwGy19xzw2DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: runtime
+serves: worker_execution
+default: true
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-worker-execution-runtime
+abi_version: "v3"
+native_resume: true
+required_caps:
+  - ryeos.runtime.dedicated_session.start
+  - ryeos.runtime.dedicated_session.command
+  - ryeos.runtime.dedicated_session.terminate
+launch_contract:
+  primary_allowed_kinds: [worker_execution]
+  primary_allowed_spaces: [bundle]
+  primary_allowed_trust: [trusted_bundle]
+  ref_bindings:
+    environment:
+      required: false
+      allowed_kinds: [config]
+      allowed_spaces: [bundle, project]
+      allowed_trust: [trusted_bundle, trusted_project]
+  preparation:
+    kind: handler
+    handler: handler:ryeos/core/worker-execution-launch
+    config: {}
+    execution_cache: content_addressed
+  config_inputs: {}
+  execution_dependencies:
+    max_dependencies: 1
+    allowed_kinds: [worker]
+    allowed_spaces: [bundle]
+    allowed_trust: [trusted_bundle]
+  content_dependencies:
+    max_dependencies: 1
+    allowed_bindings: [environment]
+    max_targets_per_dependency: 1
+    max_executable_search_entries: 16
+    external_content:
+      max_declarations: 8
+      large_content_max_total_bytes: 4294967296
+  financial_authority: {kind: none}
+  external_effect_authority: {kind: external}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: [worker_execution]
+  runtime_facts: {}
+description: Owns one root execution while its admitted session-bound worker is live.

@@ -132,6 +132,11 @@ pub enum PinnedProjectRealization {
 pub enum PinnedTerminalPublication {
     Discard,
     RetainResult,
+    RetainCurrentHead {
+        principal_key: String,
+        project_hash: String,
+        expected_hash: String,
+    },
     AdvanceHead {
         head_ref: String,
         expected_hash: String,
@@ -152,6 +157,10 @@ pub enum ChildProjectAuthorityPolicy {
 pub enum PinnedChildProjectRealization {
     ReadOnly,
     CowDiscard,
+    /// Give the child root an independent private COW generation whose
+    /// terminal result remains retained for explicit owner disposition. This
+    /// never inherits or manufactures a project-HEAD publication grant.
+    CowRetainResult,
 }
 
 /// Explicit project-authority transitions over one chain's private operational
@@ -680,6 +689,24 @@ impl ExecutionProjectAuthority {
                     // admission. `snapshot_hash` may advance through private
                     // operational generations before terminal publication.
                 }
+                if let PinnedProjectRealization::Cow {
+                    terminal_publication:
+                        PinnedTerminalPublication::RetainCurrentHead {
+                            principal_key,
+                            project_hash,
+                            expected_hash,
+                        },
+                } = realization
+                {
+                    validate_hash("explicit publication principal key", principal_key)?;
+                    validate_hash("explicit publication project hash", project_hash)?;
+                    validate_hash("explicit publication expected hash", expected_hash)?;
+                    if expected_hash != base_snapshot_hash {
+                        anyhow::bail!(
+                            "explicit publication expected hash must equal the admitted base generation"
+                        );
+                    }
+                }
                 if matches!(realization, PinnedProjectRealization::ReadOnly)
                     && base_snapshot_hash != snapshot_hash
                 {
@@ -708,6 +735,32 @@ impl ExecutionProjectAuthority {
             Self::PinnedGeneration { snapshot_hash, .. } => Some(snapshot_hash),
             Self::Projectless { .. } | Self::LiveProject { .. } => None,
         }
+    }
+
+    /// Opaque namespace identity for durable state owned by one logical
+    /// project.
+    ///
+    /// This deliberately excludes the execution workspace and the current
+    /// operational snapshot. A pinned COW continuation may relocate and
+    /// advance its executable generation without becoming a different
+    /// project. The value names a namespace only; it grants no authority to
+    /// read or mutate state.
+    pub fn project_state_scope_id(&self) -> anyhow::Result<Option<String>> {
+        self.validate()?;
+        let stable_identity = match self {
+            Self::Projectless { .. } => return Ok(None),
+            Self::LiveProject {
+                authored_project_identity,
+                ..
+            } => authored_project_identity,
+            Self::PinnedGeneration {
+                stable_project_identity,
+                ..
+            } => stable_project_identity,
+        };
+        Ok(Some(lillux::sha256_hex(
+            format!("ryeos.project-state-scope\0{stable_identity}").as_bytes(),
+        )))
     }
 
     /// Stable execution-authority identity for content-addressed preparation
@@ -887,6 +940,7 @@ impl ExecutionProjectAuthority {
             Self::PinnedGeneration {
                 realization: PinnedProjectRealization::Cow {
                     terminal_publication: PinnedTerminalPublication::RetainResult
+                        | PinnedTerminalPublication::RetainCurrentHead { .. }
                         | PinnedTerminalPublication::AdvanceHead { .. },
                 },
                 ..
@@ -1210,6 +1264,143 @@ mod tests {
         assert_ne!(
             left.stable_cache_identity().unwrap(),
             advanced.stable_cache_identity().unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_current_head_freezes_exact_destination_and_admitted_base() {
+        let base = "a".repeat(64);
+        let principal_key = "b".repeat(64);
+        let project_hash = "c".repeat(64);
+        let authority = ExecutionProjectAuthority::pinned(
+            "remote-project".to_string(),
+            Some(PathBuf::from("/srv/remote/materialization")),
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key: principal_key.clone(),
+                    project_hash: project_hash.clone(),
+                    expected_hash: base.clone(),
+                },
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let restarted: ExecutionProjectAuthority =
+            serde_json::from_value(serde_json::to_value(&authority).unwrap()).unwrap();
+        restarted.validate().unwrap();
+        let identity = restarted.stable_cache_identity().unwrap();
+        assert_eq!(
+            identity["realization"]["terminal_publication"]["principal_key"].as_str(),
+            Some(principal_key.as_str())
+        );
+        assert_eq!(
+            identity["realization"]["terminal_publication"]["project_hash"].as_str(),
+            Some(project_hash.as_str())
+        );
+        assert_eq!(
+            identity["realization"]["terminal_publication"]["expected_hash"].as_str(),
+            Some(base.as_str())
+        );
+
+        let advanced = restarted
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &"d".repeat(64),
+                },
+            )
+            .unwrap();
+        advanced.validate().unwrap();
+        assert_eq!(advanced.subject_base_snapshot_hash(), Some(base.as_str()));
+
+        let wrong_base = ExecutionProjectAuthority::pinned(
+            "remote-project".to_string(),
+            None,
+            base,
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key,
+                    project_hash,
+                    expected_hash: "e".repeat(64),
+                },
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        );
+        assert!(wrong_base.is_err());
+    }
+
+    #[test]
+    fn project_state_scope_survives_pinning_relocation_and_generation_advance() {
+        let root = tempfile::tempdir().unwrap();
+        let stable_identity = format!("local:{}", root.path().display());
+        let live = ExecutionProjectAuthority::live(
+            root.path().to_path_buf(),
+            stable_identity.clone(),
+            LiveProjectAccess::ReadWrite,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let pinned = ExecutionProjectAuthority::pinned(
+            stable_identity,
+            Some(PathBuf::from("/different/materialization")),
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let advanced = pinned
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &"b".repeat(64),
+                },
+            )
+            .unwrap();
+
+        let scope = live.project_state_scope_id().unwrap().unwrap();
+        assert_eq!(scope.len(), 64);
+        assert_eq!(
+            pinned.project_state_scope_id().unwrap(),
+            Some(scope.clone())
+        );
+        assert_eq!(advanced.project_state_scope_id().unwrap(), Some(scope));
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS
+                .project_state_scope_id()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn project_state_scope_separates_logical_projects() {
+        let left = ExecutionProjectAuthority::pinned(
+            "local:/project/left".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let right = ExecutionProjectAuthority::pinned(
+            "local:/project/right".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_ne!(
+            left.project_state_scope_id().unwrap(),
+            right.project_state_scope_id().unwrap()
         );
     }
 

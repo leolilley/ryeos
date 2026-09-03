@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T01:18:25Z:1e708f50e84e2f154a6a3a741e2a91e9b1f00322c45ed99f5e2678f3798f5243:97J4k6NV8paeGho2bq6/pz9Tfpl8sc8yPUvFgUofI8b4erSW6oBylftJr10OSDecK8gC8Ee16N6/QgBHw6dJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:43Z:a4ba44aa085837c72a7450dc9f6b3c3808a4927cfc629b3882882d046549bb83:S/pN8EUOKFujuIOPkP+JjjLlxAJemFyWzFUfSTGdDguioA5evNt0+KZGOErL4Gw5ZPCN9d9sSZHw4iRnl1HYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - maintenance
 - gc
@@ -6,3 +6,4 @@ description: 'Run GC: prune unreachable CAS objects; use --deep to purge disposa
 dispatch:
   kind: execute_ref
   execute: service:maintenance/gc
+  availability: both

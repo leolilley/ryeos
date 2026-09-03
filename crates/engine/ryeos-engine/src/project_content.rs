@@ -21,6 +21,44 @@ pub struct ProjectContentEntry {
     pub normalized_mode: u32,
 }
 
+/// The sealed view of one dependency path at plan build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealedDependencyContent {
+    /// No admitted realization covers this path. The live (or admitted
+    /// project) bytes are what will execute, so they are what verification
+    /// must judge.
+    Uncovered,
+    /// An admitted realization covers this path and seals these exact bytes;
+    /// they replace whatever the filesystem holds at execution.
+    Sealed(Vec<u8>),
+    /// An admitted realization covers this path but seals no file there. The
+    /// mount replaces the whole subtree at execution, so a file observed at
+    /// this path outside the mount is invisible to the run: there is nothing
+    /// to verify.
+    Absent,
+}
+
+/// Bytes that will actually execute for a path covered by an admitted
+/// realization mount.
+///
+/// Plan-build verification runs in the daemon, where the runtime's read-only
+/// realization mounts do not exist. Reading such a path live would verify
+/// bytes the runtime is never going to see: the live file can differ from the
+/// sealed content without changing what executes. Any verifier that decides
+/// whether a dependency is admissible must therefore consult this view
+/// first, and fall back to the live filesystem only for paths it reports
+/// uncovered.
+pub trait SealedDependencyBytes {
+    /// Resolve the sealed view of `absolute_path`. Oversized sealed content
+    /// is rejected rather than truncated, so a caller can never verify a
+    /// prefix of a file.
+    fn sealed_bytes(
+        &self,
+        absolute_path: &Path,
+        max_bytes: u64,
+    ) -> Result<SealedDependencyContent, EngineError>;
+}
+
 pub trait AuthoritativeProjectContent {
     /// List regular files beneath the project-relative `prefix`, returning
     /// each entry relative to that prefix. The authority enforces `max_entries`

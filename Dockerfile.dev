@@ -18,9 +18,10 @@ FROM node:22-trixie-slim@sha256:4228fca437e45714a3ebd1d4ecd1dcc583cf79f5a940aa02
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates tini && \
+        ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 
@@ -34,16 +35,21 @@ COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 # Already-published bundles (CAS rebuilt by populate-bundles.sh).
 COPY bundles/.ai         /opt/ryeos/.ai
 COPY bundles/core        /opt/ryeos/core
+COPY bundles/central-auth /opt/ryeos/central-auth
 COPY bundles/standard    /opt/ryeos/standard
 COPY bundles/web         /opt/ryeos/web
+COPY bundles/browser     /opt/ryeos/browser
 COPY bundles/ryeos-ui     /opt/ryeos/ryeos-ui
 COPY bundles/hosted-node /opt/ryeos/hosted-node
+COPY bundles/codex       /opt/ryeos/codex
+COPY bundles/local-inference /opt/ryeos/local-inference
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=full
 EXPOSE 8000
 
 # Image-level provenance only. The binary's own revision is baked in by the

@@ -68,7 +68,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
     HANDLER_CALLS.store(0, Ordering::SeqCst);
     let (_tmp, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
-    services.register_raw("identity.public_key", counting_handler);
+    services.register_raw("federation.capabilities", counting_handler);
     state.services = Arc::new(services);
 
     let principal = Principal {
@@ -93,7 +93,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
     };
 
     let error = match execute_service(
-        "service:identity/public_key",
+        "service:federation/capabilities",
         json!({}),
         ExecutionMode::Live,
         &execution,
@@ -122,18 +122,19 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
 async fn compiled_recorded_route_returns_thread_identity_and_persists_attribution() {
     let (_tmp, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
-    services.register_raw("identity.public_key", route_handler);
+    services.register_raw("federation.capabilities", route_handler);
     state.services = Arc::new(services);
 
     let invoker = CompiledServiceInvocation {
-        service_ref: "service:identity/public_key".to_string(),
-        endpoint: "identity.public_key".to_string(),
+        service_ref: "service:federation/capabilities".to_string(),
+        endpoint: "federation.capabilities".to_string(),
     };
     let principal = RoutePrincipal {
         id: "route:identity/public-key".to_string(),
         scopes: Vec::new(),
         verifier_key: "none",
         verified: false,
+        authorized_key_class: None,
         authenticated_origin_site_id: None,
         metadata: Default::default(),
     };
@@ -185,10 +186,47 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn public_identity_bootstrap_is_unrecorded() {
+    let (_tmp, state) = test_state::build_test_state_with_bundles();
+    let invoker = CompiledServiceInvocation {
+        service_ref: "service:identity/public_key".to_string(),
+        endpoint: "identity.public_key".to_string(),
+    };
+    let result = invoker
+        .invoke(RouteInvocationContext {
+            route_id: "identity/public-key".into(),
+            method: Method::GET,
+            uri: "/public-key".parse().unwrap(),
+            captures: Default::default(),
+            headers: HeaderMap::new(),
+            body_raw: Vec::new(),
+            input: json!({}),
+            principal: Some(RoutePrincipal::anonymous(
+                "route:identity/public-key".to_string(),
+                "none",
+            )),
+            workspace_lifeline: None,
+            launch_timings: None,
+            state,
+            webhook_dedupe: Arc::new(WebhookDedupeStore::new()),
+        })
+        .await
+        .unwrap();
+    let RouteInvocationResult::Json { value, thread_id } = result else {
+        panic!("public identity route did not return JSON");
+    };
+    assert!(value["principal_id"].as_str().is_some());
+    assert_eq!(
+        thread_id, None,
+        "audience discovery must not create a thread"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
     let (_tmp, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
-    services.register_raw("identity.public_key", route_handler);
+    services.register_raw("federation.capabilities", route_handler);
     state.services = Arc::new(services);
 
     let raw = RawRouteSpec {
@@ -200,7 +238,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
         limits: RawLimits::default(),
         response: RawResponseSpec {
             mode: "json".to_string(),
-            source: Some("service:identity/public_key".to_string()),
+            source: Some("service:federation/capabilities".to_string()),
             source_config: Value::Null,
             status: None,
             content_type: None,
@@ -249,7 +287,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
 async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity() {
     let (_tmp, mut state) = test_state::build_test_state_with_bundles();
     let mut services = ServiceRegistry::new();
-    services.register_raw("identity.public_key", failing_route_handler);
+    services.register_raw("federation.capabilities", failing_route_handler);
     state.services = Arc::new(services);
 
     let raw = RawRouteSpec {
@@ -261,7 +299,7 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
         limits: RawLimits::default(),
         response: RawResponseSpec {
             mode: "json".to_string(),
-            source: Some("service:identity/public_key".to_string()),
+            source: Some("service:federation/capabilities".to_string()),
             source_config: Value::Null,
             status: None,
             content_type: None,
@@ -327,6 +365,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
                 scopes: Vec::new(),
                 verifier_key: "none",
                 verified: false,
+                authorized_key_class: None,
                 authenticated_origin_site_id: None,
                 metadata: Default::default(),
             }),
@@ -367,6 +406,9 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
                 scopes: Vec::new(),
                 verifier_key: "ryeos_signed",
                 verified: true,
+                authorized_key_class: Some(
+                    ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                ),
                 authenticated_origin_site_id: None,
                 metadata: Default::default(),
             }),

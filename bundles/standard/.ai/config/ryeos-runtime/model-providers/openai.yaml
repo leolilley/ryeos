@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-23T15:25:30Z:419d93de711910a6a861d0e9415e32de0cf4e990bd7cd868b760a323df28caa5:8t3V6kn17EIOi4ypKtCb0JVB6taPRtlYgpNB47kf5TR4OXAfE5N70qeWAC3jw5vg91gkhRzy03DJfQ0iml3ICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:27Z:9b9e541696e2d9e5848ecfffb1d5f5d9c3d787a021425a0cd561579563e2d07b:Awb3Skygy5Oie1PEHiiyyESS5h5V1czYgLiZjzMPm5gKzk1GziAEiEC1drWhVrldjFWYPcm67it9rTdiFhDkDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
-base_url: "https://api.openai.com/v1"
+transport:
+  kind: remote_http
+  base_url: "https://api.openai.com/v1"
 auth:
   env_var: OPENAI_API_KEY
   header_name: Authorization

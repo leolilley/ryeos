@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use ryeos_directive_core::{ProviderSetupModelProjection, ProviderSetupProjection};
+use ryeos_directive_definition::{ProviderSetupModelProjection, ProviderSetupProjection};
 use ryeos_node::{
     InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase, InitProgress, InitReport,
     LifecycleController, LocalLifecycleEnv, PersistModelRouteOptions,
@@ -224,6 +224,8 @@ async fn run_core_initialization(
         app_root: options.app_root.clone(),
         source_dir: options.source_dir.clone(),
         trust_files: options.trust_files.clone(),
+        node_profile: options.node_profile.clone(),
+        replace_node_policy_generation: options.replace_node_policy_generation,
         skip_preflight: options.skip_preflight,
     };
     let ceremony = InitOperatorCeremony {

@@ -1,0 +1,17 @@
+# ryeos:signed:2026-08-26T10:09:18Z:95b2e591f3fc68c71aeb40ab02c951cc5a01e354e4c8a5b5935d18792864ee5b:/kr/ZMY+layRH0ZLtNYGi7jiFzQPKq0Y9HwUcnZ3tWlET4U9PHoSMlSY1bOqBXFJhOIoci6jyWbCZPR+aEfcBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, command]
+description: "Send one idempotent typed structured-session command to a Codex worker execution"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: idempotency_key
+      - field: route_id
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/command
+  availability: daemon

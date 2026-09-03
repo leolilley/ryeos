@@ -1,0 +1,30 @@
+# ryeos:signed:2026-08-18T23:03:51Z:93be4efbd879259f2be2caa6b8da6907c98c625953d23d916a477e0bc144517d:rm0Q0zt5uoeQtHzvWMlNhum3FXu02i9j3EN09yxCUoCS/T7kc5tIl9yfH3nhlFzNYAp7kdmfV47uvpR0lE/SBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: persistent_session
+category: ryeos/core
+abi_version: v1
+description: Callback-free persistent subprocess with bounded bidirectional frames over a daemon-owned inherited socket.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: none
+session:
+  process_mode: pooled_requests
+  workspace_authority: ephemeral_scratch
+  network_authority: isolated
+  runtime_env_allowlist: []
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: ryeos.persistent-session
+  wire_version: 1
+  max_frame_bytes: 16777216

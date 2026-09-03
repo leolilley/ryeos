@@ -1154,33 +1154,15 @@ fn verified_repair_closure_inner(
                     let state: crate::ChainState = serde_json::from_value(value)
                         .with_context(|| format!("decode chain_state {hash}"))?;
                     state.validate()?;
-                    if state.chain_root_id != chain_root_id {
-                        anyhow::bail!(
-                            "chain_state {hash} root mismatch: expected {chain_root_id}, got {}",
-                            state.chain_root_id
-                        );
-                    }
                 }
                 Some("thread_snapshot") => {
-                    let snapshot = ThreadSnapshot::from_current_value(value)
+                    ThreadSnapshot::from_current_value(value)
                         .with_context(|| format!("decode current thread_snapshot {hash}"))?;
-                    if snapshot.chain_root_id != chain_root_id {
-                        anyhow::bail!(
-                            "thread_snapshot {hash} root mismatch: expected {chain_root_id}, got {}",
-                            snapshot.chain_root_id
-                        );
-                    }
                 }
                 Some("thread_event") => {
                     let event: ThreadEvent = serde_json::from_value(value)
                         .with_context(|| format!("decode thread_event {hash}"))?;
                     event.validate()?;
-                    if event.chain_root_id != chain_root_id {
-                        anyhow::bail!(
-                            "thread_event {hash} root mismatch: expected {chain_root_id}, got {}",
-                            event.chain_root_id
-                        );
-                    }
                 }
                 _ => {}
             }
@@ -1198,12 +1180,15 @@ fn verified_repair_closure_inner(
     )
     .with_context(|| format!("decode chain head object {head_hash}"))?;
     state.validate()?;
-    if state.chain_root_id != chain_root_id {
-        anyhow::bail!(
-            "chain head object root mismatch: expected {chain_root_id}, got {}",
-            state.chain_root_id
-        );
-    }
+    ensure_repair_head_root(&state, chain_root_id)?;
+    // A complete object closure may carry signed supporting evidence rooted in
+    // another chain. Attestation subjects are ordinary closure edges, and
+    // federated follow reservations intentionally bind a parent-chain head
+    // while travelling with the child. The loop above therefore performs
+    // structural validation only. Authority remains single-chain and strict:
+    // this head check plus validate_authoritative_history below prove that
+    // every ChainState, snapshot, and event on the requested history belongs
+    // to `chain_root_id` and advances through its exact legal transitions.
     crate::chain::validate_authoritative_history_with_cas_and_check(
         cas,
         chain_root_id,
@@ -1215,6 +1200,16 @@ fn verified_repair_closure_inner(
         format!("invalid authoritative history for chain {chain_root_id}@{head_hash}")
     })?;
     Ok(closure)
+}
+
+fn ensure_repair_head_root(state: &crate::ChainState, chain_root_id: &str) -> Result<()> {
+    if state.chain_root_id != chain_root_id {
+        anyhow::bail!(
+            "chain head object root mismatch: expected {chain_root_id}, got {}",
+            state.chain_root_id
+        );
+    }
+    Ok(())
 }
 
 fn chain_heads_with_observer(
@@ -1992,6 +1987,27 @@ mod tests {
         assert!(format!("{error:#}").contains("incomplete CAS closure"));
     }
 
+    #[test]
+    fn repair_closure_still_rejects_a_requested_head_from_another_chain() {
+        let value = make_chain_state(
+            "T-root",
+            None,
+            vec![("T-root", &"1".repeat(64), None, 0, "created")],
+            None,
+            0,
+        );
+        let state: crate::ChainState = serde_json::from_value(value).unwrap();
+        state.validate().unwrap();
+
+        let error = ensure_repair_head_root(&state, "T-requested")
+            .expect_err("supporting multi-root evidence must not weaken requested-head identity");
+        assert!(
+            format!("{error:#}")
+                .contains("chain head object root mismatch: expected T-requested, got T-root"),
+            "unexpected repair refusal: {error:#}"
+        );
+    }
+
     fn make_chain_state(
         chain_root_id: &str,
         prev_hash: Option<&str>,
@@ -2051,6 +2067,7 @@ mod tests {
             "error": null,
             "budget": null,
             "artifacts": [],
+            "managed_runtime_terminal": null,
             "facets": {},
             "last_event_hash": null,
             "last_chain_seq": 0,
@@ -2074,7 +2091,12 @@ mod tests {
                     "kind_schema_content_hash": "33".repeat(32),
                     "resolved_from": {
                         "node_default": {
-                            "node_policy": "missing_config"
+                            "node_policy": {
+                                "path": ".ai/node/policies/thread_history.yaml",
+                                "space": "node",
+                                "content_hash": "44".repeat(32),
+                                "signer_fingerprint": "55".repeat(32)
+                            }
                         }
                     },
                 }),

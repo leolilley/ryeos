@@ -422,6 +422,7 @@ fn admit_fresh_launch(
         &project.effective_path,
         ref_bindings.clone(),
         lifecycle_authority,
+        Some(ctx.clone()),
     )
     .map_err(|error| {
         HandlerError::Internal(format!(
@@ -726,6 +727,7 @@ pub async fn handle(
         &candidate_id,
         &resume_context,
         &previous.thread_id,
+        &ctx,
     )
     .await
     .map_err(build_and_launch_error)?;

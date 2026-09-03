@@ -289,6 +289,7 @@ async fn run_entry(
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,
+        effect_authority: None,
     };
 
     let dispatch =

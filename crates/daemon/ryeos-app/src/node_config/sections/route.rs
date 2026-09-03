@@ -1,17 +1,55 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
+use crate::node_config::{
+    CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope, NodeItemContext,
+    SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
+};
 use crate::route_raw::RawRouteSpec;
+
+pub const SECTION_NAME: &str = "routes";
 
 pub struct RouteSection;
 
-impl NodeConfigSection for RouteSection {
-    fn source_policy(&self) -> SectionSourcePolicy {
-        SectionSourcePolicy::EffectiveBundleRootsAndState
+impl CompiledNodeConfigItem for RawRouteSpec {
+    fn section_name(&self) -> &'static str {
+        SECTION_NAME
     }
 
-    fn parse(&self, _ctx: &NodeItemContext, body: &Value) -> Result<Box<dyn SectionRecord>> {
+    fn admit(
+        mut self: Box<Self>,
+        target: &mut crate::node_config::loader::NodeConfigSnapshotBuilder,
+        admission: &crate::node_config::loader::NodeConfigAdmission,
+    ) -> anyhow::Result<()> {
+        self.source_file = admission.source_file.clone();
+        target.push_route(*self);
+        Ok(())
+    }
+}
+
+impl NodeConfigSection for RouteSection {
+    fn name(&self) -> &'static str {
+        SECTION_NAME
+    }
+
+    fn source_scope(&self) -> NodeConfigSourceScope {
+        NodeConfigSourceScope::AppRootAndBundleRoots
+    }
+
+    fn load_spec(&self) -> SectionLoadSpec {
+        SectionLoadSpec {
+            phase: SectionLoadPhase::Full,
+            traversal: SectionTraversal::Recursive,
+            signer: SectionSignerPolicy::Trusted,
+            cardinality: SectionCardinality::Any,
+        }
+    }
+
+    fn parse(
+        &self,
+        _ctx: &NodeItemContext,
+        body: &Value,
+    ) -> Result<Box<dyn CompiledNodeConfigItem>> {
         let record: RawRouteSpec = serde_json::from_value::<RawRouteSpec>(body.clone())
             .context("failed to parse route record")?;
 
@@ -20,12 +58,6 @@ impl NodeConfigSection for RouteSection {
         }
 
         Ok(Box::new(record))
-    }
-}
-
-impl SectionRecord for RawRouteSpec {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 

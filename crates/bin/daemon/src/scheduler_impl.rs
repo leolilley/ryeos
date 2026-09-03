@@ -77,6 +77,9 @@ impl SchedulerContext for AppSchedulerContext {
             thread_id,
             ryeos_app::cascade::CascadeMode::Graceful,
         )?;
+        if !cancelled_roots.is_empty() {
+            ryeos_executor::execution::launch::kick_launch_window_after_discard(&self.0);
+        }
         for root in cancelled_roots {
             ryeos_executor::execution::launch::kick_follow_resume_if_ready(&self.0, &root);
         }
@@ -204,6 +207,7 @@ impl SchedulerContext for AppSchedulerContext {
             root_admission: Some(root_admission),
             root_dispatch_evidence: None,
             parent_execution_context: None,
+            effect_authority: None,
         };
 
         ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0)

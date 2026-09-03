@@ -1,6 +1,6 @@
 [package]
 name = "ryeosd"
-version = "0.5.76"
+version = "0.5.77"
 edition = "2024"
 description = "ryeosd daemon - Rust control plane for Rye OS"
 license.workspace = true
@@ -19,6 +19,10 @@ default = []
 # Propagate release-equivalent latency instrumentation and make the compiled
 # artifact profile observable through daemon build info.
 latency-profiling = ["ryeos-app/latency-profiling", "ryeos-engine/latency-profiling"]
+# Exact process-kill qualification for runtime-owned durable boundaries. This
+# endpoint and inherited channel do not exist in production daemon builds.
+crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"]
+handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -39,6 +43,8 @@ ryeos-node = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-accounting = { workspace = true }
+ryeos-provider-contract = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-api = { workspace = true }
@@ -66,7 +72,9 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 url = { workspace = true }
 
 [dev-dependencies]
+ryeos-node = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+ryeos-api = { workspace = true, features = ["handoff-test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }

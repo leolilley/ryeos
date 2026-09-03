@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-03T06:49:04Z:1feb14e4d670289401bcdf6cdacbeb51247b7163f29c6ebe444d9f95fcfac9ce:gpl6R82mjSxWu31deKtUVxQUqb6axGIXau+9TmzwuDXSsV0bdoEJl6svvTf6L/9Mje82BIKfKcBDcHdhLrMxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:03Z:3ebd600f2c9724d64ca868cd8f479abec87d360fcb73f4daeacde4e6dc88da66:vKwatG6QfIM2zkspRNa2t8q7VExLt+vgBOS7TeJhYwfzA2v13HgwSBYLh94H4n5YUE1fpZBwxBvwxn6Yl1ynCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -8,6 +8,20 @@ effective_trust:
   include_references: false
 resolution: []
 execution:
+  source_closure:
+    derived: effective_source_closure
+    location:
+      type: item_namespace
+    testimony: owner_signed_files
+    max_files: 4096
+    max_total_bytes: 67108864
+    max_file_bytes: 8388608
+    max_depth: 64
+  # Kind-owned location of the author's durable-effect ceiling. Generic
+  # dispatch consumes only this signed mechanical projection; it never names
+  # or interprets the tool document's `effects` field directly.
+  effect_class_ceiling:
+    path: [effects]
   terminator:
     kind: subprocess
     protocol: protocol:ryeos/core/tool_callback
@@ -57,12 +71,23 @@ composed_value_contract:
     requires:
       type: single
       prim: mapping
+    # Author-vouched effect class for this item: `sealed` | `recorded` |
+    # `live`. At dispatch a caller may not claim a stronger durable class
+    # than the item declares here — a tool that writes outside its result
+    # envelope declares `live`, and no graph node can then record it, because
+    # replay serves the stored result and would silently skip the writes.
+    # Absent means live/ineligible. Durable replay is never inferred.
+    effects:
+      type: single
+      prim: string
+    source_scope:
+      type: single
+      prim: mapping
 runtime:
   handlers:
     - type: config
     - type: env_config
     - type: config_resolve
-    - type: verify_deps
     - type: execution_params
     - type: native_async
     - type: native_resume
@@ -88,6 +113,15 @@ runtime:
     # callback caps. Ignored here (runtime block parser) so tool YAMLs may
     # declare it without triggering UnknownRuntimeBlock.
     - requires
+    # `effects` is the item's author-vouched effect class (sealed | recorded
+    # | live), read from the composed value by the daemon dispatcher to bound
+    # what durable class a caller may claim for this item. Ignored here
+    # (runtime block parser) so items may declare it without triggering
+    # UnknownRuntimeBlock.
+    - effects
+    # Signed executor-chain policy for adjacent source admission. The daemon
+    # consumes this before plan compilation; it is not a runtime handler.
+    - source_scope
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare

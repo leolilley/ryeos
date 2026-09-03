@@ -1,13 +1,14 @@
+<!-- ryeos:signed:2026-09-02T08:16:01Z:6f3ea40fb650b54471156c6af311e8a48814351e8218c5217644ed6c8525db2e:Fir0w3W+wDyVzmaWQIRcow1qQFQzhof+QTMVCziwRSWRIACYJxTPQVCKyhHU0562L7r0WTvwg7olfk7NBq79Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Hosted-Node Bundle
 
-The `hosted-node` bundle packages core-only operator policy for a RyeOS
-node that is exposed as a public remote target. It is intentionally
-outside `standard`: a hosted node does not need the workflow/runtime
-bundle just to participate in decentralized remote admission.
+The `hosted-node` bundle is the core-only profile marker and operator
+documentation for a RyeOS node exposed as a remote target. The actual hosted
+policy is required node-owned complete-generation state; the publisher-signed
+`hosted-workflow` init profile supplies its initial body and initialization
+re-signs the selected generation with the current node identity.
 
-Runtime bundle contents currently depend only on the core `node` kind:
-
-- `node:hosted/policy`
+The bundle intentionally does not ship a `.ai/node/policies` generation.
+Bundles cannot widen node-owned policy authority.
 
 These notes live outside `.ai/` so the bundle does not acquire a runtime
 dependency on the `knowledge` kind from `standard`.
@@ -23,13 +24,15 @@ Core owns generic decentralized protocol primitives:
 - target-node-local `authorized_keys` grants;
 - remote doctor/configure/execute orchestration.
 
-`hosted-node` owns hosted/operator defaults:
+The node-owned `hosted` policy owns the operator choices:
 
-- public HTTPS deployment expectations;
-- stricter remote exposure policy;
-- admission and grant-change audit expectations;
-- provider boundary documentation and runbooks outside the runtime item
-  graph.
+- whether one-time-token admission is enabled;
+- the bounded admission-token lifetime ceiling;
+- whether plain HTTP is permitted for loopback descriptor URLs.
+
+HTTPS for non-loopback URLs, live descriptor identity matching, wildcard-scope
+refusal, out-of-band one-time token delivery, and target-node authorized-key
+enforcement are protocol invariants, not configurable policy booleans.
 
 `standard` remains workflow/runtime UX. It may use core remote commands to
 connect to a hosted node, but it must not contain hosted provider
@@ -58,12 +61,13 @@ state as sufficient authority for RyeOS execution requests.
 Run the hosted node with a stable public URL and HTTPS termination before
 sharing descriptors or admission tokens.
 
-Operator defaults are recorded in `node:hosted/policy`. The
-important invariants are:
+Operator choices are atomically recorded in the current node-signed
+`.ai/node/policies/hosted.yaml` generation. The important invariants are:
 
 - public non-loopback admission uses HTTPS;
 - descriptors are trust pins, not credentials;
-- admission tokens are one-time bootstrap material;
+- admission must be explicitly enabled before tokens can be minted or claimed;
+- admission tokens are one-time bootstrap material with a policy-bounded TTL;
 - wildcard scopes are rejected;
 - execution authority is the target node's local authorized-key store.
 
@@ -95,7 +99,10 @@ ryeos remote admit \
   --remote hosted-prod \
   --token "<one-time-token>" \
   --label "caller-node" \
-  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
+  --scopes ryeos.execute.service.objects/has \
+  --scopes ryeos.execute.service.objects/put \
+  --scopes ryeos.execute.service.objects/get \
+  --scopes ryeos.execute.service.system/push-head
 
 ryeos remote doctor --remote hosted-prod
 ```

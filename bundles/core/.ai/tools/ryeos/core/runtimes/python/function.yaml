@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-28T15:40:40Z:b3b8ed90eb5060b35edc847d1118bd0517e36306effb3891a1e6cad34103e761:B43RaITWPkfvQLfuI2GNcIsRPzwFxzpDHdPBV9uT4LEXS8LeGZNO1PbMLNtT6TVxZ9Z155V/XHXF9nD8RM4xDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-18T22:04:42Z:ee2e5b6a114bfe70cc4cfcac554ca40a063389fb4b3b36e944a623544bc2b82f:+TjZi6QWLrcrb5MIYLHQqZ9L+T8wNNSfeF4h22m5/gO+1VYlOwlD30oWlZl9dwQ5ausx9HIcDfqg+duZnWBsCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
-version: "1.0.0"
+version: "1.1.0"
 executor_id: "@subprocess"
 description: "Python function runtime - calls execute(params, project_path) and serializes result to stdout"
 
@@ -9,19 +9,17 @@ env_config:
     type: local_binary
     binary: python
     candidates: [python3]
-    search_paths: [".venv/bin", ".venv/Scripts"]
+    search_paths: []
     var: RYE_PYTHON
     path_candidates: [python3]
   env:
+    PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "${interpreter}"
 
-verify_deps:
-  enabled: true
-  scope: tool_dir
-  recursive: true
-  extensions: [".py", ".yaml", ".yml", ".json"]
-  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory, namespace_root, namespace_lib]
+  materialization: read_only
 
 config_resolve:
   type: single
@@ -53,8 +51,7 @@ config:
         source=Path(sealed_path).read_bytes()
         actual_hash=hashlib.sha256(source).hexdigest()
         if actual_hash!=entry["content_hash"]:sys.exit("RyeOS Python runtime: sealed tool digest mismatch")
-        runtime_lib=Path(sys.argv[2]).resolve()
-        project_path=sys.argv[3]
+        project_path=sys.argv[2]
         tools_root=None
         for candidate in [tool_path.parent,*tool_path.parents]:
             if candidate.name=="tools" and candidate.parent.name==".ai":
@@ -65,7 +62,7 @@ config:
         if not rel.parts:sys.exit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
         tool_namespace_root=tools_root/rel.parts[0] if len(rel.parts)>1 else tools_root
         tool_dir=tool_path.parent
-        for path in reversed([tool_dir,tool_namespace_root,tool_namespace_root/"lib",runtime_lib]):prepend(path)
+        for path in reversed([tool_dir,tool_namespace_root,tool_namespace_root/"lib"]):prepend(path)
         mod=types.ModuleType("tool")
         mod.__file__=str(tool_path)
         mod.__loader__=None
@@ -81,7 +78,6 @@ config:
         _payload=(json.dumps(r,default=str)if r is not None else json.dumps(dict()))+"\n"
         os.write(_saved_stdout,_payload.encode())
     - "${tool_path}"
-    - "${runtime_dir}/lib"
     - "${project_path}"
   input_data: "${params_json}"
   timeout_secs: 300

@@ -1,0 +1,27 @@
+# ryeos:signed:2026-08-26T10:41:54Z:5f99470e198b3af72a4a3f607da4496aaf772af7c3a83c66d858d12c5710f1d4:kG2ebj//bUV3fv0ePASkFsCtS9wrs64joEaSC4SnPrDFfmvt+Tc21owJ/FiKXuuyq17NNEwf37jObGSE9vV/BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: codex
+description: Open one short-lived RyeOS-owned Codex credential-enrollment execution.
+config:
+  worker_ref: worker:codex/hosted
+  environment_binding: null
+  required_credential_state: any
+  route_set: enrollment
+  allowed_effect_classes:
+    - credential_read
+    - credential_write
+    - pure_read
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: false
+  required_terminal_publication: any
+  max_lifetime_seconds: 1500
+  recover_upstream_session: false
+limits:
+  duration_seconds: 1800
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

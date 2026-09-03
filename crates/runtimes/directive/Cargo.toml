@@ -26,7 +26,8 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-accounting = { workspace = true }
-ryeos-directive-core = { workspace = true }
+ryeos-provider-contract = { workspace = true }
+ryeos-directive-definition = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }

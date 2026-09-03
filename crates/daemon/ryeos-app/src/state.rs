@@ -22,6 +22,7 @@ use crate::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
+use crate::node_policy::NodePolicySnapshot;
 use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::resolution_cache::ResolutionCache;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
@@ -95,10 +96,8 @@ pub struct AppState {
     pub service_descriptors: &'static [ServiceDescriptor],
     /// Node-config snapshot loaded at startup.
     pub node_config: Arc<NodeConfigSnapshot>,
-    /// Signed node-wide history authority resolved once at boot. Execution
-    /// resolves every new root against this typed snapshot before creation;
-    /// projects and item overlays cannot replace it.
-    pub node_history_policy: Arc<ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy>,
+    /// Exact atomic node-owned semantic policy generation loaded at startup.
+    pub node_policy: Arc<NodePolicySnapshot>,
     /// Operator-secret store. Read at request-build time and merged
     /// into the spawned subprocess env via the `vault_bindings`
     /// pipeline (see `thread_lifecycle::spawn_item`). The daemon stays
@@ -121,9 +120,7 @@ pub struct AppState {
     /// Channel to request scheduler reload after register/deregister/pause/resume.
     /// `None` when the scheduler is not running (e.g. in unit tests).
     pub scheduler_reload_tx: Option<mpsc::Sender<ReloadSignal>>,
-    /// Ingest ignore matcher. Loaded once from `.ai/node/ingest/ignore.yaml`
-    /// at startup. Used by ingest_walk, walk_and_diff, and push-head
-    /// validation.
+    /// Ingest ignore matcher compiled from the retained node-policy snapshot.
     pub ignore_matcher: Arc<IgnoreMatcher>,
     /// Vault X25519 public key fingerprint. `None` when using
     /// `EmptyVault` or when the vault public key file doesn't exist.
@@ -134,6 +131,8 @@ pub struct AppState {
     /// open or verify — every hard-budget admission then fails closed while
     /// unrelated non-hard work continues.
     pub accounting: Option<Arc<crate::accounting_db::AccountingDb>>,
+    /// Meaning-blind daemon ownership for admitted persistent subprocesses.
+    pub persistent_sessions: Arc<crate::persistent_session::PersistentSessionPool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,11 +181,17 @@ pub struct AccountingStatus {
 }
 
 impl AppState {
+    pub fn node_history_policy(
+        &self,
+    ) -> anyhow::Result<&ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy> {
+        self.node_policy.require()
+    }
+
     /// Acquire one descriptor-bound CAS read capability. The shared guard is
     /// retained for the lifetime of the store so a concurrent sweep cannot
     /// remove objects between traversal and payload reads.
     pub fn acquire_cas_read(&self) -> anyhow::Result<PinnedCasRead> {
-        let authority = self.state_store.with_state_db(|db| db.pinned_authority())?;
+        let authority = self.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
         Ok(PinnedCasRead { _guard: guard, cas })
@@ -194,6 +199,9 @@ impl AppState {
 
     pub fn status(&self) -> anyhow::Result<StatusResponse> {
         let pending_head_transitions = self.state_store.pending_head_transition_status()?;
+        self.state_store
+            .projection_health()
+            .observe_pending_transitions(pending_head_transitions.pending);
         Ok(StatusResponse {
             version: self.daemon_build.version.to_string(),
             revision: self.daemon_build.revision.to_string(),

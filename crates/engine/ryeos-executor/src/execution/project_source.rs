@@ -111,6 +111,10 @@ pub struct ResolvedProjectContext {
     pub source: ProjectSource,
     /// CAS snapshot hash (set for PushedHead).
     pub snapshot_hash: Option<String>,
+    /// Exact principal-scoped destination proven by the same lookup that
+    /// selected a `CurrentHead` snapshot. Publication authority must consume
+    /// this retained tuple instead of canonicalizing the mutable path again.
+    pub current_head_destination: Option<ResolvedCurrentHeadDestination>,
     /// Opaque descriptor/content proof for a pinned CAS materialization.
     /// Present exactly when `snapshot_hash` is present for a newly realized
     /// context; consumers use this instead of trusting the temporary path.
@@ -136,6 +140,13 @@ pub struct ResolvedProjectContext {
     captured_generation: Option<super::CapturedProjectGeneration>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCurrentHeadDestination {
+    pub principal_key: String,
+    pub project_hash: String,
+    pub expected_hash: String,
+}
+
 impl ResolvedProjectContext {
     /// Construct a borrowed context for a callback child. No checkout,
     /// no temp dir tracking (parent owns it), and no engine rebuild
@@ -157,6 +168,7 @@ impl ResolvedProjectContext {
             original_path,
             source: ProjectSource::PushedHead,
             snapshot_hash: None,
+            current_head_destination: None,
             pinned_materialization: None,
             temp_dir: None,
             request_engine,
@@ -231,6 +243,7 @@ pub fn resolve_project_context(
                 original_path,
                 source: ProjectSource::LiveFs,
                 snapshot_hash: None,
+                current_head_destination: None,
                 pinned_materialization: None,
                 temp_dir: None,
                 request_engine: Arc::clone(&state.engine),
@@ -263,17 +276,24 @@ pub fn resolve_project_context(
                     project_path: project_str.to_string(),
                 })?;
 
-            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
-                state,
-                authority: &authority,
-                cas_mutation_guard: &cas_mutation_guard,
-                snapshot_hash: &snap_hash,
-                original_path,
-                checkout_id,
-                source: ProjectSource::PushedHead,
-                captured_generation: None,
-                realization: pinned_realization.expect("validated pinned realization"),
-            })?
+            let mut context =
+                resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
+                    state,
+                    authority: &authority,
+                    cas_mutation_guard: &cas_mutation_guard,
+                    snapshot_hash: &snap_hash,
+                    original_path,
+                    checkout_id,
+                    source: ProjectSource::PushedHead,
+                    captured_generation: None,
+                    realization: pinned_realization.expect("validated pinned realization"),
+                })?;
+            context.current_head_destination = Some(ResolvedCurrentHeadDestination {
+                principal_key: principal_key.to_owned(),
+                project_hash,
+                expected_hash: snap_hash,
+            });
+            context
         }
         ProjectSource::Snapshot { hash } => {
             let authority = crate::execution::pinned_state_authority(state)?;
@@ -451,22 +471,32 @@ fn resolve_pinned_snapshot_context_admitted(
                     reserved.state
                 )));
             }
-            let lower = workspace.lower;
+            let project = workspace.project;
             (
-                Some(lower.clone()),
+                Some(project.clone()),
                 Some(Arc::new(
-                    TempDirGuard::new_workspace(workspace.root, lower)
+                    TempDirGuard::new_workspace(workspace.root, project)
                         .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?,
                 )),
             )
         }
     };
+    let project_materialization = match target_path.as_deref() {
+        None => crate::execution::ProjectMaterialization::SharedReadOnly,
+        Some(path) if state.isolation.is_enforced() => {
+            crate::execution::ProjectMaterialization::EnforcedCowProject(path)
+        }
+        Some(path) => crate::execution::ProjectMaterialization::PrivateWritableWorkspace {
+            target_dir: path,
+            budget: None,
+        },
+    };
     let (effective_path, generation_lease, pinned_materialization) =
-        crate::execution::checkout_project_lower(
+        crate::execution::checkout_project_snapshot(
             authority,
             cas_mutation_guard,
             snapshot_hash,
-            target_path.as_deref(),
+            project_materialization,
             &materialization_cache,
         )
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
@@ -508,6 +538,7 @@ fn resolve_pinned_snapshot_context_admitted(
         original_path,
         source,
         snapshot_hash: Some(snapshot_hash.to_string()),
+        current_head_destination: None,
         pinned_materialization: Some(pinned_materialization),
         // Request-owned: the runner and request-scoped launch components may
         // share it, but no engine/resolution cache retains this checkout.

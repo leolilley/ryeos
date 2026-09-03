@@ -60,8 +60,7 @@ fn verify_ref(actual: &ryeos_app::state_store::PersistedEventRecord, expected: &
 
 fn is_state_anchor(event: &ryeos_app::state_store::PersistedEventRecord) -> bool {
     event.event_type == "milestone"
-        && event.payload.get("kind").and_then(Value::as_str) == Some("state_anchor")
-        && event.payload.get("payload").is_some()
+        && ryeos_state::objects::StateAnchorMilestone::from_value(event.payload.clone()).is_ok()
 }
 
 fn durable_event_by_ref(
@@ -261,10 +260,29 @@ mod tests {
             "milestone",
             json!({
                 "kind": "state_anchor",
-                "payload": {"label": "arc.sim_state"}
+                "payload": {
+                    "schema_version": 3,
+                    "label": "arc.sim_state",
+                    "state_digest": format!("sha256:{}", "a".repeat(64)),
+                    "manifest_ref": format!("cas:{}", "a".repeat(64)),
+                    "runtime": {},
+                    "metadata": {}
+                },
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": "d".repeat(64),
+                    "node": "solve",
+                    "step": 3
+                }
             }),
         );
         assert!(is_state_anchor(&anchor));
+
+        let mut predecessor = anchor.clone();
+        predecessor.payload["payload"]["schema_version"] = json!(2);
+        assert!(!is_state_anchor(&predecessor));
 
         let milestone = persisted_event("milestone", json!({"kind": "other", "payload": {}}));
         assert!(!is_state_anchor(&milestone));

@@ -16,7 +16,6 @@
 //!     --key <author.pem>
 //! ```
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -196,6 +195,7 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
     signing_key: &lillux::crypto::SigningKey,
     base_trust_store: Option<&TrustStore>,
 ) -> Result<SignBundleReport> {
+    let bundle_name = read_bundle_source_name(source)?;
     let verifying_key = signing_key.verifying_key();
     let fingerprint = ryeos_engine::trust::compute_fingerprint(&verifying_key);
 
@@ -284,8 +284,17 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
             continue;
         }
 
+        let kind_authority = lillux::PinnedDirectory::open(&kind_dir)?
+            .ok_or_else(|| anyhow::anyhow!("bundle kind directory disappeared"))?;
         let mut files: Vec<PathBuf> = Vec::new();
-        collect_files_recursive(&kind_dir, &mut files);
+        kind_authority.visit_regular_files_bounded(
+            lillux::DirectoryTraversalBudget::new(1_000_000, 128),
+            |_relative, _is_directory| Ok(false),
+            |relative, _file| {
+                files.push(kind_dir.join(relative));
+                Ok(())
+            },
+        )?;
         files.sort();
 
         for file_path in files {
@@ -318,6 +327,7 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
                 &ai_dir,
                 &parser_dispatcher,
                 signing_key,
+                &bundle_name,
             ) {
                 Ok(info) => {
                     let outcome = ItemOutcome {
@@ -351,6 +361,16 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
     Ok(report)
 }
 
+fn read_bundle_source_name(source: &Path) -> Result<String> {
+    let path = source.join(AI_DIR).join("manifest.source.yaml");
+    let bytes = lillux::read_regular_file_bounded_no_follow(&path, 1024 * 1024)
+        .with_context(|| format!("read {}", path.display()))?;
+    let manifest: ryeos_bundle::manifest::BundleManifestSource =
+        serde_yaml::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    ryeos_engine::protocol_vocabulary::validate_bundle_name(&manifest.name)?;
+    Ok(manifest.name)
+}
+
 /// Fail loudly when a populated `.ai/<dir>` is not covered by any registered
 /// kind. The kind loop only visits directories for kinds present in the loaded
 /// registry; an item directory whose kind lives in a bundle that was neither
@@ -370,16 +390,14 @@ fn check_all_item_dirs_covered(ai_dir: &Path, kinds: &KindRegistry) -> Result<()
         }
     }
 
-    let entries = match fs::read_dir(ai_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(ai_authority) = lillux::PinnedDirectory::open(ai_dir)? else {
+        return Ok(());
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for entry in ai_authority.entries_no_follow_bounded(1_000_000)? {
+        if entry.entry_type != lillux::PinnedEntryType::Directory {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        let Some(name) = entry.name.to_str() else {
             continue;
         };
         // Derived CAS + binary artifacts are never item directories.
@@ -395,7 +413,10 @@ fn check_all_item_dirs_covered(ai_dir: &Path, kinds: &KindRegistry) -> Result<()
             continue;
         }
         // Empty directories sign nothing — only populated ones are a problem.
-        if !dir_contains_file(&path) {
+        let directory = ai_authority
+            .open_child_directory(&entry.name)?
+            .ok_or_else(|| anyhow::anyhow!("bundle item directory disappeared"))?;
+        if !dir_contains_file(&directory)? {
             continue;
         }
         bail!(
@@ -410,20 +431,17 @@ fn check_all_item_dirs_covered(ai_dir: &Path, kinds: &KindRegistry) -> Result<()
 }
 
 /// True when `dir` contains at least one regular file anywhere below it.
-fn dir_contains_file(dir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            return true;
-        }
-        if p.is_dir() && dir_contains_file(&p) {
-            return true;
-        }
-    }
-    false
+fn dir_contains_file(directory: &lillux::PinnedDirectory) -> Result<bool> {
+    let mut present = false;
+    directory.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(1_000_000, 128),
+        |_relative, _is_directory| Ok(false),
+        |_relative, _file| {
+            present = true;
+            Ok(())
+        },
+    )?;
+    Ok(present)
 }
 
 /// Outcome of signing a single item.
@@ -448,9 +466,15 @@ fn sign_one_item(
     ai_root: &Path,
     parsers: &ParserDispatcher,
     signing_key: &lillux::crypto::SigningKey,
+    bundle_name: &str,
 ) -> Result<SignItemInfo> {
-    let content =
-        fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
+    let content = lillux::read_regular_file_bounded_no_follow(
+        file_path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )
+    .with_context(|| format!("read {}", file_path.display()))?;
+    let content = std::str::from_utf8(&content)
+        .with_context(|| format!("{} is not UTF-8", file_path.display()))?;
 
     let ext = file_path
         .extension()
@@ -469,7 +493,7 @@ fn sign_one_item(
     let parsed = parsers
         .dispatch(
             &source_format.parser,
-            &content,
+            content,
             Some(file_path),
             &source_format.signature,
         )
@@ -490,6 +514,18 @@ fn sign_one_item(
         )
     })?;
 
+    super::sign::validate_authored_external_content(
+        &parsed,
+        kind_schema,
+        ryeos_engine::external_content::DeclaringAuthority::Bundle(bundle_name),
+    )
+    .with_context(|| {
+        format!(
+            "strict external-content validation refused {}",
+            file_path.display()
+        )
+    })?;
+
     // Does this item participate in daemon cap minting? Only items whose
     // `requires.capabilities.manifest.runtime_authority` is non-empty do; the
     // namespace lint uses this to distinguish a cap-minting item (actionable
@@ -502,36 +538,15 @@ fn sign_one_item(
         suffix: source_format.signature.suffix.clone(),
         after_shebang: source_format.signature.after_shebang,
     };
-    let stripped = lillux::signature::strip_signature_lines_with_envelope(
-        &content,
-        &envelope.prefix,
-        envelope.suffix.as_deref(),
-    );
-
-    // Check if the existing signature is already valid for this body and signer.
-    if is_already_validly_signed(&content, &stripped, signing_key, &envelope) {
-        return Ok(SignItemInfo {
-            result: SignResult::Unchanged,
-            declares_runtime_authority,
-        });
-    }
-
-    // Sign in place (atomic)
-    let signed = lillux::signature::sign_content_with_options(
-        &stripped,
-        signing_key,
-        &source_format.signature.prefix,
-        source_format.signature.suffix.as_deref(),
-        source_format.signature.after_shebang,
-    );
-
-    let tmp = file_path.with_extension(format!("signed.tmp.{}", std::process::id()));
-    fs::write(&tmp, &signed).with_context(|| format!("write tmp {}", tmp.display()))?;
-    fs::rename(&tmp, file_path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), file_path.display()))?;
+    let changed =
+        super::sign::sign_validated_in_place_with_key(file_path, content, &envelope, signing_key)?;
 
     Ok(SignItemInfo {
-        result: SignResult::Signed,
+        result: if changed {
+            SignResult::Signed
+        } else {
+            SignResult::Unchanged
+        },
         declares_runtime_authority,
     })
 }
@@ -548,37 +563,6 @@ fn declares_manifest_runtime_authority(parsed: &serde_json::Value) -> bool {
         .and_then(|rv| ryeos_bundle::runtime_authority::parse_runtime_requires(rv).ok())
         .map(|reqs| reqs.manifest.runtime_authority.declares_runtime_authority())
         .unwrap_or(false)
-}
-
-/// Check whether `existing` (the full file content) already carries a
-/// valid signature for `body` (the stripped content) signed by `signing_key`.
-///
-/// Returns true only when all three conditions hold:
-///   1. the parsed header's content hash matches the body,
-///   2. the signer fingerprint matches the current key, and
-///   3. the signature verifies against the hash.
-fn is_already_validly_signed(
-    existing: &str,
-    body: &str,
-    signing_key: &lillux::crypto::SigningKey,
-    envelope: &ryeos_engine::contracts::SignatureEnvelope,
-) -> bool {
-    let Some(header) = ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
-    else {
-        return false;
-    };
-
-    let verifying_key = signing_key.verifying_key();
-    let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
-    let signed_body = lillux::signature::content_to_sign(body, envelope.after_shebang);
-    lillux::signature::is_valid_signature_for(
-        &header.content_hash,
-        &header.signature_b64,
-        &header.signer_fingerprint,
-        signed_body,
-        &verifying_key,
-        &fingerprint,
-    )
 }
 
 /// Derive a bare-id from a file path relative to its kind directory,
@@ -598,20 +582,5 @@ fn derive_bare_id(
         s
     } else {
         file_path.display().to_string()
-    }
-}
-
-/// Recursively collect all files under a directory.
-fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files_recursive(&path, out);
-        } else if path.is_file() {
-            out.push(path);
-        }
     }
 }

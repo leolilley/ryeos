@@ -321,6 +321,7 @@ pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
 /// only *add*. Deploying these would clobber or leak the remote's own state.
 pub const NODE_OWNED: &[&str] = &[
     ".ai/state",
+    ".ai/cache",
     ".ai/node/schedules",
     ".ai/node/routes",
     ".ai/node/bundles",
@@ -359,6 +360,23 @@ pub fn snapshot_floor_rules() -> Vec<String> {
     rules
 }
 
+/// Canonical identity of every non-bypassable rule applied before bytes may
+/// enter durable CAS. Keep this beside the predicate so import request
+/// identity and capture enforcement cannot drift into separate hard-coded
+/// path lists.
+pub fn durable_content_capture_floor_rules() -> Vec<String> {
+    let mut rules = snapshot_floor_rules();
+    rules.extend(
+        crate::ignore::durable_capture_floor()
+            .canonical_patterns()
+            .iter()
+            .map(|pattern| format!("built_in_ignore:{pattern}")),
+    );
+    rules.sort();
+    rules.dedup();
+    rules
+}
+
 /// Match `rel_path` against a set of `.ai` prefixes on segment boundaries,
 /// returning the matched prefix. `foo` matches `foo` and `foo/bar`, never
 /// `foobar`.
@@ -379,6 +397,14 @@ pub fn is_project_snapshot_floor_excluded(rel_path: &str) -> bool {
     matched_prefix(rel_path, NEVER_DEPLOY_SECRETS).is_some()
         || matched_prefix(rel_path, NODE_OWNED).is_some()
         || transaction_artifact
+}
+
+/// Floor for content copied into durable CAS rather than merely read live.
+/// The project safety floor and the shared built-in ingest floor are both
+/// mandatory; a node's loaded ignore configuration may only narrow further.
+pub fn is_durable_content_capture_floor_excluded(rel_path: &str) -> bool {
+    is_project_snapshot_floor_excluded(rel_path)
+        || crate::ignore::durable_capture_floor().is_ignored(rel_path)
 }
 
 fn surface_kind_str(kind: ProjectAiSurfaceKind) -> &'static str {
@@ -823,13 +849,13 @@ mod tests {
 
     #[test]
     fn rendered_policy_is_valid_yaml_with_all_buckets() {
-        let yaml = render_effective_sync_policy_yaml(".ai/node/ingest/ignore.yaml");
+        let yaml = render_effective_sync_policy_yaml(".ai/node/policies/ingest_ignore.yaml");
         let v: serde_yaml::Value =
             serde_yaml::from_str(&yaml).expect("generated policy is valid YAML");
         assert_eq!(v["version"].as_u64(), Some(1));
         assert_eq!(
             v["ignore_source"].as_str(),
-            Some(".ai/node/ingest/ignore.yaml")
+            Some(".ai/node/policies/ingest_ignore.yaml")
         );
         let secrets = v["never_deploy_secrets"].as_sequence().unwrap();
         assert!(secrets.iter().any(|x| x.as_str() == Some(".env")));

@@ -38,7 +38,10 @@ use ryeos_app::thread_lifecycle::{
 use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
 mod accounting;
+mod dedicated_sessions;
 mod routing;
+#[cfg(feature = "crash-qualification-test-support")]
+mod runtime_phase_cut;
 mod transport;
 
 #[cfg(test)]
@@ -120,6 +123,9 @@ pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
 }
 
 pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) -> Result<()> {
+    #[cfg(feature = "crash-qualification-test-support")]
+    runtime_phase_cut::initialize_from_env()?;
+
     let mut connections = tokio::task::JoinSet::new();
     let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
     let frame_bytes = Arc::new(Semaphore::new(MAX_UDS_IN_FLIGHT_FRAME_BYTES));
@@ -265,7 +271,7 @@ pub(crate) async fn dispatch_runtime_method(
     //
     //  - thread-auth methods (dispatch_action, spawn_follow_child) prove a
     //    per-request `thread_auth_token` against the caller's own thread here,
-    //    then do their own stronger validation (callback token + project_path +
+    //    then do their own stronger validation (callback token + exact thread +
     //    server-side trust derivation) in the handler.
     //  - chain *reads* (get_thread / replay) may target any thread in the
     //    capability's own chain — a successor rehydrates by folding its
@@ -294,10 +300,13 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.poll_input"
             | "runtime.author_item"
             | "runtime.project_snapshot"
-            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_prepare"
             | "runtime.provider_attempt_mark_issued"
             | "runtime.provider_attempt_settle"
             | "runtime.provider_attempt_release_unissued"
+            | "runtime.provider_attempt_local_stream_start"
+            | "runtime.provider_attempt_local_stream_next"
+            | "runtime.provider_attempt_local_stream_control"
     ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
@@ -319,7 +328,9 @@ pub(crate) async fn dispatch_runtime_method(
             method,
             "runtime.author_item"
                 | "runtime.project_snapshot"
+                | "runtime.provider_attempt_prepare"
                 | "runtime.provider_attempt_mark_issued"
+                | "runtime.provider_attempt_local_stream_start"
         ) {
             validated_thread_auth = Some(thread_auth);
         }
@@ -426,18 +437,51 @@ pub(crate) async fn dispatch_runtime_method(
             callback_cap.as_ref(),
             validated_thread_auth.as_ref(),
         ),
+        "runtime.start_dedicated_session" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session start requires callback authority"))?;
+            dedicated_sessions::start(&clean_params, state, cap).await
+        }
+        "runtime.dedicated_session_status" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session status requires callback authority"))?;
+            dedicated_sessions::status(&clean_params, state, cap)
+        }
+        "runtime.wait_dedicated_session" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session wait requires callback authority"))?;
+            dedicated_sessions::wait(&clean_params, state, cap).await
+        }
+        "runtime.dedicated_session_command" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session command requires callback authority"))?;
+            dedicated_sessions::command(&clean_params, state, cap).await
+        }
+        "runtime.terminate_dedicated_session" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("dedicated-session termination requires callback authority")
+            })?;
+            dedicated_sessions::terminate(&clean_params, state, cap).await
+        }
         "runtime.finalize_thread" => {
             let owner = callback_launch_owner
                 .ok_or_else(|| anyhow!("runtime.finalize_thread requires a launch owner"))?;
-            let result = handle_finalize(&clean_params, state, owner)?;
+            let capability = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("runtime.finalize_thread requires callback capability authority")
+            })?;
+            let result = handle_finalize(&clean_params, state, owner, capability).await?;
             // A self-finalizing follow child (the normal path) flips its waiter to
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
-                ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+                ryeos_executor::execution::launch::kick_launch_window_for_terminal(
                     state,
                     chain_root_id,
                 );
-                ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+                ryeos_executor::execution::launch::kick_follow_resume_if_ready(
                     state,
                     chain_root_id,
                 );
@@ -452,6 +496,9 @@ pub(crate) async fn dispatch_runtime_method(
         }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
         "runtime.publish_state_anchor" => handle_publish_state_anchor(&clean_params, state),
+        "runtime.publish_project_observation" => {
+            handle_publish_project_observation(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
         "runtime.submit_command" => handle_submit_command(&clean_params, state).await,
@@ -464,13 +511,22 @@ pub(crate) async fn dispatch_runtime_method(
             handle_attach_process(&clean_params, state, peer, owner).await
         }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
-        "runtime.provider_attempt_reserve" => {
+        "runtime.provider_attempt_prepare" => {
             let cap = callback_cap.as_ref().ok_or_else(|| {
-                anyhow!("provider_attempt_reserve requires a callback capability")
+                anyhow!("provider_attempt_prepare requires a callback capability")
             })?;
             let owner = callback_launch_owner
-                .ok_or_else(|| anyhow!("provider_attempt_reserve requires a launch owner"))?;
-            accounting::handle_provider_attempt_reserve(&clean_params, state, cap, owner)
+                .ok_or_else(|| anyhow!("provider_attempt_prepare requires a launch owner"))?;
+            let thread_auth = validated_thread_auth.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_prepare requires validated thread authority")
+            })?;
+            accounting::handle_provider_attempt_prepare(
+                &clean_params,
+                state,
+                cap,
+                owner,
+                thread_auth,
+            )
         }
         "runtime.provider_attempt_mark_issued" => {
             let cap = callback_cap.as_ref().ok_or_else(|| {
@@ -512,6 +568,29 @@ pub(crate) async fn dispatch_runtime_method(
                 .ok_or_else(|| anyhow!("provider_attempt_get requires a callback capability"))?;
             accounting::handle_provider_attempt_get(&clean_params, state, cap)
         }
+        "runtime.provider_attempt_local_stream_start" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_start requires a callback capability")
+            })?;
+            validated_thread_auth.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_start requires validated thread authority")
+            })?;
+            accounting::handle_provider_attempt_local_stream_start(&clean_params, state, cap)
+        }
+        "runtime.provider_attempt_local_stream_next" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_next requires a callback capability")
+            })?;
+            accounting::handle_provider_attempt_local_stream_next(&clean_params, state, cap).await
+        }
+        "runtime.provider_attempt_local_stream_control" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_control requires a callback capability")
+            })?;
+            accounting::handle_provider_attempt_local_stream_control(&clean_params, state, cap)
+        }
+        #[cfg(feature = "crash-qualification-test-support")]
+        "runtime.test_phase_cut" => runtime_phase_cut::reach(&clean_params).await,
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -544,6 +623,10 @@ fn enforce_runtime_callback_admission(
 }
 
 fn is_running_runtime_mutation(method: &str) -> bool {
+    #[cfg(feature = "crash-qualification-test-support")]
+    if method == "runtime.test_phase_cut" {
+        return true;
+    }
     matches!(
         method,
         "runtime.append_event"
@@ -553,16 +636,21 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.request_continuation"
             | "runtime.author_item"
             | "runtime.project_snapshot"
+            | "runtime.start_dedicated_session"
+            | "runtime.dedicated_session_command"
+            | "runtime.terminate_dedicated_session"
             | "runtime.vault_put"
             | "runtime.vault_delete"
             | "runtime.bundle_events_append"
             | "runtime.bundle_events_materialize_attachment"
             | "runtime.publish_artifact"
             | "runtime.publish_state_anchor"
+            | "runtime.publish_project_observation"
             | "runtime.submit_command"
             | "runtime.poll_input"
-            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_prepare"
             | "runtime.provider_attempt_mark_issued"
+            | "runtime.provider_attempt_local_stream_start"
     )
 }
 
@@ -574,6 +662,7 @@ fn is_stop_completion_method(method: &str) -> bool {
             | "runtime.complete_command"
             | "runtime.provider_attempt_settle"
             | "runtime.provider_attempt_release_unissued"
+            | "runtime.provider_attempt_local_stream_control"
     )
 }
 
@@ -593,12 +682,15 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.bundle_events_scan"
             | "runtime.vault_get"
             | "runtime.vault_list"
+            | "runtime.provider_attempt_local_stream_next"
+            | "runtime.dedicated_session_status"
+            | "runtime.wait_dedicated_session"
     )
 }
 
 /// Runtime methods that carry a per-request `thread_auth_token`. The prelude
 /// proves the token against the caller's own `thread_id`; the handler performs
-/// the stronger validation (callback token + project_path) and derives every
+/// the stronger validation (callback token + exact thread) and derives every
 /// trust-bearing field (principal, provenance, caps) from server-side state.
 fn is_thread_auth_method(method: &str) -> bool {
     matches!(
@@ -869,10 +961,11 @@ fn final_cost_from_runtime(
     })
 }
 
-fn handle_finalize(
+async fn handle_finalize(
     params: &serde_json::Value,
     state: &AppState,
     launch_owner: &str,
+    capability: &ryeos_app::callback_token::CallbackCapability,
 ) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
@@ -920,12 +1013,32 @@ fn handle_finalize(
         Some(launch_owner),
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     )?;
+    // A retained COW generation is part of terminal truth, not cleanup. Seal
+    // it while this authenticated callback still blocks the managed runtime;
+    // terminal state then commits the exact snapshot identity in the same
+    // transition. Discard-only and borrowed executions return `None`.
+    let pending_project_result =
+        ryeos_executor::execution::prepare_managed_runtime_terminal_project_result(
+            state,
+            capability,
+            &completion.status,
+        )
+        .await?;
+    let result_project_snapshot_hash = pending_project_result
+        .as_ref()
+        .map(|pending| pending.snapshot_hash().to_string());
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,
         &completion,
         Some(managed_envelope),
+        result_project_snapshot_hash.as_deref(),
     )?;
+    if let Some(pending) = pending_project_result {
+        pending
+            .publish()
+            .context("release terminal project-generation recovery roots")?;
+    }
     // Terminal thread state (the CAS publication) is durable; clear the
     // gate's terminal-publication marker. Startup recovery completes this if
     // we crash in between.
@@ -1402,6 +1515,9 @@ async fn handle_submit_command(
         .await;
         match stop_result {
             Ok(Ok((report, cancelled_roots))) => {
+                if !cancelled_roots.is_empty() {
+                    ryeos_executor::execution::launch::kick_launch_window_after_discard(state);
+                }
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
                 }
@@ -1505,6 +1621,35 @@ fn handle_publish_state_anchor(
     let publication = state.threads.publish_state_anchor(&params)?;
     serde_json::to_value(publication)
         .context("failed to encode runtime.publish_state_anchor result")
+}
+
+fn handle_publish_project_observation(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let params: ryeos_runtime::ProjectObservationPublishParams =
+        serde_json::from_value(params.clone())
+            .context("invalid runtime.publish_project_observation params")?;
+    let cap = cap.ok_or_else(|| anyhow!("project observation requires callback authority"))?;
+    let source_definition_ref = cap
+        .item_ref
+        .as_deref()
+        .ok_or_else(|| anyhow!("project observation source has no admitted item identity"))?;
+    if !source_definition_ref.starts_with("graph:") {
+        anyhow::bail!("project observations may be published only by an admitted graph runtime");
+    }
+    let source_effective_definition_digest = cap
+        .effective_definition_digest
+        .as_deref()
+        .ok_or_else(|| anyhow!("project observation source has no effective definition digest"))?;
+    let publication = state.threads.publish_project_observation(
+        &params,
+        source_definition_ref,
+        source_effective_definition_digest,
+    )?;
+    serde_json::to_value(publication)
+        .context("failed to encode runtime.publish_project_observation result")
 }
 
 fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -1649,7 +1794,7 @@ mod tests {
         ttl: std::time::Duration,
         effective_caps: Vec<String>,
         provenance: TestProvenance,
-        root_content_digest: String,
+        root_raw_content_digest: String,
     ) -> ryeos_app::callback_token::CallbackCapability {
         bind_test_callback_owner(
             state,
@@ -1659,7 +1804,7 @@ mod tests {
                 ttl,
                 effective_caps,
                 provenance,
-                root_content_digest,
+                root_raw_content_digest,
             ),
         )
     }
@@ -1674,7 +1819,7 @@ mod tests {
         provenance: TestProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
-        root_content_digest: String,
+        root_raw_content_digest: String,
         hard_limits: serde_json::Value,
         depth: u32,
     ) -> ryeos_app::callback_token::CallbackCapability {
@@ -1688,7 +1833,8 @@ mod tests {
                 provenance,
                 effective_bundle_id,
                 item_ref,
-                root_content_digest,
+                root_raw_content_digest.clone(),
+                Some(root_raw_content_digest),
                 hard_limits,
                 depth,
             ),
@@ -1696,7 +1842,7 @@ mod tests {
     }
 
     /// Build a minimal AppState for UDS dispatch tests.
-    fn setup_app_state() -> (TempDir, AppState) {
+    pub(super) fn setup_app_state() -> (TempDir, AppState) {
         let tmpdir = TempDir::new().unwrap();
         let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -1708,10 +1854,7 @@ mod tests {
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-            require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: 60_000,
         };
 
         let identity = NodeIdentity::create(&key_path).unwrap();
@@ -1801,10 +1944,14 @@ mod tests {
         let state = AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
-            isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+            isolation: Arc::new(
+                ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ),
             state_store,
             engine,
-            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+            resolution_cache: std::sync::Arc::new(
+                ryeos_app::resolution_cache::ResolutionCache::new(128),
+            ),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -1830,11 +1977,11 @@ mod tests {
                 bundles: vec![],
                 routes: vec![],
                 commands: vec![],
-                hosted_node_policies: vec![],
-                command_registration_policy: Default::default(),
             }),
-            node_history_policy: Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            node_policy: Arc::new(
+                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                )]),
             ),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),
@@ -1848,6 +1995,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
 
         (tmpdir, state)
@@ -1891,7 +2041,7 @@ mod tests {
                 kind_schema_content_hash: hash,
                 resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                     node_policy:
-                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }
         });
@@ -2465,6 +2615,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_project_generation_is_part_of_authoritative_finalize() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread_for_test(&make_create_params("T-project", "T-project"))
+            .unwrap();
+        state
+            .threads
+            .finalize_from_completion_with_project_snapshot(
+                "T-project",
+                &ryeos_engine::contracts::ExecutionCompletion {
+                    status: ryeos_engine::contracts::ThreadTerminalStatus::Completed,
+                    outcome_code: Some("success".to_string()),
+                    result: Some(json!({"ok": true})),
+                    error: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    continuation_request: None,
+                    metadata: None,
+                },
+                None,
+                &"b".repeat(64),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state
+                .state_store
+                .authoritative_result_project_snapshot("T-project")
+                .unwrap()
+                .as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
     fn runtime_finalize_uses_closed_terminal_status_enum() {
         for status in ["timed_out", "running", "done"] {
             let value = json!({
@@ -2604,12 +2790,18 @@ mod tests {
             test_provenance(state, "/proj"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "P",
-            "user:test".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "P",
+                "user:test".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
         (cbt.token, tat.token)
     }
 
@@ -2622,10 +2814,10 @@ mod tests {
             "callback_token": callback_token,
             "thread_auth_token": thread_auth_token,
             "thread_id": "P",
-            "project_path": "/proj",
             "graph_run_id": "gr-1",
             "follow_node": "node-a",
             "step_count": 0,
+            "result_shape": "single",
             "children": [{
                 "item_ref": child,
                 "ref_bindings": {},
@@ -2675,7 +2867,7 @@ mod tests {
                 kind_schema_content_hash: hash,
                 resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                     node_policy:
-                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }
         });
@@ -2769,8 +2961,10 @@ mod tests {
                 "required_secrets": [],
                 "runtime_facts": {},
                 "binding_records": {},
+                "execution_dependencies": {},
                 "config_contributors": [],
                 "financial_authority": null,
+                "external_effect_authority": null,
             }),
             runtime_descriptor_document: runtime_document,
             protocol_descriptor_document: protocol_document,
@@ -2974,8 +3168,10 @@ mod tests {
                         "required_secrets": [],
                         "runtime_facts": {},
                         "binding_records": {},
+                        "execution_dependencies": {},
                         "config_contributors": [],
                         "financial_authority": null,
+                        "external_effect_authority": null,
                     }),
                     runtime_descriptor_document: runtime_document,
                     protocol_descriptor_document: protocol_document,
@@ -4069,12 +4265,18 @@ mod tests {
             test_provenance(&state, "/proj"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "P",
-            "user:test".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "P",
+                "user:test".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
         let resp = dispatch(
             rpc(
                 "runtime.spawn_follow_child",
@@ -4494,8 +4696,8 @@ mod tests {
                 "callback_token": cbt.token,
                 "thread_id": "T-stream-2",
                 "events": [
-                    {"event_type": "tool_call_start",  "payload": {"i": 1}, "storage_class": "indexed"},
-                    {"event_type": "tool_call_result", "payload": {"i": 2}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_start",  "payload": {"i": 1, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_result", "payload": {"i": 2, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
                     {"event_type": "stream_closed",    "payload": {"i": 3}, "storage_class": "indexed"},
                 ],
             })),
@@ -5033,8 +5235,8 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-missing",
-                    "project_path": "/p",
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5074,9 +5276,9 @@ mod tests {
         let resp = dispatch(rpc("runtime.dispatch_action", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-tat-wrong",
-                "project_path": "/p",
                 "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
                 "action": {
+                    "operation_id": "1".repeat(64),
                     "item_id": "directive:ryeos/agent/core/base",
                     "ref_bindings": {},
                     "thread": "inline",
@@ -5108,12 +5310,18 @@ mod tests {
         );
         // Mint a tat for a SPECIFIC principal — this is the value the
         // daemon must use, not anything caller-controllable.
-        let tat = state.thread_auth.mint(
-            "T-tat-ok",
-            "fp:server-authoritative-principal".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-tat-ok",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
 
         // The DispatchActionParams struct is `deny_unknown_fields` and
         // does NOT include a principal field, so the only acting principal
@@ -5127,10 +5335,10 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-ok",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token.clone(),
                     "acting_principal": "fp:attacker-spoofed-principal",
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5161,9 +5369,9 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-ok",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token,
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5195,12 +5403,18 @@ mod tests {
             test_provenance(&state, "/p"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "T-caps-empty",
-            "fp:server-authoritative-principal".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-caps-empty",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
 
         let resp = dispatch(
             rpc(
@@ -5208,9 +5422,9 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-caps-empty",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token,
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5243,12 +5457,18 @@ mod tests {
             test_provenance(&state, "/p"),
             "0".repeat(64),
         );
-        let tat = state.thread_auth.mint(
-            "T-caps-wild",
-            "fp:server-authoritative-principal".to_string(),
-            vec!["execute".to_string()],
-            std::time::Duration::from_secs(300),
-        );
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-caps-wild",
+                "fp:server-authoritative-principal".to_string(),
+                vec!["execute".to_string()],
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
 
         let resp = dispatch(
             rpc(
@@ -5256,9 +5476,9 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-caps-wild",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token,
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5389,6 +5609,7 @@ mod tests {
             "runtime.request_continuation",
             "runtime.publish_artifact",
             "runtime.publish_state_anchor",
+            "runtime.publish_project_observation",
         ] {
             let resp = dispatch(
                 rpc(

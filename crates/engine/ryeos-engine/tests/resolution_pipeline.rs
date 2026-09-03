@@ -20,7 +20,8 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::ParserRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
 use ryeos_engine::resolution::{
-    ResolutionError, run_effective_item_pipeline, run_resolution_pipeline,
+    ResolutionError, run_effective_item_pipeline, run_effective_item_pipeline_with_probes,
+    run_resolution_pipeline,
 };
 use ryeos_engine::test_support::load_live_handler_registry;
 use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
@@ -508,6 +509,43 @@ fn valid_composition_passes_through() {
 
     // Verify the composed value is accessible.
     assert!(output.composed.composed.is_object());
+    assert_eq!(output.composed.composed["mode"], "cli_exec");
+}
+
+#[test]
+fn effective_item_with_probes_accepts_non_executable_data_kind() {
+    let project_dir = tempdir();
+    let kinds_dir = tempdir();
+    write_tool_schema(&kinds_dir, TOOL_SCHEMA_WITH_CONTRACT);
+
+    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store()).unwrap();
+    let tools_dir = project_dir.join(".ai").join("tools");
+    write_tool_item(
+        &tools_dir,
+        "bound_data",
+        "name: bound_data\nmode: cli_exec\n",
+    );
+
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
+    let parsers = dispatcher_for_yaml_and_markdown_directive();
+    let trust = trust_store();
+    let handlers = load_live_handler_registry();
+    let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
+        .expect("from_kinds must bind the data kind");
+    let item = CanonicalRef::parse("tool:bound_data").unwrap();
+
+    let executable_error =
+        run_resolution_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
+            .expect_err("the test kind deliberately has no execution block");
+    assert!(matches!(
+        executable_error,
+        ResolutionError::KindNotExecutable { .. }
+    ));
+
+    let (output, _probes) = run_effective_item_pipeline_with_probes(
+        &item, &kinds, &parsers, &roots, &trust, &composers,
+    )
+    .expect("a bound data item must resolve through the effective-item pipeline");
     assert_eq!(output.composed.composed["mode"], "cli_exec");
 }
 

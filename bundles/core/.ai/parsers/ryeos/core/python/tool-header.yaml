@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-02T08:58:48Z:5596be02389513e98f046993fcb479fd592fb7e90f63f41e69319b2ffd9db67d:Lbi5IYhSLuRt5u+x1uedA/QPK7qwVRH8QxjQyCMpjHeg8krymefLKCp5FYg0aOLsmAXYHqVmQlTByAoAKLr1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:03Z:5596be02389513e98f046993fcb479fd592fb7e90f63f41e69319b2ffd9db67d:Lbi5IYhSLuRt5u+x1uedA/QPK7qwVRH8QxjQyCMpjHeg8krymefLKCp5FYg0aOLsmAXYHqVmQlTByAoAKLr1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/python"
 description: "Python comment-YAML tool metadata parser"

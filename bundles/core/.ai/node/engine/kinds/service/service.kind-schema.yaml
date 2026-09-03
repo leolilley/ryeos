@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:18:43Z:3a95580dbb89a544a1db599327f38f18df8fc4cee51042c8418c860fc63b279d:EAeXmEpnxFbHbLEb65J7I8a/PuWKuPpMljUfIDiEyppfz8Sv9APHJ1xjqxhBEv4Agt9lPRG1KLY6cZCINKJoCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-25T01:31:18Z:21034eac233430d7db17c2cb614cda2c3f592161a41ea5149b5e91017579260a:kCyTtZMahYGL/e9sLPVgJFnIeXv3SeiqGsPssfAjOU2A5WOg97CrK0IxMWQYNkQy06E4f5o3xArkShkBPc+yDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -10,6 +10,10 @@ execution:
   terminator:
     kind: in_process
     registry: services
+    capabilities:
+      # The in-process executor implements the frozen generic terminal
+      # projection contract for both success and handler-error outcomes.
+      durable_result_projection: true
   thread_profile:
     name: service_run
     root_executable: true
@@ -19,6 +23,10 @@ execution:
   # verified composed service value. No service/ref branch consumes it.
   history_policy:
     composed_path: history
+  # Generic engine contract for the durable representation of successful
+  # results and handler errors. Omission on an item retains the full terminal.
+  result_policy:
+    composed_path: result_retention
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -36,14 +44,18 @@ composed_value_contract:
     availability:
       type: single
       prim: string
-      enum: [both, daemon_only, offline]
-    offline_execute: { type: single, prim: string }
+      enum: [both, daemon_only, local, stopped_node]
+    local_execute: { type: single, prim: string }
     required_caps:
       type: single
       prim: sequence
       elements: { type: single, prim: string }
     description: { type: single, prim: string }
     record_thread: { type: single, prim: boolean }
+    result_retention:
+      type: single
+      prim: string
+      enum: [full, digest_only]
     state_access:
       type: single
       prim: string

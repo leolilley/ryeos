@@ -33,6 +33,8 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/pkg/test-ryeos-terminal.sh \
     scripts/lib/ryeos-terminal.sh \
     scripts/gate.sh \
+    scripts/dev/qualify-configured-remote.sh \
+    scripts/dev/test-qualify-configured-remote.sh \
     scripts/dev-tui.sh \
     scripts/dev-ui-assets.sh \
     scripts/smoke-execute-stream.sh \

@@ -80,12 +80,7 @@ fn main() -> anyhow::Result<()> {
 async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
-    let client = CallbackClient::new(
-        &envelope.callback,
-        &envelope.thread_id,
-        envelope.callback_project_path.to_str().unwrap_or(""),
-        &thread_auth_token,
-    );
+    let client = CallbackClient::new(&envelope.callback, &envelope.thread_id, &thread_auth_token);
 
     // Register this process's pgid before marking running so the daemon can
     // tell a live runtime from a crashed one on restart (else it resumes a
@@ -123,7 +118,6 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
                     method,
                     thread_id,
                     callback: envelope.callback.clone(),
-                    callback_project_path: envelope.callback_project_path.clone(),
                     project_root: envelope.project_root.clone(),
                     runtime_config: envelope.runtime_config.clone(),
                     payload: serde_json::Value::Null,
@@ -173,7 +167,6 @@ mod tests {
                 socket_path: std::path::PathBuf::from("/tmp/cb.sock"),
                 token: "tat-test".into(),
             },
-            callback_project_path: std::path::PathBuf::from("/tmp/proj-state"),
             project_root: std::path::PathBuf::from("/tmp/proj"),
             runtime_config: std::collections::BTreeMap::new(),
             payload,

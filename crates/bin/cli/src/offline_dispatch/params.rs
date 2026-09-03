@@ -13,6 +13,13 @@ pub(super) fn bind_params_minimal(
     command: &CommandDef,
     project_path: &str,
 ) -> Result<Value, CliError> {
+    crate::project_resolve::reject_bound_project_parameter_flag(
+        tail,
+        command
+            .project
+            .as_ref()
+            .and_then(|project| project.bind_parameter.as_deref()),
+    )?;
     // Shared with daemon dispatch so the two paths cannot drift:
     // `--input` is only honored when the descriptor declares an input
     // flag (clean cut from the old always-on offline behavior), and
@@ -23,6 +30,8 @@ pub(super) fn bind_params_minimal(
 
     let mut params = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
         .map_err(|e| CliError::Local { detail: e })?;
+
+    reject_injected_project_binding(&params, command)?;
 
     // Project resolution
     let resolution = command_project_resolution(command);
@@ -156,6 +165,29 @@ fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution 
         .unwrap_or_default()
 }
 
+fn reject_injected_project_binding(params: &Value, command: &CommandDef) -> Result<(), CliError> {
+    let Some(bind_parameter) = command
+        .project
+        .as_ref()
+        .and_then(|project| project.bind_parameter.as_ref())
+    else {
+        return Ok(());
+    };
+    if bind_parameter != "project"
+        && params
+            .as_object()
+            .is_some_and(|object| object.contains_key(bind_parameter))
+    {
+        return Err(CliError::Local {
+            detail: format!(
+                "--{} is runtime-bound from the command's project selector; use --project <path> instead",
+                bind_parameter.replace('_', "-")
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn apply_project_parameter_binding(params: &mut Value, command: &CommandDef) {
     let Some(bind_parameter) = command
         .project
@@ -277,7 +309,7 @@ mod tests {
             }),
             dispatch: CommandDispatch::ExecuteRef {
                 execute: "example:namespace/status".into(),
-                availability: CommandAvailability::Offline,
+                availability: CommandAvailability::Local,
             },
             source_file: PathBuf::new(),
             provenance: CommandProvenance::default(),
@@ -302,5 +334,44 @@ mod tests {
             json!({"project_path": project_path.to_string_lossy()})
         );
         assert!(params.get("project").is_none());
+    }
+
+    #[test]
+    fn offline_binding_honors_project_named_parameter() {
+        let project_path = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        let params = bind_params_minimal(
+            &[],
+            &project_command("project"),
+            project_path.to_str().expect("UTF-8 project path"),
+        )
+        .expect("bind offline parameters");
+
+        assert_eq!(params, json!({"project": project_path.to_string_lossy()}));
+    }
+
+    #[test]
+    fn offline_binding_refuses_injected_runtime_project_parameter() {
+        let project_path = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        let error = bind_params_minimal(
+            &[
+                "--project-path".to_string(),
+                "/tmp/other-project".to_string(),
+            ],
+            &project_command("project_path"),
+            project_path.to_str().expect("UTF-8 project path"),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--project-path is a runtime-bound service field")
+        );
     }
 }

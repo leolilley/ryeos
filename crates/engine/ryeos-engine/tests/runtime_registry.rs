@@ -57,7 +57,7 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
 
 fn with_empty_launch_contract(body: &str, serves: &str) -> String {
     format!(
-        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n"
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
     )
 }
 
@@ -107,7 +107,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/{host_triple}/directive_runner
-abi_version: v2
+abi_version: v3
 required_caps:
   - ryeos.read.directive.*
 launch_contract:
@@ -123,12 +123,19 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
   secret_policy:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {}
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
 description: Default directive runtime
 ";
@@ -137,7 +144,7 @@ const MINIMAL_RUNTIME_YAML: &str = "\
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/runner
-abi_version: v2
+abi_version: v3
 launch_contract:
   primary_allowed_kinds: [directive]
   primary_allowed_spaces: [bundle]
@@ -146,12 +153,19 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
   secret_policy:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {}
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
 ";
 
@@ -190,7 +204,7 @@ fn parse_runtime_yaml_success() {
     assert_eq!(yaml.serves, "directive");
     assert_eq!(yaml.default, Some(true));
     assert_eq!(yaml.binary_ref, "bin/{host_triple}/directive_runner");
-    assert_eq!(yaml.abi_version, "v2");
+    assert_eq!(yaml.abi_version, "v3");
     assert_eq!(
         yaml.required_caps,
         vec!["ryeos.read.directive.*".to_string()]
@@ -212,7 +226,7 @@ fn parse_runtime_yaml_missing_serves_rejected() {
         "\
 kind: runtime
 binary_ref: bin/test-triple/x
-abi_version: v2
+abi_version: v3
 ",
         "directive",
     );
@@ -229,7 +243,7 @@ fn parse_runtime_yaml_missing_binary_ref_rejected() {
         "\
 kind: runtime
 serves: directive
-abi_version: v2
+abi_version: v3
 ",
         "directive",
     );
@@ -264,7 +278,7 @@ fn parse_runtime_yaml_wrong_kind_rejected() {
 kind: tool
 serves: directive
 binary_ref: bin/test-triple/x
-abi_version: v2
+abi_version: v3
 ",
         "directive",
     );
@@ -324,7 +338,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/test-triple/fast
-abi_version: v2
+abi_version: v3
 ",
             "directive",
         ),
@@ -337,7 +351,7 @@ abi_version: v2
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/slow
-abi_version: v2
+abi_version: v3
 ",
             "directive",
         ),
@@ -366,7 +380,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/test-triple/a
-abi_version: v2
+abi_version: v3
 ",
             "directive",
         ),
@@ -380,7 +394,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/test-triple/b
-abi_version: v2
+abi_version: v3
 ",
             "directive",
         ),
@@ -412,7 +426,7 @@ fn registry_two_runtimes_neither_default_lookup_fails() {
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/a
-abi_version: v2
+abi_version: v3
 ",
             "directive",
         ),
@@ -425,7 +439,7 @@ abi_version: v2
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/b
-abi_version: v2
+abi_version: v3
 ",
             "directive",
         ),
@@ -556,7 +570,7 @@ metadata:
             r#"kind: runtime
 serves: fake_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
-abi_version: "v2"
+abi_version: "v3"
 "#,
             "fake_kind",
         ),
@@ -626,7 +640,7 @@ metadata:
             r#"kind: runtime
 serves: no_exec_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
-abi_version: "v2"
+abi_version: "v3"
 "#,
             "no_exec_kind",
         ),

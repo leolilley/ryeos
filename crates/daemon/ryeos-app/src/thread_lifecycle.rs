@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,11 +24,11 @@ use crate::state_store::{
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
-    DelegatedPrincipal, EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion,
-    ExecutionHints, ExecutionPlan, FinalCost, ItemMetadata, ItemSpace, LaunchMode, PinnedVersion,
-    PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem, ResolvedSourceFormat,
-    RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader, SignerFingerprint,
-    ThreadTerminalStatus, TrustClass, VerifiedItem,
+    EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
+    ExecutionPlan, FinalCost, ItemMetadata, ItemSourceRoot, ItemSpace, LaunchMode, PinnedVersion,
+    PlanArgument, PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem,
+    ResolvedSourceFormat, RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
+    SignerFingerprint, ThreadTerminalStatus, TrustClass, VerifiedItem,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::history_policy::{
@@ -49,8 +48,9 @@ mod sealed_request;
 mod validation;
 
 pub use direct_execution::{
-    PreparedItemPlan, RunningItem, SpawnItemParams, SpawnedItemAwaitingAttachment,
-    prepare_item_plan, spawn_item,
+    ADMITTED_DIRECT_PROJECT_ROOT, PreparedItemPlan, RunningItem, SpawnItemParams,
+    SpawnedItemAwaitingAttachment, SpawnedPersistentSessionAwaitingAttachment,
+    prepare_captured_item_plan, prepare_item_plan, spawn_item,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
@@ -403,7 +403,7 @@ pub struct ThreadView {
 /// A `ThreadListItem` projection decorated with daemon-authored
 /// [`ExecutionFacts`], follow lineage, and staged-input depth — the list-row
 /// analogue of [`ThreadView`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadListView {
     #[serde(flatten)]
     pub item: ThreadListItem,
@@ -455,6 +455,28 @@ pub struct ExecutionTreeResult {
     pub root_thread_id: Option<String>,
     pub threads: Vec<ExecutionTreeView>,
     pub truncated: bool,
+}
+
+fn expand_execution_tree_paths(
+    decorated: Vec<ThreadListView>,
+    paths: Vec<(String, ExecutionTreePosition)>,
+) -> Result<Vec<ExecutionTreeView>> {
+    let snapshots = decorated
+        .into_iter()
+        .map(|thread| (thread.item.thread_id.clone(), thread))
+        .collect::<BTreeMap<_, _>>();
+    paths
+        .into_iter()
+        .map(|(thread_id, tree)| {
+            let thread = snapshots
+                .get(&thread_id)
+                .with_context(|| {
+                    format!("execution tree path references missing thread `{thread_id}`")
+                })?
+                .clone();
+            Ok(ExecutionTreeView { thread, tree })
+        })
+        .collect()
 }
 
 /// A graph thread's current node/step (see [`ThreadListView::current_node`]).
@@ -583,6 +605,52 @@ pub fn recorded_service_terminal_json_equal(
         }
         (None, Some(_)) | (Some(_), None) => Ok(false),
     }
+}
+
+/// Project a live successful result into its signed, kind-declared durable
+/// representation. This is deliberately generic: no kind, item, endpoint, or
+/// payload field is interpreted here.
+pub fn retained_thread_result(
+    value: &Value,
+    policy: &ryeos_engine::history_policy::ResolvedThreadResultPolicy,
+) -> Result<Value> {
+    use ryeos_engine::history_policy::ThreadResultRetention;
+
+    let retained = match policy.retention {
+        ThreadResultRetention::Full => value.clone(),
+        ThreadResultRetention::DigestOnly => json!({
+            "schema": 1,
+            "kind": "ryeos.digest_only_result",
+            "result_digest": ryeos_state::objects::canonical_value_digest(value)?,
+            "policy": policy,
+        }),
+    };
+    ryeos_state::objects::validate_thread_result_content(Some(&retained), None)
+        .context("validate retained thread result")?;
+    Ok(retained)
+}
+
+/// Apply the same frozen terminal-retention contract to an execution error.
+/// The live caller still receives the original error; a digest-only terminal
+/// retains no error text or structured handler body.
+pub fn retained_thread_error(
+    value: &Value,
+    policy: &ryeos_engine::history_policy::ResolvedThreadResultPolicy,
+) -> Result<Value> {
+    use ryeos_engine::history_policy::ThreadResultRetention;
+
+    let retained = match policy.retention {
+        ThreadResultRetention::Full => value.clone(),
+        ThreadResultRetention::DigestOnly => json!({
+            "schema": 1,
+            "kind": "ryeos.digest_only_error",
+            "error_digest": ryeos_state::objects::canonical_value_digest(value)?,
+            "policy": policy,
+        }),
+    };
+    ryeos_state::objects::validate_thread_result_content(None, Some(&retained))
+        .context("validate retained thread error")?;
+    Ok(retained)
 }
 
 /// Lifecycle-layer result of a conditional pre-launch cleanup. `Finalized` and
@@ -1503,6 +1571,7 @@ pub struct RootExecutionAdmission {
     usage_subject_asserted_by: Option<String>,
     ref_bindings: BTreeMap<String, String>,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
+    resolved_result_policy: ryeos_engine::history_policy::ResolvedThreadResultPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
     project_binding: AdmittedProjectBinding,
     admitted_request_snapshot: Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
@@ -1531,6 +1600,12 @@ impl RootExecutionAdmission {
 
     pub fn captured_history_policy(&self) -> &ryeos_state::objects::CapturedThreadHistoryPolicy {
         &self.captured_history_policy
+    }
+
+    pub fn resolved_result_policy(
+        &self,
+    ) -> &ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+        &self.resolved_result_policy
     }
 
     pub fn ref_bindings(&self) -> &BTreeMap<String, String> {
@@ -1607,6 +1682,56 @@ impl RootExecutionAdmission {
         )?;
         if self.project_binding.execution_workspace() != rebound.execution_workspace() {
             bail!("execution provenance workspace differs from the sealed root materialization");
+        }
+        Ok(())
+    }
+
+    /// Prove that a post-admission dispatch still uses the exact request
+    /// engine and planning authority sealed during root preflight. In-process
+    /// and subprocess terminators share this check;
+    /// neither may silently re-plan a supplied admission under the daemon's
+    /// current request context.
+    pub fn ensure_matches_plan_context(
+        &self,
+        engine: &Arc<Engine>,
+        plan_context: &PlanContext,
+    ) -> Result<()> {
+        self.validate()?;
+        if !Arc::ptr_eq(self.request_engine(), engine) {
+            bail!("dispatch engine differs from the sealed root admission");
+        }
+        if !same_plan_context(&self.plan_context, plan_context) {
+            let mismatches = plan_context_mismatches(&self.plan_context, plan_context);
+            let project_context_detail = if mismatches.contains(&"project_context") {
+                format!(
+                    "; project_context admitted={}, dispatch={}",
+                    project_context_kind(&self.plan_context.project_context),
+                    project_context_kind(&plan_context.project_context)
+                )
+            } else {
+                String::new()
+            };
+            bail!(
+                "dispatch planning authority does not match the sealed root admission (mismatched fields: {}{})",
+                mismatches.join(", "),
+                project_context_detail
+            );
+        }
+        Ok(())
+    }
+
+    /// Prove that usage attribution supplied at the final terminator boundary
+    /// is the attribution sealed by synchronous admission.
+    pub fn ensure_matches_usage_attribution(
+        &self,
+        usage_subject: Option<&UsageSubject>,
+        usage_subject_asserted_by: Option<&str>,
+    ) -> Result<()> {
+        self.validate()?;
+        if self.usage_subject.as_ref() != usage_subject
+            || self.usage_subject_asserted_by.as_deref() != usage_subject_asserted_by
+        {
+            bail!("dispatch usage attribution does not match the sealed root admission");
         }
         Ok(())
     }
@@ -1917,6 +2042,19 @@ impl RootExecutionAdmission {
             != self.captured_history_policy
         {
             bail!("admitted root resolved and captured history policies differ");
+        }
+        let result_policy = &self.resolved_result_policy;
+        if result_policy.canonical_item_ref
+            != self.verified_subject.resolved.canonical_ref.to_string()
+            || result_policy.item_content_hash != self.verified_subject.resolved.content_hash
+            || result_policy.kind_schema_content_hash
+                != self.captured_history_policy.kind_schema_content_hash
+            || result_policy.item_signer_fingerprint
+                != self.captured_history_policy.item_signer_fingerprint
+            || capture_item_trust_class(result_policy.item_trust_class)
+                != self.captured_history_policy.item_trust_class
+        {
+            bail!("admitted root result policy identity differs from its verified subject");
         }
         if self.thread_profile.trim().is_empty()
             || self.thread_profile.trim() != self.thread_profile
@@ -2329,9 +2467,11 @@ fn validate_principal_identifier(label: &str, principal: &str) -> Result<()> {
 /// from one item with another `item_ref`.
 #[derive(Debug, Clone)]
 pub struct NonExecutionRootAdmission {
+    request_engine: Arc<Engine>,
     verified_subject: VerifiedItem,
     plan_context: PlanContext,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    project_binding: Option<AdmittedProjectBinding>,
     thread_profile: String,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
@@ -2351,6 +2491,9 @@ impl NonExecutionRootAdmission {
     }
 
     pub fn project_root(&self) -> Option<&Path> {
+        if self.project_binding.is_some() {
+            return self.project_authority.project_root_projection();
+        }
         match &self.plan_context.project_context {
             ProjectContext::LocalPath { path } => Some(path.as_path()),
             ProjectContext::None
@@ -2369,7 +2512,9 @@ impl NonExecutionRootAdmission {
             plan_principal_identifier(&self.plan_context),
         )?;
         self.project_authority.validate()?;
-        if self.project_authority.project_root_projection() != self.project_root() {
+        if self.project_binding.is_none()
+            && self.project_authority.project_root_projection() != self.project_root()
+        {
             bail!("non-execution root project authority does not match its planning context");
         }
         if self.thread_profile.trim().is_empty()
@@ -2401,10 +2546,17 @@ impl NonExecutionRootAdmission {
     /// Validate the sealed admission at the final persistence boundary against
     /// the already-loaded verified kind registry. The mutable item source is
     /// deliberately not re-resolved or re-read after admission.
-    fn validate_for_persistence(&self, engine: &Engine) -> Result<()> {
+    fn validate_for_persistence(&self) -> Result<()> {
         self.validate()?;
+        if let Some(binding) = &self.project_binding {
+            binding.validate_for(&self.request_engine, &self.plan_context)?;
+            if binding.exact_authority() != &self.project_authority {
+                bail!("non-execution root binding differs from its project authority");
+            }
+        }
         let admitted = &self.verified_subject.resolved;
-        let current_schema_hash = engine
+        let current_schema_hash = self
+            .request_engine
             .kinds
             .schema_content_hash(&admitted.kind)
             .ok_or_else(|| {
@@ -2550,41 +2702,25 @@ fn capture_item_space(space: ItemSpace) -> Result<ryeos_state::objects::Captured
     Ok(match space {
         ItemSpace::Project => ryeos_state::objects::CapturedItemSpace::Project,
         ItemSpace::Bundle => ryeos_state::objects::CapturedItemSpace::Bundle,
-        ItemSpace::Node => {
-            bail!("node-local config authority cannot be captured as general item provenance")
-        }
+        ItemSpace::Node => ryeos_state::objects::CapturedItemSpace::Node,
     })
 }
 
 fn capture_node_policy_provenance(
     provenance: &NodeHistoryPolicyProvenance,
 ) -> Result<ryeos_state::objects::CapturedNodeHistoryPolicyProvenance> {
-    match provenance {
-        NodeHistoryPolicyProvenance::MissingConfig => {
-            Ok(ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig)
-        }
-        NodeHistoryPolicyProvenance::SignedConfig {
-            path,
-            space,
-            content_hash,
-            signer_fingerprint,
-        } => {
-            if path != Path::new(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG) {
-                bail!(
-                    "node history provenance path must be exactly `{}`",
-                    ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG
-                );
-            }
-            Ok(
-                ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::SignedConfig {
-                    path: PathBuf::from(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG),
-                    space: capture_item_space(*space)?,
-                    content_hash: content_hash.clone(),
-                    signer_fingerprint: signer_fingerprint.clone(),
-                },
-            )
-        }
+    if provenance.path != Path::new(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG) {
+        bail!(
+            "node history provenance path must be exactly `{}`",
+            ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG
+        );
     }
+    Ok(ryeos_state::objects::CapturedNodeHistoryPolicyProvenance {
+        path: provenance.path.clone(),
+        space: capture_item_space(provenance.space)?,
+        content_hash: provenance.content_hash.clone(),
+        signer_fingerprint: provenance.signer_fingerprint.clone(),
+    })
 }
 
 fn capture_effective_trust_class(
@@ -2648,20 +2784,10 @@ impl ThreadLifecycleService {
         kind_profiles: Arc<KindProfileRegistry>,
         _events: Arc<EventStoreService>,
         event_hub: Arc<ThreadEventHub>,
+        current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        let hostname = env::var("HOSTNAME")
-            .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "HOSTNAME env var not set and system hostname unavailable. \
-                 Set HOSTNAME to this node's identity (e.g. hostname or unique site ID). \
-                 This is used to construct the site_id for thread isolation."
-                )
-            })?;
-        let current_site_id = format!("site:{hostname}");
-        crate::identity::validate_canonical_site_id(&current_site_id).with_context(|| {
-            format!("HOSTNAME `{hostname}` cannot form this node's canonical site identity")
-        })?;
+        crate::identity::validate_canonical_site_id(current_site_id)
+            .context("node identity produced a non-canonical site id")?;
 
         Ok(Self::new_with_site_id(
             state_store,
@@ -2669,7 +2795,7 @@ impl ThreadLifecycleService {
             kind_profiles,
             _events,
             event_hub,
-            current_site_id,
+            current_site_id.to_owned(),
         ))
     }
 
@@ -3303,7 +3429,10 @@ impl ThreadLifecycleService {
         admission: &NonExecutionRootAdmission,
     ) -> Result<ThreadDetail> {
         self.validate_root_create_shape(params)?;
-        admission.validate_for_persistence(&self.engine)?;
+        if !Arc::ptr_eq(&self.engine, &admission.request_engine) {
+            bail!("non-execution root admission belongs to a different engine generation");
+        }
+        admission.validate_for_persistence()?;
         let admitted_ref = admission
             .verified_subject
             .resolved
@@ -3456,7 +3585,7 @@ impl ThreadLifecycleService {
     /// repeats are rejected because target code cannot legitimately have
     /// self-attached while still awaiting release.
     pub fn attach_new_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
-        self.attach_new_process_with_owner(params, None)
+        self.attach_new_process_with_owner(params, None, false)
     }
 
     pub fn attach_new_process_owned(
@@ -3464,7 +3593,15 @@ impl ThreadLifecycleService {
         params: &ThreadAttachProcessParams,
         launch_owner: &str,
     ) -> Result<ThreadDetail> {
-        self.attach_new_process_with_owner(params, Some(launch_owner))
+        self.attach_new_process_with_owner(params, Some(launch_owner), false)
+    }
+
+    pub fn attach_new_process_owned_rearming_resume_budget(
+        &self,
+        params: &ThreadAttachProcessParams,
+        launch_owner: &str,
+    ) -> Result<ThreadDetail> {
+        self.attach_new_process_with_owner(params, Some(launch_owner), true)
     }
 
     fn attach_process_with_owner(
@@ -3499,6 +3636,7 @@ impl ThreadLifecycleService {
         &self,
         params: &ThreadAttachProcessParams,
         launch_owner: Option<&str>,
+        rearm_resume_budget: bool,
     ) -> Result<ThreadDetail> {
         let process_identity = params.process_identity.as_ref().ok_or_else(|| {
             anyhow!(
@@ -3507,14 +3645,26 @@ impl ThreadLifecycleService {
                 params.pgid
             )
         })?;
-        self.state_store.attach_new_thread_process(
-            &params.thread_id,
-            params.pid,
-            params.pgid,
-            process_identity,
-            &params.launch_metadata,
-            launch_owner,
-        )?;
+        if rearm_resume_budget {
+            self.state_store
+                .attach_new_thread_process_rearming_resume_budget(
+                    &params.thread_id,
+                    params.pid,
+                    params.pgid,
+                    process_identity,
+                    &params.launch_metadata,
+                    launch_owner,
+                )?;
+        } else {
+            self.state_store.attach_new_thread_process(
+                &params.thread_id,
+                params.pid,
+                params.pgid,
+                process_identity,
+                &params.launch_metadata,
+                launch_owner,
+            )?;
+        }
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
             anyhow!(
                 "thread not found after pre-release process attachment: {}",
@@ -3557,14 +3707,7 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        self.finalize_from_completion_inner(
-            thread_id,
-            completion,
-            managed_envelope,
-            None,
-            false,
-            None,
-        )
+        self.finalize_from_completion_inner(thread_id, completion, managed_envelope, None, None)
     }
 
     pub fn finalize_from_completion_with_project_snapshot(
@@ -3579,7 +3722,6 @@ impl ThreadLifecycleService {
             completion,
             managed_envelope,
             Some(result_project_snapshot_hash),
-            false,
             None,
         )
     }
@@ -3596,46 +3738,28 @@ impl ThreadLifecycleService {
             completion,
             None,
             result_project_snapshot_hash,
-            false,
             Some(launch_owner),
         )
     }
 
-    /// Finalization reported by the runtime callback boundary. The StateStore
-    /// atomically fences daemon shutdown and lets durable Cancel/Kill intent
-    /// dominate the runtime's self-reported terminal status.
-    pub fn finalize_from_runtime_completion(
-        &self,
-        thread_id: &str,
-        completion: &ExecutionCompletion,
-        managed_envelope: Option<Value>,
-    ) -> Result<ThreadDetail> {
-        self.finalize_from_completion_inner(
-            thread_id,
-            completion,
-            managed_envelope,
-            None,
-            true,
-            None,
-        )
-    }
-
-    /// Runtime-reported completion fenced by the exact launch owner carried on
-    /// its callback capability. The owner comparison is performed under the
-    /// same StateStore lock as terminal persistence.
+    /// Runtime-reported completion fenced by its exact launch owner and the
+    /// project generation sealed while the callback is still a synchronous
+    /// execution barrier. A retained generation must join the terminal state
+    /// transition; attaching it after terminal commit would make the durable
+    /// result depend on a best-effort cleanup phase.
     pub fn finalize_from_runtime_completion_owned(
         &self,
         thread_id: &str,
         launch_owner: &str,
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
+        result_project_snapshot_hash: Option<&str>,
     ) -> Result<ThreadDetail> {
         self.finalize_from_completion_inner(
             thread_id,
             completion,
             managed_envelope,
-            None,
-            false,
+            result_project_snapshot_hash,
             Some(launch_owner),
         )
     }
@@ -3646,7 +3770,6 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
         result_project_snapshot_hash: Option<&str>,
-        runtime_callback: bool,
         launch_owner: Option<&str>,
     ) -> Result<ThreadDetail> {
         let reported_status = completion.status.as_str();
@@ -3671,10 +3794,7 @@ impl ThreadLifecycleService {
             managed_envelope: managed_envelope.clone(),
             result_project_snapshot_hash: result_project_snapshot_hash.map(ToOwned::to_owned),
         };
-        let (persisted, effective) = if runtime_callback {
-            self.state_store
-                .finalize_thread_from_runtime(thread_id, &requested)?
-        } else if let Some(launch_owner) = launch_owner {
+        let (persisted, effective) = if let Some(launch_owner) = launch_owner {
             self.state_store
                 .finalize_thread_effective_owned(thread_id, launch_owner, &requested)?
         } else {
@@ -3783,7 +3903,7 @@ impl ThreadLifecycleService {
         // failure). A follow child that finalizes here degrades to a visible
         // failure envelope; the normal follow terminal carries its envelope via
         // the callback or `finalize_thread_with_managed_envelope`.
-        self.finalize_thread_inner(params, None, false, None)
+        self.finalize_thread_inner(params, None, None, None)
     }
 
     pub fn finalize_thread_owned(
@@ -3791,7 +3911,7 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
         launch_owner: &str,
     ) -> Result<ThreadDetail> {
-        self.finalize_thread_inner(params, None, false, Some(launch_owner))
+        self.finalize_thread_inner(params, None, None, Some(launch_owner))
     }
 
     /// Like [`Self::finalize_thread`], but carries the runtime's canonical managed
@@ -3803,7 +3923,25 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
         managed_envelope: Value,
     ) -> Result<ThreadDetail> {
-        self.finalize_thread_inner(params, Some(managed_envelope), false, None)
+        self.finalize_thread_inner(params, Some(managed_envelope), None, None)
+    }
+
+    /// Supervisor fallback settlement for a managed runtime that exited
+    /// before self-finalizing. The exact launch owner and any post-exit sealed
+    /// result generation join the same terminal transition.
+    pub fn finalize_thread_with_managed_envelope_owned(
+        &self,
+        params: &ThreadFinalizeParams,
+        managed_envelope: Value,
+        launch_owner: &str,
+        result_project_snapshot_hash: Option<&str>,
+    ) -> Result<ThreadDetail> {
+        self.finalize_thread_inner(
+            params,
+            Some(managed_envelope),
+            result_project_snapshot_hash,
+            Some(launch_owner),
+        )
     }
 
     /// Settle a link-failure row only if it is atomically proven to remain a
@@ -4115,7 +4253,7 @@ impl ThreadLifecycleService {
         &self,
         params: &ThreadFinalizeParams,
         managed_envelope: Option<Value>,
-        execution_result: bool,
+        result_project_snapshot_hash: Option<&str>,
         launch_owner: Option<&str>,
     ) -> Result<ThreadDetail> {
         let reported_status = normalize_terminal_status(&params.status)?;
@@ -4127,7 +4265,7 @@ impl ThreadLifecycleService {
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
             managed_envelope: managed_envelope.clone(),
-            result_project_snapshot_hash: None,
+            result_project_snapshot_hash: result_project_snapshot_hash.map(ToOwned::to_owned),
         };
         let (persisted, effective) = if let Some(launch_owner) = launch_owner {
             self.state_store.finalize_thread_effective_owned(
@@ -4135,9 +4273,6 @@ impl ThreadLifecycleService {
                 launch_owner,
                 &requested,
             )?
-        } else if execution_result {
-            self.state_store
-                .finalize_thread_from_runtime(&params.thread_id, &requested)?
         } else {
             self.state_store
                 .finalize_thread_effective(&params.thread_id, &requested)?
@@ -4239,14 +4374,12 @@ impl ThreadLifecycleService {
         if terminal_status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
             return;
         }
-        match self
+        let has_local_waiter = match self
             .state_store
             .get_follow_waiter_by_child_chain(chain_root_id)
         {
-            // No waiter awaits this chain — nothing to record (the common,
-            // non-follow case). No noise.
-            Ok(None) => return,
-            Ok(Some(_)) => {}
+            Ok(None) => false,
+            Ok(Some(_)) => true,
             Err(e) => {
                 tracing::warn!(
                     thread_id,
@@ -4256,7 +4389,7 @@ impl ThreadLifecycleService {
                 );
                 return;
             }
-        }
+        };
         // Only the followed child itself — or a continuation successor of it —
         // settles the follow. The child's chain also carries AUXILIARY runs
         // (launch-time knowledge composition, nested dispatches); the first of
@@ -4284,6 +4417,28 @@ impl ThreadLifecycleService {
                 return;
             }
         }
+        let has_remote_waiter = if has_local_waiter {
+            false
+        } else {
+            match self
+                .state_store
+                .has_remote_follow_delivery_reservation(chain_root_id)
+            {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id,
+                        chain_root_id,
+                        error = %e,
+                        "failed to look up remote follow reservation; terminal delivery deferred",
+                    );
+                    return;
+                }
+            }
+        };
+        if !has_local_waiter && !has_remote_waiter {
+            return;
+        }
         // Prefer the canonical envelope carried through finalization (preserves
         // outputs/warnings/raw cost). When none is present, this is a cancel /
         // reconcile / pre-run finalize or an old runtime — the stored result
@@ -4301,6 +4456,29 @@ impl ThreadLifecycleService {
                 degraded_follow_envelope(thread_id, terminal_status, result, error, final_cost)
             }
         };
+        if has_remote_waiter {
+            match self.state_store.reserve_remote_follow_terminal_delivery(
+                chain_root_id,
+                thread_id,
+                terminal_status,
+                &envelope,
+            ) {
+                Ok(Some(job_id)) => tracing::info!(
+                    thread_id,
+                    chain_root_id,
+                    job_id,
+                    "retained remote follow terminal delivery"
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    error = %e,
+                    "failed to retain remote follow terminal delivery",
+                ),
+            }
+            return;
+        }
         if let Err(e) = self.state_store.mark_follow_child_terminal(
             chain_root_id,
             thread_id,
@@ -4413,6 +4591,47 @@ impl ThreadLifecycleService {
             &envelope,
         )?;
         Ok(flipped.then_some(waiter.follow_key))
+    }
+
+    /// Rebuild target-owned remote follow delivery jobs after a crash between
+    /// the signed terminal commit and the ordinary post-finalize callback.
+    /// This complete projection scan is intentionally startup-only.
+    pub fn reconcile_remote_follow_terminal_deliveries(&self) -> Result<usize> {
+        let candidates = self
+            .state_store
+            .remote_follow_terminal_recovery_candidates()?;
+        let mut retained = 0usize;
+        for (chain_root_id, thread_id, terminal_status) in candidates {
+            let terminal = self
+                .state_store
+                .get_thread_terminal_authority(&thread_id)?
+                .ok_or_else(|| anyhow!("remote follow terminal recovery lost its authority"))?;
+            if terminal.status.as_str() != terminal_status {
+                bail!("remote follow terminal recovery status changed");
+            }
+            let envelope = terminal.managed_envelope.unwrap_or_else(|| {
+                degraded_follow_envelope(
+                    &thread_id,
+                    &terminal_status,
+                    terminal.result.as_ref(),
+                    terminal.error.as_ref(),
+                    terminal.final_cost.as_ref(),
+                )
+            });
+            if self
+                .state_store
+                .reserve_remote_follow_terminal_delivery(
+                    &chain_root_id,
+                    &thread_id,
+                    &terminal_status,
+                    &envelope,
+                )?
+                .is_some()
+            {
+                retained += 1;
+            }
+        }
+        Ok(retained)
     }
 
     fn update_scheduler_fire_on_thread_terminal(
@@ -4836,6 +5055,66 @@ impl ThreadLifecycleService {
         })
     }
 
+    pub fn request_continuation_with_project_generation(
+        &self,
+        params: &ThreadContinuationParams,
+        successor_thread_id: &str,
+        expected_resume_context: &crate::launch_metadata::ResumeContext,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        source_result_snapshot_hash: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+    ) -> Result<ThreadContinuationResult> {
+        validate_thread_id_format(successor_thread_id)?;
+        validate_continued_completion(&params.completion)?;
+        let source = self
+            .get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("source thread not found: {}", params.thread_id))?;
+        let profile = self.kind_profiles().get(&source.kind);
+        if !profile.is_some_and(|profile| profile.supports_continuation) {
+            bail!("continuation is not supported for kind '{}'", source.kind);
+        }
+        let successor_record = NewThreadRecord {
+            thread_id: successor_thread_id.to_string(),
+            chain_root_id: source.chain_root_id.clone(),
+            kind: source.kind.clone(),
+            item_ref: source.item_ref.clone(),
+            executor_ref: source.executor_ref.clone(),
+            launch_mode: source.launch_mode.clone(),
+            current_site_id: source.current_site_id.clone(),
+            origin_site_id: source.origin_site_id.clone(),
+            upstream_thread_id: Some(source.thread_id.clone()),
+            requested_by: source.requested_by.clone(),
+            project_root: source.project_root.as_ref().map(PathBuf::from),
+            base_project_snapshot_hash: expected_resume_context
+                .project_authority
+                .operational_snapshot_projection()
+                .map(str::to_owned),
+            project_authority: expected_resume_context.project_authority.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: None,
+        };
+        let (persisted, successor) = self
+            .state_store
+            .create_machine_continuation_with_project_generation(
+                &successor_record,
+                &source.thread_id,
+                &source.chain_root_id,
+                params.reason.as_deref(),
+                expected_resume_context,
+                successor_launch_metadata,
+                source_result_snapshot_hash,
+                initial_events,
+            )?;
+        self.publish_records(&persisted);
+        Ok(ThreadContinuationResult {
+            source_thread_id: source.thread_id,
+            successor_thread_id: successor.thread_id.clone(),
+            chain_root_id: source.chain_root_id,
+            successor,
+        })
+    }
+
     /// Create a parent's follow-resume successor (created, NOT launched) and
     /// settle the parent `continued` in one atomic op, then publish the resulting
     /// events. The daemon follow keystone calls this to suspend the parent; the
@@ -4896,6 +5175,37 @@ impl ThreadLifecycleService {
     ) -> Result<StateAnchorPublication> {
         let publication = self.state_store.publish_state_anchor(params)?;
         self.publish_records(std::slice::from_ref(&publication.event));
+        Ok(publication)
+    }
+
+    pub fn publish_project_observation(
+        &self,
+        params: &ryeos_runtime::ProjectObservationPublishParams,
+        source_definition_ref: &str,
+        source_effective_definition_digest: &str,
+    ) -> Result<crate::state_store::ProjectObservationPublication> {
+        let publication = self.state_store.publish_project_observation(
+            params,
+            source_definition_ref,
+            source_effective_definition_digest,
+        )?;
+        if publication.inserted {
+            self.publish_records(std::slice::from_ref(&publication.event));
+        }
+        Ok(publication)
+    }
+
+    pub fn publish_provider_call_observation(
+        &self,
+        thread_id: &str,
+        draft: &ryeos_state::ProviderCallObservationDraft,
+    ) -> Result<crate::state_store::ProviderCallObservationPublication> {
+        let publication = self
+            .state_store
+            .publish_provider_call_observation(thread_id, draft)?;
+        if publication.inserted {
+            self.publish_records(std::slice::from_ref(&publication.event));
+        }
         Ok(publication)
     }
 
@@ -5072,27 +5382,31 @@ impl ThreadLifecycleService {
         let page = self
             .state_store
             .execution_tree(selected_thread_id, max_depth, max_nodes)?;
-        let positions = page
-            .items
-            .iter()
-            .map(|item| ExecutionTreePosition {
-                parent_thread_id: item.tree_parent_thread_id.clone(),
-                relation: item.relation.clone(),
-                depth: item.depth,
-                has_children: item.has_children,
-            })
-            .collect::<Vec<_>>();
-        let items = page
-            .items
-            .into_iter()
-            .map(|item| item.item)
-            .collect::<Vec<_>>();
+        // A DAG fan-in emits one structural row per path. Decorate each thread
+        // exactly once, then reuse that page-scoped live snapshot for every
+        // path. Decorating duplicate rows independently can observe different
+        // facets/current-node/pending state within one response, and the field
+        // projection must never receive divergent facts for one thread id.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut items = Vec::new();
+        let mut paths = Vec::with_capacity(page.items.len());
+        for item in page.items {
+            let thread_id = item.item.thread_id.clone();
+            paths.push((
+                thread_id.clone(),
+                ExecutionTreePosition {
+                    parent_thread_id: item.tree_parent_thread_id,
+                    relation: item.relation,
+                    depth: item.depth,
+                    has_children: item.has_children,
+                },
+            ));
+            if seen.insert(thread_id) {
+                items.push(item.item);
+            }
+        }
         let decorated = self.decorate_list_items(items)?;
-        let threads = decorated
-            .into_iter()
-            .zip(positions)
-            .map(|(thread, tree)| ExecutionTreeView { thread, tree })
-            .collect::<Vec<_>>();
+        let threads = expand_execution_tree_paths(decorated, paths)?;
         let root_thread_id = threads.first().map(|row| row.thread.item.thread_id.clone());
         Ok(ExecutionTreeResult {
             root_thread_id,
@@ -5983,14 +6297,14 @@ fn admit_verified_root_execution_inner(
         resolution_closure,
         admitted_request_snapshot,
     } = validated_resolution;
-    let history = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
+    let launch_policy = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
         &verified_subject,
         resolution_closure.output(),
         &engine.kinds,
         node_history_policy,
     )
-    .map_err(|error| anyhow!("history-policy resolution failed: {error}"))?
-    .history;
+    .map_err(|error| anyhow!("launch-policy resolution failed: {error}"))?;
+    let history = launch_policy.history;
     let admission = RootExecutionAdmission {
         verified_subject,
         resolution_closure,
@@ -6001,6 +6315,7 @@ fn admit_verified_root_execution_inner(
         ref_bindings,
         captured_history_policy: capture_thread_history_policy(&history)?,
         resolved_history_policy: history,
+        resolved_result_policy: launch_policy.result,
         project_binding,
         admitted_request_snapshot,
         selected_executor_route: None,
@@ -6021,7 +6336,7 @@ fn admit_verified_root_execution_inner(
 // independent admission facts and remain explicit at this boundary.
 #[allow(clippy::too_many_arguments)]
 pub fn admit_non_execution_root(
-    engine: &Engine,
+    engine: &Arc<Engine>,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
     item_ref: &str,
     project_path: &Path,
@@ -6074,14 +6389,57 @@ pub fn admit_non_execution_root(
     let resolved_history_policy =
         resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
     let admission = NonExecutionRootAdmission {
+        request_engine: Arc::clone(engine),
         verified_subject,
         plan_context,
         project_authority,
+        project_binding: None,
         thread_profile,
         captured_history_policy: capture_thread_history_policy(&resolved_history_policy)?,
         resolved_history_policy,
     };
-    admission.validate_for_persistence(engine)?;
+    admission.validate_for_persistence()?;
+    Ok(admission)
+}
+
+/// Admit a daemon-owned root against an already-captured immutable project
+/// generation. This is the pinned counterpart of [`admit_non_execution_root`]
+/// and reuses the same engine/project binding that owns the CoW workspace.
+#[allow(clippy::too_many_arguments)]
+pub fn admit_pinned_non_execution_root(
+    engine: &Arc<Engine>,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+    item_ref: &str,
+    plan_context: PlanContext,
+    project_binding: AdmittedProjectBinding,
+    thread_profile: String,
+) -> Result<NonExecutionRootAdmission> {
+    validate_principal_identifier(
+        "pinned non-execution root acting principal",
+        plan_principal_identifier(&plan_context),
+    )?;
+    project_binding.validate_for(engine, &plan_context)?;
+    let canonical_ref = CanonicalRef::parse(item_ref)
+        .map_err(|error| anyhow!("invalid pinned root policy item ref `{item_ref}`: {error}"))?;
+    let resolved = engine
+        .resolve(&plan_context, &canonical_ref)
+        .map_err(|error| anyhow!("pinned root policy item resolution failed: {error}"))?;
+    let verified_subject = engine
+        .verify(&plan_context, resolved.clone())
+        .map_err(|error| anyhow!("pinned root policy item verification failed: {error}"))?;
+    let resolved_history_policy =
+        resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
+    let admission = NonExecutionRootAdmission {
+        request_engine: Arc::clone(engine),
+        verified_subject,
+        plan_context,
+        project_authority: project_binding.exact_authority().clone(),
+        project_binding: Some(project_binding),
+        thread_profile,
+        captured_history_policy: capture_thread_history_policy(&resolved_history_policy)?,
+        resolved_history_policy,
+    };
+    admission.validate_for_persistence()?;
     Ok(admission)
 }
 
@@ -6211,6 +6569,7 @@ pub(super) fn build_execution_plan_for_request(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
     verified: &VerifiedItem,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
 ) -> Result<ryeos_engine::contracts::ExecutionPlan> {
     match resolved
         .root_admission
@@ -6233,6 +6592,7 @@ pub(super) fn build_execution_plan_for_request(
                     &resolved.plan_context.execution_hints,
                     project_root,
                     authority,
+                    sealed_content,
                 )
                 .map_err(|e| anyhow!("plan build failed: {e}"))
         }
@@ -6252,6 +6612,7 @@ pub(super) fn build_execution_plan_for_request(
                 verified,
                 &resolved.parameters,
                 &resolved.plan_context.execution_hints,
+                sealed_content,
             )
             .map_err(|e| anyhow!("plan build failed: {e}")),
     }
@@ -6263,7 +6624,7 @@ pub fn validate_item(
     resolved: &ResolvedExecutionRequest,
 ) -> Result<ValidatedItem> {
     let verified = verified_execution_subject(engine, resolved)?;
-    let plan = build_execution_plan_for_request(engine, resolved, &verified)?;
+    let plan = build_execution_plan_for_request(engine, resolved, &verified, None)?;
 
     Ok(ValidatedItem {
         trust_class: verified.trust_class,
@@ -6316,6 +6677,129 @@ mod tests {
         );
     }
 
+    #[test]
+    fn digest_only_result_retention_keeps_only_digest_and_policy_identity() {
+        let policy = ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::DigestOnly,
+            canonical_item_ref: "service:test/sensitive".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::ItemAuthored {
+                composed_path: "result_retention".to_string(),
+                effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            },
+        };
+        let live = json!({"userCode":"SECRET-CODE","verificationUri":"https://example.invalid"});
+        let retained = retained_thread_result(&live, &policy).unwrap();
+
+        assert_eq!(retained["kind"], "ryeos.digest_only_result");
+        assert_eq!(retained["schema"], 1);
+        assert_eq!(
+            retained["result_digest"],
+            ryeos_state::objects::canonical_value_digest(&live).unwrap()
+        );
+        assert_eq!(
+            retained["policy"]["canonical_item_ref"],
+            "service:test/sensitive"
+        );
+        assert!(
+            !serde_json::to_string(&retained)
+                .unwrap()
+                .contains("SECRET-CODE")
+        );
+
+        let mut full = policy;
+        full.retention = ryeos_engine::history_policy::ThreadResultRetention::Full;
+        assert_eq!(retained_thread_result(&live, &full).unwrap(), live);
+    }
+
+    #[test]
+    fn digest_only_error_retention_does_not_persist_secret_text() {
+        let policy = ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::DigestOnly,
+            canonical_item_ref: "service:test/sensitive".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::ItemAuthored {
+                composed_path: "result_retention".to_string(),
+                effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            },
+        };
+        let live = json!({"error":"DEVICE-CREDENTIAL-SENTINEL"});
+        let retained = retained_thread_error(&live, &policy).unwrap();
+        assert_eq!(retained["kind"], "ryeos.digest_only_error");
+        assert!(
+            !serde_json::to_string(&retained)
+                .unwrap()
+                .contains("DEVICE-CREDENTIAL-SENTINEL")
+        );
+    }
+
+    fn test_result_policy(
+        retention: ryeos_engine::history_policy::ThreadResultRetention,
+    ) -> ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+        ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention,
+            canonical_item_ref: "service:test/large-result".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::DefaultFull,
+        }
+    }
+
+    #[test]
+    fn full_result_retention_rejects_oversized_content_before_finalization() {
+        let live = json!({
+            "payload": "x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES)
+        });
+
+        let error = retained_thread_result(
+            &live,
+            &test_result_policy(ryeos_engine::history_policy::ThreadResultRetention::Full),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("validate retained thread result")
+        );
+    }
+
+    #[test]
+    fn full_error_retention_rejects_oversized_content_before_finalization() {
+        let live = json!({
+            "error": "x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES)
+        });
+
+        let error = retained_thread_error(
+            &live,
+            &test_result_policy(ryeos_engine::history_policy::ThreadResultRetention::Full),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("validate retained thread error"));
+    }
+
+    #[test]
+    fn digest_only_retention_accepts_an_oversized_live_result() {
+        let live = json!({
+            "payload": "x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES)
+        });
+
+        let retained = retained_thread_result(
+            &live,
+            &test_result_policy(ryeos_engine::history_policy::ThreadResultRetention::DigestOnly),
+        )
+        .unwrap();
+        assert_eq!(retained["kind"], "ryeos.digest_only_result");
+        ryeos_state::objects::validate_thread_result_content(Some(&retained), None).unwrap();
+    }
+
     fn empty_test_engine() -> Arc<Engine> {
         Arc::new(Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
@@ -6336,6 +6820,7 @@ mod tests {
             resolved_ref: "directive:example".to_string(),
             source_path: workspace.join(".ai/directives/example.md"),
             source_space: ItemSpace::Project,
+            source_root: ItemSourceRoot::Project,
             trust_class: ResolutionTrustClass::TrustedProject,
             signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
@@ -6368,6 +6853,13 @@ mod tests {
             resolved_ref: "runtime:augmentation-runtime".to_string(),
             source_path: PathBuf::from("/bundle/.ai/runtimes/augmentation-runtime.yaml"),
             source_space,
+            source_root: match source_space {
+                ItemSpace::Project => ItemSourceRoot::Project,
+                ItemSpace::Bundle => ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
+                ItemSpace::Node => ItemSourceRoot::Node,
+            },
             trust_class: ResolutionTrustClass::TrustedBundle,
             signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
@@ -6652,6 +7144,9 @@ mod tests {
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/items/effective.yaml"),
                 source_space: ItemSpace::Bundle,
+                source_root: ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
                 resolved_from: "bundle:standard".to_string(),
                 shadowed: Vec::new(),
                 probed_absent: Vec::new(),
@@ -6752,7 +7247,7 @@ mod tests {
                     requested_seconds: 30,
                     minimum_seconds: 60,
                 }),
-                node_policy: NodeHistoryPolicyProvenance::SignedConfig {
+                node_policy: NodeHistoryPolicyProvenance {
                     path: PathBuf::from(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG),
                     space: ItemSpace::Project,
                     content_hash: "44".repeat(32),
@@ -6785,11 +7280,11 @@ mod tests {
             json!("trusted_project")
         );
         assert_eq!(
-            wire["resolved_from"]["item_authored"]["node_policy"]["signed_config"]["space"],
+            wire["resolved_from"]["item_authored"]["node_policy"]["space"],
             json!("project")
         );
         assert_eq!(
-            wire["resolved_from"]["item_authored"]["node_policy"]["signed_config"]["path"],
+            wire["resolved_from"]["item_authored"]["node_policy"]["path"],
             json!(ryeos_engine::history_policy::NODE_HISTORY_POLICY_CONFIG)
         );
     }
@@ -6959,6 +7454,80 @@ mod tests {
         let steered = ThreadListView { pending: 2, ..view };
         let v2 = serde_json::to_value(&steered).unwrap();
         assert_eq!(v2["pending"], json!(2));
+    }
+
+    #[test]
+    fn execution_tree_fan_in_reuses_one_decorated_snapshot_for_every_path() {
+        let thread = ThreadListView {
+            item: ThreadListItem {
+                thread_id: "T-joined".to_string(),
+                chain_root_id: "T-root".to_string(),
+                kind: "graph".to_string(),
+                status: "completed".to_string(),
+                item_ref: "graph:test/fan-in".to_string(),
+                launch_mode: "managed_async".to_string(),
+                current_site_id: "site:test".to_string(),
+                origin_site_id: "site:test".to_string(),
+                upstream_thread_id: None,
+                successor_thread_id: None,
+                requested_by: None,
+                project_root: None,
+                project_authority: None,
+                lifecycle_authority: None,
+                admitted_launch_capsule_hash: None,
+                created_at: "t0".to_string(),
+                updated_at: "t1".to_string(),
+            },
+            execution: ExecutionFacts {
+                supports_continuation: true,
+                supports_operator_followup: false,
+            },
+            follow: None,
+            project: None,
+            pending: 2,
+            facets: BTreeMap::from([("game".to_string(), "fixture".to_string())]),
+            current_node: Some(CurrentNode {
+                node: "done".to_string(),
+                step: 11,
+            }),
+            error: None,
+        };
+        let paths = vec![
+            (
+                "T-joined".to_string(),
+                ExecutionTreePosition {
+                    parent_thread_id: Some("T-left".to_string()),
+                    relation: "spawned".to_string(),
+                    depth: 3,
+                    has_children: false,
+                },
+            ),
+            (
+                "T-joined".to_string(),
+                ExecutionTreePosition {
+                    parent_thread_id: Some("T-right".to_string()),
+                    relation: "spawned".to_string(),
+                    depth: 3,
+                    has_children: false,
+                },
+            ),
+        ];
+
+        let rows = expand_execution_tree_paths(vec![thread], paths).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tree.parent_thread_id.as_deref(), Some("T-left"));
+        assert_eq!(rows[1].tree.parent_thread_id.as_deref(), Some("T-right"));
+        for row in rows {
+            assert_eq!(row.thread.pending, 2);
+            assert_eq!(
+                row.thread.facets.get("game").map(String::as_str),
+                Some("fixture")
+            );
+            let current = row.thread.current_node.expect("current graph node");
+            assert_eq!(current.node, "done");
+            assert_eq!(current.step, 11);
+        }
     }
 
     #[test]

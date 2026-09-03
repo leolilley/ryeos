@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T04:23:11Z:8316696c77836a446ace577106f7e4cd6f8156772d00cc9c43d1bbd9e57f5387:DoPSij+zynb1byVV2WSNHIiCIfbSszCh9vWZ6FuYg2I2bmMiUiIjPfaRKliYFxH/zHCVz138HqWoe9M4VaPlBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:38Z:c8b4fa41312956d9d16446fd0e4509663f1cab32717fd729c4f12a12bdba3a7f:cBAKjOJrXE2HQykaWOpxHtwjBJe4OdlzRe5T4BLKAwCbOcFUIIi6fvPwU4Kqxatl2j/ex1qVAdzA8+oY0j1mCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/kinds
 tags: [kind, directive, llm, workflow]
@@ -16,5 +16,11 @@ Invariant: directives are markdown LLM workflows whose effective body, permissio
 - Execution: delegates through runtime registry to `runtime:directive-runtime`
 - Policy facts: `requires.capabilities.declared` becomes `effective_caps`
 - Launch augmentation: composed context positions are rendered through the knowledge runtime before launch
+- Hooks: authored `hooks` inherit or replace atomically; configured layers are captured before launch
 
-Directive inheritance keeps the root body verbatim, narrows child permissions against parent effective permissions, and merges context blocks root-last by position.
+Directive inheritance keeps the root body verbatim, narrows child permissions
+against parent effective permissions, merges context blocks root-last by
+position, and treats hook policy as one nearest complete list. After declared
+augmentation, the daemon captures the effective hook plan, validates and seals
+the full resolution, and the runtime recomputes its
+`effective_definition_digest` before execution.

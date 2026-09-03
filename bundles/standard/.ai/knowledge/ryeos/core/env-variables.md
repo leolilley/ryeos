@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-17T00:38:07Z:9fbc7529e4b7f944499675deb8b3a5f8a705bf35d0cc8ed770b4aaf168bb897e:cELcoxmLqVz3kcYLjg8Ttk8bs+L+Nv92Wxnb449UzxzPNmw8ewrntG3dxRDPhEacKkKfnfnQJ1osrObQOXnJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:caf9eecbe5d3b5a51fec59e50700fdabbaa683f9a5547b23c0cee3941f81b34b:VWQoFYWO0g8aQWB+a5OOk6NCVbgyfFfm/K6aXm4501yqJdB53SNE8e0LKsJE7CfZyPzZruEKyOlS8NvR0sCDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
-version: "2.1.1"
+version: "2.2.0"
 description: >
   Environment variables for local lifecycle, daemon dispatch, CLI
   signing, runtimes, tools, and provider auth.
@@ -14,7 +14,13 @@ description: >
 
 | Variable | Description |
 |---|---|
-| `HOSTNAME` | Node identity for thread isolation. Must be non-empty. |
+| `HOSTNAME` | Canonical node site name used to form `site:<HOSTNAME>` for thread and remote-origin isolation. It must be non-empty and stable across daemon restarts. |
+
+Origin-bound remote grants must name the exact `site_id` reported by the
+running source node. A supervisor must therefore start that node with the same
+canonical host identity used when the grant was issued; changing `HOSTNAME`
+does not rename a node or migrate its retained chains and instead causes exact
+site-bound operations to fail closed.
 
 ## Local lifecycle and daemon configuration
 
@@ -40,13 +46,18 @@ The daemon sets `RYEOSD_URL` and `RYEOSD_SOCKET_PATH` for its own listener
 process. A child receives only the environment selected by its verified
 protocol plus daemon-root, engine-plan, secret, and resume bindings. In
 particular, callback variables (`RYEOSD_SOCKET_PATH`,
-`RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`, and
-`RYEOSD_PROJECT_PATH`) are declared by callback-capable protocols such as
+`RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`) and
+the identity-only `RYEOSD_PROJECT_STATE_SCOPE` are declared by callback-capable protocols such as
 `runtime` and the default tool protocol `tool_callback`; callback-free
-protocols receive none of that authority. `RYEOSD_PROJECT_PATH` is the callback
-authorization/state anchor: a deliberate state-root override when present,
-otherwise the effective project root. It may intentionally differ from the
-source-oriented `RYE_PROJECT_PATH`.
+protocols receive none of that authority. The daemon derives durable project
+and state authority from the sealed callback token; subprocesses neither
+receive nor submit the canonical host project path as callback authority.
+
+`RYEOSD_PROJECT_STATE_SCOPE` is an opaque lowercase digest naming the admitted
+logical project's durable state namespace. It stays stable when a pinned COW
+continuation relocates or advances its operational snapshot. It is empty for
+projectless execution and grants no state access by itself; the callback token
+still supplies authority.
 
 Engine-plan and lifecycle bindings can include `RYEOS_THREAD_ID`,
 `RYEOS_CHAIN_ROOT_ID`, `RYEOS_ITEM_PATH`, `RYEOS_ITEM_KIND`, `RYEOS_ITEM_REF`,

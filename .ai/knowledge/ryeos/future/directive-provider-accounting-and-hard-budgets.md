@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-23T15:25:30Z:90cbe378097a17e552425da8cb6d73f6abfddd7e1cb69bd7b7b1581b9ef98a28:fRsTBXN8Lesb8BZOWzEdu8CfoiG1DAz+U+6zA0SM1MTZR/oEiUae0XTOEhxWuMOaX2FEOZDx7ZL7B+yJvoUPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-06T03:37:13Z:0940fe9acb1dc271d23ce89cdf0f4b70c75ed62b18f29aab1eb9c5bbba1cd6fb:X5ZpynSbYrbRfEHE/CgJNOeZsDznx6ncquasRStojvF+MtrQu+dqZ2b1eaBUwrJr2mvRqR3ZhM7J1LEsLNULCw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 # Directive provider accounting and hard budgets
 
 ## Status
@@ -92,3 +92,11 @@ and the exact local stream-byte backstop remain separate controls.
   preflight bound;
 - a general Prometheus/OpenTelemetry exporter over the durable summary
   surface.
+
+## Relationship to execution-family analytics
+
+Cost attribution gains a denominator once execution families exist: see
+`execution-family-analytics.md` for cost-per-effective-digest series. Budget
+policy and analytics stay separate concerns — budgets act at
+admission/dispatch time; analytics read sealed accounting scopes after the
+fact.

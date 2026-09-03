@@ -1,0 +1,34 @@
+[package]
+name = "ryeos-structured-session"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "ryeos-structured-session-bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "ryeos-worker-execution-launch-preparer"
+path = "src/bin/launch_preparer.rs"
+
+[[bin]]
+name = "ryeos-worker-execution-runtime"
+path = "src/bin/session_runtime.rs"
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jsonschema.workspace = true
+lillux.workspace = true
+ryeos-engine.workspace = true
+ryeos-handler-protocol.workspace = true
+ryeos-handler-bins = { path = "../handler-bins" }
+ryeos-runtime.workspace = true
+ryeos-state.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

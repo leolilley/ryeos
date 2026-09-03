@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-26T10:09:18Z:475862b9902b0f50f8faf3df4878c1b5d0c29470ca5038e9770d6c13c9ac8388:M4jaPD9YPSAk+LsocSNMgRz8ZlsGX6QrLUuL9dbFHeZdgUDMtUgp5W0/Agiu5D22eJ2IPsR+YSjJyNoEZHxfCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, status]
+description: "Read the durable projection for one Codex session"
+forms:
+  - slots:
+      - field: chain_root_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/status
+  availability: daemon

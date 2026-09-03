@@ -1,0 +1,190 @@
+name: Qualify local-inference against one RyeOS source
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: "Exact RyeOS source revision to qualify"
+        required: true
+        type: string
+      require_promoted_release:
+        description: "Require the immutable realization release to be non-prerelease"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    name: Fresh-node activation and replay conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out exact RyeOS source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Verify exact source and immutable realization release
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUIRE_PROMOTED: ${{ inputs.require_promoted_release }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          CONTRACT="scripts/release/local-inference-qwen3-0.6b-v1.json"
+          RELEASE_TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_tag"])' "$CONTRACT")"
+          RELEASE_JSON="$RUNNER_TEMP/local-inference-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RELEASE_JSON"
+          VERIFY_ARGS=(
+            --contract "$CONTRACT"
+            --release-json "$RELEASE_JSON"
+          )
+          if [[ "$REQUIRE_PROMOTED" == true ]]; then
+            VERIFY_ARGS+=(--require-promoted)
+          fi
+          python3 scripts/release/verify-local-inference-release.py "${VERIFY_ARGS[@]}"
+
+          if [[ "$REQUIRE_PROMOTED" == true ]]; then
+            REALIZATION_SOURCE_SHA="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+            RUNS_JSON="$RUNNER_TEMP/local-inference-release-runs.json"
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/publish-local-inference-realizations.yml/runs" \
+              -f head_sha="$REALIZATION_SOURCE_SHA" \
+              -f status=completed \
+              -f per_page=100 > "$RUNS_JSON"
+            python3 - "$RUNS_JSON" "$REALIZATION_SOURCE_SHA" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          runs = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          source_sha = sys.argv[2]
+          accepted = [
+              run for run in runs.get("workflow_runs", [])
+              if run.get("head_sha") == source_sha
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+          ]
+          if not accepted:
+              raise SystemExit(
+                  "the immutable realization release has no successful exact-tag "
+                  "publication and online-conformance run"
+              )
+          PY
+          fi
+
+      - name: Install disposable-node build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils libcap-dev libssl-dev pkg-config python3 python3-yaml zstd
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Build exact disposable-node inputs
+        run: |
+          scripts/populate-bundles.sh \
+            --key .dev-keys/PUBLISHER_DEV.pem \
+            --owner ryeos-dev \
+            --bundle-set full \
+            --all \
+            --jobs 2
+          QUALIFICATION_BIN="$RUNNER_TEMP/local-inference-qualification-bin"
+          mkdir "$QUALIFICATION_BIN"
+          install -m 0755 target/release/ryeos "$QUALIFICATION_BIN/ryeos"
+          install -m 0755 target/release/ryeosd "$QUALIFICATION_BIN/ryeosd"
+          rm -rf -- target
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Qualify directive native-resume crash cuts
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/directive-crash-target
+          RYEOS_TEST_SKIP_BUNDLE_REFRESH: "1"
+        run: |
+          cargo test -p ryeosd \
+            --features crash-qualification-test-support \
+            --test directive_crash_recovery_e2e
+          rm -rf -- "$CARGO_TARGET_DIR"
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Stage exact immutable archives for offline qualification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONTRACT="scripts/release/local-inference-qwen3-0.6b-v1.json"
+          RELEASE_TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_tag"])' "$CONTRACT")"
+          OFFLINE_ROOT="$RUNNER_TEMP/local-inference-offline-archives"
+          mkdir "$OFFLINE_ROOT"
+          python3 - "$CONTRACT" <<'PY' | while IFS= read -r archive; do
+          import json
+          from pathlib import Path
+          import sys
+
+          contract = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          for realization in contract["realizations"]:
+              print(realization["archive"])
+          PY
+            gh release download "$RELEASE_TAG" \
+              --pattern "$archive" \
+              --dir "$OFFLINE_ROOT"
+          done
+
+      # These are functional/recovery conformance runs over exact bytes already
+      # trusted by the RyeOS publisher's signed contract. Disabled isolation
+      # is intentionally honest: same-UID worker observations are not evidence
+      # that adversarial third-party code is harmless. Offline acquisition is
+      # selected explicitly and has no online fallback; the second run proves
+      # the separately selected signed HTTPS distribution path. This job has
+      # no write token or release authority, and runs on a disposable runner.
+      - name: Qualify offline fresh-node activation, bank, restart, and replay
+        run: |
+          scripts/release/qualify-local-inference-node.sh \
+            --release-contract scripts/release/local-inference-qwen3-0.6b-v1.json \
+            --bundle-source bundles \
+            --ryeos-bin "$RUNNER_TEMP/local-inference-qualification-bin/ryeos" \
+            --archive-root "$RUNNER_TEMP/local-inference-offline-archives" \
+            --minimum-free-bytes 2147483648 \
+            --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml \
+            --qualification-parent "$RUNNER_TEMP" \
+            --evidence-output "$RUNNER_TEMP/local-inference-offline-qualification.json"
+
+      - name: Release offline archive staging before online qualification
+        run: |
+          rm -rf -- "$RUNNER_TEMP/local-inference-offline-archives"
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Qualify online fresh-node activation, bank, restart, and replay
+        run: |
+          scripts/release/qualify-local-inference-node.sh \
+            --release-contract scripts/release/local-inference-qwen3-0.6b-v1.json \
+            --bundle-source bundles \
+            --ryeos-bin "$RUNNER_TEMP/local-inference-qualification-bin/ryeos" \
+            --online \
+            --minimum-free-bytes 2147483648 \
+            --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml \
+            --qualification-parent "$RUNNER_TEMP" \
+            --evidence-output "$RUNNER_TEMP/local-inference-online-qualification.json"
+
+      - name: Retain exact local-inference qualification evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: local-inference-qualification-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/local-inference-offline-qualification.json
+            ${{ runner.temp }}/local-inference-online-qualification.json
+          if-no-files-found: error
+          retention-days: 30

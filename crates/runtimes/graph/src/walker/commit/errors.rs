@@ -1,4 +1,5 @@
 use super::*;
+use crate::evaluation::GraphRunExpressionContext;
 
 impl Walker {
     pub(super) async fn commit_expression_failed(
@@ -132,14 +133,17 @@ impl Walker {
                         .count(),
                     expected: fanout.statuses.len(),
                     results: None,
+                    dispatches: Vec::new(),
                 });
         let receipt = NodeReceipt {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash,
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),
@@ -299,9 +303,11 @@ impl Walker {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),
@@ -360,7 +366,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(execution),
-                    Some(graph_run_id),
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    ),
                 ) {
                     Ok(Some(next_node)) => {
                         let next_step = step + 1;
@@ -489,9 +500,11 @@ impl Walker {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),
@@ -550,7 +563,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(execution),
-                    Some(graph_run_id),
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    ),
                 ) {
                     Ok(Some(next_node)) => {
                         let next_step = step + 1;

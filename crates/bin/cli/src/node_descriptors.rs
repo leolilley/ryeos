@@ -2,7 +2,9 @@ use std::path::Path;
 
 use anyhow::Context;
 use ryeos_app::node_config::loader::BootstrapLoader;
-use ryeos_app::node_config::{NodeConfigSnapshot, SectionTable};
+use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
+use ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority;
+use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_runtime::{CommandDef, CommandDispatch};
 
 #[derive(Debug, Clone)]
@@ -34,6 +36,7 @@ pub fn load_verified_snapshot_with_trust(
     app_root: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> anyhow::Result<NodeConfigSnapshot> {
+    let policy = load_verified_policy_snapshot_with_trust(app_root, trust_store)?;
     let loader = BootstrapLoader {
         app_root,
         trust_store,
@@ -42,8 +45,30 @@ pub fn load_verified_snapshot_with_trust(
         .load_bundle_section()
         .context("load verified node bundle registrations")?;
     loader
-        .load_full(&SectionTable::new(), &bundles)
+        .load_full(
+            &NodeConfigTable::new(),
+            &bundles,
+            policy.require::<CommandRegistrationAuthority>()?,
+            &NodePolicyTable::new(),
+        )
         .context("load verified node config")
+}
+
+pub fn load_verified_policy_snapshot(app_root: &Path) -> anyhow::Result<NodePolicySnapshot> {
+    let trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+    )
+    .context("load trust store for verified node policy")?;
+    load_verified_policy_snapshot_with_trust(app_root, &trust_store)
+}
+
+pub fn load_verified_policy_snapshot_with_trust(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> anyhow::Result<NodePolicySnapshot> {
+    ryeos_app::node_policy::load_snapshot(app_root, trust_store, &NodePolicyTable::new())
+        .context("load verified node policy generation")
 }
 
 pub fn load_command_descriptors_from_snapshot(
@@ -134,8 +159,6 @@ mod tests {
                 source_file: PathBuf::from("/tmp/command.yaml"),
                 provenance: ryeos_runtime::CommandProvenance::default(),
             }],
-            hosted_node_policies: vec![],
-            command_registration_policy: Default::default(),
         };
 
         let commands = load_command_descriptors_from_snapshot(&snapshot);

@@ -50,8 +50,10 @@ fn plant_mock_provider(
     let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"
@@ -691,7 +693,7 @@ fn sse_dispatch_launch_collision() {
                 kind_schema_content_hash: hash,
                 resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                     node_policy:
-                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
                 },
             }
         }),

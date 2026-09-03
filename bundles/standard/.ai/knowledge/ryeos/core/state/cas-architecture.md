@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:30Z:04c985679c14c5304e1907e819d3428f50a3fd4c1439cfa9f5903762b3970c6c:Qld55Scx7TZ2V7lQJzGNTnNlsKyhHYC3yLNWV970ldW9+a6et9Kh1Z2zKdTKZ/Kr7McGdwMk1pUZTCxhtGioAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T00:04:26Z:fd8c4168894cc4e4211f21fca6d2193b5c0d5da04b08c0e908591e1afd5debac:uVAMihvExADt+yR00fabjSusICWWrK1X/qYJyYApyCRN50aoSuf1CS+9YeVVCw7qGoVjTrfjS/I1mULwRxN/DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -49,6 +49,15 @@ serialized to canonical JSON and SHA-256 hashed before storage.
 Every object — events, snapshots, manifests, chain state — is an
 immutable JSON blob in CAS. The hash is the identity.
 
+Executable source uses two ordinary typed CAS objects. A
+`ryeos.source_closure_manifest` is a content-only, regular-file manifest whose
+edges retain its file blobs. A separate `ryeos.effective_source_binding`
+retains the owner, testimony, signed kind ceiling, executor policy, logical
+mount identity, and an edge to that manifest. Launch and persistent-session
+capsules retain the binding, so online and offline closure traversal and GC
+reach the complete source tree without consulting a live project or bundle
+path.
+
 #### Canonical JSON Contract
 
 RyeOS has one canonical encoding for CAS JSON. It is part of durable object
@@ -96,10 +105,18 @@ fully rebuilt from CAS at any time.
 
 `state/operational.sqlite3` owns records that cannot be reconstructed from
 signed chain heads: CAS-entry attribution, admission-attestation lookup rows,
-sync jobs, and sync-job attempts. It is a fixed source-of-truth store, is never
-selected through `generation.json`, and is never copied, replaced, or removed
-by projection rebuild or generation cleanup. `state/operational.initialized`
-fails closed if an established operational database later disappears.
+sync jobs and attempts, and provider-neutral credential-profile ownership,
+lifecycle, confirmed account evidence, generation, and deletion tombstones.
+Opaque provider credential bytes remain in the profile's node-private artifact
+home. RuntimeDb retains a revisioned live projection so profile leases and
+hosted-session transitions can share its transaction, but OperationalDb is the
+only credential authority preserved across an explicit runtime-history schema
+cutover. The cutover never decodes a predecessor runtime projection; it rebuilds
+the exact-current projection from stable operational records. The operational
+database is never selected through `generation.json`, copied, replaced, or
+removed by projection rebuild or generation cleanup.
+`state/operational.initialized` fails closed if an established operational
+database later disappears.
 
 ## SQLite Schema Ownership
 
@@ -130,9 +147,9 @@ database class determines recovery:
   embedded authority contract fails before row interpretation and requires the
   operator-confirmed thread-history/project-head reset; normal open never
   migrates or reinterprets it;
-- `operational.sqlite3` is retained source-of-truth state. It accepts only its
-  exact current schema today; any future deployed predecessor requires a
-  separately designed explicit atomic forward migration rather than reset;
+- `operational.sqlite3` is retained source-of-truth state. Deployed predecessor
+  schemas advance only through explicit atomic forward migrations; it is never
+  reset to activate a new schema;
 - rebuildable stores (`projection.<instance-id>.sqlite3` and
   `scheduler.sqlite3`) evolve through their explicit reset-and-rebuild paths
   from durable source material.

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-28T12:15:02Z:c2f3ef591184a824abf361a3227cc2bd78b3faa68105750de75e33c69f20e504:ieJVG380nFBja3XgMv/EWkBjjRK95JZMrCOysv0gAUhNpkelvecfxgXxAGJANFYtItc6Y6ozBXCuNvpiv1ZOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:23Z:53771588f8217cbbf2d320c3bf47813cf000f12be54a585f358a4e26f6c6c345:ZahwxfbtrgPx6mt/nzd35lfQtSp3D4WSSf0xBSBicgeu6T5V69P1eDkTI29hAui5qPvRWaRqlaT7/r/RdcajBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -37,6 +37,20 @@ execution:
         system: 4000
         before: 2000
         after: 2000
+  hooks:
+    authored_path: [hooks]
+    plan_derived: effective_hook_plan
+    events:
+      after_step:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [turn]
+        allowed_results: [discard, observation, control]
+      continuation:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation, control]
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/directive
@@ -54,10 +68,11 @@ composer_config:
       expect_value_type: string
       derive_as: body
     # Unified capability requirements. `declared` (self-asserted action
-    # authority → effective_caps) narrows against the parent by dropping;
-    # `manifest` (runtime authority, manifest-backed) narrows by failing on
-    # widen. A child can never request more than its parent template; the signed
-    # bundle manifest is the final upper bound for `manifest` at launch.
+    # authority → effective_caps) and `manifest` (manifest-backed runtime
+    # authority) inherit independently when omitted. A declaration atomically
+    # replaces its subtree and fails composition if it widens the immediately
+    # effective parent. The signed bundle manifest remains the final upper
+    # bound for `manifest` at launch.
     - name: requires
       strategy: narrow_requires_capabilities
       expect_value_type: mapping
@@ -76,6 +91,17 @@ composer_config:
       strategy: keyed_seq_merge_root_last
       key: name
       expect_value_type: sequence
+    - name: hooks
+      strategy: replace_root_last
+      expect_value_type: sequence
+    # Author-vouched effect class for the directive's provider boundary
+    # (`recorded` | `sealed` | `live`; absent means live — fresh sampling,
+    # no records). The daemon reads the sealed declaration from the admitted
+    # capsule at record publication; the runtime reads it only to decide
+    # whether to submit.
+    - name: effects
+      strategy: replace_root_last
+      expect_value_type: string
   policy_facts:
     - name: effective_caps
       path: [requires, capabilities, declared]
@@ -102,6 +128,9 @@ composed_value_contract:
     inputs:
       type: single
       prim: sequence
+    hooks:
+      type: single
+      prim: sequence
     # Unified capability requirements (`capabilities.declared` self-asserted
     # action authority + `capabilities.manifest` manifest-backed runtime
     # authority). Narrowed against the parent through `extends` (see
@@ -110,6 +139,10 @@ composed_value_contract:
     requires:
       type: single
       prim: mapping
+    # Effect class for the provider boundary; see the composer field above.
+    effects:
+      type: single
+      prim: string
 metadata:
   rules:
     name:

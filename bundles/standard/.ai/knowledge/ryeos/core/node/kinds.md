@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:18Z:33e9fdbb1c6d8563bd1968498c69ebf53d315849be3ca3a05e3e11d66ee3a908:flyhSHoJCzt4i/lZoAUdu0TjLv0i3JpSbq+Pr1GCf5fxJ+auM1hU3XOx7U+kDhPFgJantN5TPqMMg9ZSFJpZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:32Z:e39426740e637c823f8791e22cb5b46e3a8a25fb0b2f86c0bd100f89f046d9ff:FDzW/zRiiQ1xBW0DyNsR0ae2yhLTppqF/1xpFnoBr4k2rNysI+JDNKCgdGMt14hLQuwlQ+eh0TCNCBfhKV/NCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]
@@ -70,8 +70,16 @@ branching. Graphs are walked by the state-graph runtime.
 
 - **Directory:** `graphs/`
 - **Formats:** `.yaml`
-- **Composer:** `handler:ryeos/core/graph-permissions`
+- **Composer:** `handler:ryeos/core/extends-chain` (shallow graph config inheritance)
+- **Effective validator:** `handler:ryeos/core/graph-effective-validator`
 - **Execution:** Delegates to runtime registry (graph-runtime)
+
+Graphs execute their finalized composed value, not the root YAML in isolation.
+Each child redeclares `version` and `category`; omitted `config` keys inherit,
+while a declared key such as `nodes` or `hooks` replaces that complete value.
+The effective validator rejects incoherent start nodes, edges, expressions,
+retry policies, hook policy, and capability facts before launch authority is
+minted.
 
 ### `config` — Configuration
 Per-domain configuration items. Each config consumer enforces its own

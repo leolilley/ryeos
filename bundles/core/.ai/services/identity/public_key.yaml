@@ -1,5 +1,6 @@
-# ryeos:signed:2026-06-07T05:18:56Z:d088cbc6c135e1c6dcccf519b11f7a616f6dd5549ddc4f8d4cee57f8b7680a78:bwOxpdvjGakgauHOzHkGcWhSfHQ3hdjmdoLoaasI9KdJhm8MLRiTluXTbFXOV//EaRemCFD9wAVVx/ys4goUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-18T22:04:38Z:d69eed18525c1ce479c93ae99bc24b4dbdd87132a608c69df752c0f5f820d9c5:nSxlRtWuv1EycPSJe90zuk1r1o4n3Cf2uA3FW+9GEPuPb7gf/NYOpCkp9W8Zo3Vy6WA+n8PXCmQCV8KVK9NVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.public_key
 required_caps: []
+record_thread: false
 description: "Return the node's public identity document"

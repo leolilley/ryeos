@@ -84,8 +84,10 @@ export function mountFieldAccessibility(host, vm, instanceKey, dispatchUi) {
   }
 
   host.onfocus = () => {
-    const current = model.find((item) => item.selected) || model[0];
-    if (current) select(current);
+    // Restoring focus after a shell render must be silent when the shared VM
+    // already owns a selection. Re-dispatching that same selection causes a
+    // render -> refocus -> dispatch loop for as long as the listbox is focused.
+    if (!model.some((item) => item.selected) && model[0]) select(model[0]);
   };
   host.onkeydown = (event) => {
     const currentIndex = Math.max(0, model.findIndex((item) => item.selected));

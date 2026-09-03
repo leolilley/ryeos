@@ -1,0 +1,12 @@
+name: codex
+version: "1.0.0"
+description: "Supported RyeOS-hosted Codex structured-session worker and remote session surfaces"
+requires_kinds:
+  - config
+  - handler
+  - knowledge
+  - protocol
+  - runtime
+  - worker
+  - worker_execution
+uses_kinds: []

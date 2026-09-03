@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ryeos_api::handler_error::HandlerError;
 use ryeos_api::handlers::{admission_claim, admission_status, admission_submit};
 
-const TEST_POLICY: &str = "local-node-v1";
+const TEST_POLICY: &str = "local-node-v2";
 const PUSH_SCOPES: &[&str] = &[
     "ryeos.execute.service.objects/has",
     "ryeos.execute.service.objects/put",
@@ -38,12 +38,13 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
             subject_hash: subject_hash.clone(),
             policy: TEST_POLICY.to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         state.clone(),
     )
@@ -77,12 +78,13 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
             subject_hash,
             policy: TEST_POLICY.to_string(),
             claim: "accepted".to_string(),
-            max_objects: 16,
-            max_blobs: 16,
-            max_object_bytes: 4096,
-            max_blob_bytes: 4096,
-            max_total_blob_bytes: 4096,
-            max_links_per_object: 16,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_links_per_object: Some(16),
         },
         state,
     )
@@ -90,6 +92,31 @@ async fn admission_submit_writes_attestation_and_status_reads_it() {
     .unwrap();
     assert_eq!(repeated["reused_existing"], true);
     assert_eq!(repeated["attestation_hash"], attestation_hash);
+}
+
+#[tokio::test]
+async fn admission_submit_cannot_widen_node_object_closure_policy() {
+    let (_tmp, state) = test_state::build_test_state();
+    let subject_hash = store_subject(&state);
+    let error = admission_submit::handle(
+        admission_submit::Request {
+            subject_hash,
+            policy: TEST_POLICY.to_string(),
+            claim: "accepted".to_string(),
+            max_objects: Some(32_769),
+            max_blobs: None,
+            max_object_bytes: None,
+            max_total_object_bytes: None,
+            max_blob_bytes: None,
+            max_total_blob_bytes: None,
+            max_links_per_object: None,
+        },
+        Arc::new(state),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("exceeds node policy"));
 }
 
 #[tokio::test]
@@ -110,7 +137,7 @@ async fn admission_status_reports_missing_head() {
 
 #[tokio::test]
 async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "test-admission-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -141,7 +168,7 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
 
 #[tokio::test]
 async fn admission_claim_rejects_wildcard_requested_scope() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "wildcard-request-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -159,7 +186,7 @@ async fn admission_claim_rejects_wildcard_requested_scope() {
 
 #[tokio::test]
 async fn admission_claim_rejects_wildcard_token_file_scope() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "wildcard-token-file-token";
     write_admission_token_file(&state, token, &["ryeos.execute.service.*"], None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -177,7 +204,7 @@ async fn admission_claim_rejects_wildcard_token_file_scope() {
 
 #[tokio::test]
 async fn admission_claim_rejects_wrong_audience_signature() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "wrong-audience-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -201,7 +228,7 @@ async fn admission_claim_rejects_wrong_audience_signature() {
 
 #[tokio::test]
 async fn admission_claim_rejects_origin_site_changed_after_signing() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(600);
     let token = "tampered-origin-site-token";
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -255,6 +282,28 @@ async fn admission_claim_rejects_aged_overlong_hosted_policy_token() {
             .unwrap_err()
             .to_string()
             .contains("hosted-node policy maximum"),
+    );
+}
+
+#[tokio::test]
+async fn admission_claim_refuses_explicitly_disabled_policy_before_token_use() {
+    let (_tmp, state) = test_state::build_test_state_with_disabled_hosted_admission();
+    let token = "disabled-hosted-admission-token";
+    write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
+    let token_path = admission_token_path(
+        &state.config.app_root,
+        &lillux::cas::sha256_hex(token.as_bytes()),
+    );
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine"));
+
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+
+    let err = result.expect_err("disabled admission must reject every claim");
+    assert!(err.to_string().contains("admission is disabled"));
+    assert!(
+        token_path.is_file(),
+        "disabled admission must not consume tokens"
     );
 }
 

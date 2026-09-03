@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-19T00:43:21Z:3ada96759e2bfb9f46d6e549f5c77888db099a3501662255ee2e3ac6e4861649:S7YaUC+7RPZr6qen4EBNyzfjMz9oyVMD7JEdQ06yYEeaJLBTq8hgDSX+quSJx3Atqx5QeLwO+x4IRc5kyqeCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: credential-profiles.confirm
+required_caps: ["ryeos.execute.service.credential-profiles/confirm"]
+schema:
+  profile_id: string
+  login_epoch: integer
+  expected_account_digest: string
+description: "Confirm an observed account and activate its owner-bound credential generation"

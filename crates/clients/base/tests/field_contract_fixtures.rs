@@ -26,7 +26,7 @@ fn generic_truth_fixtures_are_well_formed_and_domain_neutral() {
     assert_eq!(parsed_cut.relations.len(), 1);
 
     for fixture in [&live, &cut] {
-        assert_eq!(fixture["schema_version"], "ryeos.ui.field.facts.v1");
+        assert_eq!(fixture["schema_version"], FIELD_FACTS_SCHEMA);
         let encoded = serde_json::to_string(fixture).unwrap().to_lowercase();
         for forbidden in ["arc.", "game_solver", "controller", "accepted_state"] {
             assert!(
@@ -51,6 +51,55 @@ fn generic_truth_fixtures_are_well_formed_and_domain_neutral() {
     assert_eq!(cut["replay"]["previous"]["chain_seq"], 11);
     assert_eq!(cut["replay"]["next"]["chain_seq"], 13);
     assert_eq!(cut["replay"]["live_head"]["chain_seq"], 18);
+}
+
+#[test]
+fn braid_cut_projects_through_the_shared_reducer_and_vm() {
+    let cut: Value = serde_json::from_str(BRAID_CUT).expect("cut fixture JSON");
+    let parsed = parse_field_document(&cut).expect("braid-cut fixture satisfies the wire schema");
+    let parsed_result = Ok(parsed);
+    let binding: ViewBinding = serde_json::from_value(json!({
+        "widget": "field",
+        "sources": {"execution": {"ref": "service:fixture/field/execution"}},
+        "projections": {"schema_version": FIELD_PROJECTION_SCHEMA}
+    }))
+    .unwrap();
+    let vm = project_field(
+        "field:braid-cut",
+        "Braid cut",
+        "view:fixture/braid-cut",
+        &binding,
+        &[FieldSourceInput {
+            channel: "execution",
+            source_ref: "service:fixture/field/execution",
+            subject_fingerprint: Some("thread:T-root"),
+            response: Some(&cut),
+            parsed: Some(&parsed_result),
+            error: None,
+            refreshing: false,
+        }],
+        None,
+    );
+
+    assert_eq!(vm.replay.mode, "braid_cut");
+    assert_eq!(
+        vm.replay.anchor.as_ref().map(|event| event.chain_seq),
+        Some(12)
+    );
+    assert_eq!(
+        vm.replay.previous.as_ref().map(|event| event.chain_seq),
+        Some(11)
+    );
+    assert_eq!(
+        vm.replay.next.as_ref().map(|event| event.chain_seq),
+        Some(13)
+    );
+    assert_eq!(
+        vm.replay.live_head.as_ref().map(|event| event.chain_seq),
+        Some(18)
+    );
+    assert_eq!(vm.replay.outside_cut.len(), 2);
+    assert_eq!(vm.cursor, vm.replay.anchor);
 }
 
 #[test]
@@ -100,7 +149,7 @@ fn real_project_fixture_exercises_occurrence_scoped_compound_joins() {
                         "attributes.observation.kind": "arc.portfolio_decision"
                     },
                     "keys": [
-                        "attributes.hook.occurrence.graph_run_id",
+                        "attributes.hook.occurrence.coordinates.graph_run_id",
                         "attributes.observation.payload.selected_candidate_key"
                     ]
                 },
@@ -166,7 +215,7 @@ fn performance_fixture_shape_is_exact_and_deterministic() {
         })
         .collect::<Vec<_>>();
     let fixture = json!({
-        "schema_version": "ryeos.ui.field.facts.v1",
+        "schema_version": FIELD_FACTS_SCHEMA,
         "source": "performance",
         "subject": { "kind": "fixture", "id": "generic-scale-v1" },
         "revision": "deterministic-v1",

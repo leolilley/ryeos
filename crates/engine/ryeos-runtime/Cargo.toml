@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-runtime"
-version = "0.5.76"
+version = "0.5.77"
 edition = "2024"
 license.workspace = true
 description = "Shared runtime library for Rye OS Rust runtimes"
@@ -18,6 +18,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 lillux = { workspace = true }
 ryeos-accounting = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-expression = { workspace = true }
 ryeos-state = { workspace = true }

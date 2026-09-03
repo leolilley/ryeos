@@ -16,6 +16,9 @@ use directories::BaseDirs;
 use ryeos_engine::roots::{InstallRoot, RuntimeRoot};
 use serde::{Deserialize, Serialize};
 
+const DAEMON_CONFIG_MAX_BYTES: u64 = 64 * 1024;
+const RETIRED_ACCOUNTING_ISSUE_ACCEPTANCE_WINDOW_MS: u64 = 60_000;
+
 #[cfg(unix)]
 fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
@@ -42,27 +45,7 @@ pub struct Config {
     /// Operator signing key — used for operator edits in project/config space.
     /// Defaults to `<app_root>/.ai/config/keys/signing/private_key.pem`.
     pub operator_signing_key_path: PathBuf,
-    pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
-    /// Comma-separated list of host-env var names that tool subprocesses
-    /// may reference via `${VAR}` in their `env_config.env` values.
-    /// This is distinct from `required_secrets`: declared secrets can
-    /// be resolved from host env by name without appearing here.
-    /// Also set via `RYEOS_TOOL_ENV_PASSTHROUGH` env var (env var wins).
-    /// Empty by default — most deployments don't need passthrough.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_env_passthrough: Vec<String>,
-    /// Maximum issue-to-provider-acceptance interval, in milliseconds. A
-    /// time-bounded spend certificate must remain valid through this window
-    /// beyond the durable `Issued` boundary or the daemon releases the
-    /// reservation unissued instead of permitting provider contact. Never
-    /// runtime-supplied; zero is rejected at load.
-    #[serde(default = "default_accounting_issue_acceptance_window_ms")]
-    pub accounting_issue_acceptance_window_ms: u64,
-}
-
-fn default_accounting_issue_acceptance_window_ms() -> u64 {
-    60_000
 }
 
 /// Plain-data inputs for [`Config::load`]. Constructed by the daemon
@@ -75,7 +58,6 @@ pub struct ConfigSources {
     pub bind: Option<SocketAddr>,
     pub db_path: Option<PathBuf>,
     pub uds_path: Option<PathBuf>,
-    pub require_auth: bool,
     pub authorized_keys_dir: Option<PathBuf>,
     pub force: bool,
 }
@@ -89,10 +71,107 @@ struct PartialConfig {
     app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
     operator_signing_key_path: Option<PathBuf>,
-    require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
-    tool_env_passthrough: Option<Vec<String>>,
-    accounting_issue_acceptance_window_ms: Option<u64>,
+}
+
+/// Exact daemon-config shape written before semantic node policy moved into
+/// the atomic node-policy generation. This is accepted only by the explicit
+/// stopped-node init cutover below; normal config loading remains strict.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreNodePolicyConfig {
+    bind: SocketAddr,
+    db_path: PathBuf,
+    uds_path: PathBuf,
+    app_root: PathBuf,
+    node_signing_key_path: PathBuf,
+    operator_signing_key_path: PathBuf,
+    require_auth: bool,
+    authorized_keys_dir: PathBuf,
+    #[serde(default)]
+    tool_env_passthrough: Vec<String>,
+    #[serde(default = "retired_accounting_issue_acceptance_window_ms")]
+    accounting_issue_acceptance_window_ms: u64,
+}
+
+fn retired_accounting_issue_acceptance_window_ms() -> u64 {
+    RETIRED_ACCOUNTING_ISSUE_ACCEPTANCE_WINDOW_MS
+}
+
+/// Permanently retire the exact predecessor daemon-config shape during
+/// explicit stopped-node initialization.
+///
+/// This is a clean schema cut, not a compatibility parser: [`Config::load`]
+/// never accepts the retired fields. Init preserves only bootstrap location
+/// fields and refuses to discard any non-default policy value, which must be
+/// represented deliberately in the node's atomic policy generation instead.
+pub fn retire_pre_node_policy_config(app_root: &Path) -> Result<bool> {
+    let node_directory_path = app_root.join(ryeos_engine::AI_DIR).join("node");
+    let path = node_directory_path.join("config.yaml");
+    let node_directory =
+        lillux::PinnedDirectory::open(&node_directory_path)?.with_context(|| {
+            format!(
+                "open daemon config directory {}",
+                node_directory_path.display()
+            )
+        })?;
+    let Some(config_file) =
+        node_directory.open_pinned_regular(std::ffi::OsStr::new("config.yaml"), false)?
+    else {
+        return Ok(false);
+    };
+    let bytes = config_file
+        .read_bounded(DAEMON_CONFIG_MAX_BYTES)
+        .with_context(|| format!("read daemon config cutover input {}", path.display()))?;
+
+    if serde_yaml::from_slice::<PartialConfig>(&bytes).is_ok() {
+        return Ok(false);
+    }
+
+    let predecessor: PreNodePolicyConfig = serde_yaml::from_slice(&bytes).with_context(|| {
+        format!(
+            "daemon config {} is neither the current bootstrap schema nor the exact predecessor node-policy schema",
+            path.display()
+        )
+    })?;
+    if predecessor.app_root != app_root {
+        bail!(
+            "predecessor daemon config app_root {} does not match initialized app root {}",
+            predecessor.app_root.display(),
+            app_root.display()
+        );
+    }
+    if predecessor.require_auth
+        || !predecessor.tool_env_passthrough.is_empty()
+        || predecessor.accounting_issue_acceptance_window_ms
+            != RETIRED_ACCOUNTING_ISSUE_ACCEPTANCE_WINDOW_MS
+    {
+        bail!(
+            "predecessor daemon config contains non-default semantic policy; author the equivalent current node policy explicitly before retiring {}",
+            path.display()
+        );
+    }
+
+    let current = Config {
+        bind: predecessor.bind,
+        db_path: predecessor.db_path,
+        uds_path: predecessor.uds_path,
+        app_root: predecessor.app_root,
+        node_signing_key_path: predecessor.node_signing_key_path,
+        operator_signing_key_path: predecessor.operator_signing_key_path,
+        authorized_keys_dir: predecessor.authorized_keys_dir,
+    };
+    let yaml = serde_yaml::to_string(&current)
+        .context("serialize current daemon bootstrap config during policy cutover")?;
+    node_directory
+        .atomic_write_pinned_if_same(
+            std::ffi::OsStr::new("config.yaml"),
+            Some(&config_file),
+            yaml.as_bytes(),
+            0o600,
+        )
+        .with_context(|| format!("publish current daemon config {}", path.display()))?;
+    Ok(true)
 }
 
 impl Config {
@@ -214,11 +293,6 @@ impl Config {
                 .as_ref()
                 .map(|_| canonical_operator_key_path.clone())
                 .unwrap_or(canonical_operator_key_path),
-            require_auth: sources.require_auth
-                || file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.require_auth)
-                    .unwrap_or(false),
             authorized_keys_dir: sources
                 .authorized_keys_dir
                 .clone()
@@ -228,33 +302,6 @@ impl Config {
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
                 .unwrap_or_else(|| resolved_runtime_root.authorized_keys_dir()),
-            // tool_env_passthrough: config file list is the base.
-            // RYEOS_TOOL_ENV_PASSTHROUGH env var (comma-separated)
-            // overrides if set — mirrors Docker usage where the env
-            // var is more convenient than editing config.yaml.
-            tool_env_passthrough: if let Ok(raw) = env::var("RYEOS_TOOL_ENV_PASSTHROUGH") {
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            } else {
-                file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.tool_env_passthrough.clone())
-                    .unwrap_or_default()
-            },
-            accounting_issue_acceptance_window_ms: {
-                let window = file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.accounting_issue_acceptance_window_ms)
-                    .unwrap_or_else(default_accounting_issue_acceptance_window_ms);
-                anyhow::ensure!(
-                    window > 0,
-                    "accounting_issue_acceptance_window_ms must be positive"
-                );
-                window
-            },
         };
 
         Ok(cfg)
@@ -283,10 +330,7 @@ impl Config {
             app_root: app_root.clone(),
             node_signing_key_path: runtime_root.node_signing_key_path(),
             operator_signing_key_path: runtime_root.operator_signing_key_path(),
-            require_auth: false,
             authorized_keys_dir: runtime_root.authorized_keys_dir(),
-            tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms: default_accounting_issue_acceptance_window_ms(),
         })
     }
 }
@@ -320,5 +364,69 @@ mod tests {
         assert!(!cfg.app_root.exists());
         assert!(!cfg.db_path.parent().unwrap().exists());
         assert!(!cfg.uds_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn explicit_init_cutover_retires_pre_policy_fields_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("state");
+        let config_path = app_root.join(".ai/node/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            format!(
+                "bind: 127.0.0.1:7412\n\
+                 db_path: {root}/.ai/state/runtime.sqlite3\n\
+                 uds_path: {root}/node.sock\n\
+                 app_root: {root}\n\
+                 node_signing_key_path: {root}/.ai/node/identity/private_key.pem\n\
+                 operator_signing_key_path: {root}/.ai/config/keys/signing/private_key.pem\n\
+                 require_auth: false\n\
+                 authorized_keys_dir: {root}/.ai/node/auth/authorized_keys\n\
+                 accounting_issue_acceptance_window_ms: 60000\n",
+                root = app_root.display()
+            ),
+        )
+        .unwrap();
+
+        assert!(retire_pre_node_policy_config(&app_root).unwrap());
+        assert!(!retire_pre_node_policy_config(&app_root).unwrap());
+
+        let body = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!body.contains("require_auth"));
+        assert!(!body.contains("tool_env_passthrough"));
+        assert!(!body.contains("accounting_issue_acceptance_window_ms"));
+        let config = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(config.bind, "127.0.0.1:7412".parse().unwrap());
+        assert_eq!(config.app_root, app_root);
+    }
+
+    #[test]
+    fn explicit_init_cutover_refuses_to_discard_semantic_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("state");
+        let config_path = app_root.join(".ai/node/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let predecessor = format!(
+            "bind: 127.0.0.1:7400\n\
+             db_path: {root}/.ai/state/runtime.sqlite3\n\
+             uds_path: {root}/node.sock\n\
+             app_root: {root}\n\
+             node_signing_key_path: {root}/.ai/node/identity/private_key.pem\n\
+             operator_signing_key_path: {root}/.ai/config/keys/signing/private_key.pem\n\
+             require_auth: true\n\
+             authorized_keys_dir: {root}/.ai/node/auth/authorized_keys\n\
+             accounting_issue_acceptance_window_ms: 60000\n",
+            root = app_root.display()
+        );
+        std::fs::write(&config_path, &predecessor).unwrap();
+
+        let error = retire_pre_node_policy_config(&app_root).unwrap_err();
+        assert!(error.to_string().contains("non-default semantic policy"));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), predecessor);
     }
 }

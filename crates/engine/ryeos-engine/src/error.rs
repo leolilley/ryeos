@@ -55,6 +55,19 @@ pub enum EngineError {
     #[error("invalid project context: {reason}")]
     InvalidProjectContext { reason: String },
 
+    /// A mutable launch-policy dependency changed between capture and the
+    /// final authority proof. Admission callers may retry the complete capture
+    /// under one new snapshot; they must never reuse the rejected candidate.
+    #[error("mutable effective-program authority changed during finalization")]
+    MutableEffectiveProgramAuthorityChanged,
+
+    #[error("effective validator rejected `{canonical_ref}` ({code}): {message}")]
+    EffectiveValidationRejected {
+        canonical_ref: String,
+        code: String,
+        message: String,
+    },
+
     #[error("project context materialization failed: {reason}")]
     ProjectContextMaterializationFailed { reason: String },
 
@@ -337,10 +350,6 @@ pub enum EngineError {
     // ── Lifecycle ────────────────────────────────────────────────────
     #[error("invalid state transition from `{from}` on event `{event}`")]
     InvalidStateTransition { from: String, event: String },
-
-    // ── Delegation ───────────────────────────────────────────────────
-    #[error("delegated principal validation failed: {reason}")]
-    DelegationValidationFailed { reason: String },
 
     // ── Runtime registry ─────────────────────────────────────────────
     #[error("runtime YAML invalid at {path}: {reason}")]

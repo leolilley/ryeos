@@ -1,0 +1,6 @@
+# ryeos:signed:2026-08-11T02:28:14Z:f52ad20c4f991d224525c88b4a889dbf79d294cecad3e1328167002de13bccb3:MDF+/RfaifJ6256+LuviF+CpPoEFWp3SdeW2P+n0/+Mvt+vUL+59oQ5kSsauI1od+hbqhlxboYeF3BH0YyY6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.scrub
+required_caps: ["ryeos.execute.service.external-content/scrub"]
+schema: {}
+description: "Verify retained large-object bytes, sidecars, and abandoned ingest staging"

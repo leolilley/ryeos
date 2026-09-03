@@ -10,6 +10,15 @@ fn main() {
                 message: e.message,
             },
         },
+        HandlerRequest::EditSource(p) => {
+            match yaml_document::edit_source(&p.parser_config, &p.content, &p.edits) {
+                Ok((content, value)) => HandlerResponse::EditSourceOk { content, value },
+                Err(error) => HandlerResponse::EditSourceErr {
+                    kind: error.kind,
+                    message: error.message,
+                },
+            }
+        }
         HandlerRequest::ValidateParserConfig(v) => {
             match yaml_document::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,
@@ -19,7 +28,8 @@ fn main() {
         HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)
         | HandlerRequest::LaunchPrepare(_)
-        | HandlerRequest::ValidateLaunchPreparerConfig(_) => HandlerResponse::ParseErr {
+        | HandlerRequest::ValidateLaunchPreparerConfig(_)
+        | HandlerRequest::EffectiveValidate(_) => HandlerResponse::ParseErr {
             kind: ryeos_handler_protocol::ParseErrKind::Internal,
             message: "this is a parser binary; received composer request".into(),
         },

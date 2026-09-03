@@ -50,16 +50,20 @@ pub async fn handle(
     )
     .map_err(HandlerError::BadRequest)?;
 
-    let item_ref = match &matched.command.dispatch {
-        CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
-        CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => {
+    let (item_ref, validate_only) = match &matched.command.dispatch {
+        CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
+        CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg,
+            validate_only,
+            ..
+        } => {
             // The ref itself is a tail argument (e.g. `execute <ref>`).
             let Some(found) = parameters.get(item_ref_arg).and_then(Value::as_str) else {
                 return Err(HandlerError::BadRequest(format!(
                     "command requires `{item_ref_arg}` argument"
                 )));
             };
-            found.to_string()
+            (found.to_string(), *validate_only)
         }
         CommandDispatch::Group => {
             // A group prefix is a prompt for more tokens, not an error:
@@ -76,7 +80,7 @@ pub async fn handle(
         }
         CommandDispatch::LocalHandler { .. } => {
             return Err(HandlerError::BadRequest(
-                "command is offline-only (local handler); run it via the CLI".to_string(),
+                "command is implemented by a local CLI handler; run it via the CLI".to_string(),
             ));
         }
     };
@@ -112,7 +116,7 @@ pub async fn handle(
         current_site_id: site_id.clone(),
         origin_site_id,
         execution_hints: Default::default(),
-        validate_only: false,
+        validate_only,
     };
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
         principal_fingerprint: ctx.fingerprint.clone(),
@@ -137,7 +141,7 @@ pub async fn handle(
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "wait",
         target_site_id: None,
-        validate_only: false,
+        validate_only,
         params: parameters,
         ref_bindings: req.ref_bindings,
         acting_principal: ctx.fingerprint.as_str(),
@@ -153,11 +157,18 @@ pub async fn handle(
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,
+        effect_authority: None,
     };
 
-    let result = ryeos_executor::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state)
-        .await
-        .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
+    let result = ryeos_executor::dispatch::dispatch_with_handler_context(
+        &item_ref,
+        ctx.clone(),
+        &dispatch_req,
+        &exec_ctx,
+        &state,
+    )
+    .await
+    .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
     drop(dispatch_req);
     drop(exec_ctx);
     result

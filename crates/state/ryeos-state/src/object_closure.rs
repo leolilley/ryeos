@@ -7,17 +7,36 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-const DEFAULT_MAX_OBJECTS: usize = 10_000;
-const DEFAULT_MAX_BLOBS: usize = 10_000;
-const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
-const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
-const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
-const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
+pub const DEFAULT_MAX_OBJECTS: usize = 10_000;
+// One external realization may reference 10,000 blobs. Capsules also carry
+// executable/protocol blobs, so the closure-wide ceiling must leave bounded
+// headroom rather than making a contract-valid realization untransferable.
+pub const DEFAULT_MAX_BLOBS: usize = 20_000;
+pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
+pub const DEFAULT_MAX_TOTAL_OBJECT_BYTES: u64 =
+    (DEFAULT_MAX_OBJECTS as u64) * DEFAULT_MAX_OBJECT_BYTES;
+pub const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+pub const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
+
+/// Absolute wire-protocol bounds accepted by the remote closure endpoints.
+/// Node policy must select limits within these bounds; callers may only narrow
+/// that selected policy. These are protocol safety invariants, not defaults.
+pub const REMOTE_CLOSURE_MAX_ROOTS: usize = 1_024;
+pub const REMOTE_CLOSURE_MAX_OBJECTS: usize = 100_000;
+pub const REMOTE_CLOSURE_MAX_BLOBS: usize = 100_000;
+pub const REMOTE_CLOSURE_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+pub const REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT: usize = 100_000;
 
 /// Transitive closure for one or more CAS object roots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,6 +48,10 @@ pub struct ObjectClosureReport {
     pub object_hashes: BTreeSet<String>,
     /// All reachable blob hashes.
     pub blob_hashes: BTreeSet<String>,
+    /// All reachable hashes in the distinct large-object store. Residency is
+    /// verified by callers that hold that store; these are never opened as CAS
+    /// blobs.
+    pub large_object_hashes: BTreeSet<String>,
     /// Blob hashes referenced by reachable objects but absent from CAS.
     pub missing_blobs: Vec<MissingDependency>,
     /// Object hashes that were referenced but not present in CAS.
@@ -82,13 +105,95 @@ pub struct UnsupportedObjectKind {
 pub struct ObjectLinks {
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
+    pub large_object_hashes: Vec<String>,
     pub unsupported_kind: Option<String>,
+}
+
+/// Meaning-blind registration surface for durable object contracts owned by
+/// layers above state. State retains and traverses the declared typed edges;
+/// it never imports or interprets the registering domain's Rust types.
+pub struct ObjectContractRegistration {
+    pub kind: &'static str,
+    pub validate: fn(&Value) -> anyhow::Result<()>,
+    pub links: fn(&Value) -> Result<RegisteredObjectLinks, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredObjectExpectation {
+    Any,
+    Kind(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredObjectEdge {
+    pub hash: String,
+    pub expected: RegisteredObjectExpectation,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegisteredObjectLinks {
+    pub object_edges: Vec<RegisteredObjectEdge>,
+    pub blob_hashes: Vec<String>,
+    pub large_object_hashes: Vec<String>,
+}
+
+static REGISTERED_OBJECT_CONTRACTS: OnceLock<Vec<ObjectContractRegistration>> = OnceLock::new();
+
+/// Install the application-owned object contracts exactly once, before any
+/// closure walk. Duplicate built-in kinds and malformed/duplicate external
+/// kinds fail closed. Repeated installation is never treated as an alias.
+pub fn install_object_contracts(
+    mut registrations: Vec<ObjectContractRegistration>,
+) -> anyhow::Result<()> {
+    registrations.sort_by_key(|registration| registration.kind);
+    let mut prior = None;
+    for registration in &registrations {
+        if registration.kind.is_empty()
+            || registration.kind.len() > 128
+            || !registration
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            anyhow::bail!(
+                "registered object kind is not canonical: {}",
+                registration.kind
+            );
+        }
+        if contracts::CURRENT_OBJECT_KINDS.contains(&registration.kind) {
+            anyhow::bail!(
+                "registered object kind {} collides with state-owned contract",
+                registration.kind
+            );
+        }
+        if prior == Some(registration.kind) {
+            anyhow::bail!("registered object kind {} is duplicated", registration.kind);
+        }
+        prior = Some(registration.kind);
+    }
+    REGISTERED_OBJECT_CONTRACTS
+        .set(registrations)
+        .map_err(|_| anyhow::anyhow!("application object contracts were already installed"))
+}
+
+/// Exact object kinds the current closure decoder admits.
+///
+/// Durable writers and maintenance coverage tests use this inventory so a new
+/// current kind cannot remain implicit in a private match arm.
+pub fn current_object_kinds() -> Vec<&'static str> {
+    let mut kinds = contracts::CURRENT_OBJECT_KINDS.to_vec();
+    if let Some(registered) = REGISTERED_OBJECT_CONTRACTS.get() {
+        kinds.extend(registered.iter().map(|contract| contract.kind));
+    }
+    kinds.sort_unstable();
+    kinds
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ExpectedObject {
     Any,
     Kind(&'static str),
+    OneOf(&'static [&'static str]),
     ItemSource { item_ref: String },
 }
 
@@ -114,6 +219,76 @@ enum HistoryGraph {
     BundleEventPredecessors,
 }
 
+#[path = "object_closure/contracts.rs"]
+mod contracts;
+use contracts::ContractLinks;
+
+fn registered_contract(kind: &str) -> Option<&'static ObjectContractRegistration> {
+    let registrations = REGISTERED_OBJECT_CONTRACTS.get()?;
+    registrations
+        .binary_search_by_key(&kind, |registration| registration.kind)
+        .ok()
+        .map(|index| &registrations[index])
+}
+
+fn decode_registered(value: &Value) -> anyhow::Result<Option<ContractLinks>> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing object kind"))?;
+    let Some(contract) = registered_contract(kind) else {
+        return Ok(None);
+    };
+    (contract.validate)(value).with_context(|| format!("invalid registered {kind} object"))?;
+    registered_links(contract, value)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("invalid registered {kind} object links"))
+}
+
+fn links_registered(value: &Value) -> Result<Option<ContractLinks>, String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing object kind".to_string())?;
+    let Some(contract) = registered_contract(kind) else {
+        return Ok(None);
+    };
+    registered_links(contract, value).map(Some)
+}
+
+fn registered_links(
+    contract: &ObjectContractRegistration,
+    value: &Value,
+) -> Result<ContractLinks, String> {
+    let declared = (contract.links)(value)?;
+    let mut links = ContractLinks::leaf();
+    for edge in declared.object_edges {
+        push_typed_hash(
+            &edge.hash,
+            match edge.expected {
+                RegisteredObjectExpectation::Any => ExpectedObject::Any,
+                RegisteredObjectExpectation::Kind(kind) => ExpectedObject::Kind(kind),
+            },
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    for hash in declared.blob_hashes {
+        if !is_canonical_hash(&hash) {
+            return Err(format!("invalid registered blob hash: {hash}"));
+        }
+        links.blob_hashes.push(hash);
+    }
+    for hash in declared.large_object_hashes {
+        if !is_canonical_hash(&hash) {
+            return Err(format!("invalid registered large-object hash: {hash}"));
+        }
+        links.large_object_hashes.push(hash);
+    }
+    Ok(links.finish())
+}
+
 impl HistoryGraph {
     fn label(self) -> &'static str {
         match self {
@@ -133,6 +308,12 @@ impl ExpectedObject {
             Self::Kind(expected) if identity.kind == *expected => Ok(()),
             Self::Kind(expected) => Err(format!(
                 "object edge expected kind {expected}, got {}",
+                identity.kind
+            )),
+            Self::OneOf(expected) if expected.contains(&identity.kind.as_str()) => Ok(()),
+            Self::OneOf(expected) => Err(format!(
+                "object edge expected one of {}, got {}",
+                expected.join(", "),
                 identity.kind
             )),
             Self::ItemSource { item_ref }
@@ -158,6 +339,7 @@ pub struct ObjectClosureLimits {
     pub max_objects: usize,
     pub max_blobs: usize,
     pub max_object_bytes: u64,
+    pub max_total_object_bytes: u64,
     pub max_blob_bytes: u64,
     pub max_total_blob_bytes: u64,
     pub max_links_per_object: usize,
@@ -265,6 +447,7 @@ impl Default for ObjectClosureLimits {
             max_objects: DEFAULT_MAX_OBJECTS,
             max_blobs: DEFAULT_MAX_BLOBS,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_total_object_bytes: DEFAULT_MAX_TOTAL_OBJECT_BYTES,
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             max_total_blob_bytes: DEFAULT_MAX_TOTAL_BLOB_BYTES,
             max_links_per_object: DEFAULT_MAX_LINKS_PER_OBJECT,
@@ -281,6 +464,7 @@ impl ObjectClosureLimits {
             max_objects: 100_000,
             max_blobs: 100_000,
             max_object_bytes: 32 * 1024 * 1024,
+            max_total_object_bytes: 100_000 * 32 * 1024 * 1024,
             max_blob_bytes: 16 * 1024 * 1024 * 1024,
             max_total_blob_bytes: 64 * 1024 * 1024 * 1024,
             max_links_per_object: 100_000,
@@ -292,6 +476,7 @@ impl ObjectClosureLimits {
             max_objects: usize::MAX,
             max_blobs: usize::MAX,
             max_object_bytes: u64::MAX,
+            max_total_object_bytes: u64::MAX,
             max_blob_bytes: u64::MAX,
             max_total_blob_bytes: u64::MAX,
             max_links_per_object: usize::MAX,
@@ -438,6 +623,25 @@ pub fn collect_object_closure_with_cas_and_limits(
     collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check)
 }
 
+/// Collect and validate a closure from untrusted in-memory transport bytes.
+/// This deliberately shares the authoritative typed-edge, expected-child,
+/// cycle, size, and link-count implementation used for pinned CAS traversal,
+/// allowing remote clients to reject a response before any bytes are written.
+pub fn collect_object_closure_from_memory(
+    objects: &BTreeMap<String, Vec<u8>>,
+    blobs: &BTreeMap<String, Vec<u8>>,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+) -> anyhow::Result<ObjectClosureReport> {
+    let mut check = || Ok(());
+    collect_object_closure_from_source(
+        ClosureCas::Memory { objects, blobs },
+        roots,
+        limits,
+        &mut check,
+    )
+}
+
 fn collect_object_closure_with_limits_and_check(
     cas_root: &Path,
     roots: impl IntoIterator<Item = String>,
@@ -451,6 +655,10 @@ fn collect_object_closure_with_limits_and_check(
 enum ClosureCas<'a> {
     Path(&'a Path),
     Pinned(&'a lillux::CasStore),
+    Memory {
+        objects: &'a BTreeMap<String, Vec<u8>>,
+        blobs: &'a BTreeMap<String, Vec<u8>>,
+    },
 }
 
 impl ClosureCas<'_> {
@@ -471,6 +679,15 @@ impl ClosureCas<'_> {
                     anyhow::bail!("CAS object {hash} exceeded byte limit while reading");
                 }
                 Ok(Some(bytes))
+            }
+            Self::Memory { objects, .. } => {
+                let Some(bytes) = objects.get(hash) else {
+                    return Ok(None);
+                };
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+                    anyhow::bail!("transport object {hash} exceeds byte limit {max_bytes}");
+                }
+                Ok(Some(bytes.clone()))
             }
         }
     }
@@ -513,6 +730,16 @@ impl ClosureCas<'_> {
                 };
                 opened
             }
+            Self::Memory { blobs, .. } => {
+                let Some(bytes) = blobs.get(hash) else {
+                    return Ok(None);
+                };
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+                    anyhow::bail!("transport blob {hash} exceeds byte limit {max_bytes}");
+                }
+                let actual = lillux::sha256_hex(bytes);
+                return Ok(Some((u64::try_from(bytes.len())?, actual)));
+            }
         };
         if size > max_bytes {
             anyhow::bail!("CAS blob {hash} exceeds byte limit {max_bytes}");
@@ -548,6 +775,7 @@ fn collect_object_closure_from_source(
     let mut queue: VecDeque<(String, Option<String>, ExpectedObject)> = VecDeque::new();
     let mut loaded_identities = HashMap::<String, LoadedObjectIdentity>::new();
     let mut history_edges = BTreeMap::<HistoryGraph, BTreeMap<String, BTreeSet<String>>>::new();
+    let mut total_object_bytes = 0_u64;
     let mut total_blob_bytes = 0_u64;
 
     for root in roots {
@@ -596,6 +824,14 @@ fn collect_object_closure_from_source(
                 continue;
             }
         };
+        total_object_bytes = total_object_bytes.saturating_add(content.len() as u64);
+        if total_object_bytes > limits.max_total_object_bytes {
+            anyhow::bail!(
+                "object closure exceeds max_total_object_bytes: {} > {}",
+                total_object_bytes,
+                limits.max_total_object_bytes
+            );
+        }
         let actual_hash = lillux::sha256_hex(&content);
         if actual_hash != hash {
             let reason = format!("object bytes hash mismatch: requested {hash}, got {actual_hash}");
@@ -632,20 +868,34 @@ fn collect_object_closure_from_source(
             continue;
         }
 
-        if let Err(error) = validate_current_object(&value) {
-            if let Some(mismatch) = error.chain().find_map(|cause| {
-                cause
-                    .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
-                    .cloned()
-            }) {
-                report.incompatible_current_schemas.push(mismatch);
+        let decoded = match contracts::decode(&value) {
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => {
+                let kind = value
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing>")
+                    .to_string();
+                report
+                    .unsupported_objects
+                    .push(UnsupportedObjectKind { hash, kind });
+                continue;
             }
-            report.malformed_objects.push(MalformedObject {
-                hash,
-                reason: format!("{error:#}"),
-            });
-            continue;
-        }
+            Err(error) => {
+                if let Some(mismatch) = error.chain().find_map(|cause| {
+                    cause
+                        .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+                        .cloned()
+                }) {
+                    report.incompatible_current_schemas.push(mismatch);
+                }
+                report.malformed_objects.push(MalformedObject {
+                    hash,
+                    reason: format!("{error:#}"),
+                });
+                continue;
+            }
+        };
 
         let kind = value
             .get("kind")
@@ -670,40 +920,18 @@ fn collect_object_closure_from_source(
             continue;
         }
 
-        let links = match object_links(&value) {
-            Ok(links) => links,
-            Err(reason) => {
-                report
-                    .malformed_objects
-                    .push(MalformedObject { hash, reason });
-                continue;
-            }
-        };
+        let object_edges = decoded.object_edges;
 
-        let object_edges = match typed_object_edges(&value) {
-            Ok(edges) => edges,
-            Err(reason) => {
-                report
-                    .malformed_objects
-                    .push(MalformedObject { hash, reason });
-                continue;
-            }
-        };
-
-        let link_count = object_edges.len().saturating_add(links.blob_hashes.len());
+        let link_count = object_edges
+            .len()
+            .saturating_add(decoded.blob_hashes.len())
+            .saturating_add(decoded.large_object_hashes.len());
         if link_count > limits.max_links_per_object {
             anyhow::bail!(
                 "object {hash} exceeds max_links_per_object: {} > {}",
                 link_count,
                 limits.max_links_per_object
             );
-        }
-
-        if let Some(kind) = links.unsupported_kind {
-            report
-                .unsupported_objects
-                .push(UnsupportedObjectKind { hash, kind });
-            continue;
         }
 
         for edge in object_edges {
@@ -717,6 +945,16 @@ fn collect_object_closure_from_source(
             }
             queue.push_back((edge.hash, Some(hash.clone()), edge.expected));
         }
+        for large_object in decoded.large_object_hashes {
+            if !is_canonical_hash(&large_object) {
+                report.malformed_objects.push(MalformedObject {
+                    hash: hash.clone(),
+                    reason: format!("invalid large-object hash: {large_object}"),
+                });
+                continue;
+            }
+            report.large_object_hashes.insert(large_object);
+        }
         let project_file_size = if identity.kind == "project_file" {
             Some(
                 crate::objects::ProjectFile::from_value(&value)
@@ -726,7 +964,7 @@ fn collect_object_closure_from_source(
         } else {
             None
         };
-        for blob in links.blob_hashes {
+        for blob in decoded.blob_hashes {
             check()?;
             if is_canonical_hash(&blob) {
                 match cas
@@ -861,220 +1099,12 @@ fn cyclic_graph_member(edges: &BTreeMap<String, BTreeSet<String>>) -> Option<Str
     }
 }
 
+#[cfg(test)]
 fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
-    let kind = value
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "missing object kind".to_string())?;
-    let mut edges = Vec::new();
-    match kind {
-        "attestation" => {
-            push_required_object_edge(value, "subject_hash", ExpectedObject::Any, None, &mut edges)?
-        }
-        "chain_state" => {
-            push_optional_object_edge(
-                value,
-                "prev_chain_state_hash",
-                ExpectedObject::Kind("chain_state"),
-                Some(HistoryGraph::ChainStatePredecessors),
-                &mut edges,
-            )?;
-            push_optional_object_edge(
-                value,
-                "last_event_hash",
-                ExpectedObject::Kind("thread_event"),
-                None,
-                &mut edges,
-            )?;
-            let threads = value
-                .get("threads")
-                .and_then(Value::as_object)
-                .ok_or_else(|| "chain_state missing threads object".to_string())?;
-            for entry in threads.values() {
-                push_required_object_edge(
-                    entry,
-                    "snapshot_hash",
-                    ExpectedObject::Kind("thread_snapshot"),
-                    None,
-                    &mut edges,
-                )?;
-                push_optional_object_edge(
-                    entry,
-                    "last_event_hash",
-                    ExpectedObject::Kind("thread_event"),
-                    None,
-                    &mut edges,
-                )?;
-            }
-        }
-        "thread_snapshot" => {
-            for field in ["base_project_snapshot_hash", "result_project_snapshot_hash"] {
-                push_optional_object_edge(
-                    value,
-                    field,
-                    ExpectedObject::Kind("project_snapshot"),
-                    None,
-                    &mut edges,
-                )?;
-            }
-            push_optional_object_edge(
-                value,
-                "last_event_hash",
-                ExpectedObject::Kind("thread_event"),
-                None,
-                &mut edges,
-            )?;
-            push_optional_object_edge(
-                value,
-                "admitted_launch_capsule_hash",
-                ExpectedObject::Kind("admitted_launch_capsule"),
-                None,
-                &mut edges,
-            )?;
-        }
-        "admitted_launch_capsule" => {
-            let project_authority = value
-                .get("project_authority")
-                .and_then(Value::as_object)
-                .ok_or_else(|| {
-                    "admitted_launch_capsule missing project_authority object".to_string()
-                })?;
-            if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
-                let authority = Value::Object(project_authority.clone());
-                for field in ["base_snapshot_hash", "snapshot_hash"] {
-                    push_required_object_edge(
-                        &authority,
-                        field,
-                        ExpectedObject::Kind("project_snapshot"),
-                        None,
-                        &mut edges,
-                    )?;
-                }
-            }
-        }
-        "thread_event" => {
-            push_optional_object_edge(
-                value,
-                "prev_chain_event_hash",
-                ExpectedObject::Kind("thread_event"),
-                Some(HistoryGraph::ThreadEventChainPredecessors),
-                &mut edges,
-            )?;
-            push_optional_object_edge(
-                value,
-                "prev_thread_event_hash",
-                ExpectedObject::Kind("thread_event"),
-                Some(HistoryGraph::ThreadEventThreadPredecessors),
-                &mut edges,
-            )?;
-            if value.get("event_type").and_then(Value::as_str) == Some("milestone")
-                && value.pointer("/payload/kind").and_then(Value::as_str) == Some("state_anchor")
-            {
-                let manifest_ref = value
-                    .pointer("/payload/payload/manifest_ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        "state_anchor milestone is missing string manifest_ref".to_string()
-                    })?;
-                let manifest_hash = manifest_ref.strip_prefix("cas:").ok_or_else(|| {
-                    "state_anchor manifest_ref must use the cas:<hash> form".to_string()
-                })?;
-                push_typed_hash(
-                    manifest_hash,
-                    ExpectedObject::Kind("state_manifest"),
-                    None,
-                    &mut edges,
-                )?;
-            }
-        }
-        "bundle_event" => push_optional_object_edge(
-            value,
-            "prev_chain_event_hash",
-            ExpectedObject::Kind("bundle_event"),
-            Some(HistoryGraph::BundleEventPredecessors),
-            &mut edges,
-        )?,
-        "project_snapshot" => {
-            push_required_object_edge(
-                value,
-                "project_tree_hash",
-                ExpectedObject::Kind("project_tree"),
-                None,
-                &mut edges,
-            )?;
-            push_required_object_edge(
-                value,
-                "effective_policy_hash",
-                ExpectedObject::Kind("project_snapshot_policy"),
-                None,
-                &mut edges,
-            )?;
-            let parents = value
-                .get("parent_hashes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| "project_snapshot missing parent_hashes array".to_string())?;
-            for parent in parents {
-                let hash = parent.as_str().ok_or_else(|| {
-                    "project_snapshot parent_hashes contains non-string".to_string()
-                })?;
-                push_typed_hash(
-                    hash,
-                    ExpectedObject::Kind("project_snapshot"),
-                    Some(HistoryGraph::ProjectSnapshotParents),
-                    &mut edges,
-                )?;
-            }
-        }
-        "source_manifest" => {
-            let hashes = value
-                .get("item_source_hashes")
-                .and_then(Value::as_object)
-                .ok_or_else(|| "source_manifest missing item_source_hashes object".to_string())?;
-            for (item_ref, hash) in hashes {
-                let hash = hash.as_str().ok_or_else(|| {
-                    "source_manifest item_source_hashes contains non-string".to_string()
-                })?;
-                push_typed_hash(
-                    hash,
-                    ExpectedObject::ItemSource {
-                        item_ref: item_ref.clone(),
-                    },
-                    None,
-                    &mut edges,
-                )?;
-            }
-        }
-        "project_tree" => {
-            let hashes = value
-                .get("files")
-                .and_then(Value::as_object)
-                .ok_or_else(|| "project_tree missing files object".to_string())?;
-            for hash in hashes.values() {
-                let hash = hash
-                    .as_str()
-                    .ok_or_else(|| "project_tree files contains non-string".to_string())?;
-                push_typed_hash(hash, ExpectedObject::Kind("project_file"), None, &mut edges)?;
-            }
-        }
-        "project_file" | "project_snapshot_policy" | "state_manifest" => {}
-        "item_source" => {}
-        _ => return Ok(Vec::new()),
-    }
-    edges.sort_by(|left, right| {
-        (&left.hash, &left.expected, &left.history_graph).cmp(&(
-            &right.hash,
-            &right.expected,
-            &right.history_graph,
-        ))
-    });
-    edges.dedup_by(|left, right| {
-        left.hash == right.hash
-            && left.expected == right.expected
-            && left.history_graph == right.history_graph
-    });
-    Ok(edges)
+    Ok(contracts::links(value)?
+        .map(|links| links.object_edges)
+        .unwrap_or_default())
 }
-
 fn push_required_object_edge(
     value: &Value,
     field: &str,
@@ -1126,211 +1156,117 @@ fn push_typed_hash(
 /// invariant checks as its authoritative reader. Link extraction alone is not
 /// validation: it must not make an old-schema or partially typed object a GC
 /// root merely because a few hash-shaped fields can be found.
+#[cfg(test)]
 fn validate_current_object(value: &Value) -> anyhow::Result<()> {
-    let kind = value
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing object kind"))?;
-    let result: anyhow::Result<()> = match kind {
-        "attestation" => crate::objects::Attestation::from_value(value).map(|_| ()),
-        "chain_state" => serde_json::from_value::<crate::objects::ChainState>(value.clone())
-            .context("deserialize chain_state")
-            .and_then(|object| object.validate()),
-        "thread_snapshot" => crate::objects::ThreadSnapshot::from_current_value(value.clone())
-            .context("deserialize current thread_snapshot")
-            .map(|_| ()),
-        "admitted_launch_capsule" => {
-            crate::objects::AdmittedLaunchCapsule::from_current_value(value.clone())
-                .context("deserialize current admitted_launch_capsule")
-                .map(|_| ())
-        }
-        "thread_event" => serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
-            .context("deserialize thread_event")
-            .and_then(|object| object.validate()),
-        "bundle_event" => {
-            serde_json::from_value::<crate::objects::BundleEventObject>(value.clone())
-                .context("deserialize bundle_event")
-                .and_then(|object| object.validate())
-        }
-        "state_manifest" => crate::objects::StateManifest::from_current_value(value.clone())
-            .context("deserialize current state_manifest")
-            .map(|_| ()),
-        "project_snapshot" => crate::objects::ProjectSnapshot::from_value(value).map(|_| ()),
-        "project_tree" => crate::objects::ProjectTree::from_value(value).map(|_| ()),
-        "project_file" => crate::objects::ProjectFile::from_value(value).map(|_| ()),
-        "project_snapshot_policy" => {
-            crate::objects::ProjectSnapshotPolicy::from_value(value).map(|_| ())
-        }
-        "source_manifest" => crate::objects::SourceManifest::from_value(value).map(|_| ()),
-        "item_source" => crate::objects::ItemSource::from_value(value).map(|_| ()),
-        _ => return Ok(()),
-    };
-    result.with_context(|| format!("invalid {kind} object"))
+    contracts::decode(value).map(|_| ())
 }
-
 /// Extract schema-defined links from one CAS object value.
 pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
     let kind = value
         .get("kind")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .ok_or_else(|| "missing object kind".to_string())?;
+    let Some(decoded) = contracts::links(value)? else {
+        return Ok(ObjectLinks {
+            unsupported_kind: Some(kind.to_string()),
+            ..ObjectLinks::default()
+        });
+    };
+    let mut object_hashes = decoded
+        .object_edges
+        .into_iter()
+        .map(|edge| edge.hash)
+        .collect::<Vec<_>>();
+    object_hashes.sort();
+    object_hashes.dedup();
+    Ok(ObjectLinks {
+        object_hashes,
+        blob_hashes: decoded.blob_hashes,
+        large_object_hashes: decoded.large_object_hashes,
+        unsupported_kind: None,
+    })
+}
 
-    let mut links = ObjectLinks::default();
+/// Return the exact number of schema-defined outgoing links in one current
+/// object. Unlike [`object_links`], this deliberately does not deduplicate
+/// repeated object edges: closure admission charges the authored edge count,
+/// and callers validating a supplemental object must apply the same limit as
+/// the authoritative collector.
+pub fn object_link_count(value: &Value) -> Result<Option<usize>, String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing object kind".to_string())?;
+    let Some(decoded) = contracts::links(value)? else {
+        let _ = kind;
+        return Ok(None);
+    };
+    Ok(Some(
+        decoded
+            .object_edges
+            .len()
+            .saturating_add(decoded.blob_hashes.len())
+            .saturating_add(decoded.large_object_hashes.len()),
+    ))
+}
+/// Manifest hashes for every external realization sealed into one capsule.
+///
+/// This parses the one reserved durable slot using the shared wire type. A
+/// shape probe over arbitrary derived values would let unrelated data create
+/// false CAS edges and would make GC semantics depend on field-name
+/// coincidence.
+fn external_realization_manifest_hashes(capsule: &Value) -> Result<Vec<String>, String> {
+    let Some(derived) = capsule
+        .get("exact_program")
+        .and_then(|program| program.get("resolution_output"))
+        .and_then(|resolution| resolution.get("composed"))
+        .and_then(|composed| composed.get("derived"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
 
-    match kind {
-        "attestation" => push_required_hash(value, "subject_hash", &mut links.object_hashes)?,
-        "chain_state" => {
-            push_optional_hash(value, "prev_chain_state_hash", &mut links.object_hashes)?;
-            push_optional_hash(value, "last_event_hash", &mut links.object_hashes)?;
-            let Some(threads) = value.get("threads").and_then(|v| v.as_object()) else {
-                return Err("chain_state missing threads object".to_string());
-            };
-            for entry in threads.values() {
-                push_required_hash(entry, "snapshot_hash", &mut links.object_hashes)?;
-                push_optional_hash(entry, "last_event_hash", &mut links.object_hashes)?;
-            }
-        }
-        "thread_snapshot" => {
-            push_optional_hash(
-                value,
-                "base_project_snapshot_hash",
-                &mut links.object_hashes,
-            )?;
-            push_optional_hash(
-                value,
-                "result_project_snapshot_hash",
-                &mut links.object_hashes,
-            )?;
-            push_optional_hash(value, "last_event_hash", &mut links.object_hashes)?;
-            push_optional_hash(
-                value,
-                "admitted_launch_capsule_hash",
-                &mut links.object_hashes,
-            )?;
-        }
-        "admitted_launch_capsule" => {
-            let project_authority = value
-                .get("project_authority")
-                .and_then(Value::as_object)
-                .ok_or_else(|| {
-                    "admitted_launch_capsule missing project_authority object".to_string()
-                })?;
-            if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
-                let authority = Value::Object(project_authority.clone());
-                for field in ["base_snapshot_hash", "snapshot_hash"] {
-                    push_required_hash(&authority, field, &mut links.object_hashes)?;
-                }
-            }
-            let execution_closure = value
-                .get("execution_closure")
-                .and_then(Value::as_object)
-                .ok_or_else(|| {
-                    "admitted_launch_capsule missing execution_closure object".to_string()
-                })?;
-            let command = execution_closure.get("command").and_then(Value::as_object);
-            if execution_closure.get("driver").and_then(Value::as_str) == Some("managed_runtime") {
-                push_required_hash(
-                    &Value::Object(execution_closure.clone()),
-                    "executor_blob_hash",
-                    &mut links.blob_hashes,
-                )?;
-            }
-            if command
-                .and_then(|command| command.get("authority"))
-                .and_then(Value::as_str)
-                == Some("content_addressed")
-            {
-                push_required_hash(
-                    &Value::Object(command.cloned().expect("checked direct command")),
-                    "executable_blob_hash",
-                    &mut links.blob_hashes,
-                )?;
-            }
-        }
-        "thread_event" => {
-            push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
-            push_optional_hash(value, "prev_thread_event_hash", &mut links.object_hashes)?;
-        }
-        "state_manifest" => {
-            let restore = value
-                .get("restore")
-                .ok_or_else(|| "state_manifest missing restore object".to_string())?;
-            push_required_hash(restore, "blob_hash", &mut links.blob_hashes)?;
-            let objects = value
-                .get("objects")
-                .and_then(Value::as_array)
-                .ok_or_else(|| "state_manifest missing objects array".to_string())?;
-            for object in objects {
-                push_required_hash(object, "blob_hash", &mut links.blob_hashes)?;
-            }
-        }
-        "bundle_event" => {
-            push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
-            let attachments = value
-                .get("attachments")
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| "bundle_event attachments is not an array".to_string())
-                })
-                .transpose()?
-                .cloned()
-                .unwrap_or_default();
-            for attachment in &attachments {
-                push_required_hash(attachment, "blob_hash", &mut links.blob_hashes)?;
-            }
-        }
-        "project_snapshot" => {
-            push_required_hash(value, "project_tree_hash", &mut links.object_hashes)?;
-            push_required_hash(value, "effective_policy_hash", &mut links.object_hashes)?;
-            let parents = value
-                .get("parent_hashes")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| "project_snapshot missing parent_hashes array".to_string())?;
-            for parent in parents {
-                let Some(hash) = parent.as_str() else {
-                    return Err("project_snapshot parent_hashes contains non-string".to_string());
-                };
-                push_hash(hash, &mut links.object_hashes)?;
-            }
-        }
-        "source_manifest" => {
-            let hashes = value
-                .get("item_source_hashes")
-                .and_then(|v| v.as_object())
-                .ok_or_else(|| "source_manifest missing item_source_hashes object".to_string())?;
-            for hash_value in hashes.values() {
-                let Some(hash) = hash_value.as_str() else {
-                    return Err(
-                        "source_manifest item_source_hashes contains non-string".to_string()
-                    );
-                };
-                push_hash(hash, &mut links.object_hashes)?;
-            }
-        }
-        "project_tree" => {
-            let hashes = value
-                .get("files")
-                .and_then(Value::as_object)
-                .ok_or_else(|| "project_tree missing files object".to_string())?;
-            for hash_value in hashes.values() {
-                let Some(hash) = hash_value.as_str() else {
-                    return Err("project_tree files contains non-string".to_string());
-                };
-                push_hash(hash, &mut links.object_hashes)?;
-            }
-        }
-        "project_file" => push_required_hash(value, "blob_hash", &mut links.blob_hashes)?,
-        "project_snapshot_policy" => {}
-        "item_source" => push_required_hash(value, "content_blob_hash", &mut links.blob_hashes)?,
-        other => links.unsupported_kind = Some(other.to_string()),
-    }
+    let Some(value) = derived.get(crate::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY) else {
+        return Ok(Vec::new());
+    };
+    crate::objects::ExternalContentRealizationSet::from_value(value)
+        .map(|set| set.manifest_hashes())
+        .map_err(|error| format!("invalid external realization set: {error}"))
+}
 
-    links.object_hashes.sort();
-    links.object_hashes.dedup();
-    links.blob_hashes.sort();
-    links.blob_hashes.dedup();
-    Ok(links)
+fn persistent_session_external_realization_manifest_hashes(
+    capsule: &Value,
+) -> Result<Vec<String>, String> {
+    let Some(derived) = capsule
+        .get("exact_program")
+        .and_then(|program| program.get("resolution_output"))
+        .and_then(|resolution| resolution.get("composed"))
+        .and_then(|composed| composed.get("derived"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(value) = derived.get(crate::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY) else {
+        return Ok(Vec::new());
+    };
+    crate::objects::ExternalContentRealizationSet::from_value(value)
+        .map(|set| set.manifest_hashes())
+        .map_err(|error| format!("invalid persistent-session external realization set: {error}"))
+}
+
+fn retained_resolution_external_realization_manifest_hashes(
+    resolution: &Value,
+) -> Result<Vec<String>, String> {
+    let Some(value) = resolution
+        .get("composed")
+        .and_then(|composed| composed.get("derived"))
+        .and_then(|derived| derived.get(crate::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY))
+    else {
+        return Ok(Vec::new());
+    };
+    crate::objects::ExternalContentRealizationSet::from_value(value)
+        .map(|set| set.manifest_hashes())
+        .map_err(|error| format!("invalid content-dependency external realization set: {error}"))
 }
 
 fn push_required_hash(value: &Value, field: &str, out: &mut Vec<String>) -> Result<(), String> {
@@ -1446,7 +1382,7 @@ mod tests {
         );
 
         let report = collect_object_closure(&cas_root, [snapshot]).unwrap();
-        assert!(report.is_complete());
+        assert!(report.is_complete(), "{report:?}");
         assert_eq!(report.object_hashes.len(), 4);
         assert!(report.blob_hashes.contains(&blob_hash));
     }
@@ -1641,13 +1577,35 @@ mod tests {
             "prev_thread_event_hash": null,
             "payload": {
                 "kind": "state_anchor",
-                "payload": {"manifest_ref": format!("cas:{manifest_hash}")}
+                "payload": {
+                    "schema_version": 3,
+                    "label": "checkpoint",
+                    "state_digest": format!("sha256:{manifest_hash}"),
+                    "manifest_ref": format!("cas:{manifest_hash}"),
+                    "runtime": {},
+                    "metadata": {}
+                },
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": h("de"),
+                    "node": "solve",
+                    "step": 3
+                }
             }
         });
         let edges = typed_object_edges(&event).unwrap();
         assert!(edges.iter().any(|edge| {
             edge.hash == manifest_hash && edge.expected == ExpectedObject::Kind("state_manifest")
         }));
+        let mut predecessor = event;
+        predecessor["payload"]["payload"]["schema_version"] = json!(1);
+        assert!(
+            typed_object_edges(&predecessor)
+                .unwrap_err()
+                .contains("current contract")
+        );
 
         let restore_hash = h("bd");
         let input_hash = h("ce");
@@ -1679,6 +1637,7 @@ mod tests {
         let executable_blob_hash = h("de");
         let links = object_links(&json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {"kind": "projectless", "environment": {"kind": "none"}},
             "execution_closure": {
                 "driver": "direct_item_executor",
@@ -1700,6 +1659,7 @@ mod tests {
         let operational_snapshot_hash = h("cd");
         let links = object_links(&json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {
                 "kind": "pinned_generation",
                 "base_snapshot_hash": base_snapshot_hash,
@@ -1728,6 +1688,7 @@ mod tests {
         let executor_blob_hash = h("ce");
         let links = object_links(&json!({
             "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
             "project_authority": {"kind": "projectless", "environment": {"kind": "none"}},
             "execution_closure": {
                 "driver": "managed_runtime",
@@ -1836,6 +1797,7 @@ mod tests {
                 max_objects: 8,
                 max_blobs: 8,
                 max_object_bytes: 32,
+                max_total_object_bytes: 32,
                 max_blob_bytes: 32,
                 max_total_blob_bytes: 32,
                 max_links_per_object: 8,
@@ -1844,6 +1806,30 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("exceeds byte limit"));
+    }
+
+    #[test]
+    fn traversal_rejects_aggregate_object_bytes_above_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let hash = write_object(&cas_root, &json!({ "kind": "future_kind" }));
+
+        let err = collect_object_closure_with_limits(
+            &cas_root,
+            [hash],
+            ObjectClosureLimits {
+                max_objects: 8,
+                max_blobs: 8,
+                max_object_bytes: 1024,
+                max_total_object_bytes: 1,
+                max_blob_bytes: 1024,
+                max_total_blob_bytes: 1024,
+                max_links_per_object: 8,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("exceeds max_total_object_bytes"));
     }
 
     #[test]
@@ -1868,6 +1854,7 @@ mod tests {
                 max_objects: 8,
                 max_blobs: 8,
                 max_object_bytes: 1024,
+                max_total_object_bytes: 1024,
                 max_blob_bytes: 1024,
                 max_total_blob_bytes: 1024,
                 max_links_per_object: 1,
@@ -1876,5 +1863,159 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("exceeds max_links_per_object"));
+    }
+
+    #[test]
+    fn a_capsule_edge_reaches_its_realization_manifest() {
+        let manifest_hash = h("aa");
+        // The wire key is asserted literally on purpose: renaming the
+        // reserved derived slot must break this test, not silently detach
+        // every realization from GC reachability.
+        let capsule = json!({
+            "kind": "admitted_launch_capsule",
+            "execution_realization_hash": h("99"),
+            "project_authority": {"kind": "live_project"},
+            "execution_closure": {
+                "driver": "direct_item_executor",
+                "execution_plan": {},
+                "protocol_descriptor_document": "# signed",
+                "command": {"authority": "runtime_path"}
+            },
+            "exact_program": {
+                "resolution_output": {
+                    "composed": {
+                        "derived": {
+                            "effective_external_realizations": [{
+                                "id": "sim",
+                                "kind": "tree",
+                                "mode": "captured",
+                                "manifest_hash": manifest_hash,
+                                "entry_count": 1,
+                                "total_bytes": 5,
+                                "mount": "vendor/sim"
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        let edges = typed_object_edges(&capsule).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == manifest_hash
+                && edge.expected == ExpectedObject::OneOf(contracts::EXTERNAL_MANIFEST_KINDS)
+        }));
+
+        // Malformed derived data is a closure error, never an empty edge set:
+        // silently dropping the edge is exactly how a realization becomes
+        // collectable garbage.
+        let mut malformed = capsule;
+        malformed["exact_program"]["resolution_output"]["composed"]["derived"]["effective_external_realizations"] =
+            json!([{"id": "sim"}]);
+        assert!(
+            typed_object_edges(&malformed)
+                .unwrap_err()
+                .contains("invalid external realization set")
+        );
+    }
+
+    #[test]
+    fn an_external_manifest_closure_reaches_every_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let file_blob = write_blob(&cas_root, b"hello");
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": "external_content_manifest",
+                "schema": crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+                "entries": [
+                    {"path": "content", "kind": "file", "mode": 0o644,
+                     "blob_hash": file_blob, "size": 5},
+                    {"path": "link", "kind": "symlink", "target": "content"}
+                ],
+                "entry_count": 2,
+                "total_bytes": 5
+            }),
+        );
+        let report = collect_object_closure(&cas_root, [manifest]).unwrap();
+        assert!(report.is_complete());
+        assert!(report.blob_hashes.contains(&file_blob));
+    }
+
+    #[test]
+    fn a_realization_with_a_missing_blob_is_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let ghost = h("ee");
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": "external_content_manifest",
+                "schema": crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+                "entries": [{"path": "content", "kind": "file", "mode": 0o644,
+                             "blob_hash": ghost, "size": 1}],
+                "entry_count": 1,
+                "total_bytes": 1
+            }),
+        );
+        let report = collect_object_closure(&cas_root, [manifest]).unwrap();
+        assert!(!report.is_complete());
+        assert!(report.missing_blobs.iter().any(|blob| blob.hash == ghost));
+    }
+
+    #[test]
+    fn a_large_manifest_reports_each_storage_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let large_hash = h("ac");
+        let small_blob = write_blob(&cas_root, b"small");
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+                "schema": crate::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
+                "entries": [
+                    {
+                        "path": "config.json",
+                        "kind": "file",
+                        "mode": 0o644,
+                        "blob_hash": small_blob,
+                        "size": 5
+                    },
+                    {
+                        "path": "model.safetensors",
+                        "kind": "file",
+                        "mode": 0o644,
+                        "file_sha256": large_hash,
+                        "size": 5,
+                        "chunk_size": crate::objects::MIN_LARGE_CONTENT_CHUNK_BYTES,
+                        "chunk_hashes": [h("bd")]
+                    }
+                ],
+                "entry_count": 2,
+                "total_bytes": 10
+            }),
+        );
+        let report = collect_object_closure(&cas_root, [manifest]).unwrap();
+        assert!(report.is_complete(), "{report:?}");
+        assert!(report.blob_hashes.contains(&small_blob));
+        assert_eq!(report.large_object_hashes, BTreeSet::from([large_hash]));
+    }
+
+    #[test]
+    fn current_registry_contains_every_baseline_specialized_object_kind() {
+        let kinds = current_object_kinds();
+        for kind in [
+            crate::objects::EXECUTION_IDENTITY_KIND,
+            crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+            crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+            crate::objects::EFFECT_RECORD_KIND,
+            crate::objects::STATE_MANIFEST_KIND,
+        ] {
+            assert!(
+                kinds.contains(&kind),
+                "missing current object contract: {kind}"
+            );
+        }
     }
 }

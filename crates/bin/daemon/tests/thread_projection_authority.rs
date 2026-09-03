@@ -4,8 +4,8 @@
 //! (only internal, non-continuable profiles), so they can pin the projection
 //! WIRING but always observe `supports_continuation: false`. This integration
 //! test loads the actual shipped kind schemas — where `directive_run`
-//! (continuation + operator follow-up) and `graph_run` (machine continuation,
-//! NO operator follow-up) live — and asserts the daemon-authored
+//! (continuation + operator follow-up), `graph_run`, and `worker_execution`
+//! (machine continuation, NO operator follow-up) live — and asserts the daemon-authored
 //! `execution.{supports_continuation, supports_operator_followup}` reflect that
 //! contrast through `threads.get` and `threads.list`.
 //!
@@ -36,7 +36,7 @@ fn captured_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistor
         item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
         kind_schema_content_hash: hash,
         resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
-            node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+            node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
         },
     }
 }
@@ -50,8 +50,8 @@ fn workspace_root() -> PathBuf {
 }
 
 /// A `ThreadLifecycleService` whose `KindProfileRegistry` is derived from the
-/// REAL signed `core` + `standard` bundle kind schemas (so `directive_run` /
-/// `graph_run` and their continuation flags are present), backed by a temp
+/// REAL signed `core` + `standard` bundle kind schemas (so `directive_run`,
+/// `graph_run`, and `worker_execution` and their continuation flags are present), backed by a temp
 /// state store. The temp dir is returned so it outlives the service.
 fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
     let tmp = TempDir::new().unwrap();
@@ -117,6 +117,7 @@ fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
     let item_ref = match kind {
         "directive_run" => "directive:test/item",
         "graph_run" => "graph:test/item",
+        "worker_execution" => "worker:ryeos/test",
         other => panic!("unsupported fixture kind: {other}"),
     };
     ThreadCreateParams {
@@ -186,6 +187,29 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
         graph["execution"]["supports_operator_followup"], false,
         "graph_run refuses operator follow-up: {graph:#?}"
     );
+
+    // worker_execution uses a daemon-trusted machine continuation to restore
+    // a signed portable-state manifest. It deliberately does not grant callers
+    // the conversational/operator continuation surface.
+    threads
+        .create_thread_for_test(&create_params("T-worker", "worker_execution"))
+        .unwrap();
+    let worker = serde_json::to_value(
+        threads
+            .get_thread_view("T-worker")
+            .unwrap()
+            .expect("worker-execution thread"),
+    )
+    .unwrap();
+    assert_eq!(worker["kind"], "worker_execution");
+    assert_eq!(
+        worker["execution"]["supports_continuation"], true,
+        "worker_execution is machine-continuable: {worker:#?}"
+    );
+    assert_eq!(
+        worker["execution"]["supports_operator_followup"], false,
+        "worker_execution refuses operator follow-up: {worker:#?}"
+    );
 }
 
 #[test]
@@ -196,6 +220,9 @@ fn thread_list_reflects_real_kind_continuation_authority() {
         .unwrap();
     threads
         .create_thread_for_test(&create_params("T-graph", "graph_run"))
+        .unwrap();
+    threads
+        .create_thread_for_test(&create_params("T-worker", "worker_execution"))
         .unwrap();
 
     let listing = threads.list_threads_filtered(100, None).unwrap();
@@ -228,5 +255,16 @@ fn thread_list_reflects_real_kind_continuation_authority() {
         fact("T-graph", "supports_operator_followup"),
         false,
         "graph_run row refuses operator follow-up"
+    );
+    // worker execution: trusted machine continuation, NO operator follow-up.
+    assert_eq!(
+        fact("T-worker", "supports_continuation"),
+        true,
+        "worker_execution row machine-continuable"
+    );
+    assert_eq!(
+        fact("T-worker", "supports_operator_followup"),
+        false,
+        "worker_execution row refuses operator follow-up"
     );
 }

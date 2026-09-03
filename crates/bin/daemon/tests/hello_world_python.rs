@@ -26,9 +26,9 @@ use ryeos_engine::trust::TrustStore;
 
 fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
-    let node = root.join(".ai/node");
-    fs::create_dir_all(&node).unwrap();
-    fs::write(node.join("isolation.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    let fixtures = root.join(".ai/test-fixtures");
+    fs::create_dir_all(&fixtures).unwrap();
+    fs::write(fixtures.join("isolation-policy.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
     root
 }
 
@@ -255,6 +255,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
             &verified,
             &serde_json::Value::Null,
             &plan_ctx.execution_hints,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -275,9 +276,14 @@ fn daemon_executes_python_hello_world_end_to_end() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_filesystem_authority_ceiling:
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        isolation_network_authority_ceiling:
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         isolation_live_access_authority: Some(
             ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                 authorized_write_namespaces: vec!["project".to_string()],
@@ -285,6 +291,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         ),
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
+        isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
@@ -293,6 +300,10 @@ fn daemon_executes_python_hello_world_end_to_end() {
             content_hash: verified.resolved.content_hash.clone(),
         }],
         isolation_verified_command: None,
+        isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -376,6 +387,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             &verified,
             &serde_json::Value::Null,
             &plan_ctx.execution_hints,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -398,9 +410,14 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_filesystem_authority_ceiling:
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        isolation_network_authority_ceiling:
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         isolation_live_access_authority: Some(
             ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                 authorized_write_namespaces: vec!["project".to_string()],
@@ -408,6 +425,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         ),
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
+        isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
@@ -416,6 +434,10 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             content_hash: verified.resolved.content_hash.clone(),
         }],
         isolation_verified_command: None,
+        isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -489,6 +511,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             &verified,
             &serde_json::Value::Null,
             &plan_ctx.execution_hints,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -511,9 +534,14 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_filesystem_authority_ceiling:
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        isolation_network_authority_ceiling:
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         isolation_live_access_authority: Some(
             ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                 authorized_write_namespaces: vec!["project".to_string()],
@@ -521,6 +549,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         ),
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
+        isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
@@ -529,6 +558,10 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             content_hash: verified.resolved.content_hash.clone(),
         }],
         isolation_verified_command: None,
+        isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -603,6 +636,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
                 &verified,
                 &serde_json::Value::Null,
                 &plan_ctx.execution_hints,
+                None,
             )
             .expect("build_plan");
     });
@@ -642,13 +676,13 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
         "engine:build_plan should carry canonical_ref"
     );
 
-    // The python script chain declares config_resolve + env_config +
-    // verify_deps + config (runtime_config). At least one per-handler
-    // span must appear as a descendant of build_plan.
+    // The python script chain declares config_resolve + env_config + config
+    // (runtime_config). Adjacent-source policy is projected before compilation,
+    // not dispatched as a runtime handler. At least one per-handler span must
+    // appear as a descendant of build_plan.
     let handler_present = ryeos_tracing::test::find_span(&spans, "engine:env_config")
         .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:config_resolve"))
         .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:runtime_config"))
-        .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:verify_deps"))
         .is_some();
     assert!(
         handler_present,

@@ -5,7 +5,7 @@
 //!
 //! Any bundle name is accepted — no special treatment for any name.
 //!
-//! OfflineOnly: the daemon must be stopped (engine reload not implemented).
+//! Stopped-node only: the daemon must be stopped (engine reload not implemented).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -319,18 +319,10 @@ pub(crate) fn admit_completed_staging(
         true,
         Arc::clone(&isolation),
     )?;
-    let prospective_roots: Vec<PathBuf> = plan
-        .bundles
-        .values()
-        .map(|bundle| bundle.source.root_path().clone())
-        .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(app_root, &prospective_roots, node_trust_store)
-        .context("prospective bundle set would fail node engine boot")?;
-
     // Exercise the second boot phase too: bundle-contributed node config is
-    // scanned from the prospective roots and command/policy collisions are
-    // rejected before activation. Existing records retain their node-owned
-    // command grants; a newly written/replaced record has no implicit grants.
+    // scanned from the prospective roots and policy-directory collisions are
+    // rejected before activation. Command grants come only from the exact
+    // node-policy generation, never from bundle registrations.
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root,
         trust_store: node_trust_store,
@@ -349,10 +341,17 @@ pub(crate) fn admit_completed_staging(
         .iter()
         .map(|(name, bundle)| {
             if name == bundle_name {
+                if replace {
+                    current_records.remove(name).with_context(|| {
+                        format!(
+                            "replacement bundle '{}' has no verified current registration",
+                            name
+                        )
+                    })?;
+                }
                 Ok(ryeos_app::node_config::BundleRecord {
                     name: name.clone(),
                     path: bundle.source.root_path().clone(),
-                    command_registration_caps: Vec::new(),
                     source_file: app_root
                         .join(ryeos_engine::AI_DIR)
                         .join("node/bundles")
@@ -368,15 +367,38 @@ pub(crate) fn admit_completed_staging(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    let config_table = ryeos_app::node_config::NodeConfigTable::new();
+    let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
+    let policy_snapshot =
+        ryeos_app::node_policy::load_snapshot(app_root, node_trust_store, &policy_table)
+            .context("load exact node policy generation for prospective admission")?;
+    let command_registration = policy_snapshot.require::<
+        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+    >()?;
     let snapshot = loader
-        .load_full_prospective(
-            &ryeos_app::node_config::SectionTable::new(),
+        .load_full(
+            &config_table,
             &prospective_records,
+            command_registration,
+            &policy_table,
         )
         .context("prospective bundle set would fail full node-config boot")?;
     prospective_validator
         .validate(&snapshot)
         .context("prospective bundle set would fail composed node-config admission")?;
+    let prospective_roots: Vec<PathBuf> = plan
+        .bundles
+        .values()
+        .map(|bundle| bundle.source.root_path().clone())
+        .collect();
+    ryeos_app::engine_init::admit_node_bundle_roots(
+        app_root,
+        &prospective_roots,
+        node_trust_store,
+        policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+        policy_snapshot.generation_digest(),
+    )
+    .context("prospective bundle set would fail node engine boot")?;
     Ok(())
 }
 
@@ -671,7 +693,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/install",
     endpoint: "bundle.install",
-    availability: ServiceAvailability::OfflineOnly,
+    availability: ServiceAvailability::StoppedNodeOnly,
     required_caps: &["ryeos.execute.service.bundle/install"],
     handler: |params, _ctx, state| {
         Box::pin(async move {

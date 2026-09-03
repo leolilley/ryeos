@@ -8,8 +8,10 @@ fn main() {
             directive_launch::validate(request)
         }
         HandlerRequest::Parse(_)
+        | HandlerRequest::EditSource(_)
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::Compose(_)
-        | HandlerRequest::ValidateComposerConfig(_) => directive_launch::wrong_request(),
+        | HandlerRequest::ValidateComposerConfig(_)
+        | HandlerRequest::EffectiveValidate(_) => directive_launch::wrong_request(),
     }));
 }

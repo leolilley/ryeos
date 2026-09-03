@@ -77,6 +77,23 @@ impl RuntimeRoot {
         self.state().join("cache")
     }
 
+    /// Node-private implementation root for declarative external-content
+    /// activation. Callers must still open and mutate it through Lillux
+    /// descriptor-relative primitives; this method owns only canonical layout.
+    pub fn managed_external_content(&self) -> PathBuf {
+        self.state().join("managed-external-content")
+    }
+
+    pub fn managed_external_content_cache(&self) -> PathBuf {
+        self.cache()
+            .join("managed-external-content")
+            .join("archives")
+    }
+
+    pub fn managed_external_content_staging(&self) -> PathBuf {
+        self.managed_external_content().join("staging")
+    }
+
     pub fn operator_signing_key_path(&self) -> PathBuf {
         self.config()
             .join("keys")

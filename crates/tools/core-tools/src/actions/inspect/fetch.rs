@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -111,12 +111,15 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
         None
     };
 
-    let content = std::fs::read_to_string(&resolved.source_path).with_context(|| {
-        format!(
-            "failed to read item content from {:?}",
-            resolved.source_path
-        )
-    })?;
+    let content = lillux::read_regular_file_bounded_no_follow(
+        &resolved.source_path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )?;
+    if lillux::sha256_hex(&content) != resolved.content_hash {
+        bail!("resolved item changed before its content could be returned");
+    }
+    let content =
+        String::from_utf8(content).map_err(|_| anyhow!("resolved item content is not UTF-8"))?;
 
     let report = FetchReport {
         item_ref: params.item_ref,

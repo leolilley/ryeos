@@ -23,7 +23,6 @@
 //! applies before persistence, after daemon-owned follow-result splicing, and
 //! while loading so every checkpoint path accepts the same bounded domain.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -59,37 +58,50 @@ pub fn validate_checkpoint_shape(
     EvaluationSession::with_context(&context, &limits).validate_value(value, field)
 }
 
-fn read_checkpoint_json(path: &Path) -> Result<Value> {
-    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let declared_len = file
-        .metadata()
-        .with_context(|| format!("inspect {}", path.display()))?
-        .len();
-    if declared_len > MAX_CHECKPOINT_FILE_BYTES as u64 {
-        bail!(
-            "checkpoint {} is {declared_len} bytes; maximum is {MAX_CHECKPOINT_FILE_BYTES}",
-            path.display()
-        );
-    }
+fn read_checkpoint_bytes(directory: &lillux::PinnedDirectory) -> Result<Option<Vec<u8>>> {
+    let Some(file) = directory
+        .open_pinned_regular(Path::new(LATEST_FILE).as_os_str(), false)
+        .with_context(|| format!("open checkpoint in {}", directory.path().display()))?
+    else {
+        return Ok(None);
+    };
+    file.read_bounded(MAX_CHECKPOINT_FILE_BYTES as u64)
+        .map(Some)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "read checkpoint {} under {MAX_CHECKPOINT_FILE_BYTES}-byte maximum: {error:#}",
+                file.path().display()
+            )
+        })
+}
 
-    // The metadata check avoids an unnecessary read for an already-large file;
-    // `take(MAX + 1)` is the authoritative cap if the file grows after that
-    // check. Never reserve from attacker-controlled metadata above the limit.
-    let capacity = usize::try_from(declared_len)
-        .unwrap_or(MAX_CHECKPOINT_FILE_BYTES)
-        .min(MAX_CHECKPOINT_FILE_BYTES);
-    let mut bytes = Vec::with_capacity(capacity);
-    file.take(MAX_CHECKPOINT_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read {}", path.display()))?;
+fn read_checkpoint_json(directory: &lillux::PinnedDirectory) -> Result<Option<Value>> {
+    let Some(bytes) = read_checkpoint_bytes(directory)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .with_context(|| format!("parse checkpoint in {}", directory.path().display()))
+}
+
+fn publish_checkpoint_bytes(directory: &lillux::PinnedDirectory, bytes: &[u8]) -> Result<()> {
     if bytes.len() > MAX_CHECKPOINT_FILE_BYTES {
         bail!(
-            "checkpoint {} exceeds the {MAX_CHECKPOINT_FILE_BYTES}-byte maximum",
-            path.display()
+            "serialized checkpoint is {} bytes; maximum is {MAX_CHECKPOINT_FILE_BYTES}",
+            bytes.len()
         );
     }
-
-    serde_json::from_slice(&bytes).with_context(|| format!("parse checkpoint {}", path.display()))
+    let incumbent = directory
+        .open_pinned_regular(Path::new(LATEST_FILE).as_os_str(), false)
+        .with_context(|| format!("pin incumbent checkpoint in {}", directory.path().display()))?;
+    directory
+        .atomic_write_pinned_if_same(
+            Path::new(LATEST_FILE).as_os_str(),
+            incumbent.as_ref(),
+            bytes,
+            0o600,
+        )
+        .with_context(|| format!("publish checkpoint in {}", directory.path().display()))
 }
 
 /// The top-level checkpoint field the follow machinery splices a followed child's
@@ -150,18 +162,25 @@ impl CheckpointWriter {
     /// Returns `Ok(true)` if a checkpoint was found and copied, `Ok(false)` if
     /// the source dir has none.
     pub fn copy_latest(from_dir: &Path, to_dir: &Path) -> Result<bool> {
-        let src = from_dir.join(LATEST_FILE);
-        if !src.exists() {
+        let Some(from) = lillux::PinnedDirectory::open(from_dir)
+            .with_context(|| format!("pin checkpoint source {}", from_dir.display()))?
+        else {
             return Ok(false);
-        }
-        // Byte-exact durable seed: read the predecessor's bytes verbatim (no
-        // re-serialization) and publish them through the same fsync barrier as
-        // `write`, so a power loss right after seeding cannot leave the
-        // successor's dir empty or half-written.
-        let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
-        std::fs::create_dir_all(to_dir).with_context(|| format!("create {}", to_dir.display()))?;
-        lillux::atomic_write(&to_dir.join(LATEST_FILE), &bytes)
-            .with_context(|| format!("durable copy {} -> {}", src.display(), to_dir.display()))?;
+        };
+        let to = lillux::PinnedDirectory::open_or_create(to_dir)
+            .with_context(|| format!("pin checkpoint destination {}", to_dir.display()))?;
+        Self::copy_latest_pinned(&from, &to)
+    }
+
+    /// Copy through exact descriptor-rooted source and destination authorities.
+    pub fn copy_latest_pinned(
+        from: &lillux::PinnedDirectory,
+        to: &lillux::PinnedDirectory,
+    ) -> Result<bool> {
+        let Some(bytes) = read_checkpoint_bytes(from)? else {
+            return Ok(false);
+        };
+        publish_checkpoint_bytes(to, &bytes)?;
         Ok(true)
     }
 
@@ -180,20 +199,37 @@ impl CheckpointWriter {
         key: &str,
         value: Value,
     ) -> Result<bool> {
-        let src = from_dir.join(LATEST_FILE);
-        if !src.exists() {
+        let Some(from) = lillux::PinnedDirectory::open(from_dir)
+            .with_context(|| format!("pin checkpoint source {}", from_dir.display()))?
+        else {
             return Ok(false);
-        }
-        let mut payload = read_checkpoint_json(&src)?;
-        let obj = payload
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("checkpoint {} is not a JSON object", src.display()))?;
+        };
+        let to = lillux::PinnedDirectory::open_or_create(to_dir)
+            .with_context(|| format!("pin checkpoint destination {}", to_dir.display()))?;
+        Self::copy_latest_with_splice_pinned(&from, &to, key, value)
+    }
+
+    pub fn copy_latest_with_splice_pinned(
+        from: &lillux::PinnedDirectory,
+        to: &lillux::PinnedDirectory,
+        key: &str,
+        value: Value,
+    ) -> Result<bool> {
+        let Some(mut payload) = read_checkpoint_json(from)? else {
+            return Ok(false);
+        };
+        let obj = payload.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "checkpoint in {} is not a JSON object",
+                from.path().display()
+            )
+        })?;
         obj.insert(key.to_string(), value);
         validate_checkpoint_shape(&payload, "spliced checkpoint payload").map_err(|error| {
             anyhow::anyhow!("spliced checkpoint payload exceeded runtime JSON bounds: {error}")
         })?;
-        // Atomic write into the successor's dir via the same tmp+rename path.
-        Self::new(to_dir.to_path_buf()).write(&payload)?;
+        let bytes = serde_json::to_vec(&payload).context("serialize spliced checkpoint payload")?;
+        publish_checkpoint_bytes(to, &bytes)?;
         Ok(true)
     }
 
@@ -211,18 +247,10 @@ impl CheckpointWriter {
         validate_checkpoint_shape(state, "checkpoint payload").map_err(|error| {
             anyhow::anyhow!("checkpoint payload exceeded runtime JSON bounds: {error}")
         })?;
-        std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("create checkpoint dir {}", self.dir.display()))?;
-        let final_path = self.dir.join(LATEST_FILE);
+        let directory = lillux::PinnedDirectory::open_or_create(&self.dir)
+            .with_context(|| format!("pin checkpoint dir {}", self.dir.display()))?;
         let bytes = serde_json::to_vec(state).context("serialize checkpoint payload")?;
-        if bytes.len() > MAX_CHECKPOINT_FILE_BYTES {
-            bail!(
-                "serialized checkpoint is {} bytes; maximum is {MAX_CHECKPOINT_FILE_BYTES}",
-                bytes.len()
-            );
-        }
-        lillux::atomic_write(&final_path, &bytes)
-            .with_context(|| format!("durable atomic checkpoint write {}", final_path.display()))?;
+        publish_checkpoint_bytes(&directory, &bytes)?;
         Ok(())
     }
 
@@ -230,11 +258,14 @@ impl CheckpointWriter {
     /// Returns `None` if the file does not exist (first run, no
     /// checkpoint yet) or the directory does not exist.
     pub fn load_latest(&self) -> Result<Option<Value>> {
-        let path = self.dir.join(LATEST_FILE);
-        if !path.exists() {
+        let Some(directory) = lillux::PinnedDirectory::open(&self.dir)
+            .with_context(|| format!("pin checkpoint dir {}", self.dir.display()))?
+        else {
             return Ok(None);
-        }
-        let value = read_checkpoint_json(&path)?;
+        };
+        let Some(value) = read_checkpoint_json(&directory)? else {
+            return Ok(None);
+        };
         validate_checkpoint_shape(&value, "checkpoint payload").map_err(|error| {
             anyhow::anyhow!("checkpoint payload exceeded runtime JSON bounds: {error}")
         })?;
@@ -274,6 +305,21 @@ mod tests {
             .unwrap();
         assert_eq!(loaded["node"], "b");
         assert_eq!(loaded["step"], 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_latest_rejects_symlinked_source_checkpoint() {
+        use std::os::unix::fs::symlink;
+
+        let from = TempDir::new().unwrap();
+        let to = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret"), b"{\"secret\":true}").unwrap();
+        symlink(outside.path().join("secret"), from.path().join(LATEST_FILE)).unwrap();
+
+        assert!(CheckpointWriter::copy_latest(from.path(), to.path()).is_err());
+        assert!(!to.path().join(LATEST_FILE).exists());
     }
 
     #[test]

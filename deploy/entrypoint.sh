@@ -51,17 +51,57 @@ collect_baked_publisher_trust_args() {
   esac
 }
 
+# Build the lifecycle argument vector without knowing any distribution or
+# provider name. Every image must set the one generic init-profile variable. It is
+# first-publication authority only: an absent generation receives the exact
+# mapped profile, while any present generation occupant is preserved and left to
+# Rust's signed complete-generation validation. A malformed or partial occupant
+# therefore fails; packaging never falls back to the profile.
+build_ryeos_init_args() {
+  local source_dir="$1"
+  local app_root="$2"
+  local policy_generation="$app_root/.ai/node/policies"
+
+  [[ -n "${RYEOS_INIT_NODE_PROFILE:-}" ]] || {
+    echo "[entrypoint] RYEOS_INIT_NODE_PROFILE is required" >&2
+    return 1
+  }
+  INIT_ARGS=(init --non-interactive --app-root "$app_root" --source "$source_dir")
+  case "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" in
+    0|"")
+      if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
+        INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
+      else
+        echo "[entrypoint] preserving existing signed node policy generation"
+      fi
+      ;;
+    1)
+      if [[ -e "$policy_generation" || -L "$policy_generation" ]]; then
+        echo "[entrypoint] explicitly replacing obsolete signed node policy generation"
+        INIT_ARGS+=(
+          --node-profile "$RYEOS_INIT_NODE_PROFILE"
+          --replace-node-policy-generation
+          --confirm-node-policy-generation-replacement
+        )
+      else
+        INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
+      fi
+      ;;
+    *)
+      echo "[entrypoint] invalid RYEOS_RESET_NODE_POLICY_GENERATION value; use 0 (default) or 1" >&2
+      return 1
+      ;;
+  esac
+}
+
 main() {
   echo "[entrypoint] running ryeos init --non-interactive"
   mkdir -p /data
 
   collect_baked_publisher_trust_args /opt/ryeos
+  build_ryeos_init_args /opt/ryeos /data/app
 
-  ryeos init \
-    --non-interactive \
-    --app-root /data/app \
-    --source /opt/ryeos \
-    "${TRUST_ARGS[@]}"
+  ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
 
   echo "[entrypoint] init complete, starting daemon"
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce

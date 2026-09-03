@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-21T00:24:30Z:40786b51cb025dba7737ce3514144169592f9afe4b026579e69a2a1f325f8b4e:dkalhxICPSMF27cZu1xzUnt4ENsXkd275VCjFkM1jexRIsc2HSzkBzX7YyxB4ZniTmoOzXPn0rOfQMsfH/BrDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:48Z:3e9fafa534b3391a54dd925270478e93b20389c6fb785b70eacc6f9035bad34e:Ej+j1yWIdh2Nys5xzUT3YiRzzGRUDAaW44z4g+wHntxwFfGr7UxE7n+7g1SZpnhUeG+0wqV3ChncKxHnv/qQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
 tags: [architecture, isolation, hermetic, env, security, subprocess]
-version: "2.3.0"
+version: "2.4.0"
 description: >
   Hermetic execution and optional OS isolation — env_clear, explicit env
   injection, node-owned policy, signed backend bundles, per-route semaphores,
@@ -115,7 +115,7 @@ protocol and lifecycle bindings, not a list granted to every subprocess:
 | `RYEOSD_CALLBACK_TOKEN` | Auth token for daemon callbacks |
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |
-| `RYEOSD_PROJECT_PATH` | Callback authorization/state anchor; a deliberate state-root override when present, otherwise the effective project root |
+| `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW relocation and generation advance, empty for projectless execution, and never an authority token |
 | `RYE_THREAD_ID` | Thread ID for tool primitives |
 | `RYEOS_ITEM_PATH` | Resolved item source path |
 | `RYEOS_ITEM_KIND` | Resolved item kind |

@@ -10,6 +10,10 @@ fn main() {
                 message: e.message,
             },
         },
+        HandlerRequest::EditSource(_) => HandlerResponse::EditSourceErr {
+            kind: ryeos_handler_protocol::ParseErrKind::Schema,
+            message: "regex parser does not expose source editing".into(),
+        },
         HandlerRequest::ValidateParserConfig(v) => {
             match regex_kv::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,
@@ -19,7 +23,8 @@ fn main() {
         HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)
         | HandlerRequest::LaunchPrepare(_)
-        | HandlerRequest::ValidateLaunchPreparerConfig(_) => HandlerResponse::ParseErr {
+        | HandlerRequest::ValidateLaunchPreparerConfig(_)
+        | HandlerRequest::EffectiveValidate(_) => HandlerResponse::ParseErr {
             kind: ryeos_handler_protocol::ParseErrKind::Internal,
             message: "this is a parser binary; received composer request".into(),
         },

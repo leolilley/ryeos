@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-03T10:15:15Z:115b0f7c315f38ca0b6c0cc977fe4b3624b9d46bea87bf9059c272333868f09c:4DqJ1IlJqrHqSdHkDxbVxFzN4GSFTrOrsKHDyQkPflRDsS0qg4y7GeZOANlU7UV1cxVfin9EpUYJq0lvaFHUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:29Z:115b0f7c315f38ca0b6c0cc977fe4b3624b9d46bea87bf9059c272333868f09c:4DqJ1IlJqrHqSdHkDxbVxFzN4GSFTrOrsKHDyQkPflRDsS0qg4y7GeZOANlU7UV1cxVfin9EpUYJq0lvaFHUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [latency, profiling, observability, streaming, providers, caching]

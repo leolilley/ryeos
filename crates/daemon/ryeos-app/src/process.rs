@@ -1188,11 +1188,26 @@ fn signal_pin_failure(error: IdentityPinError) -> SignalResult {
     }
 }
 
-fn group_pin_failure(_identity: &ExecutionProcessIdentity, error: IdentityPinError) -> KillResult {
+fn group_pin_failure(identity: &ExecutionProcessIdentity, error: IdentityPinError) -> KillResult {
+    // Losing the exact leader does not by itself prove that the process group
+    // is empty: descendants can retain an orphaned PGID after their leader is
+    // reaped. A kernel ESRCH probe for the recorded PGID is the additional
+    // proof boundary. Once the group namespace is absent, every member of the
+    // old group has exited; a later numeric-ID reuse cannot resurrect it.
+    let group_absent =
+        process_group_presence(identity.group_leader_pid) == IdentityLiveness::DeadOrStale;
     match error {
+        IdentityPinError::AlreadyDead if group_absent => KillResult {
+            success: true,
+            method: "group_absent",
+        },
         IdentityPinError::AlreadyDead => KillResult {
             success: false,
             method: "group_identity_lost",
+        },
+        IdentityPinError::Stale if group_absent => KillResult {
+            success: true,
+            method: "group_absent",
         },
         IdentityPinError::Stale => KillResult {
             success: false,
@@ -1594,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn graceful_kill_with_reaped_leader_fails_closed() {
+    fn graceful_kill_with_reaped_empty_group_proves_absence() {
         let tmp = TempDir::new().unwrap();
         let (mut child, identity, _marker) = spawn_signal_target(&tmp);
         // Reap it ourselves so the PGID is gone.
@@ -1606,8 +1621,65 @@ mod tests {
             &identity,
             ShutdownAction::Graceful(Duration::from_millis(50)),
         );
+        assert!(result.success);
+        assert_eq!(result.method, "group_absent");
+    }
+
+    #[test]
+    fn graceful_kill_with_reaped_leader_and_live_group_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let descendant_path = tmp.path().join("descendant_pid");
+        let script = format!(
+            "sleep 30 & printf %s $! > '{}'; wait",
+            descendant_path.display()
+        );
+        let mut leader = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn group leader")
+        };
+        for _ in 0..100 {
+            if descendant_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let descendant_pid: i32 = std::fs::read_to_string(&descendant_path)
+            .expect("read descendant PID")
+            .parse()
+            .expect("parse descendant PID");
+        let pgid = i64::from(leader.id());
+        assert_eq!(unsafe { libc::getpgid(descendant_pid) }, pgid as i32);
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture leader identity");
+
+        assert_eq!(unsafe { libc::kill(pgid as i32, libc::SIGKILL) }, 0);
+        let _ = leader.wait().expect("reap group leader");
+        assert_eq!(process_group_presence(pgid), IdentityLiveness::Alive);
+
+        let result = kill_by_action(
+            &identity,
+            ShutdownAction::Graceful(Duration::from_millis(50)),
+        );
         assert!(!result.success);
         assert_eq!(result.method, "group_identity_lost");
+
+        // Test-only cleanup is safe here: the still-present PGID is the one
+        // created above and the numeric leader cannot be reused while the
+        // descendant retains that group.
+        let _ = unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
     }
 
     /// Spawn a target whose SIGUSR1 trap writes a marker then exits, in its own

@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-26T16:27:42Z:705cc57b83e2417b71520ad0fd668481fcb45f1affa6327f93b9d9bf773dc6fb:SpiCwiwhmLpiJBoB4imPyY/pCdafmrI1bt3oGNewOwF8aY/Z2n6/GyrIIsT47zASjSc7+AynrLgWHHwjE0wkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: federation.follow-terminal-deliver
+required_caps: ["ryeos.execute.service.federation/follow-terminal-deliver"]
+schema:
+  operation_id: string
+  reservation_attestation_hash: string
+  terminal_attestation_hash: string
+  child_chain_root_id: string
+  target_chain_head_hash: string
+  parent_site_id: string
+  target_site_id: string
+description: "Deliver one target-signed followed-execution terminal to its exact parent reservation"

@@ -7,9 +7,43 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 
 use crate::context::ExecutionContext;
-use crate::model::{FanoutItemStatus, GraphResult, GraphRunStatus};
+use crate::model::FanoutItemStatus;
+#[cfg(test)]
+use crate::model::GraphRunStatus;
 
 const NATIVE_FAILURE_DIAGNOSTIC_CHARS: usize = 4_096;
+pub(crate) const GRAPH_ACTION_OCCURRENCE_SCHEMA: &str = "ryeos.runtime_action_occurrence.v1";
+
+/// Stable logical identity for one graph action occurrence.
+///
+/// A graph retry advances `step`, so a known-safe authored retry is a new
+/// occurrence. Re-driving the same retained step after process loss derives
+/// the same identity. Foreach members add their ordered item index; no action
+/// behavior or child identity is caller-authored into this coordinate.
+pub(crate) fn graph_action_operation_id(
+    graph_run_id: &str,
+    node: &str,
+    step: u32,
+    item_index: Option<usize>,
+    attempt: Option<u32>,
+) -> String {
+    let mut identity = serde_json::json!({
+        "schema": GRAPH_ACTION_OCCURRENCE_SCHEMA,
+        "owner_kind": "graph",
+        "graph_run_id": graph_run_id,
+        "node": node,
+        "step": step,
+    });
+    if let Some(item_index) = item_index {
+        identity["item_index"] = serde_json::json!(item_index);
+    }
+    if let Some(attempt) = attempt {
+        identity["attempt"] = serde_json::json!(attempt);
+    }
+    let canonical =
+        lillux::canonical_json(&identity).expect("fixed graph action occurrence is canonical JSON");
+    lillux::sha256_hex(canonical.as_bytes())
+}
 
 /// Outcome of dispatching a single graph action leaf, classified from
 /// the daemon execute envelope BEFORE the bare result is unwrapped.
@@ -58,6 +92,7 @@ pub struct ActionFailure {
     /// or cost provenance is invalid. Such failures cannot be authored around
     /// with `on_error`, because doing so could settle after losing accounting.
     pub integrity: bool,
+    pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +100,11 @@ pub struct ActionFailure {
 pub struct ActionDispatchError {
     pub diagnostic: String,
     pub retryable: bool,
+    /// The callback may have crossed the daemon action boundary without
+    /// returning authoritative settlement. This is neither an authored retry
+    /// nor a terminal leaf failure: native recovery must re-drive the exact
+    /// same operation occurrence.
+    pub outcome_unknown: bool,
 }
 
 impl From<anyhow::Error> for ActionDispatchError {
@@ -72,6 +112,7 @@ impl From<anyhow::Error> for ActionDispatchError {
         Self {
             diagnostic: format!("{error:#}"),
             retryable: false,
+            outcome_unknown: false,
         }
     }
 }
@@ -88,7 +129,7 @@ pub struct ActionSuccess {
     /// `result` of a directive return is the synthetic sentinel
     /// `"directive_return"` — not meaningful graph data — so the outputs
     /// are the payload. A `graph:*` child keeps its complete typed
-    /// [`GraphResult`] in the durable runtime envelope while exposing that
+    /// `GraphResult` in the durable runtime envelope while exposing that
     /// DTO's authored `result` here. For every other leaf (subprocess, bare
     /// value, native return with no outputs) this is the bare inner result and
     /// the shape is unchanged.
@@ -103,6 +144,14 @@ pub struct ActionSuccess {
     /// walker emits a `child_thread_spawned` event from this so the dispatch
     /// edge lands in the parent's portable braid.
     pub child_thread_id: Option<String>,
+    /// The durable effect record this result was replayed from, when the
+    /// daemon substituted a recorded result for execution. Flows into the
+    /// node receipt so replay provenance is inspectable per step.
+    pub replayed_from: Option<String>,
+    /// Daemon-owned dispatch provenance. Follow-resume outcomes do not pass
+    /// through the unary callback boundary and therefore carry `None` here;
+    /// unary, retry, and foreach actions always carry it.
+    pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 impl ActionSuccess {
@@ -115,8 +164,63 @@ impl ActionSuccess {
             result,
             cost: None,
             child_thread_id: None,
+            replayed_from: None,
+            dispatch: None,
         }
     }
+}
+
+fn build_action_payload(
+    action: &Value,
+) -> Result<ryeos_runtime::callback::ActionPayload, ActionDispatchError> {
+    let item_id = action.get("item_id").and_then(Value::as_str).unwrap_or("");
+    let ref_bindings = action
+        .get("ref_bindings")
+        .ok_or_else(|| anyhow::anyhow!("action `{item_id}` is missing required `ref_bindings`"))
+        .and_then(|value| {
+            serde_json::from_value::<BTreeMap<String, String>>(value.clone())
+                .map_err(|error| anyhow::anyhow!("invalid `ref_bindings` for `{item_id}`: {error}"))
+        })?;
+    let call = match action.get("call") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value::<ryeos_runtime::callback::MethodCall>(value.clone()).map_err(
+                |error| anyhow::anyhow!("invalid `call` block for `{item_id}`: {error}"),
+            )?,
+        ),
+    };
+    let launch_window = match action.get("launch_window") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value::<ryeos_runtime::callback::LaunchWindow>(value.clone())
+                .map_err(|error| {
+                    anyhow::anyhow!("invalid `launch_window` for `{item_id}`: {error}")
+                })?,
+        ),
+    };
+    Ok(ryeos_runtime::callback::ActionPayload {
+        operation_id: action
+            .get(ryeos_runtime::callback::action_keys::OPERATION_ID)
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        item_id: item_id.to_owned(),
+        ref_bindings,
+        params: action.get("params").cloned().unwrap_or_else(|| json!({})),
+        thread: action
+            .get("thread")
+            .and_then(Value::as_str)
+            .unwrap_or("inline")
+            .to_owned(),
+        call,
+        facets: action.get("facets").cloned(),
+        launch_window,
+    })
+}
+
+pub(crate) fn rendered_action_digest(action: &Value) -> Result<String, ActionDispatchError> {
+    Ok(ryeos_runtime::callback::dispatch_action_digest(
+        &build_action_payload(action)?,
+    )?)
 }
 
 #[tracing::instrument(
@@ -131,83 +235,31 @@ pub async fn dispatch_action(
     client: &CallbackClient,
     action: &Value,
     thread_id: &str,
-    project_path: &str,
+    _project_path: &str,
+    effect_dispatch: Option<ryeos_runtime::callback::EffectDispatchRequest>,
     _exec_ctx: Option<&ExecutionContext>,
 ) -> Result<ActionOutcome, ActionDispatchError> {
     let action = action.clone();
 
     let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
     tracing::Span::current().record("tool_name", item_id);
-    let params = action.get("params").cloned().unwrap_or(json!({}));
-    let ref_bindings = action
-        .get("ref_bindings")
-        .ok_or_else(|| anyhow::anyhow!("action `{item_id}` is missing required `ref_bindings`"))
-        .and_then(|value| {
-            serde_json::from_value::<BTreeMap<String, String>>(value.clone())
-                .map_err(|e| anyhow::anyhow!("invalid `ref_bindings` for `{item_id}`: {e}"))
-        })?;
-    let thread = action
-        .get("thread")
-        .and_then(|v| v.as_str())
-        .unwrap_or("inline");
-
-    // Optional method selector. The node's `call: { method, args }` block
-    // (already rendered by the walker) maps onto the daemon's
-    // method dispatch. Absent (or explicit `null`, for parity with how
-    // `/execute` deserializes `Option<MethodCall>`) → the leaf takes the
-    // kind's default method. A malformed `call` is a node authoring error,
-    // surfaced loudly.
-    let call = match action.get("call") {
-        None => None,
-        Some(v) if v.is_null() => None,
-        Some(call_val) => Some(
-            serde_json::from_value::<ryeos_runtime::callback::MethodCall>(call_val.clone())
-                .map_err(|e| anyhow::anyhow!("invalid `call` block for `{item_id}`: {e}"))?,
-        ),
-    };
-
-    // Cohort/fleet facets ride the action Value (the walker sets them from the
-    // node's rendered `facets:`); the daemon stamps them on a detached child.
-    let facets = action.get("facets").cloned();
-
-    // Bounded-fanout window (the foreach runners set it for a `detach` node
-    // with `max_concurrency`); malformed is an authoring/plumbing error,
-    // surfaced loudly.
-    let launch_window = match action.get("launch_window") {
-        None => None,
-        Some(v) if v.is_null() => None,
-        Some(v) => Some(
-            serde_json::from_value::<ryeos_runtime::callback::LaunchWindow>(v.clone())
-                .map_err(|e| anyhow::anyhow!("invalid `launch_window` for `{item_id}`: {e}"))?,
-        ),
-    };
+    let payload = build_action_payload(&action)?;
 
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
-        project_path: project_path.to_string(),
-        action: ryeos_runtime::callback::ActionPayload {
-            operation_id: action
-                .get("operation_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            item_id: item_id.to_string(),
-            ref_bindings,
-            params,
-            thread: thread.to_string(),
-            call,
-            facets,
-            launch_window,
-        },
+        action: payload,
         hook_dispatch: None,
+        effect_dispatch,
     };
 
-    let response = client
-        .dispatch_action(request)
-        .await
-        .map_err(|error| ActionDispatchError {
+    let response = client.dispatch_action(request).await.map_err(|error| {
+        let outcome_unknown = error.runtime_action_outcome_unknown();
+        ActionDispatchError {
             diagnostic: format!("dispatch failed: {error}"),
-            retryable: error.retryable(),
-        })?;
+            retryable: !outcome_unknown && error.retryable(),
+            outcome_unknown,
+        }
+    })?;
 
     // The typed callback contract puts the leaf-dispatcher value in
     // `response.result`; the wrapping `thread` snapshot is for audit
@@ -216,27 +268,25 @@ pub async fn dispatch_action(
     // failure rather than a silent `null`. Only success peels to the bare
     // leaf value; a leaf that still requests inline continuation
     // (`continuation_id` at its top level) is then rejected loudly.
-    // The `thread` snapshot is the spawned child (a native directive/sub-graph
-    // child); capture its id BEFORE classifying `result` so the walker can emit a
-    // `child_thread_spawned` event. Empty/absent for subprocess/tool/bare leaves,
-    // which spawn no child thread.
-    let callback_child_thread_id = response
-        .thread
-        .get("thread_id")
-        .or_else(|| response.thread.get("id"));
-    let (child_thread_id, child_thread_id_error) = match callback_child_thread_id {
-        None => (None, None),
-        Some(Value::String(thread_id)) => {
-            match ryeos_runtime::validate_runtime_thread_id(thread_id) {
-                Ok(()) => (Some(thread_id.clone()), None),
-                Err(error) => (None, Some(error)),
-            }
-        }
-        Some(_) => (None, Some("runtime thread_id is not a string".to_string())),
-    };
+    // A native child snapshot identifies a spawned directive/sub-graph child;
+    // capture its id BEFORE classifying `result` so the walker can emit a
+    // `child_thread_spawned` event. In-process service envelopes instead carry
+    // invocation/audit metadata and are explicitly excluded below.
+    let (child_thread_id, child_thread_id_error) = callback_child_thread_identity(&response.thread);
 
-    match classify_envelope_for_item(response.result, item_id) {
+    response
+        .dispatch
+        .validate()
+        .map_err(|error| ActionDispatchError {
+            diagnostic: format!("invalid daemon dispatch evidence: {error:#}"),
+            retryable: false,
+            outcome_unknown: false,
+        })?;
+    let daemon_dispatch = response.dispatch;
+    let classified_result = classify_callback_result(response.result, item_id, &response.thread);
+    match classified_result {
         ActionOutcome::Failure(mut failure) => {
+            failure.dispatch = Some(daemon_dispatch);
             if let Some(error) = child_thread_id_error {
                 failure
                     .diagnostic
@@ -269,6 +319,18 @@ pub async fn dispatch_action(
             Ok(ActionOutcome::Failure(failure))
         }
         ActionOutcome::Success(mut success) => {
+            if success.replayed_from != daemon_dispatch.replayed_from {
+                return Ok(ActionOutcome::Failure(ActionFailure {
+                    diagnostic: "leaf replay marker contradicts daemon dispatch evidence"
+                        .to_owned(),
+                    cost: success.cost,
+                    retryable: false,
+                    child_thread_id: None,
+                    integrity: true,
+                    dispatch: Some(daemon_dispatch),
+                }));
+            }
+            success.dispatch = Some(daemon_dispatch);
             if let Some(error) = child_thread_id_error {
                 return Ok(ActionOutcome::Failure(ActionFailure {
                     diagnostic: format!("invalid dispatched child identity: {error}"),
@@ -276,6 +338,7 @@ pub async fn dispatch_action(
                     retryable: false,
                     child_thread_id: None,
                     integrity: true,
+                    dispatch: success.dispatch,
                 }));
             }
             success.child_thread_id = child_thread_id;
@@ -304,10 +367,43 @@ pub async fn dispatch_action(
                     retryable: false,
                     child_thread_id: success.child_thread_id,
                     integrity: false,
+                    dispatch: success.dispatch,
                 }));
             }
             Ok(ActionOutcome::Success(success))
         }
+    }
+}
+
+/// Extract the identity of a native child launched by one callback action.
+///
+/// In-process services also return a `thread` object, but its `svc-*`
+/// identity is invocation/audit metadata rather than a spawned runtime child.
+/// The service envelope carries the explicit `recorded` discriminator, so it
+/// must never produce a graph lineage edge. Native child snapshots have no
+/// such discriminator and retain the strict runtime thread-id contract.
+fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<String>) {
+    match thread.get("recorded") {
+        Some(Value::Bool(_)) => return (None, None),
+        Some(_) => {
+            return (
+                None,
+                Some("service invocation recorded marker is not a boolean".to_string()),
+            );
+        }
+        None => {}
+    }
+
+    let callback_child_thread_id = thread.get("thread_id").or_else(|| thread.get("id"));
+    match callback_child_thread_id {
+        None => (None, None),
+        Some(Value::String(thread_id)) => {
+            match ryeos_runtime::validate_runtime_thread_id(thread_id) {
+                Ok(()) => (Some(thread_id.clone()), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        Some(_) => (None, Some("runtime thread_id is not a string".to_string())),
     }
 }
 
@@ -339,7 +435,7 @@ fn classify_envelope(value: Value) -> ActionOutcome {
 /// Classify a live dispatch result using the exact kind selected by the
 /// authored canonical item reference.
 ///
-/// Graph runtimes retain their complete [`GraphResult`] in the durable native
+/// Graph runtimes retain their complete `GraphResult` in the durable native
 /// envelope. At the graph-expression boundary, however, a graph action exposes
 /// the child graph's authored return value. Kind-directed projection keeps that
 /// contract explicit and prevents arbitrary non-graph payloads that happen to
@@ -350,6 +446,19 @@ fn classify_envelope_for_item(value: Value, item_ref: &str) -> ActionOutcome {
         Err(diagnostic) => return malformed_native_runtime_failure(diagnostic, None),
     };
     classify_envelope_with_projection(value, projection)
+}
+
+fn classify_callback_result(value: Value, item_ref: &str, thread: &Value) -> ActionOutcome {
+    if matches!(thread.get("recorded"), Some(Value::Bool(_))) {
+        // In-process service results are ordinary domain values. A service is
+        // allowed to return keys such as `status` or `success`; those names are
+        // native-envelope discriminators only for an actual runtime child.
+        // `thread.recorded` is the daemon-authored terminator discriminator,
+        // independent of whether this particular service normally records.
+        ActionOutcome::Success(ActionSuccess::bare(value))
+    } else {
+        classify_envelope_for_item(value, item_ref)
+    }
 }
 
 fn classify_envelope_with_projection(
@@ -395,6 +504,7 @@ fn classify_envelope_with_projection(
 #[derive(Debug)]
 pub(crate) struct ClassifiedFollowEnvelope {
     pub(crate) outcome: ActionOutcome,
+    pub(crate) child_thread_id: String,
     status: RuntimeResultStatus,
 }
 
@@ -429,6 +539,10 @@ struct NativeResultEnvelope {
     outputs: Value,
     warnings: Vec<String>,
     cost: Value,
+    /// Present when the daemon served this result from a durable effect
+    /// record instead of executing; carried into the node receipt.
+    #[serde(default)]
+    replayed_from: Option<String>,
 }
 
 #[derive(Debug)]
@@ -455,6 +569,10 @@ struct SubprocessResultEnvelope {
     result: Value,
     error: Value,
     artifacts: Vec<Value>,
+    /// Present when the daemon served this result from a durable effect
+    /// record instead of executing; carried into the node receipt.
+    #[serde(default)]
+    replayed_from: Option<String>,
 }
 
 /// Exact wire shape written by `managed_runtime_envelope` and spliced into a
@@ -463,12 +581,11 @@ struct SubprocessResultEnvelope {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FollowResultEnvelope {
+    projection: String,
     success: bool,
     child_thread_id: String,
     status: RuntimeResultStatus,
     result: Value,
-    outputs: Value,
-    warnings: Vec<String>,
     cost: Value,
 }
 
@@ -493,7 +610,7 @@ struct FollowFanoutResumeEnvelope {
 /// closed status, `success` must agree exactly with the status outcome.
 #[cfg(test)]
 fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
-    classify_follow_envelope_with_projection(value, NativeResultProjection::KindDefined)
+    classify_follow_envelope_value(value)
 }
 
 /// Classify a single followed child using the canonical item ref captured in
@@ -503,25 +620,31 @@ pub(crate) fn classify_follow_envelope_for_item(
     value: Value,
     item_ref: &str,
 ) -> Result<ClassifiedFollowEnvelope, String> {
-    let projection = native_result_projection(item_ref)?;
-    classify_follow_envelope_with_projection(value, projection)
+    // The daemon has already applied the kind-owned action projection before
+    // persisting this bounded resume envelope. Still reject a corrupt
+    // checkpointed item reference instead of silently accepting it.
+    let _ = native_result_projection(item_ref)?;
+    classify_follow_envelope_value(value)
 }
 
-fn classify_follow_envelope_with_projection(
-    value: Value,
-    projection: NativeResultProjection,
-) -> Result<ClassifiedFollowEnvelope, String> {
+fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
     let envelope: FollowResultEnvelope = serde_json::from_value(value)
         .map_err(|error| format!("malformed follow result envelope: {error}"))?;
     let FollowResultEnvelope {
+        projection,
         success,
         child_thread_id: envelope_child_thread_id,
         status,
         result,
-        outputs,
-        warnings: _warnings,
         cost,
     } = envelope;
+
+    if projection != ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION {
+        return Err(format!(
+            "malformed follow result envelope: projection `{projection}` is not `{}`",
+            ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION
+        ));
+    }
 
     ryeos_runtime::validate_runtime_thread_id(&envelope_child_thread_id)
         .map_err(|error| format!("malformed follow result envelope: {error}"))?;
@@ -548,13 +671,14 @@ fn classify_follow_envelope_with_projection(
         Some(cost)
     };
 
+    let child_thread_id = envelope_child_thread_id.clone();
     let outcome = if status.is_success() {
-        let result = native_success_value(result, outputs, projection)
-            .map_err(|error| format!("malformed follow result envelope: {error}"))?;
         ActionOutcome::Success(ActionSuccess {
             result,
             cost,
             child_thread_id: Some(envelope_child_thread_id),
+            replayed_from: None,
+            dispatch: None,
         })
     } else {
         let structured_failure = parse_runtime_failure(&result);
@@ -599,10 +723,15 @@ fn classify_follow_envelope_with_projection(
                 && runtime_failure_contract_error.is_none(),
             child_thread_id,
             integrity: runtime_failure_contract_error.is_some(),
+            dispatch: None,
         })
     };
 
-    Ok(ClassifiedFollowEnvelope { outcome, status })
+    Ok(ClassifiedFollowEnvelope {
+        outcome,
+        child_thread_id,
+        status,
+    })
 }
 
 /// Parse and classify the exact daemon-managed cohort result for a checkpointed
@@ -705,6 +834,7 @@ fn classify_native_runtime_envelope(
         outputs,
         warnings: _warnings,
         cost,
+        replayed_from,
     } = envelope;
     let cost = match parse_native_cost(cost) {
         Ok(cost) => cost,
@@ -715,6 +845,7 @@ fn classify_native_runtime_envelope(
                 retryable: false,
                 child_thread_id: None,
                 integrity: true,
+                dispatch: None,
             });
         }
     };
@@ -733,6 +864,8 @@ fn classify_native_runtime_envelope(
                 result,
                 cost,
                 child_thread_id: None,
+                replayed_from,
+                dispatch: None,
             }),
             Err(diagnostic) => malformed_native_runtime_failure(diagnostic, cost),
         }
@@ -756,6 +889,7 @@ fn classify_native_runtime_envelope(
                 && runtime_failure_contract_error.is_none(),
             child_thread_id: structured_failure.map(|failure| failure.diagnostic_locator.thread_id),
             integrity: runtime_failure_contract_error.is_some(),
+            dispatch: None,
         })
     }
 }
@@ -770,6 +904,7 @@ fn malformed_native_runtime_failure(
         retryable: false,
         child_thread_id: None,
         integrity: true,
+        dispatch: None,
     })
 }
 
@@ -783,6 +918,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
                 retryable: false,
                 child_thread_id: None,
                 integrity: true,
+                dispatch: None,
             });
         }
     };
@@ -791,9 +927,16 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
         result,
         error,
         artifacts: _artifacts,
+        replayed_from,
     } = envelope;
     if error.is_null() {
-        ActionOutcome::Success(ActionSuccess::bare(result))
+        ActionOutcome::Success(ActionSuccess {
+            result,
+            cost: None,
+            child_thread_id: None,
+            replayed_from,
+            dispatch: None,
+        })
     } else {
         ActionOutcome::Failure(ActionFailure {
             diagnostic: describe_subprocess_failure(outcome_code.as_deref(), &error),
@@ -801,13 +944,14 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             retryable: false,
             child_thread_id: None,
             integrity: false,
+            dispatch: None,
         })
     }
 }
 
 /// Graph-visible success value for a native-runtime envelope.
 ///
-/// A graph runtime's durable result is the complete typed [`GraphResult`], but
+/// A graph runtime's durable result is the complete typed `GraphResult`, but
 /// an authored graph action observes only that DTO's `result` field. Other
 /// native kinds retain their kind-defined result projection: directives with
 /// declared outputs expose `{result, outputs}`, while a native return with no
@@ -818,14 +962,12 @@ fn native_success_value(
     projection: NativeResultProjection,
 ) -> Result<Value, String> {
     match projection {
-        NativeResultProjection::GraphReturn => project_graph_return(result, outputs),
-        NativeResultProjection::KindDefined => {
-            if has_meaningful_outputs(&outputs) {
-                Ok(json!({ "result": result, "outputs": outputs }))
-            } else {
-                Ok(result)
-            }
+        NativeResultProjection::GraphReturn => {
+            ryeos_graph_definition::project_graph_action_result(result, outputs)
         }
+        NativeResultProjection::KindDefined => Ok(
+            ryeos_runtime::envelope::project_kind_defined_action_result(result, outputs),
+        ),
     }
 }
 
@@ -843,55 +985,6 @@ fn native_result_projection(item_ref: &str) -> Result<NativeResultProjection, St
     } else {
         NativeResultProjection::KindDefined
     })
-}
-
-fn project_graph_return(result: Value, outputs: Value) -> Result<Value, String> {
-    if !outputs.is_null() {
-        return Err("graph runtime envelope must carry null `outputs`".to_string());
-    }
-
-    let graph_result: GraphResult = serde_json::from_value(result)
-        .map_err(|error| format!("graph runtime returned malformed GraphResult: {error}"))?;
-    let definition_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(
-        &graph_result.definition_ref,
-    )
-    .map_err(|error| {
-        format!(
-            "graph runtime returned GraphResult with invalid definition_ref `{}`: {error}",
-            graph_result.definition_ref
-        )
-    })?;
-    if definition_ref.kind != "graph" {
-        return Err(format!(
-            "graph runtime returned GraphResult with non-graph definition_ref `{}`",
-            graph_result.definition_ref
-        ));
-    }
-    let successful_status = matches!(
-        graph_result.status,
-        GraphRunStatus::Valid | GraphRunStatus::Completed | GraphRunStatus::CompletedWithErrors
-    );
-    if !graph_result.success || !successful_status {
-        return Err(format!(
-            "graph runtime returned success envelope with contradictory GraphResult success={} status=`{}`",
-            graph_result.success,
-            graph_result.status.as_str()
-        ));
-    }
-
-    Ok(graph_result.result.unwrap_or(Value::Null))
-}
-
-/// Whether a native envelope's `outputs` carries declared data. A
-/// directive with no declared outputs emits `outputs: {}`; treating that
-/// (and `null`) as absent keeps the bare-result shape for the common case
-/// so `${result.foo}` does not silently become `${result.result.foo}`.
-fn has_meaningful_outputs(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Object(map) => !map.is_empty(),
-        _ => true,
-    }
 }
 
 /// Parse the required nullable `cost` field of a native envelope into a typed
@@ -1038,6 +1131,58 @@ mod tests {
         CallbackClient::from_inner(inner, "T-test", "/project", "tat-test")
     }
 
+    fn live_dispatch_value() -> Value {
+        serde_json::to_value(ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+            action_digest: "a".repeat(64),
+            effect_identity: None,
+            publication:
+                ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn service_invocation_metadata_is_not_a_spawned_child() {
+        for recorded in [false, true] {
+            let (child, error) = callback_child_thread_identity(&json!({
+                "thread_id": "svc-1786320000000-deadbeef",
+                "recorded": recorded,
+                "kind": "service_run",
+            }));
+            assert!(child.is_none());
+            assert!(error.is_none());
+        }
+    }
+
+    #[test]
+    fn service_invocation_metadata_requires_a_boolean_discriminator() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "svc-1786320000000-deadbeef",
+            "recorded": "false",
+        }));
+        assert!(child.is_none());
+        assert_eq!(
+            error.as_deref(),
+            Some("service invocation recorded marker is not a boolean")
+        );
+    }
+
+    #[test]
+    fn native_child_metadata_retains_strict_runtime_identity() {
+        let (child, error) = callback_child_thread_identity(&json!({"thread_id": "T-child_1"}));
+        assert_eq!(child.as_deref(), Some("T-child_1"));
+        assert!(error.is_none());
+
+        let (child, error) =
+            callback_child_thread_identity(&json!({"thread_id": "svc-not-a-child"}));
+        assert!(child.is_none());
+        assert_eq!(error.as_deref(), Some("runtime thread_id is invalid"));
+    }
+
     struct MockClient {
         results: Mutex<Vec<Value>>,
         child_thread_id: Option<String>,
@@ -1066,9 +1211,10 @@ mod tests {
             _request: DispatchActionRequest,
         ) -> Result<Value, CallbackError> {
             let mut results = self.results.lock().unwrap();
-            // Strict typed contract: wrap leaf in `{thread, result}`.
+            // Strict typed contract: daemon evidence is always present and
+            // separate from the authored leaf result.
             if results.is_empty() {
-                Ok(json!({"thread": {}, "result": {}}))
+                Ok(json!({"thread": {}, "result": {}, "dispatch": live_dispatch_value()}))
             } else {
                 Ok(json!({
                     "thread": self
@@ -1077,6 +1223,7 @@ mod tests {
                         .map(|id| json!({"thread_id": id}))
                         .unwrap_or_else(|| json!({})),
                     "result": results.remove(0),
+                    "dispatch": live_dispatch_value(),
                 }))
             }
         }
@@ -1179,7 +1326,11 @@ mod tests {
             request: DispatchActionRequest,
         ) -> Result<Value, CallbackError> {
             *self.last.lock().unwrap() = Some(request.action);
-            Ok(json!({"thread": {}, "result": {}}))
+            Ok(json!({
+                "thread": {},
+                "result": {},
+                "dispatch": live_dispatch_value(),
+            }))
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
             Ok(json!({}))
@@ -1278,7 +1429,7 @@ mod tests {
             "params": {},
             "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
         });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1302,7 +1453,7 @@ mod tests {
             "thread": "detached",
             "launch_window": { "key": "gr-1:fan", "width": 12 },
         });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1321,7 +1472,7 @@ mod tests {
             "thread": "detached",
             "launch_window": { "width": "twelve" },
         });
-        let err = dispatch_action(&client, &action, "T-test", "/project", None)
+        let err = dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect_err("malformed launch_window must fail");
         assert!(err.to_string().contains("launch_window"), "got: {err}");
@@ -1335,7 +1486,7 @@ mod tests {
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
         let action = json!({ "item_id": "tool:t/echo", "ref_bindings": {}, "params": {} });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1353,7 +1504,7 @@ mod tests {
         // Parity with `/execute`'s `Option<MethodCall>`: explicit null == absent.
         let action =
             json!({ "item_id": "tool:t/echo", "ref_bindings": {}, "params": {}, "call": null });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1375,7 +1526,7 @@ mod tests {
                 "ref_bindings": {},
                 "params": {"user_input": "kept"},
             });
-            dispatch_action(&client, &action, "T-test", "/project", None)
+            dispatch_action(&client, &action, "T-test", "/project", None, None)
                 .await
                 .expect("dispatch ok");
 
@@ -1393,7 +1544,7 @@ mod tests {
             "params": {},
             "call": { "op": "query" }, // unknown field — deny_unknown_fields
         });
-        let err = dispatch_action(&client, &action, "T-test", "/project", None)
+        let err = dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect_err("malformed call must fail");
         assert!(
@@ -1409,7 +1560,7 @@ mod tests {
         // `follow: true`), never silently block chasing the chain.
         let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
         let action = json!({"item_id": "tool:test/deep", "ref_bindings": {}});
-        let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None, None)
             .await
             .unwrap();
         let failure = expect_action_failure(outcome);
@@ -1434,7 +1585,7 @@ mod tests {
             "T-child-failed",
         );
         let action = json!({"item_id": "directive:test/child", "ref_bindings": {}});
-        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None, None)
             .await
             .expect("dispatch response");
         let failure = expect_action_failure(outcome);
@@ -1461,7 +1612,7 @@ mod tests {
             "T-child;tail",
         );
         let action = json!({"item_id": "directive:test/child", "ref_bindings": {}});
-        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None, None)
             .await
             .expect("dispatch response");
         let failure = expect_action_failure(outcome);
@@ -1502,18 +1653,43 @@ mod tests {
         expect_action_failure(classify_envelope(value)).diagnostic
     }
 
+    #[test]
+    fn service_domain_status_is_not_a_native_runtime_envelope() {
+        let value = json!({
+            "status": "degraded",
+            "missing_services": ["service:example/missing"],
+        });
+        let classified = expect_success(classify_callback_result(
+            value.clone(),
+            "service:health/status",
+            &json!({"recorded": true}),
+        ));
+        assert_eq!(classified, value);
+
+        let failure = expect_action_failure(classify_callback_result(
+            value,
+            "directive:test/child",
+            &json!({"thread_id": "T-child"}),
+        ));
+        assert!(failure.integrity);
+        assert!(
+            failure
+                .diagnostic
+                .contains("malformed native runtime envelope")
+        );
+    }
+
     fn canonical_follow_envelope(
         success: bool,
         status: RuntimeResultStatus,
         result: Value,
     ) -> Value {
         json!({
+            "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
             "success": success,
             "child_thread_id": "T-follow-child",
             "status": status,
             "result": result,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         })
     }
@@ -1538,7 +1714,7 @@ mod tests {
             "success": true,
             "graph_id": "test/child",
             "definition_ref": "graph:test/child",
-            "definition_hash": "sha256:test-child",
+            "effective_definition_digest": "sha256:test-child",
             "graph_run_id": "gr-child",
             "status": GraphRunStatus::Completed,
             "steps": 1,
@@ -1574,11 +1750,7 @@ mod tests {
     fn single_graph_follow_projects_authored_return() {
         let authored = json!({"child_ran": "sentinel"});
         let classified = classify_follow_envelope_for_item(
-            canonical_follow_envelope(
-                true,
-                RuntimeResultStatus::Completed,
-                completed_graph_result(authored.clone()),
-            ),
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, authored.clone()),
             "graph:test/child",
         )
         .expect("canonical graph follow envelope");
@@ -1690,9 +1862,8 @@ mod tests {
     }
 
     #[test]
-    fn graph_follow_fanout_projects_each_item_by_its_checkpointed_kind() {
+    fn graph_follow_fanout_consumes_daemon_projected_items_in_order() {
         let graph_authored = json!({"child_ran": "graph"});
-        let graph_result = completed_graph_result(graph_authored.clone());
         let graph_shaped_directive_result =
             completed_graph_result(json!({"child_ran": "directive"}));
         let wrapper = json!({
@@ -1704,7 +1875,7 @@ mod tests {
                 canonical_follow_envelope(
                     true,
                     RuntimeResultStatus::Completed,
-                    graph_result,
+                    graph_authored.clone(),
                 ),
                 canonical_follow_envelope(
                     true,
@@ -1745,14 +1916,9 @@ mod tests {
         assert!(failure.integrity);
         assert!(failure.diagnostic.contains("malformed GraphResult"));
 
-        let follow_envelope = canonical_follow_envelope(
-            true,
-            RuntimeResultStatus::Completed,
-            json!({"child_ran": "missing graph result contract"}),
-        );
-        let error =
-            classify_follow_envelope_for_item(follow_envelope, "graph:test/child").unwrap_err();
-        assert!(error.contains("malformed GraphResult"), "{error}");
+        // Follow persistence applies this same kind-owned projection before
+        // constructing the compact action-result envelope; the resumed runtime
+        // therefore never reparses a complete GraphResult.
     }
 
     #[test]
@@ -2197,11 +2363,11 @@ mod tests {
     #[test]
     fn classify_follow_envelope_rejects_unknown_status_and_fields() {
         let unknown_status = json!({
+            "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
             "success": false,
+            "child_thread_id": "T-follow-child",
             "status": "error",
             "result": null,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         });
         assert!(

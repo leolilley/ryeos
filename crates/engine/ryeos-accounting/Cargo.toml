@@ -10,7 +10,9 @@ name = "ryeos_accounting"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 lillux = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ryeos-provider-contract = { workspace = true }

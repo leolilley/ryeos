@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-17T00:38:07Z:4fb735c65ffd4fa4fa9ccddb8d6ae8d02c23bc3ca6d5a95bd74455f485a83865:u4oaAh/JGV4KU+L14yg4H1J02PPMXuqWgIAXV3f0y9nlJYKfO+2yTX8I4Va73lf+iCY9JL2SrcFhNyKLLWjoBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-02T21:49:18Z:ad053f3bc00614e86e4895934a31243a27a3411628cbf3b7c908d84000cd5c5d:+iOzt5D0YJ9ny20CCnVexPZm95rpZuNDfMQsyEWxZK92RJgjdsjOATGAFfV3bpx/mt+t6/QBbL9lLMWuPCbvCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]
@@ -19,8 +19,9 @@ only daemon-local artifacts.
 `ryeos init` owns user signing key, node signing key, user/node
 self-trust docs, publisher trust pinning, bundle discovery/planning,
 install, signed registrations, vault key creation, and post-init trust
-verification. It also creates node-owned defaults such as
-`.ai/node/isolation.yaml` only when absent.
+verification. On first publication it selects one explicit signed init profile
+and publishes that profile's complete policy set under `.ai/node/policies/`,
+re-signed by the node. Runtime startup never fills omitted policy with defaults.
 
 `bootstrap::repair_daemon_local` owns only daemon-local repair after
 init-state verification. It first checks that operator signing key, node
@@ -30,11 +31,13 @@ to operator trust and never regenerates the node key, because that would
 invalidate the node trust doc in the node trust store.
 
 Daemon-local artifacts repaired by startup include layout dirs, default
-daemon config, public identity derived from node key, vault public/key
+daemon bootstrap config, public identity derived from node key, vault public/key
 files, and the node-signed authorized-key entry for the local user key.
 The trust directory is derived from resolved `config.user_signing_key_path`
 layout `<user_root>/.ai/config/keys/{signing,trusted}/`, not by
-re-reading `roots::user_root()`.
+re-reading `roots::user_root()`. Semantic authentication, execution,
+accounting, isolation, retention, and hosted-session settings live only in the
+complete node-policy generation, never in daemon `config.yaml`.
 
 ## Startup gate
 
@@ -45,10 +48,12 @@ startup on a fresh machine fails closed before tracing, socket cleanup,
 runtime directory creation, or engine bootstrap. The removed `--init-only`
 daemon path is not part of the system anymore.
 
-After bootstrap configuration is resolved, the daemon strictly loads one
-sandbox-policy snapshot. An invalid strict policy fails startup. Disabled mode does
-not inspect a backend; enforced mode resolves the selected backend and resource limit
-before listeners accept execution. Startup never rewrites the operator policy.
+Before runtime composition, the daemon strictly loads one complete atomic
+node-policy generation. Missing, extra, malformed, or mixed-generation policy
+fails startup. The compiled isolation member is passed into runtime resolution;
+the engine never reopens a second raw policy path. Disabled mode does not inspect
+a backend; enforced mode resolves the selected backend and resource limits before
+listeners accept execution. Startup never rewrites policy authority.
 See [Execution Isolation](../node/execution-isolation.md).
 
 ## Two-layer engine bootstrap

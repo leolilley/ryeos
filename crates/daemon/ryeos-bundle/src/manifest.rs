@@ -300,6 +300,7 @@ pub fn materialize_manifest(
     ai_dir: &Path,
     expected_name: &str,
 ) -> Result<BundleManifest> {
+    ryeos_engine::protocol_vocabulary::validate_bundle_name(&source.name)?;
     if source.name != expected_name {
         bail!(
             "manifest identity mismatch: source.name is '{}' but expected '{}' — \
@@ -763,10 +764,13 @@ mod tests {
             mf.uses_kinds.is_empty(),
             "hosted-node runtime bundle must stay core-only; docs belong outside .ai/"
         );
-        assert!(root.join(".ai/node/hosted/policy.yaml").is_file());
         assert!(
             !root.join(".ai/config").exists(),
-            "hosted-node runtime policy belongs under .ai/node/hosted, not .ai/config"
+            "hosted-node bundle must not contribute system configuration"
+        );
+        assert!(
+            !root.join(".ai/node/policies").exists(),
+            "node policy generations are node-owned state, not bundle content"
         );
         assert!(
             !root.join(".ai/knowledge").exists(),
@@ -1368,7 +1372,7 @@ typo_field: oops
 
         ryeos_isolation_protocol::IsolationBackendDeclaration {
             id: id.to_string(),
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
             adapter: "adapter".to_string(),
             artifacts: std::collections::BTreeMap::from([(
@@ -1394,7 +1398,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v1
+    protocol: ryeos.isolation-adapter/v3
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: { launcher: launcher }

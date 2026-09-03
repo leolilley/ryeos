@@ -4,10 +4,11 @@
 //! - `ryeosd` (ingest_walk, walk_and_diff, push-head validation)
 //! - `ryeos-cli` (remote push manifest building)
 //!
-//! Patterns are loaded from `.ai/node/ingest/ignore.yaml`. If the file is
-//! missing the daemon is misconfigured — no silent default fallback.
+//! Patterns are compiled from the mandatory `ingest_ignore` member of the
+//! atomic node policy generation. Missing policy is a startup error.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -208,6 +209,17 @@ pub fn matcher_from_builtins() -> IgnoreMatcher {
             .collect(),
     };
     IgnoreMatcher::from_config(&config).expect("built-in patterns must be valid")
+}
+
+/// Non-bypassable baseline for bytes that may be copied into durable CAS.
+///
+/// Production still loads the node's configured matcher and applies it as an
+/// additional restriction. This baseline prevents removing a configured
+/// ignore from turning repository metadata, credentials, runtime state, or
+/// generated dependency trees into permanently stored content.
+pub fn durable_capture_floor() -> &'static IgnoreMatcher {
+    static FLOOR: OnceLock<IgnoreMatcher> = OnceLock::new();
+    FLOOR.get_or_init(matcher_from_builtins)
 }
 
 #[cfg(test)]

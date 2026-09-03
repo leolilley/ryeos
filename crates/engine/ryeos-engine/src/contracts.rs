@@ -15,9 +15,10 @@ use crate::canonical_ref::CanonicalRef;
 mod execution_plan;
 mod runtime_decorations;
 pub use execution_plan::{
-    EngineContext, ExecutionPlan, MaterializationRequirement, PlanBundleExecutorIdentity,
-    PlanCapabilities, PlanContext, PlanNode, PlanNodeId, PlanRuntimeIdentity, PlanStdin,
-    PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand, SubjectResolutionAuthority,
+    EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
+    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
+    PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
+    SubjectResolutionAuthority,
 };
 pub use runtime_decorations::{
     CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,
@@ -2489,9 +2490,9 @@ mod kind_contract_regressions {
                 ("version", ft_string()),
                 (
                     "availability",
-                    ft_string_enum(&["both", "daemon_only", "offline"]),
+                    ft_string_enum(&["both", "daemon_only", "local", "stopped_node"]),
                 ),
-                ("offline_execute", ft_string()),
+                ("local_execute", ft_string()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
                 (
@@ -2509,7 +2510,7 @@ mod kind_contract_regressions {
             "endpoint": "verify",
             "description": "Verify signed items",
             "required_caps": ["ryeos.execute.service.verify"],
-            "availability": "offline"
+            "availability": "local"
         });
         let report = validate(&service_shape(), &value);
         assert!(report.is_ok(), "valid service should pass: {report}");
@@ -2833,6 +2834,30 @@ pub enum ItemSpace {
     Node,
 }
 
+/// Typed identity of the search root that supplied an item. This is distinct
+/// from the diagnostic source path: authority-bearing consumers can require a
+/// registered project/node/bundle root, while loose search roots remain
+/// explicitly non-authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ItemSourceRoot {
+    Project,
+    Node,
+    Bundle { name: String },
+    Search { label: String },
+}
+
+impl ItemSourceRoot {
+    pub fn matches_space(&self, space: ItemSpace) -> bool {
+        match self {
+            Self::Project => space == ItemSpace::Project,
+            Self::Node => space == ItemSpace::Node,
+            Self::Bundle { .. } => space == ItemSpace::Bundle,
+            Self::Search { .. } => true,
+        }
+    }
+}
+
 impl ItemSpace {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -2939,6 +2964,9 @@ pub struct ResolvedItem {
     pub kind: String,
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
+    /// Exact registered root identity, or an explicit non-authoritative
+    /// search-root identity. Never reconstruct this from `source_path`.
+    pub source_root: ItemSourceRoot,
     /// Label of the root that won resolution, e.g. "system(node)", "user"
     pub resolved_from: String,
     /// Lower-priority candidates that were shadowed by the winner

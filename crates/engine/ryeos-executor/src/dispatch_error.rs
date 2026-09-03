@@ -341,6 +341,24 @@ pub enum DispatchError {
     /// outcome is durably confirmed.
     #[error("recording integrity failure: {detail}")]
     RecordingIntegrity { detail: String },
+    /// The daemon cannot prove whether an already-reserved runtime action made
+    /// child contact. The caller may recover only by replaying the same opaque
+    /// operation identity; presenting this as an ordinary tool failure could
+    /// cause cognition to choose a second, behaviorally equivalent action.
+    #[error("runtime action '{operation_id}' outcome is unknown: {detail}")]
+    RuntimeActionOutcomeUnknown {
+        operation_id: String,
+        detail: String,
+    },
+    /// The exact operation reached a known terminal child, but that child's
+    /// signed digest-only retention policy intentionally left no response body
+    /// to reconstruct after contact was interrupted. The same operation is
+    /// settled by this stable error; callers may choose a new operation only
+    /// as a new behavioral decision.
+    #[error(
+        "runtime action '{operation_id}' completed but its exact result is unavailable under digest-only retention"
+    )]
+    RuntimeActionResultUnavailable { operation_id: String },
     /// One exact error result shared by all requests waiting on the same
     /// in-flight cache fill. The wrapper delegates every public error
     /// classification to the leader's immutable result.
@@ -391,7 +409,8 @@ impl DispatchError {
             Self::ProjectSource(_)
             | Self::ProjectSourcePushFirst(_)
             | Self::Conflict(_)
-            | Self::LaunchCancelled { .. } => StatusCode::CONFLICT,
+            | Self::LaunchCancelled { .. }
+            | Self::RuntimeActionResultUnavailable { .. } => StatusCode::CONFLICT,
             // Bad gateway: the daemon reached out to a subsystem
             // (service handler, runtime binary, CAS) and it was
             // missing, unavailable, or returned an error.
@@ -437,6 +456,7 @@ impl DispatchError {
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
             Self::HookDispatchIntegrity { .. }
             | Self::RecordingIntegrity { .. }
+            | Self::RuntimeActionOutcomeUnknown { .. }
             | Self::Internal(_)
             | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Shared(_) => unreachable!("shared errors return before classification"),
@@ -498,6 +518,8 @@ impl DispatchError {
                 ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
             }
             Self::RecordingIntegrity { .. } => "recording_integrity",
+            Self::RuntimeActionOutcomeUnknown { .. } => "runtime_action_outcome_unknown",
+            Self::RuntimeActionResultUnavailable { .. } => "runtime_action_result_unavailable",
             Self::Internal(_) => "internal",
             Self::Shared(_) => unreachable!("shared errors return before classification"),
         }
@@ -603,6 +625,29 @@ mod tests {
         assert_eq!(error.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error.code(), "recording_integrity");
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn runtime_action_unknown_is_internal_and_never_retryable() {
+        let error = DispatchError::RuntimeActionOutcomeUnknown {
+            operation_id: "1".repeat(64),
+            detail: "worker contact cannot be disproved".to_string(),
+        };
+        assert_eq!(error.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code(), "runtime_action_outcome_unknown");
+        assert!(!error.retryable());
+        assert!(error.to_string().contains(&"1".repeat(64)));
+    }
+
+    #[test]
+    fn digest_only_runtime_action_result_is_a_known_nonretryable_conflict() {
+        let error = DispatchError::RuntimeActionResultUnavailable {
+            operation_id: "2".repeat(64),
+        };
+        assert_eq!(error.http_status(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), "runtime_action_result_unavailable");
+        assert!(!error.retryable());
+        assert!(error.to_string().contains(&"2".repeat(64)));
     }
 
     #[test]

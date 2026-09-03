@@ -9,7 +9,12 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
-//!   - `ryeos node gc` — explicit offline recovery/GC that must work when boot fails
+//!   - `ryeos node reset execution-history` — explicit offline epoch retirement
+//!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
+//!   - `ryeos node reset external-content-bindings` — retire realization bindings
+//!   - `ryeos node reset authorization` — retire grants and restore the operator
+//!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
+//!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -77,13 +82,33 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "gc"],
-        summary: "Run explicit offline node garbage collection",
+        tokens: &["node", "reset", "execution-history"],
+        summary: "Retire the local execution-history epoch",
         category: "maintenance",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "auth-reset"],
+        tokens: &["node", "reset", "authorization"],
         summary: "Discard grants and recreate the local operator authorization",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "reset", "replay-indexes"],
+        summary: "Discard predecessor graph/provider replay indexes",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "reset", "external-content-bindings"],
+        summary: "Discard predecessor external-content bindings",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "reset", "policy-generation"],
+        summary: "Replace an obsolete node-policy generation",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "policy-apply"],
+        summary: "Validate and install a node-owned policy",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -147,12 +172,30 @@ pub async fn try_dispatch(
                 .map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("gc")) => {
-            run_node_gc_command(&argv[2..], console).map_err(map_local_err)?;
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
+            run_execution_history_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("auth-reset")) => {
-            run_node_auth_reset_command(&argv[2..], console).map_err(map_local_err)?;
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
+            run_node_auth_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("replay-indexes") => {
+            run_node_replay_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("reset"))
+            if argv.get(2).map(String::as_str) == Some("external-content-bindings") =>
+        {
+            run_node_external_content_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
+            run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("policy-apply")) => {
+            run_node_policy_apply_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("start", _) => {
@@ -173,9 +216,312 @@ pub async fn try_dispatch(
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos node auth-reset",
+    name = "ryeos node reset policy-generation",
+    about = "Replace an obsolete node-policy generation from a trusted init profile",
+    long_about = "Explicitly replace one complete stopped-node policy generation that the current registry can no longer decode. The trusted publisher-signed init profile selects the prospective exact bundle inventory; bundle installation and policy publication occur in the same locked init transaction. Node identity, credentials, execution history, project heads, and other state are preserved.",
+    no_binary_name = true
+)]
+struct NodePolicyGenerationResetArgs {
+    /// Publisher-signed source root containing `.ai/node/init/profiles/`.
+    #[arg(long, default_value = "/usr/share/ryeos")]
+    source: PathBuf,
+
+    /// Exact publisher-signed profile to install (for example `full`).
+    #[arg(long)]
+    node_profile: String,
+
+    /// Additional publisher trust doc(s) needed to verify the replacement
+    /// profile and selected source bundles.
+    #[arg(long = "trust-file", action = clap::ArgAction::Append)]
+    trust_files: Vec<PathBuf>,
+
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that current custom node policy is retired.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+impl NodePolicyGenerationResetArgs {
+    fn validate(&self) -> Result<()> {
+        if !self.confirm {
+            anyhow::bail!("replacing the complete node-policy generation requires --confirm");
+        }
+        ryeos_app::node_policy::generation::validate_init_profile_name(&self.node_profile)
+            .context("validate node init profile name")
+    }
+}
+
+fn run_node_policy_generation_reset_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodePolicyGenerationResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    args.validate()?;
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node location for policy-generation reset")?;
+    let report = ryeos_node::run_init(&ryeos_node::InitOptions {
+        app_root: config.app_root,
+        source_dir: args.source,
+        trust_files: args.trust_files,
+        node_profile: Some(args.node_profile.clone()),
+        replace_node_policy_generation: true,
+        skip_preflight: false,
+    })
+    .context("replace node policy generation in locked initialization")?;
+
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": "replaced",
+            "node_profile": args.node_profile,
+            "app_root": report.app_root,
+            "node_fingerprint": report.node_key_fingerprint,
+            "bundles": report.bundles_installed,
+        }))?;
+    } else {
+        console.text(&format!(
+            "Node policy generation and exact bundle inventory replaced from trusted profile `{}`: {}\n",
+            args.node_profile,
+            report.app_root.display()
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node policy-apply",
+    about = "Validate and atomically install an operator-authored node policy",
+    long_about = "Validate a stopped-node policy through its registered node-policy compiler, replace that member in the complete generation, then node-sign and atomically publish the full generation. Bundle registrations, routes, and commands are separate node configuration and remain inaccessible.",
+    no_binary_name = true
+)]
+struct NodePolicyApplyArgs {
+    /// Registered node-policy section (for example external_content).
+    section: String,
+
+    /// Unsigned YAML policy source outside the live node-policy namespace.
+    source: PathBuf,
+
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodePolicyApplyArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node location for policy apply")?;
+    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
+        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    )
+    .context("node policy apply requires the daemon to be stopped")?;
+
+    let table = ryeos_app::node_policy::NodePolicyTable::new();
+    table
+        .get(&args.section)
+        .with_context(|| format!("unknown node-policy section `{}`", args.section))?;
+
+    let raw = lillux::read_regular_file_to_string_no_follow(&args.source)
+        .with_context(|| format!("read policy source {}", args.source.display()))?;
+    let body: serde_json::Value = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse policy source {}", args.source.display()))?;
+    if !body.is_object() {
+        anyhow::bail!("node policy source must contain a YAML mapping");
+    }
+    for forbidden in ["category", "section"] {
+        if body.get(forbidden).is_some() {
+            anyhow::bail!("node policy source declares path-owned field `{forbidden}`");
+        }
+    }
+
+    let identity = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+        .context("load node identity for policy apply")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
+        .context("load trust store for current node policies")?;
+    let current = ryeos_app::node_policy::generation::load_policy_generation(
+        &config.app_root,
+        &trust_store,
+        &table,
+    )?;
+    let mut policies = current.policies().clone();
+    policies.insert(args.section.clone(), body);
+    let update = current.prepare_replacement(&table, policies, &args.source)?;
+    let policy_dir = ryeos_app::node_policy::generation::publish_policy_update(
+        &config.app_root,
+        &update,
+        &identity,
+        &trust_store,
+        &_state_lock,
+    )
+    .context("atomically publish signed node policy generation")?;
+    ryeos_node::seal_init_completion_after_policy_update(
+        &config.app_root,
+        update.generation().digest(),
+        &_state_lock,
+    )
+    .context("commit updated node policy generation into initialized state")?;
+    let installed = policy_dir.join(format!("{}.yaml", args.section));
+
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": "installed",
+            "section": args.section,
+            "path": installed,
+            "signer_fingerprint": identity.fingerprint(),
+        }))?;
+    } else {
+        console.text(&format!(
+            "Installed signed node policy: {}\n",
+            installed.display()
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset replay-indexes",
+    about = "Activate the current replay-index contract",
+    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. Predecessor dispatch-effect rows are discarded; provider-call evidence, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
+    no_binary_name = true
+)]
+struct NodeReplayResetArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that predecessor replay indexes are discarded.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeReplayResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.confirm {
+        anyhow::bail!("resetting predecessor replay indexes requires --confirm");
+    }
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for replay-index reset")?;
+    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
+        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    )
+    .context("replay-index reset requires the daemon to be stopped")?;
+    let path = config
+        .runtime_state_dir()
+        .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
+    let db = ryeos_state::OperationalDb::open_for_explicit_replay_reset(&path)
+        .with_context(|| format!("activate replay indexes in {}", path.display()))?;
+    drop(db);
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": "activated",
+            "database": path,
+            "discarded": ["dispatch_effect_records"],
+            "preserved": ["provider_call_records"],
+        }))?;
+    } else {
+        console.text(&format!(
+            "Replay indexes activated: {}\nPredecessor dispatch-effect records were discarded; provider-call records, thread history, and other operational state were preserved.\n",
+            path.display()
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset external-content-bindings",
+    about = "Discard predecessor external-content bindings",
+    long_about = "Perform the explicit clean-cut external-content manifest activation. The daemon must be stopped. Every predecessor external-content binding head is retired; CAS objects remain reclaimable and all required content must be imported and rebound under the current schema.",
+    no_binary_name = true
+)]
+struct NodeExternalContentResetArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Inspect the number of binding heads without retiring them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Required acknowledgement that every external-content binding is discarded.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_external_content_reset_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeExternalContentResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
+    }
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for external-content binding reset")?;
+    let bindings =
+        ryeos_app::operator_external_content::discard_binding_heads_offline(&config, args.dry_run)?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": if args.dry_run { "inspected" } else { "retired" },
+            "bindings": bindings,
+            "requires_reimport": !args.dry_run,
+        }))?;
+    } else if args.dry_run {
+        console.text(&format!(
+            "External-content binding reset preview: {bindings} binding head(s) would be retired.\n"
+        ))?;
+    } else {
+        console.text(&format!(
+            "External-content binding cutover complete: retired {bindings} binding head(s).\nAll required realizations must be imported and rebound before launch.\n"
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset authorization",
     about = "Discard every authorized-key grant and recreate only the local operator grant",
-    long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client and remote-node grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes must be admitted again.",
+    long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client, remote-node, and remote-operator grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes and forwarded operators must be authorized again.",
     no_binary_name = true
 )]
 struct NodeAuthResetArgs {
@@ -185,7 +531,7 @@ struct NodeAuthResetArgs {
 
     /// Required acknowledgement that every existing authorization is discarded.
     #[arg(long)]
-    confirm_discard_authorized_keys: bool,
+    confirm: bool,
 
     /// Emit structured JSON.
     #[arg(long)]
@@ -196,8 +542,8 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     let Some(args) = parse_or_render_help::<NodeAuthResetArgs>(argv, console)? else {
         return Ok(());
     };
-    if !args.confirm_discard_authorized_keys {
-        anyhow::bail!("discarding every authorized key requires --confirm-discard-authorized-keys");
+    if !args.confirm {
+        anyhow::bail!("resetting every authorized key requires --confirm");
     }
     let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
         app_root: args.app_root,
@@ -291,105 +637,85 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     Ok(())
 }
 
-// ── ryeos node gc ──────────────────────────────────────────────────
+// ── ryeos node reset execution-history ───────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos node gc",
-    about = "Run bootstrap-safe offline node garbage collection",
-    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Principal and deployed project HEADs are preserved unless the explicit schema-cutover flags are also supplied. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved.",
+    name = "ryeos node reset execution-history",
+    about = "Retire the local execution-history epoch while the daemon is stopped",
+    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, and publish an empty current thread projection. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
     no_binary_name = true
 )]
-struct NodeGcArgs {
+struct ExecutionHistoryResetArgs {
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
     app_root: Option<PathBuf>,
 
-    /// Retire every local thread chain and its execution recovery history.
-    #[arg(long)]
-    discard_thread_history: bool,
-
-    /// Required acknowledgement for destructive thread-history retirement.
-    #[arg(long)]
-    confirm_discard_thread_history: bool,
-
     /// Also retire every principal and deployed project HEAD for an immutable object-schema cutover.
+    #[arg(long = "include-project-heads")]
+    include_project_heads: bool,
+
+    /// Required acknowledgement for destructive execution-history retirement.
     #[arg(long)]
-    discard_project_heads: bool,
+    confirm: bool,
 
     /// Required acknowledgement for destructive project-HEAD retirement.
-    #[arg(long)]
-    confirm_discard_project_heads: bool,
+    #[arg(long = "confirm-project-heads")]
+    confirm_project_heads: bool,
 
     /// Inspect and report without mutating any store.
     #[arg(long)]
     dry_run: bool,
-
-    /// Physically sweep newly unreachable CAS objects after retiring roots.
-    /// Omit for the fast startup-recovery path; normal maintenance can sweep later.
-    #[arg(long)]
-    sweep_cas: bool,
 
     /// Emit structured JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
 }
 
-impl NodeGcArgs {
+impl ExecutionHistoryResetArgs {
     fn validate(&self) -> Result<()> {
-        if !self.discard_thread_history {
-            anyhow::bail!(
-                "no offline GC operation selected; pass --discard-thread-history (use --dry-run to inspect first)"
-            );
+        if !self.dry_run && !self.confirm {
+            anyhow::bail!("resetting all execution history requires --confirm");
         }
-        if !self.dry_run && !self.confirm_discard_thread_history {
+        if self.include_project_heads && !self.dry_run && !self.confirm_project_heads {
             anyhow::bail!(
-                "discarding all thread history requires --confirm-discard-thread-history"
-            );
-        }
-        if self.discard_project_heads && !self.discard_thread_history {
-            anyhow::bail!("--discard-project-heads requires --discard-thread-history");
-        }
-        if self.discard_project_heads && !self.dry_run && !self.confirm_discard_project_heads {
-            anyhow::bail!(
-                "discarding all principal and deployed project HEADs requires --confirm-discard-project-heads"
-            );
-        }
-        if self.dry_run && self.sweep_cas {
-            anyhow::bail!(
-                "--sweep-cas cannot be combined with --dry-run; inspect history first, then sweep only with the confirmed discard"
+                "resetting principal and deployed project HEADs requires --confirm-project-heads"
             );
         }
         Ok(())
     }
 }
 
-fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
-    let Some(args) = parse_or_render_help::<NodeGcArgs>(argv, console)? else {
+fn run_execution_history_reset_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<ExecutionHistoryResetArgs>(argv, console)? else {
         return Ok(());
     };
     args.validate()?;
 
-    let options = ryeos_app::offline_gc::OfflineThreadHistoryGcOptions {
+    let options = ryeos_app::execution_history_reset::ExecutionHistoryResetOptions {
         app_root: args.app_root,
         dry_run: args.dry_run,
-        sweep_cas: args.sweep_cas,
-        discard_project_heads: args.discard_project_heads,
+        discard_project_heads: args.include_project_heads,
     };
-    let mut progress = crate::tty::OfflineGcProgress::new(!args.json, console.capabilities());
+    let mut progress =
+        crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
     let report = match progress.as_mut() {
         Some(progress) => {
-            let mut observer = |event: &ryeos_app::offline_gc::OfflineThreadHistoryGcProgress| {
-                progress.observe(event);
-            };
-            ryeos_app::offline_gc::run_offline_thread_history_gc_with_progress(
+            let mut observer =
+                |event: &ryeos_app::execution_history_reset::ExecutionHistoryResetProgress| {
+                    progress.observe(event);
+                };
+            ryeos_app::execution_history_reset::run_execution_history_reset_with_progress(
                 &options,
                 &mut observer,
             )
         }
-        None => ryeos_app::offline_gc::run_offline_thread_history_gc(&options),
+        None => ryeos_app::execution_history_reset::run_execution_history_reset(&options),
     }
-    .context("offline node GC failed")?;
+    .context("offline execution-history reset failed")?;
     if args.json {
         crate::tty::write_json(&report)?;
         return Ok(());
@@ -401,9 +727,9 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
     let mut status = crate::tty::StatusBanner::new(
         crate::tty::Tone::Success,
         if report.dry_run {
-            "HISTORY SCAN COMPLETE"
+            "EXECUTION HISTORY SCAN COMPLETE"
         } else {
-            "HISTORY CLEAR COMPLETE"
+            "EXECUTION HISTORY RESET COMPLETE"
         },
     );
     status.detail = Some(report.app_root.display().to_string());
@@ -438,18 +764,10 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
             report.projection.superseded_instances_deleted.to_string(),
         ),
     ];
-    if let Some(sweep) = report.cas_sweep.as_ref() {
+    if !report.dry_run {
         status.rows.push(crate::tty::Row::key_value(
-            "CAS swept",
-            format!(
-                "{} objects, {} blobs ({} bytes)",
-                sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
-            ),
-        ));
-    } else if !report.dry_run {
-        status.rows.push(crate::tty::Row::key_value(
-            "CAS sweep",
-            "deferred (run normal maintenance GC later)",
+            "storage reclamation",
+            "run `ryeos maintenance gc` after restart",
         ));
     }
     console.success(&status)?;
@@ -546,6 +864,23 @@ struct InitArgs {
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
     trust_files: Vec<PathBuf>,
 
+    /// Explicit publisher-signed node init profile from the source-root init
+    /// namespace (for example `hosted-workflow`). Required on fresh nodes.
+    #[arg(long)]
+    node_profile: Option<String>,
+
+    /// Replace an existing complete policy generation from --node-profile in
+    /// this same stopped-node init transaction.
+    #[arg(
+        long,
+        requires_all = ["node_profile", "confirm_node_policy_generation_replacement"]
+    )]
+    replace_node_policy_generation: bool,
+
+    /// Required acknowledgement for --replace-node-policy-generation.
+    #[arg(long, requires = "replace_node_policy_generation")]
+    confirm_node_policy_generation_replacement: bool,
+
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
@@ -567,6 +902,8 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         app_root,
         source_dir: args.source,
         trust_files: args.trust_files,
+        node_profile: args.node_profile,
+        replace_node_policy_generation: args.replace_node_policy_generation,
         skip_preflight: false,
     };
 
@@ -784,9 +1121,10 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     match controller.status().await {
         Ok(LifecycleStatus::Running { metadata, .. }) => {
             daemon_running = true;
-            let current = ryeos_app::build_info::get();
-            let skew = is_revision_skew(metadata.revision.as_deref(), current.revision)
-                || ryeosd_installed_after_daemon_started(&metadata);
+            let installed_revision = installed_ryeosd_revision();
+            let skew =
+                is_revision_skew(metadata.revision.as_deref(), installed_revision.as_deref())
+                    || ryeosd_installed_after_daemon_started(&metadata);
             if skew {
                 checks.push(check(
                     "daemon",
@@ -794,8 +1132,8 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     serde_json::json!({
                         "state": "running",
                         "running_revision": metadata.revision,
-                        "installed_revision": current.revision,
-                        "note": "the running daemon is an older build than the installed binary",
+                        "installed_revision": installed_revision,
+                        "note": "the running daemon does not match the installed daemon binary",
                         "fix": "ryeos stop && ryeos start",
                     }),
                 ));
@@ -932,7 +1270,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         let policy_path = config
             .app_root
             .join(ryeos_engine::AI_DIR)
-            .join("node/isolation.yaml");
+            .join("node/policies/isolation.yaml");
         match inspect_isolation_policy(&config.app_root) {
             Ok(inspection) => checks.push(check(
                 "isolation",
@@ -945,7 +1283,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                 serde_json::json!({
                     "policy": policy_path,
                     "error": format!("{error:#}"),
-                    "fix": "repair `.ai/node/isolation.yaml` (or set its mode to `disabled`); then run `ryeos node doctor` again",
+                    "fix": "publish a complete valid `.ai/node/policies/` generation; then run `ryeos node doctor` again",
                 }),
             )),
         }
@@ -1338,11 +1676,14 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
 }
 
 /// When `ryeos start` finds a daemon already running, warn loudly if that daemon
-/// is an older build than the installed binaries — the classic footgun where an
-/// install replaced `ryeosd` on disk but did not cycle the running daemon, so it
-/// keeps holding the state lock and serving stale behavior. `ryeos` and `ryeosd`
-/// are built and installed together, so this binary's build info stands in for
-/// the on-disk `ryeosd`.
+/// is an older build than the installed `ryeosd` — the classic footgun where an
+/// install replaced the daemon binary on disk but did not cycle the running
+/// process, so it keeps holding the state lock and serving stale behavior.
+///
+/// The querying `ryeos` binary is deliberately not used as a proxy for the
+/// installed daemon. Incremental builds and package staging can legitimately
+/// relink the CLI and daemon at different revisions even when the on-disk and
+/// running daemon artifacts are identical.
 ///
 /// Two independent signals, either of which fires the warning:
 ///   1. the daemon recorded a different VCS revision (or none — a build from
@@ -1355,23 +1696,27 @@ fn warn_if_stale_daemon(console: &crate::tty::Console, status: &LifecycleStatus)
     let LifecycleStatus::Running { metadata, .. } = status else {
         return Ok(());
     };
-    let current = ryeos_app::build_info::get();
+    let installed_revision = installed_ryeosd_revision();
 
-    let revision_skew = is_revision_skew(metadata.revision.as_deref(), current.revision);
+    let revision_skew =
+        is_revision_skew(metadata.revision.as_deref(), installed_revision.as_deref());
     let binary_is_newer = ryeosd_installed_after_daemon_started(metadata);
 
     if !revision_skew && !binary_is_newer {
         return Ok(());
     }
     let mut diagnostic = crate::tty::Diagnostic::warning(
-        "the running daemon is an older build than the installed binary",
+        "the running daemon does not match the installed daemon binary",
     );
     diagnostic.context = vec![
         format!(
             "running revision {}",
             metadata.revision.as_deref().unwrap_or("unknown")
         ),
-        format!("installed revision {}", current.revision),
+        format!(
+            "installed daemon revision {}",
+            installed_revision.as_deref().unwrap_or("unknown")
+        ),
         "newly installed changes do not take effect while the old daemon holds the state lock"
             .to_string(),
     ];
@@ -1380,15 +1725,54 @@ fn warn_if_stale_daemon(console: &crate::tty::Console, status: &LifecycleStatus)
     Ok(())
 }
 
-/// Whether the daemon's recorded revision indicates an older build than this
-/// one. A missing recorded revision (a daemon built before revisions were
-/// tracked) counts as skew; an "unknown" current revision (git unavailable at
-/// build time) can't discriminate, so it never fires on its own.
-fn is_revision_skew(recorded: Option<&str>, current: &str) -> bool {
-    match recorded {
-        Some(rev) => current != "unknown" && rev != current,
-        None => true,
+/// Whether the running daemon's recorded revision differs from the installed
+/// daemon artifact. If the installed artifact cannot report a revision, the
+/// revision signal is unavailable and the independent mtime signal remains.
+fn is_revision_skew(recorded: Option<&str>, installed: Option<&str>) -> bool {
+    match installed.filter(|revision| *revision != "unknown") {
+        Some(installed) => recorded != Some(installed),
+        None => false,
     }
+}
+
+/// Read build provenance from the installed `ryeosd` sibling without opening
+/// node state. `ryeosd build-info` exits before configuration or state loading.
+/// Any failure leaves revision comparison unavailable; lifecycle diagnostics
+/// remain best-effort and still retain the independent binary-mtime signal.
+fn installed_ryeosd_revision() -> Option<String> {
+    let ryeosd = sibling_ryeosd_path()?;
+    let output = std::process::Command::new(ryeosd)
+        .args(["build-info", "--revision"])
+        .env_clear()
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_installed_revision(&output.stdout)
+}
+
+fn parse_installed_revision(stdout: &[u8]) -> Option<String> {
+    const MAX_REVISION_BYTES: usize = 128;
+    if stdout.len() > MAX_REVISION_BYTES {
+        return None;
+    }
+    let revision = std::str::from_utf8(stdout).ok()?.trim();
+    if revision.is_empty()
+        || revision == "unknown"
+        || !revision.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return None;
+    }
+    Some(revision.to_string())
+}
+
+fn sibling_ryeosd_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|directory| directory.join("ryeosd"))
+        .filter(|path| path.is_file())
 }
 
 /// True when the on-disk `ryeosd` (sibling of this `ryeos` binary) has a newer
@@ -1396,11 +1780,7 @@ fn is_revision_skew(recorded: Option<&str>, current: &str) -> bool {
 /// starts. Any failure to resolve either path or its mtime returns false — a
 /// best-effort diagnostic must never block or mislead `start`.
 fn ryeosd_installed_after_daemon_started(metadata: &ryeos_node::DaemonMetadata) -> bool {
-    let Some(ryeosd) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("ryeosd")))
-        .filter(|p| p.exists())
-    else {
+    let Some(ryeosd) = sibling_ryeosd_path() else {
         return false;
     };
     let daemon_json = ryeos_node::DaemonMetadata::path(&metadata.app_root);
@@ -1642,147 +2022,88 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_core_tools::actions::doctor::NA;
 
-    fn node_gc_args(dry_run: bool, confirm: bool, sweep_cas: bool) -> NodeGcArgs {
-        NodeGcArgs {
+    fn execution_history_reset_args(dry_run: bool, confirm: bool) -> ExecutionHistoryResetArgs {
+        ExecutionHistoryResetArgs {
             app_root: None,
-            discard_thread_history: true,
-            confirm_discard_thread_history: confirm,
-            discard_project_heads: false,
-            confirm_discard_project_heads: false,
+            include_project_heads: false,
+            confirm,
+            confirm_project_heads: false,
             dry_run,
-            sweep_cas,
+            json: false,
+        }
+    }
+
+    fn policy_generation_reset_args(confirm: bool) -> NodePolicyGenerationResetArgs {
+        NodePolicyGenerationResetArgs {
+            source: PathBuf::from("/usr/share/ryeos"),
+            node_profile: "full".to_string(),
+            trust_files: Vec::new(),
+            app_root: None,
+            confirm,
             json: false,
         }
     }
 
     #[test]
-    fn node_gc_requires_an_explicit_operation_and_destructive_confirmation() {
-        let mut args = node_gc_args(true, false, false);
-        args.discard_thread_history = false;
-        assert!(args.validate().is_err());
+    fn policy_generation_schema_cut_requires_explicit_confirmation() {
+        assert!(policy_generation_reset_args(false).validate().is_err());
+        assert!(policy_generation_reset_args(true).validate().is_ok());
 
-        assert!(node_gc_args(true, false, false).validate().is_ok());
-        assert!(node_gc_args(false, false, false).validate().is_err());
-        assert!(node_gc_args(false, true, false).validate().is_ok());
-        assert!(node_gc_args(true, false, true).validate().is_err());
+        let mut invalid = policy_generation_reset_args(true);
+        invalid.node_profile = "../full".to_string();
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
-    fn project_head_cutover_requires_the_combined_explicit_confirmation() {
-        let mut args = node_gc_args(false, true, false);
-        args.discard_project_heads = true;
+    fn execution_history_reset_requires_destructive_confirmation() {
+        assert!(execution_history_reset_args(true, false).validate().is_ok());
+        assert!(
+            execution_history_reset_args(false, false)
+                .validate()
+                .is_err()
+        );
+        assert!(execution_history_reset_args(false, true).validate().is_ok());
+    }
+
+    #[test]
+    fn project_head_cutover_requires_its_own_explicit_confirmation() {
+        let mut args = execution_history_reset_args(false, true);
+        args.include_project_heads = true;
         assert!(args.validate().is_err());
 
-        args.confirm_discard_project_heads = true;
+        args.confirm_project_heads = true;
         assert!(args.validate().is_ok());
 
-        args.discard_thread_history = false;
-        assert!(args.validate().is_err());
-
-        let mut preview = node_gc_args(true, false, false);
-        preview.discard_project_heads = true;
+        let mut preview = execution_history_reset_args(true, false);
+        preview.include_project_heads = true;
         assert!(preview.validate().is_ok());
     }
 
-    fn isolation_policy(mode: &str, open_files: Option<u64>) -> String {
-        let open_files = open_files
-            .map(|limit| format!("  open_files: {limit}\n"))
-            .unwrap_or_else(|| "  open_files: null\n".to_string());
-        let backend = if mode == "enforce" {
-            "backend:\n  bundle: example-isolation-backend\n  implementation: example"
-        } else {
-            "backend: null"
-        };
-        format!(
-            "version: 1\nmode: {mode}\n{backend}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
-        )
-    }
+    #[test]
+    fn revision_skew_compares_running_and_installed_daemon() {
+        assert!(!is_revision_skew(
+            Some("abc123def456"),
+            Some("abc123def456")
+        ));
+        assert!(is_revision_skew(Some("oldsha000000"), Some("newsha111111")));
+        assert!(is_revision_skew(None, Some("abc123def456")));
 
-    fn supported_open_file_limit() -> u64 {
-        [128, 64, 32, 16, 8, 4, 2, 1, 0]
-            .into_iter()
-            .find(|max_open_files| {
-                lillux::validate_subprocess_limits(Some(&lillux::SubprocessLimits {
-                    max_open_files: Some(*max_open_files),
-                    ..lillux::SubprocessLimits::default()
-                }))
-                .is_ok()
-            })
-            .expect("the current process should accept at least RLIMIT_NOFILE=0")
+        // A CLI built at another revision is irrelevant. If the installed
+        // daemon revision cannot be read, this signal cannot claim skew.
+        assert!(!is_revision_skew(Some("abc123def456"), None));
+        assert!(!is_revision_skew(None, None));
+        assert!(!is_revision_skew(Some("abc123def456"), Some("unknown")));
     }
 
     #[test]
-    fn revision_skew_detects_mismatch_and_missing() {
-        // Same revision → not skewed.
-        assert!(!is_revision_skew(Some("abc123def456"), "abc123def456"));
-        // Different revision → skewed.
-        assert!(is_revision_skew(Some("oldsha000000"), "newsha111111"));
-        // No recorded revision (older daemon predating the field) → skewed.
-        assert!(is_revision_skew(None, "abc123def456"));
-        // Current revision unknown (git unavailable at build): a recorded
-        // revision can't be discriminated, but a missing one still skews.
-        assert!(!is_revision_skew(Some("abc123def456"), "unknown"));
-        assert!(is_revision_skew(None, "unknown"));
-    }
-
-    #[test]
-    fn isolation_doctor_requires_a_registered_signed_backend() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".ai/node/identity")).unwrap();
-        std::fs::write(
-            temp.path().join(".ai/node/identity/public-identity.json"),
-            "{}",
-        )
-        .unwrap();
-        let policy = temp.path().join(".ai/node/isolation.yaml");
-        let max_open_files = supported_open_file_limit();
-        std::fs::write(&policy, isolation_policy("enforce", Some(max_open_files))).unwrap();
-
-        let error = inspect_isolation_policy(temp.path())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("isolation bundle"));
-    }
-
-    #[test]
-    fn isolation_doctor_reports_disabled_without_inspecting_backend() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
-        let policy = temp.path().join(".ai/node/isolation.yaml");
-        std::fs::write(&policy, isolation_policy("disabled", Some(1024))).unwrap();
-
-        let inspection = inspect_isolation_policy(temp.path()).unwrap();
-        assert_eq!(inspection.status, NA);
-        assert_eq!(inspection.detail["mode"], "disabled");
-        assert_eq!(inspection.detail["backend_status"], "disabled");
+    fn installed_revision_output_is_bounded_and_single_token() {
         assert_eq!(
-            inspection.detail["limit_enforcement"]["open_files"]["status"],
-            "inactive"
+            parse_installed_revision(b"331b98afb3b5\n").as_deref(),
+            Some("331b98afb3b5")
         );
-    }
-
-    #[test]
-    fn isolation_doctor_rejects_unknown_fields_and_missing_selected_bundle() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
-        let policy = temp.path().join(".ai/node/isolation.yaml");
-        std::fs::write(
-            &policy,
-            format!("{}unexpected: true\n", isolation_policy("disabled", None)),
-        )
-        .unwrap();
-
-        let error = format!("{:#}", inspect_isolation_policy(temp.path()).unwrap_err());
-        assert!(error.contains("unknown field"), "{error}");
-
-        std::fs::write(&policy, isolation_policy("enforce", None)).unwrap();
-        assert!(
-            inspect_isolation_policy(temp.path())
-                .unwrap_err()
-                .to_string()
-                .contains("isolation bundle")
-        );
+        assert_eq!(parse_installed_revision(b"unknown\n"), None);
+        assert_eq!(parse_installed_revision(b"two revisions\n"), None);
+        assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
     }
 }

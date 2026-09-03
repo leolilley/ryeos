@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value};
 
-use crate::compiled_graph::CompiledNode;
 use crate::context::ExecutionContext;
-use crate::evaluation::{ExpressionScope, validate_runtime_value};
+use crate::evaluation::{ExpressionScope, GraphRunExpressionContext, validate_runtime_value};
 use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
+use ryeos_graph_definition::CompiledNode;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError};
 use ryeos_runtime::events::RuntimeEventType;
@@ -66,9 +66,10 @@ fn fold_launch_window(
     if !node.detach {
         return;
     }
-    let Some(width) = node.max_concurrency else {
-        return;
-    };
+    let width = node.max_concurrency.unwrap_or_else(|| {
+        usize::try_from(ryeos_runtime::DEFAULT_LIVE_FANOUT_WINDOW_WIDTH)
+            .expect("fanout window width fits usize")
+    });
     if let Some(obj) = action.as_object_mut() {
         obj.insert(
             ryeos_runtime::callback::action_keys::LAUNCH_WINDOW.to_string(),
@@ -80,30 +81,26 @@ fn fold_launch_window(
     }
 }
 
-fn stamp_detached_operation(
+fn stamp_action_operation(
     action: &mut Value,
     graph_run_id: &str,
     node: &str,
     step: u32,
     item_index: usize,
+    attempt: u32,
 ) {
-    if action.get("thread").and_then(Value::as_str) != Some("detached") {
-        return;
-    }
-    let identity = lillux::canonical_json(&serde_json::json!({
-        "graph_run_id": graph_run_id,
-        "node": node,
-        "step": step,
-        "item_index": item_index,
-        "kind": "detached_foreach_action"
-    }))
-    .expect("fixed foreach operation identity is canonical JSON");
     action
         .as_object_mut()
         .expect("rendered foreach action is validated as an object")
         .insert(
-            "operation_id".to_string(),
-            Value::String(lillux::sha256_hex(identity.as_bytes())),
+            ryeos_runtime::callback::action_keys::OPERATION_ID.to_string(),
+            Value::String(crate::dispatch::graph_action_operation_id(
+                graph_run_id,
+                node,
+                step,
+                Some(item_index),
+                Some(attempt),
+            )),
         );
 }
 
@@ -115,6 +112,10 @@ fn stamp_detached_operation(
 /// the caller can commit foreach `assign` mutations into real state —
 /// the runner only ever sees a clone).
 pub struct ForeachRun {
+    /// A callback crossed or may have crossed the daemon action boundary but
+    /// returned no authoritative settlement. The caller exits this graph
+    /// segment without committing the foreach step.
+    pub recovery_required: Option<String>,
     /// One entry per attempted item, index-aligned with `statuses`, when no
     /// fatal aggregate/candidate limit is hit. Ordinary failed items retain a
     /// `Null` placeholder. A fatal limit invalidates the entire candidate, so
@@ -234,7 +235,7 @@ pub struct ForeachContext<'a> {
     pub current_node: &'a str,
     pub graph_run_id: &'a str,
     pub definition_ref: &'a str,
-    pub definition_hash: &'a str,
+    pub effective_definition_digest: &'a str,
     pub continue_on_error: bool,
     pub cancel_flag: Option<Arc<AtomicBool>>,
 }
@@ -246,7 +247,7 @@ pub struct ForeachContext<'a> {
 struct RetryEventCtx {
     graph_run_id: String,
     definition_ref: String,
-    definition_hash: String,
+    effective_definition_digest: String,
     node: String,
     step: u32,
 }
@@ -268,6 +269,7 @@ async fn dispatch_item_with_retry(
     exec_ctx: Option<&ExecutionContext>,
     retry: Option<&RetryConfig>,
     ev: &RetryEventCtx,
+    item_index: usize,
     item_id: &str,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> RetriedDispatch {
@@ -276,9 +278,24 @@ async fn dispatch_item_with_retry(
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        let outcome =
-            crate::dispatch::dispatch_action(client, action, thread_id, project_path, exec_ctx)
-                .await;
+        let mut attempt_action = action.clone();
+        stamp_action_operation(
+            &mut attempt_action,
+            &ev.graph_run_id,
+            &ev.node,
+            ev.step,
+            item_index,
+            attempt,
+        );
+        let outcome = crate::dispatch::dispatch_action(
+            client,
+            &attempt_action,
+            thread_id,
+            project_path,
+            None,
+            exec_ctx,
+        )
+        .await;
         let retryable = match &outcome {
             Err(error) => error.retryable,
             Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
@@ -313,8 +330,8 @@ async fn dispatch_item_with_retry(
                             Value::String(ev.definition_ref.clone()),
                         ),
                         (
-                            "definition_hash".to_string(),
-                            Value::String(ev.definition_hash.clone()),
+                            "effective_definition_digest".to_string(),
+                            Value::String(ev.effective_definition_digest.clone()),
                         ),
                         ("node".to_string(), Value::String(ev.node.clone())),
                         (
@@ -395,14 +412,14 @@ pub async fn run_foreach_sequential(
         current_node,
         graph_run_id,
         definition_ref,
-        definition_hash,
+        effective_definition_digest,
         continue_on_error,
         cancel_flag,
     } = ctx;
     let retry_ev = RetryEventCtx {
         graph_run_id: graph_run_id.to_string(),
         definition_ref: definition_ref.to_string(),
-        definition_hash: definition_hash.to_string(),
+        effective_definition_digest: effective_definition_digest.to_string(),
         node: current_node.to_string(),
         step,
     };
@@ -412,6 +429,7 @@ pub async fn run_foreach_sequential(
     let mut total_cost: Option<RuntimeCost> = None;
     let mut observations = Vec::new();
     let mut limit_error = None;
+    let mut recovery_required = None;
     let mut callback_warnings = Vec::new();
     let mut callback_warning_budget =
         RuntimeJsonArrayBudget::new(format!("node {current_node}.foreach retry warnings"));
@@ -427,6 +445,7 @@ pub async fn run_foreach_sequential(
     let mut delta: Map<String, Value> = Map::new();
     if let Err(error) = validate_runtime_value(state, "foreach base state") {
         return ForeachRun {
+            recovery_required,
             results,
             statuses,
             total_items: items.len(),
@@ -446,6 +465,7 @@ pub async fn run_foreach_sequential(
     // `cardinality * state_size` outside the evaluator budget.
     let Some(base_object) = state.as_object() else {
         return ForeachRun {
+            recovery_required,
             results,
             statuses,
             total_items: items.len(),
@@ -466,6 +486,7 @@ pub async fn run_foreach_sequential(
         Ok(budget) => budget,
         Err(error) => {
             return ForeachRun {
+                recovery_required,
                 results,
                 statuses,
                 total_items: items.len(),
@@ -494,7 +515,12 @@ pub async fn run_foreach_sequential(
             &candidate_state,
             inputs,
             execution.as_ref(),
-            Some(graph_run_id),
+            GraphRunExpressionContext::new(
+                graph_run_id,
+                step,
+                definition_ref,
+                effective_definition_digest,
+            ),
         )
         .with_foreach(var, item);
 
@@ -533,7 +559,6 @@ pub async fn run_foreach_sequential(
             }
         };
         fold_launch_window(node, &mut rendered, graph_run_id, current_node);
-        stamp_detached_operation(&mut rendered, graph_run_id, current_node, step, item_index);
         // Missing paths are handled by rye-expr/1 before this point. Explicit
         // JSON nulls are authored values and remain in the action payload.
         let item_dispatch_id = rendered
@@ -550,6 +575,7 @@ pub async fn run_foreach_sequential(
             exec_ctx,
             node.retry.as_ref(),
             &retry_ev,
+            item_index,
             &item_dispatch_id,
             cancel_flag.clone(),
         )
@@ -565,13 +591,22 @@ pub async fn run_foreach_sequential(
                     result: val,
                     cost,
                     child_thread_id,
+                    // Foreach items never request replay; the aggregate
+                    // refuses durable classes at the definition layer.
+                    replayed_from: _,
+                    dispatch,
                 } = success;
                 if let Err(error) = add_cost(&mut total_cost, cost) {
                     statuses.push(GraphToolCallStatus::IntegrityFailed);
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_success(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            &val,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -590,7 +625,12 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_success(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            &val,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     let history_error = retain_error(
@@ -633,6 +673,7 @@ pub async fn run_foreach_sequential(
                         item_dispatch_id.clone(),
                         child_thread_id,
                         &val,
+                        dispatch.clone(),
                     ),
                 ) {
                     statuses.push(GraphToolCallStatus::IntegrityFailed);
@@ -650,10 +691,16 @@ pub async fn run_foreach_sequential(
                         &candidate_state,
                         inputs,
                         execution.as_ref(),
-                        Some(graph_run_id),
+                        GraphRunExpressionContext::new(
+                            graph_run_id,
+                            step,
+                            definition_ref,
+                            effective_definition_digest,
+                        ),
                     )
                     .with_foreach(var, item)
                     .with_result(&val)
+                    .with_dispatch_option(dispatch.as_ref())
                     .render_json(assign)
                     {
                         Ok(value) => {
@@ -726,6 +773,7 @@ pub async fn run_foreach_sequential(
                     cost,
                     child_thread_id,
                     integrity,
+                    dispatch,
                     ..
                 } = failure;
                 if let Err(error) = add_cost(&mut total_cost, cost) {
@@ -733,7 +781,11 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_failure(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -751,7 +803,11 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_failure(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -768,7 +824,11 @@ pub async fn run_foreach_sequential(
                 if let Err(error) = retain_observation(
                     &mut observations,
                     &mut observation_budget,
-                    DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                    DispatchObservation::from_failure(
+                        item_dispatch_id.clone(),
+                        child_thread_id,
+                        dispatch,
+                    ),
                 ) {
                     limit_error = Some(format!(
                         "foreach node `{current_node}` observation history exceeded rye-expr/1 aggregate bounds: {error}"
@@ -800,6 +860,10 @@ pub async fn run_foreach_sequential(
                 }
             }
             Err(e) => {
+                if e.outcome_unknown {
+                    recovery_required = Some(e.diagnostic);
+                    break;
+                }
                 // Dispatch failed before the leaf returned anything.
                 statuses.push(GraphToolCallStatus::DispatchFailed);
                 if let Err(error) = retain_error(
@@ -829,6 +893,7 @@ pub async fn run_foreach_sequential(
         }
     }
     ForeachRun {
+        recovery_required,
         results,
         statuses,
         total_items: items.len(),
@@ -844,11 +909,15 @@ pub async fn run_foreach_sequential(
 /// Per-item result of a parallel foreach task. Parallel assignment is rejected
 /// at graph load, so the task can only return its result and reported cost.
 enum ParallelItem {
+    RecoveryRequired {
+        diagnostic: String,
+    },
     Success {
         result: Value,
         cost: Option<RuntimeCost>,
         item_id: String,
         child_thread_id: Option<String>,
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     },
     Failure {
         diagnostic: String,
@@ -857,6 +926,7 @@ enum ParallelItem {
         item_id: Option<String>,
         child_thread_id: Option<String>,
         integrity: bool,
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     },
 }
 
@@ -885,19 +955,22 @@ pub async fn run_foreach_parallel(
         current_node,
         graph_run_id,
         definition_ref,
-        definition_hash,
+        effective_definition_digest,
         continue_on_error,
         cancel_flag,
     } = ctx;
     let retry_ev = RetryEventCtx {
         graph_run_id: graph_run_id.to_string(),
         definition_ref: definition_ref.to_string(),
-        definition_hash: definition_hash.to_string(),
+        effective_definition_digest: effective_definition_digest.to_string(),
         node: current_node.to_string(),
         step,
     };
     let retry_cfg = node.retry.clone();
-    let max_conc = node.max_concurrency.unwrap_or(8);
+    let max_conc = node.max_concurrency.unwrap_or_else(|| {
+        usize::try_from(ryeos_runtime::DEFAULT_LIVE_FANOUT_WINDOW_WIDTH)
+            .expect("fanout window width fits usize")
+    });
     let execution = exec_ctx.as_context_value();
     let mut results = Vec::new();
     let mut errors = Vec::new();
@@ -905,6 +978,7 @@ pub async fn run_foreach_parallel(
     let mut total_cost: Option<RuntimeCost> = None;
     let mut observations = Vec::new();
     let mut limit_error = None;
+    let mut recovery_required = None;
     let mut callback_warnings = Vec::new();
     let mut callback_warning_budget = RuntimeJsonArrayBudget::new(format!(
         "node {current_node}.parallel foreach retry warnings"
@@ -937,37 +1011,41 @@ pub async fn run_foreach_parallel(
                 Some(action) => action,
                 None => continue,
             };
-            let mut rendered =
-                match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
-                    .with_foreach(var, item)
-                    .render_action(action)
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        work.push(ParallelWork::Ready(ParallelItem::Failure {
-                            diagnostic: bounded_parallel_diagnostic(format!(
-                                "expression evaluation failed in foreach action: {error}"
-                            )),
-                            cost: None,
-                            status: GraphToolCallStatus::ExpressionFailed,
-                            item_id: None,
-                            child_thread_id: None,
-                            integrity: false,
-                        }));
-                        if !continue_on_error {
-                            break;
-                        }
-                        continue;
+            let mut rendered = match ExpressionScope::new(
+                state,
+                inputs,
+                Some(&execution),
+                GraphRunExpressionContext::new(
+                    graph_run_id,
+                    step,
+                    definition_ref,
+                    effective_definition_digest,
+                ),
+            )
+            .with_foreach(var, item)
+            .render_action(action)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    work.push(ParallelWork::Ready(ParallelItem::Failure {
+                        diagnostic: bounded_parallel_diagnostic(format!(
+                            "expression evaluation failed in foreach action: {error}"
+                        )),
+                        cost: None,
+                        status: GraphToolCallStatus::ExpressionFailed,
+                        item_id: None,
+                        child_thread_id: None,
+                        integrity: false,
+                        dispatch: None,
+                    }));
+                    if !continue_on_error {
+                        break;
                     }
-                };
+                    continue;
+                }
+            };
             fold_launch_window(node, &mut rendered, graph_run_id, current_node);
-            stamp_detached_operation(
-                &mut rendered,
-                graph_run_id,
-                current_node,
-                step,
-                batch_index * max_conc + chunk_index,
-            );
+            let item_index = batch_index * max_conc + chunk_index;
             if let Err(error) = launch_budget.append(&rendered) {
                 work.push(ParallelWork::Ready(ParallelItem::Failure {
                     diagnostic: bounded_parallel_diagnostic(format!(
@@ -981,6 +1059,7 @@ pub async fn run_foreach_parallel(
                         .map(str::to_string),
                     child_thread_id: None,
                     integrity: true,
+                    dispatch: None,
                 }));
                 break;
             }
@@ -1006,6 +1085,7 @@ pub async fn run_foreach_parallel(
                     Some(&exec_ctx),
                     retry_cfg.as_ref(),
                     &retry_ev,
+                    item_index,
                     &item_dispatch_id,
                     cancel_flag,
                 )
@@ -1016,6 +1096,8 @@ pub async fn run_foreach_parallel(
                             result,
                             cost,
                             child_thread_id,
+                            replayed_from: _,
+                            dispatch,
                         } = success;
                         if let Err(error) = validate_runtime_value(
                             &result,
@@ -1030,6 +1112,7 @@ pub async fn run_foreach_parallel(
                                 item_id: Some(item_dispatch_id),
                                 child_thread_id,
                                 integrity: true,
+                                dispatch,
                             }
                         } else {
                             ParallelItem::Success {
@@ -1037,6 +1120,7 @@ pub async fn run_foreach_parallel(
                                 cost,
                                 item_id: item_dispatch_id,
                                 child_thread_id,
+                                dispatch,
                             }
                         }
                     }
@@ -1046,6 +1130,7 @@ pub async fn run_foreach_parallel(
                             cost,
                             child_thread_id,
                             integrity,
+                            dispatch,
                             ..
                         } = failure;
                         ParallelItem::Failure {
@@ -1058,8 +1143,12 @@ pub async fn run_foreach_parallel(
                             item_id: Some(item_dispatch_id),
                             child_thread_id,
                             integrity,
+                            dispatch,
                         }
                     }
+                    Err(error) if error.outcome_unknown => ParallelItem::RecoveryRequired {
+                        diagnostic: bounded_parallel_diagnostic(error.diagnostic),
+                    },
                     Err(error) => ParallelItem::Failure {
                         diagnostic: bounded_parallel_diagnostic(format!(
                             "foreach parallel iteration dispatch failed: {error:#}"
@@ -1069,6 +1158,7 @@ pub async fn run_foreach_parallel(
                         item_id: None,
                         child_thread_id: None,
                         integrity: false,
+                        dispatch: None,
                     },
                 };
                 (outcome, retried.callback_warnings)
@@ -1092,18 +1182,27 @@ pub async fn run_foreach_parallel(
                 Err(error) => Err(error),
             };
             match outcome {
+                Ok(ParallelItem::RecoveryRequired { diagnostic }) => {
+                    recovery_required.get_or_insert(diagnostic);
+                }
                 Ok(ParallelItem::Success {
                     result: value,
                     cost,
                     item_id,
                     child_thread_id,
+                    dispatch,
                 }) => {
                     if let Err(error) = add_cost(&mut total_cost, cost) {
                         statuses.push(GraphToolCallStatus::IntegrityFailed);
                         let observation_error = retain_observation(
                             &mut observations,
                             &mut observation_budget,
-                            DispatchObservation::child_only(item_id, child_thread_id),
+                            DispatchObservation::from_success(
+                                item_id,
+                                child_thread_id,
+                                &value,
+                                dispatch.clone(),
+                            ),
                         )
                         .err();
                         if limit_error.is_none() {
@@ -1122,7 +1221,12 @@ pub async fn run_foreach_parallel(
                         let _ = retain_observation(
                             &mut observations,
                             &mut observation_budget,
-                            DispatchObservation::child_only(item_id, child_thread_id),
+                            DispatchObservation::from_success(
+                                item_id,
+                                child_thread_id,
+                                &value,
+                                dispatch.clone(),
+                            ),
                         );
                         statuses.push(GraphToolCallStatus::Ok);
                         continue;
@@ -1132,7 +1236,12 @@ pub async fn run_foreach_parallel(
                         let _ = retain_observation(
                             &mut observations,
                             &mut observation_budget,
-                            DispatchObservation::child_only(item_id, child_thread_id),
+                            DispatchObservation::from_success(
+                                item_id,
+                                child_thread_id,
+                                &value,
+                                dispatch.clone(),
+                            ),
                         );
                         let _ = retain_error(
                             &mut errors,
@@ -1153,7 +1262,12 @@ pub async fn run_foreach_parallel(
                     if let Err(error) = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::from_success(item_id, child_thread_id, &value),
+                        DispatchObservation::from_success(
+                            item_id,
+                            child_thread_id,
+                            &value,
+                            dispatch,
+                        ),
                     ) {
                         statuses.push(GraphToolCallStatus::IntegrityFailed);
                         limit_error = Some(format!(
@@ -1171,6 +1285,7 @@ pub async fn run_foreach_parallel(
                     item_id,
                     child_thread_id,
                     integrity,
+                    dispatch,
                 }) => {
                     let diagnostic_limit_failure =
                         diagnostic.starts_with(PARALLEL_DIAGNOSTIC_LIMIT_FAILURE);
@@ -1180,7 +1295,11 @@ pub async fn run_foreach_parallel(
                             &mut observations,
                             &mut observation_budget,
                             item_id.and_then(|item_id| {
-                                DispatchObservation::child_only(item_id, child_thread_id)
+                                DispatchObservation::from_failure(
+                                    item_id,
+                                    child_thread_id,
+                                    dispatch.clone(),
+                                )
                             }),
                         )
                         .err();
@@ -1214,7 +1333,11 @@ pub async fn run_foreach_parallel(
                             &mut observations,
                             &mut observation_budget,
                             item_id.and_then(|item_id| {
-                                DispatchObservation::child_only(item_id, child_thread_id)
+                                DispatchObservation::from_failure(
+                                    item_id,
+                                    child_thread_id,
+                                    dispatch.clone(),
+                                )
                             }),
                         );
                         continue;
@@ -1223,7 +1346,7 @@ pub async fn run_foreach_parallel(
                         &mut observations,
                         &mut observation_budget,
                         item_id.and_then(|item_id| {
-                            DispatchObservation::child_only(item_id, child_thread_id)
+                            DispatchObservation::from_failure(item_id, child_thread_id, dispatch)
                         }),
                     ) {
                         limit_error = Some(format!(
@@ -1260,20 +1383,23 @@ pub async fn run_foreach_parallel(
                     // missing outcome, so treating the join failure as an
                     // ordinary dispatch error would permit an under-accounted
                     // `continue`. Fail the whole candidate as integrity drift.
-                    statuses.push(GraphToolCallStatus::IntegrityFailed);
-                    if limit_error.is_none() {
-                        limit_error = Some(bounded_parallel_diagnostic(format!(
-                            "parallel foreach node `{current_node}` iteration task terminated without an authoritative outcome; child cost/provenance may be incomplete: {join_error}"
-                        )));
-                    }
+                    recovery_required.get_or_insert_with(|| {
+                        bounded_parallel_diagnostic(format!(
+                            "parallel foreach node `{current_node}` iteration task terminated without an authoritative outcome: {join_error}"
+                        ))
+                    });
                 }
             }
         }
-        if limit_error.is_some() || (!continue_on_error && !errors.is_empty()) {
+        if recovery_required.is_some()
+            || limit_error.is_some()
+            || (!continue_on_error && !errors.is_empty())
+        {
             break 'batches;
         }
     }
     ForeachRun {
+        recovery_required,
         results,
         statuses,
         total_items: items.len(),
@@ -1320,6 +1446,45 @@ mod tests {
     }
 
     #[test]
+    fn every_foreach_member_gets_one_stable_index_scoped_operation() {
+        let mut inline = json!({
+            "item_id": "tool:test/member",
+            "ref_bindings": {},
+            "thread": "inline"
+        });
+        stamp_action_operation(&mut inline, "gr-1", "fan", 3, 0, 1);
+        let first = inline[ryeos_runtime::callback::action_keys::OPERATION_ID]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        stamp_action_operation(&mut inline, "gr-1", "fan", 3, 0, 1);
+        assert_eq!(
+            inline[ryeos_runtime::callback::action_keys::OPERATION_ID],
+            first
+        );
+        assert_eq!(
+            first,
+            crate::dispatch::graph_action_operation_id("gr-1", "fan", 3, Some(0), Some(1))
+        );
+        assert!(ryeos_runtime::callback::valid_action_operation_id(&first));
+
+        let mut retry = inline.clone();
+        stamp_action_operation(&mut retry, "gr-1", "fan", 3, 0, 2);
+        assert_ne!(
+            retry[ryeos_runtime::callback::action_keys::OPERATION_ID],
+            first,
+            "a known failed attempt must not replay as its authored retry"
+        );
+
+        let mut next = inline.clone();
+        stamp_action_operation(&mut next, "gr-1", "fan", 3, 1, 1);
+        assert_ne!(
+            next[ryeos_runtime::callback::action_keys::OPERATION_ID],
+            first
+        );
+    }
+
+    #[test]
     fn launch_window_stamped_for_detach_with_max_concurrency() {
         let node = detach_node(Some(12));
         let mut action = node.action.clone().unwrap();
@@ -1333,12 +1498,15 @@ mod tests {
     }
 
     #[test]
-    fn no_window_without_max_concurrency_or_detach() {
+    fn default_window_is_stamped_without_authored_max_concurrency() {
         let node = detach_node(None);
         let mut action = node.action.clone().unwrap();
         node.fold_detach_into_action(&mut action);
         fold_launch_window(&node, &mut action, "gr-1", "fan");
-        assert!(action.get("launch_window").is_none());
+        assert_eq!(
+            action["launch_window"],
+            json!({ "key": "gr-1:fan", "width": 8 })
+        );
 
         let mut inline_node = detach_node(Some(12));
         inline_node.detach = false;

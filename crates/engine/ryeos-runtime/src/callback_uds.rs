@@ -81,6 +81,29 @@ impl UdsRuntimeClient {
     fn serialize_dispatch_action_request(
         request: DispatchActionRequest,
     ) -> Result<(Value, bool), CallbackError> {
+        match (
+            request.hook_dispatch.is_some(),
+            request.action.operation_id.as_deref(),
+        ) {
+            (true, None) => {}
+            (true, Some(_)) => {
+                return Err(CallbackError::Transport(anyhow::anyhow!(
+                    "hook callback action cannot carry an ordinary operation_id"
+                )));
+            }
+            (false, Some(operation_id))
+                if crate::callback::valid_action_operation_id(operation_id) => {}
+            (false, Some(_)) => {
+                return Err(CallbackError::Transport(anyhow::anyhow!(
+                    "ordinary callback action operation_id is not a canonical lowercase SHA-256 digest"
+                )));
+            }
+            (false, None) => {
+                return Err(CallbackError::Transport(anyhow::anyhow!(
+                    "ordinary callback action has no operation_id"
+                )));
+            }
+        }
         let inline = request.action.thread == "inline";
         let params = serde_json::to_value(request).map_err(|error| {
             CallbackError::Transport(anyhow::anyhow!(
@@ -137,6 +160,107 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.attach_process", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn reach_test_phase_cut(
+        &self,
+        thread_id: &str,
+        phase: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "phase": phase});
+        self.inject_callback_token(&mut params);
+        // A successful test gate intentionally never responds: the parent
+        // observes its inherited channel and SIGKILLs the daemon. A dedicated
+        // unbounded connection prevents the shared callback lane from being
+        // occupied while the runtime is parked at the crash boundary.
+        self.rpc
+            .request_dedicated("runtime.test_phase_cut", params, None)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn start_dedicated_session(
+        &self,
+        request: DedicatedSessionStartRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session start request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.start_dedicated_session", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn dedicated_session_status(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.dedicated_session_status", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn wait_dedicated_session(
+        &self,
+        request: crate::callback::DedicatedSessionWaitRequest,
+    ) -> Result<Value, CallbackError> {
+        let server_wait = std::time::Duration::from_millis(request.timeout_ms);
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session wait request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        // This is a bounded long-poll, not an ordinary control-plane RPC. It
+        // must not occupy the shared callback connection, and its transport
+        // deadline must extend beyond the server-side wait (which is allowed
+        // to be longer than DEFAULT_RPC_TIMEOUT). The additional default RPC
+        // bound still turns a daemon that fails to answer after the admitted
+        // wait expires into an attributable transport failure.
+        self.rpc
+            .request_dedicated(
+                "runtime.wait_dedicated_session",
+                params,
+                Some(server_wait.saturating_add(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT)),
+            )
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn dedicated_session_command(
+        &self,
+        request: DedicatedSessionCommandRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session command request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.dedicated_session_command", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn terminate_dedicated_session(
+        &self,
+        request: DedicatedSessionTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session terminate request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.terminate_dedicated_session", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -206,8 +330,16 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             CallbackError::Transport(anyhow::anyhow!("serialize spawn_follow_child: {e}"))
         })?;
         self.inject_callback_token(&mut params);
+        // This is the graph's suspend/continue commit, not a prompt callback.
+        // The daemon may need to seal and admit a bounded cohort before it can
+        // durably create the parent successor and acknowledge the handoff. A
+        // transport timeout after child-root mutation would let the graph fail
+        // its parent while the daemon continues publishing the cohort. Wait on
+        // a dedicated connection for the authoritative result instead; daemon
+        // death still closes the socket, and admitted execution/cancellation
+        // policy remains the actual bound.
         self.rpc
-            .request("runtime.spawn_follow_child", params)
+            .request_authoritative_handoff("runtime.spawn_follow_child", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -255,14 +387,14 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn provider_attempt_reserve(
+    async fn provider_attempt_prepare(
         &self,
         _thread_id: &str,
         mut params: Value,
     ) -> Result<Value, CallbackError> {
         self.inject_callback_token(&mut params);
         self.rpc
-            .request("runtime.provider_attempt_reserve", params)
+            .request("runtime.provider_attempt_prepare", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -311,6 +443,42 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.provider_attempt_get", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_local_stream_start(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_local_stream_start", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_local_stream_next(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_local_stream_next", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_local_stream_control(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_local_stream_control", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -513,6 +681,22 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn publish_project_observation(
+        &self,
+        request: crate::ProjectObservationPublishParams,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize publish_project_observation request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.publish_project_observation", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);
@@ -591,21 +775,27 @@ mod tests {
     #[test]
     fn dispatch_action_serializes_typed_hook_identity() {
         let identity = HookDispatchIdentity {
-            occurrence: HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id: "graph-run-7".to_string(),
-                definition_ref: "graph:test/workflow".to_string(),
-                definition_hash: "definition-hash".to_string(),
-                step: 4,
-                node: "audit-node".to_string(),
-            },
+            occurrence: HookDispatchOccurrence::new(
+                "graph",
+                "graph_step_completed",
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "graph-run-7")
+            .with_counter_coordinate("step", 4)
+            .with_text_coordinate("node", "audit-node"),
             hook_id: "audit".to_string(),
             layer: crate::hooks_loader::HookLayer::Infrastructure,
             result_mode: crate::hooks_loader::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::from(["state".to_string()]),
+            },
             context_hash: "sha256-context".to_string(),
         };
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
                 operation_id: None,
                 item_id: "tool:test/audit".to_string(),
@@ -617,6 +807,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: Some(identity.clone()),
+            effect_dispatch: None,
         };
 
         let (params, inline) =
@@ -629,12 +820,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_action_omits_hook_identity_for_regular_actions() {
+    fn dispatch_action_retains_operation_id_for_regular_actions() {
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
-                operation_id: None,
+                operation_id: Some("1".repeat(64)),
                 item_id: "tool:test/noop".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
@@ -644,9 +834,58 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: None,
+            effect_dispatch: None,
         };
 
         let (params, _) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();
         assert!(params.get("hook_dispatch").is_none());
+        assert_eq!(params["action"]["operation_id"], "1".repeat(64));
+    }
+
+    #[test]
+    fn dispatch_action_rejects_missing_uppercase_and_hook_operation_ids() {
+        let regular = |operation_id| DispatchActionRequest {
+            thread_id: "T-1".to_string(),
+            action: ActionPayload {
+                operation_id,
+                item_id: "tool:test/noop".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
+                params: json!({}),
+                thread: "inline".to_string(),
+                call: None,
+                facets: None,
+                launch_window: None,
+            },
+            hook_dispatch: None,
+            effect_dispatch: None,
+        };
+        for request in [regular(None), regular(Some("A".repeat(64)))] {
+            let error = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap_err();
+            assert!(error.to_string().contains("operation_id"), "{error}");
+        }
+
+        let mut hook = regular(Some("1".repeat(64)));
+        hook.hook_dispatch = Some(HookDispatchIdentity {
+            occurrence: HookDispatchOccurrence::new(
+                "graph",
+                "graph_step_completed",
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            ),
+            hook_id: "audit".to_string(),
+            layer: crate::hooks_loader::HookLayer::Infrastructure,
+            result_mode: crate::hooks_loader::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::new(),
+            },
+            context_hash: "c".repeat(64),
+        });
+        let error = UdsRuntimeClient::serialize_dispatch_action_request(hook).unwrap_err();
+        assert!(
+            error.to_string().contains("hook callback action"),
+            "{error}"
+        );
     }
 }

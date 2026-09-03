@@ -67,9 +67,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
     let cas = authority
         .cas_store()
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    let _permit = state.write_barrier.try_acquire().map_err(|error| {
-        HandlerError::Internal(format!("cannot acquire CAS write permit: {error}"))
-    })?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            HandlerError::Internal(format!("cannot acquire CAS write permit: {error}"))
+        })?;
 
     // Walk the bundle tree, ingest each file into CAS.
     let mut entries: Vec<Value> = Vec::new();

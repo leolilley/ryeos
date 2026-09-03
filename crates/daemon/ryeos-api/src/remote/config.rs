@@ -296,10 +296,14 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
     let file: RemotesFile = serde_yaml::from_str(&content)
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
     for (name, raw) in file.remotes {
-        let url = raw
+        let raw_url = raw
             .get("url")
             .and_then(|v| v.as_str())
             .map(ToOwned::to_owned);
+        let diagnostic_url = raw_url
+            .as_deref()
+            .and_then(|url| normalize_url(url).ok())
+            .filter(|normalized| raw_url.as_deref() == Some(normalized.as_str()));
         match serde_yaml::from_value::<RemoteConfig>(raw).and_then(|cfg| {
             if cfg.name != name {
                 return Err(serde_yaml::Error::custom(format!(
@@ -342,7 +346,7 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
                         "edit or remove {} and re-sign the project config",
                         path.display()
                     ),
-                    RemoteConfigScope::Operator => match url.as_deref() {
+                    RemoteConfigScope::Operator => match diagnostic_url.as_deref() {
                         Some(url) => format!("run `ryeos remote configure {} --url {}`", name, url),
                         None => format!("run `ryeos remote configure {} --url <https-url>`", name),
                     },
@@ -352,7 +356,7 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
                     scope: scope.clone(),
                     config_path: path.to_path_buf(),
                     error: e.to_string(),
-                    url,
+                    url: diagnostic_url,
                     repair_hint,
                 });
             }
@@ -529,13 +533,31 @@ pub fn validate_remote_project_path(remote_project_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate that a URL uses HTTPS or is a loopback address.
-pub fn validate_url(url: &str) -> Result<()> {
-    let parsed: url::Url = url
-        .parse()
-        .with_context(|| format!("invalid URL: {}", url))?;
+/// Normalize one credential-free remote base URL. Non-loopback traffic must
+/// use HTTPS; query, fragment, userinfo, and whitespace are never part of a
+/// configured node authority.
+pub fn normalize_url(url: &str) -> Result<String> {
+    if url
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        anyhow::bail!("remote URL contains control or whitespace characters");
+    }
+    // Never copy rejected URL text into diagnostics: malformed userinfo can
+    // fail parsing before the credential check below, and load diagnostics
+    // are surfaced by both `remote list` and `remote doctor`.
+    let mut parsed: url::Url = url.parse().context("invalid remote URL")?;
 
-    let host = parsed.host_str().unwrap_or("");
+    if parsed.username() != "" || parsed.password().is_some() {
+        anyhow::bail!("remote URL must not contain credentials");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("remote base URL must not contain a query or fragment");
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("remote URL has no host"))?;
     let host = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
@@ -550,11 +572,24 @@ pub fn validate_url(url: &str) -> Result<()> {
         "http" if is_loopback => {}
         other => {
             anyhow::bail!(
-                "remote URL must use HTTPS except HTTP loopback (got scheme '{}' in '{}')",
-                other,
-                url
+                "remote URL must use HTTPS except HTTP loopback (got scheme '{}')",
+                other
             );
         }
+    }
+    let normalized_path = parsed.path().trim_end_matches('/').to_owned();
+    parsed.set_path(&normalized_path);
+    Ok(parsed.to_string().trim_end_matches('/').to_owned())
+}
+
+/// Require a stored or signed remote URL to already be in its one canonical
+/// form. `remote configure` normalizes operator input before persistence;
+/// descriptors and loaded config fail closed instead of silently moving their
+/// signed/stored identity.
+pub fn validate_url(url: &str) -> Result<()> {
+    let normalized = normalize_url(url)?;
+    if normalized != url {
+        anyhow::bail!("remote URL is not canonical; reconfigure it using its exact base URL");
     }
     Ok(())
 }
@@ -761,6 +796,87 @@ node:
     #[test]
     fn validate_rejects_non_http_loopback_scheme() {
         assert!(validate_url("ftp://localhost:7400").is_err());
+    }
+
+    #[test]
+    fn normalize_rejects_secret_or_non_base_url_components() {
+        assert!(normalize_url("https://user:secret@example.com").is_err());
+        assert!(normalize_url("https://example.com?token=secret").is_err());
+        assert!(normalize_url("https://example.com#secret").is_err());
+        assert!(normalize_url("https://example.com/with space").is_err());
+        assert_eq!(
+            normalize_url("https://EXAMPLE.com/prefix/").unwrap(),
+            "https://example.com/prefix"
+        );
+        assert!(validate_url("https://example.com/").is_err());
+    }
+
+    #[test]
+    fn load_rejects_credential_url_without_retaining_it_in_diagnostics() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = remotes_config_path(tmpdir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+remotes:
+  unsafe:
+    name: unsafe
+    url: https://user:do-not-retain@example.com
+    principal_id: {}
+    signing_key: {}
+    site_id: site:unsafe
+    vault_fingerprint: sha256:unsafe
+    ingest_ignore:
+      patterns: []
+"#,
+                test_principal_id(11),
+                test_signing_key(11),
+            ),
+        )
+        .unwrap();
+
+        let report = load_remotes_at_report(&path, RemoteConfigScope::Operator).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid.len(), 1);
+        assert!(report.invalid[0].url.is_none());
+        assert!(!report.invalid[0].repair_hint.contains("do-not-retain"));
+        assert!(!report.invalid[0].error.contains("do-not-retain"));
+    }
+
+    #[test]
+    fn load_rejects_malformed_credential_url_without_retaining_it_in_diagnostics() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = remotes_config_path(tmpdir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+remotes:
+  unsafe:
+    name: unsafe
+    url: 'https://user:do-not-retain@['
+    principal_id: {}
+    signing_key: {}
+    site_id: site:unsafe
+    vault_fingerprint: sha256:unsafe
+    ingest_ignore:
+      patterns: []
+"#,
+                test_principal_id(12),
+                test_signing_key(12),
+            ),
+        )
+        .unwrap();
+
+        let report = load_remotes_at_report(&path, RemoteConfigScope::Operator).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid.len(), 1);
+        assert!(report.invalid[0].url.is_none());
+        assert!(!report.invalid[0].repair_hint.contains("do-not-retain"));
+        assert!(!report.invalid[0].error.contains("do-not-retain"));
     }
 
     #[test]

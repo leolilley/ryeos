@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-22T02:33:39Z:9f76d67995aa9bbdb9445c74ebe436a4a8568e797d091045f9e22777799cc280:N/q658Ay2gPKeeoSzkteXima3vcaQzionsERabjMoxf6trt0ToUAIqNrmC2Py30XWZ8Fi5FSfa22KZENhOBPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-18T22:04:36Z:0770a6ff98fd67deee4e9333bc2c4084e89e50a51ddd5e7c362254341aba4ccb:aHy/uX3caa46EYiVe26X8CxO8F+e1uDo/a5QWaon8aHjJ/BsTg950Pp66bqil0KOm8eLUJpzAxLjaObE7nLxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - verify
 description: Verify one or more items' signature chains by canonical ref or .ai path
@@ -14,7 +14,7 @@ forms:
     matcher: string
 project:
   resolution: optional
-  bind_parameter: project
+  bind_parameter: project_path
   no_project_flag: true
 dispatch:
   kind: execute_ref

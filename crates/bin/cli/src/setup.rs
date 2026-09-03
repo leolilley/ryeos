@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use ryeos_directive_core::{ProviderConfig, ProviderSetupProjection};
+use ryeos_directive_definition::{ProviderConfig, ProviderSetupProjection};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -128,7 +128,7 @@ impl LocalSetupClient {
         let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
         let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
         Ok(Self {
-            base_url: discovered.effective_base_url,
+            base_url: discovered.base_url,
             audience: discovered.principal_id,
             signer: crate::transport::signing::Signer::resolve(app_root)?,
         })

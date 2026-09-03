@@ -8,10 +8,11 @@ pub mod checkpoint;
 pub mod command;
 pub mod compiled_template;
 pub mod daemon_rpc;
+pub mod effect_answer;
 pub mod envelope;
 pub mod events;
+pub mod process_outcome;
 pub use ryeos_expression as expression;
-pub mod expression_condition;
 pub mod framing;
 pub mod hooks_eval;
 pub mod hooks_loader;
@@ -29,9 +30,10 @@ pub use authorizer::{
     CapabilityParseError, canonical_cap, cap_matches,
 };
 pub use callback::{
-    ActionPayload, CallbackError, DispatchActionRequest, RUNTIME_FAILURE_KIND, ReplayResponse,
-    ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure, RuntimeFailureDiagnosticLocator,
-    TerminalCompletion, client_from_env, parse_hook_action, validate_runtime_thread_id,
+    ActionPayload, CallbackError, DispatchActionRequest, ProjectObservationPublishParams,
+    RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
+    RuntimeFailureDiagnosticLocator, TerminalCompletion, client_from_env, parse_hook_action,
+    validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{
@@ -46,6 +48,7 @@ pub use command::{
 };
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
 pub use daemon_rpc::{DaemonRpcClient, RpcError, resolve_daemon_socket_path};
+pub use effect_answer::{NormalizedDispatchEffect, normalize_dispatch_effect};
 pub use events::{
     CognitionInAssembler, CognitionInAssembly, CognitionInChunk, HOOK_FAILURE_SCHEMA,
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,
@@ -60,15 +63,27 @@ pub use expression::{
     compile_expression_for, compile_template, compile_template_for, evaluate, evaluate_bool,
     reject_removed_single_brace_interpolation, render_template,
 };
-pub use expression_condition::ExpressionCondition;
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{HookDispatcher, HookRunResult, run_hooks};
 pub use hooks_loader::{
-    CompiledHook, CompiledHookCondition, HookCompilationError, HookContextSchema, HookDefinition,
-    HookLayer, HookResultMode, HookSources, compile_hooks, load_configured_hook_sources,
+    CompiledHook, CompiledHookCondition, ExpressionCondition, HookCompilationError,
+    HookContextSchema, HookDefinition, HookLayer, HookResultMode, HookSources,
+    compile_effective_hook_plan, compile_hooks,
 };
 pub use lillux::crypto::SigningKey;
 pub use paths::AI_DIR;
 pub use progress::{ProgressEvent, StatusEvent};
 pub use resolver::{ResolveError, ResolvedCommand, resolve_command};
 pub use ryeos_engine::contracts::ThreadTerminalStatus;
+pub use ryeos_state::{
+    MAX_PROJECT_OBSERVATION_JSON_DEPTH, MAX_PROJECT_OBSERVATION_JSON_VALUES,
+    MAX_PROJECT_OBSERVATION_NAMESPACE_BYTES, MAX_PROJECT_OBSERVATION_PAYLOAD_BYTES,
+    MAX_PROJECT_OBSERVATION_STABLE_ID_BYTES, MAX_PROJECT_OBSERVATIONS_PER_ACTION,
+    PROJECT_OBSERVATION_SCHEMA, ProjectObservationOccurrence, ProjectObservationRecordedPayload,
+    ProjectObservationRequest, project_observation_id,
+};
+
+/// Default daemon-enforced width for a fanout whose author omitted a narrower
+/// concurrency bound. All runtime and executor producers share this value so
+/// omission cannot create an unwindowed cohort or divergent defaults.
+pub const DEFAULT_LIVE_FANOUT_WINDOW_WIDTH: u32 = 8;

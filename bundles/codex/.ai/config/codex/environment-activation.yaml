@@ -1,0 +1,40 @@
+# ryeos:signed:2026-08-29T10:19:43Z:c8ef51d37ce3fab7efa015531642068cb69b3f1873267d9bf3a1f0eedf600fc9:af4KrASsgYqCeUG7gNghKjO5hbKV3W3/GbbYXj8zkTebqBpbD2IIsBHWYDcfmGH+8gvM2ydge4htJeqr64lLCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+schema: ryeos.external_content_activation.v3
+consumer_ref: config:codex/environments/default
+sources:
+  - id: codex-package
+    url: https://releases.openai.com/codex/releases/0.147.0/codex-package-x86_64-unknown-linux-musl.tar.gz
+    archive_format: tar_gzip
+    sha256: bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda
+    maximum_compressed_bytes: 134217728
+    maximum_expanded_bytes: 335544320
+    maximum_entries: 64
+    members:
+      - path: codex-package.json
+        disposition: verify_only
+        sha256: 00f66f11cc7d5c4133d500b4aae6ed4975608d6b040eefd56dc1ff343566e8cf
+        maximum_bytes: 4096
+        executable: false
+      - path: codex-path/rg
+        disposition: import
+        sha256: e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849
+        maximum_bytes: 8388608
+        executable: true
+      - path: codex-resources/zsh/bin/zsh
+        disposition: import
+        sha256: 67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3
+        maximum_bytes: 2097152
+        executable: true
+components:
+  - id: developer-tools
+    storage: content
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-path/rg
+          target: bin/rg
+        - source: codex-package
+          member: codex-resources/zsh/bin/zsh
+          target: bin/zsh

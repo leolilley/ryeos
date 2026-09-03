@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::callback::{CallbackError, ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
+use crate::callback::{
+    CallbackError, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
+};
 use crate::envelope::EnvelopeCallback;
 use crate::events::{RuntimeEventType, StorageClass};
 
@@ -46,10 +48,99 @@ pub const TOOL_RESULT_INLINE_MAX_BYTES: usize = 256 * 1024;
 /// same wire limit; clients paginate until `next_cursor` is absent.
 pub const MAX_RUNTIME_REPLAY_PAGE_LIMIT: usize = 32;
 
+/// Process-local safety ceilings for one complete native-runtime recovery
+/// fold. Authored graph/directive limits remain the semantic execution
+/// authority; these bounds prevent an unexpectedly long or malformed daemon
+/// replay from growing one runtime process without limit.
+const MAX_RUNTIME_REPLAY_TOTAL_EVENTS: usize = 16 * 1024;
+const MAX_RUNTIME_REPLAY_TOTAL_SERIALIZED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Shared process-local replay budget for one complete recovery fold.
+///
+/// Callers that fold more than one replay scope, such as a directive's linear
+/// continuation path, must reuse one value across every scope so the safety
+/// ceiling cannot multiply by the number of threads.
+#[derive(Debug, Clone)]
+pub struct RuntimeReplayBudget {
+    total_events: usize,
+    // Exact serialized size of the combined JSON event array, including its
+    // opening and closing brackets. Each event after the first adds one comma.
+    total_serialized_bytes: usize,
+}
+
+impl Default for RuntimeReplayBudget {
+    fn default() -> Self {
+        Self {
+            total_events: 0,
+            total_serialized_bytes: 2,
+        }
+    }
+}
+
+fn append_replay_page(
+    all_events: &mut Vec<ReplayedEventRecord>,
+    budget: &mut RuntimeReplayBudget,
+    previous_cursor: Option<i64>,
+    page: ReplayResponse,
+    max_events: usize,
+    max_serialized_bytes: usize,
+) -> Result<Option<i64>> {
+    if page.events.len() > MAX_RUNTIME_REPLAY_PAGE_LIMIT {
+        anyhow::bail!(
+            "runtime replay page contains {} events; maximum is {}",
+            page.events.len(),
+            MAX_RUNTIME_REPLAY_PAGE_LIMIT
+        );
+    }
+    if let Some(cursor) = page.next_cursor {
+        if page.events.is_empty() {
+            anyhow::bail!("runtime replay returned an empty page with continuation cursor");
+        }
+        if cursor <= previous_cursor.unwrap_or(0) {
+            anyhow::bail!(
+                "runtime replay cursor did not advance monotonically: previous={previous_cursor:?}, next={cursor}"
+            );
+        }
+    }
+
+    let next_event_count = budget
+        .total_events
+        .checked_add(page.events.len())
+        .ok_or_else(|| anyhow::anyhow!("runtime replay event count overflow"))?;
+    if next_event_count > max_events {
+        anyhow::bail!("runtime replay contains {next_event_count} events; maximum is {max_events}");
+    }
+
+    let mut next_serialized_bytes = budget.total_serialized_bytes;
+    for (page_index, event) in page.events.iter().enumerate() {
+        if budget.total_events > 0 || page_index > 0 {
+            next_serialized_bytes = next_serialized_bytes
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("runtime replay byte count overflow"))?;
+        }
+        let event_bytes = serde_json::to_vec(event)
+            .context("serialize runtime replay event for aggregate bound")?
+            .len();
+        next_serialized_bytes = next_serialized_bytes
+            .checked_add(event_bytes)
+            .ok_or_else(|| anyhow::anyhow!("runtime replay byte count overflow"))?;
+    }
+    if next_serialized_bytes > max_serialized_bytes {
+        anyhow::bail!(
+            "runtime replay serializes to {next_serialized_bytes} bytes; maximum is {max_serialized_bytes}"
+        );
+    }
+
+    let next_cursor = page.next_cursor;
+    all_events.extend(page.events);
+    budget.total_events = next_event_count;
+    budget.total_serialized_bytes = next_serialized_bytes;
+    Ok(next_cursor)
+}
+
 pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
-    project_path: String,
     thread_auth_token: String,
 }
 
@@ -58,13 +149,12 @@ impl CallbackClient {
     pub fn from_inner(
         inner: Arc<dyn RuntimeCallbackAPI>,
         thread_id: &str,
-        project_path: &str,
+        _test_display_path: &str,
         thread_auth_token: &str,
     ) -> Self {
         Self {
             inner: Some(inner),
             thread_id: thread_id.to_string(),
-            project_path: project_path.to_string(),
             thread_auth_token: thread_auth_token.to_string(),
         }
     }
@@ -75,19 +165,13 @@ impl Clone for CallbackClient {
         Self {
             inner: self.inner.clone(),
             thread_id: self.thread_id.clone(),
-            project_path: self.project_path.clone(),
             thread_auth_token: self.thread_auth_token.clone(),
         }
     }
 }
 
 impl CallbackClient {
-    pub fn new(
-        callback: &EnvelopeCallback,
-        thread_id: &str,
-        project_path: &str,
-        thread_auth_token: &str,
-    ) -> Self {
+    pub fn new(callback: &EnvelopeCallback, thread_id: &str, thread_auth_token: &str) -> Self {
         let inner: Option<Arc<dyn RuntimeCallbackAPI>> = if callback.socket_path.exists() {
             Some(Arc::new(crate::callback_uds::UdsRuntimeClient::new(
                 callback.socket_path.clone(),
@@ -106,7 +190,6 @@ impl CallbackClient {
         Self {
             inner,
             thread_id: thread_id.to_string(),
-            project_path: project_path.to_string(),
             thread_auth_token: thread_auth_token.to_string(),
         }
     }
@@ -115,8 +198,35 @@ impl CallbackClient {
         &self.thread_id
     }
 
-    pub fn project_path(&self) -> &str {
-        &self.project_path
+    /// Reach one opaque, test-selected runtime phase and wait for the
+    /// qualification parent to crash the daemon.
+    ///
+    /// Normal launches never call this. The daemon endpoint is absent unless
+    /// its explicit crash-qualification feature is enabled.
+    #[doc(hidden)]
+    pub async fn reach_test_phase_cut(
+        &self,
+        phase: &str,
+    ) -> std::result::Result<(), CallbackError> {
+        if phase.is_empty()
+            || phase.len() > 128
+            || !phase
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(CallbackError::Transport(anyhow::anyhow!(
+                "runtime test phase is not bounded lower-snake ASCII"
+            )));
+        }
+        let client = self.inner.as_ref().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "runtime test phase cut called without an inner UDS client"
+            ))
+        })?;
+        client
+            .reach_test_phase_cut(&self.thread_id, phase)
+            .await
+            .map(|_| ())
     }
 
     /// Dispatch a sub-action through the daemon's `runtime.dispatch_action`
@@ -233,15 +343,15 @@ impl CallbackClient {
     /// financial authority operations: they hard-fail when the callback
     /// channel is absent — an attempt whose reservation state cannot be
     /// proven must never reach a provider.
-    pub async fn provider_attempt_reserve(
+    pub async fn provider_attempt_prepare(
         &self,
-        params: &ryeos_accounting::ProviderAttemptReserveParams,
-    ) -> Result<ryeos_accounting::ProviderAttemptReserveResponse, CallbackError> {
+        params: &ryeos_accounting::ProviderAttemptPrepareParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptPrepareResponse, CallbackError> {
         self.provider_attempt_call(
-            "provider_attempt_reserve",
+            "provider_attempt_prepare",
             params,
             |client, thread_id, value| async move {
-                client.provider_attempt_reserve(&thread_id, value).await
+                client.provider_attempt_prepare(&thread_id, value).await
             },
         )
         .await
@@ -308,6 +418,61 @@ impl CallbackClient {
         })
     }
 
+    pub async fn provider_attempt_local_stream_start(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptLocalStreamStartParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptLocalStreamStartResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_local_stream_start",
+            params,
+            |client, thread_id, value| async move {
+                client
+                    .provider_attempt_local_stream_start(&thread_id, value)
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_local_stream_next(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptLocalStreamNextParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptLocalStreamNextResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_local_stream_next",
+            params,
+            |client, thread_id, value| async move {
+                client
+                    .provider_attempt_local_stream_next(&thread_id, value)
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_local_stream_control(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptLocalStreamControlParams,
+    ) -> Result<(), CallbackError> {
+        let value = self
+            .provider_attempt_call_raw_named(
+                "provider_attempt_local_stream_control",
+                params,
+                |client, thread_id, value| async move {
+                    client
+                        .provider_attempt_local_stream_control(&thread_id, value)
+                        .await
+                },
+            )
+            .await?;
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(CallbackError::Transport(anyhow::anyhow!(
+                "invalid provider_attempt_local_stream_control response"
+            )));
+        }
+        Ok(())
+    }
+
     async fn provider_attempt_call<P, R, F, Fut>(
         &self,
         label: &str,
@@ -350,6 +515,28 @@ impl CallbackClient {
             CallbackError::Transport(anyhow::anyhow!("serialize {label} params: {e}"))
         })?;
         client.provider_attempt_get(&self.thread_id, value).await
+    }
+
+    async fn provider_attempt_call_raw_named<P, F, Fut>(
+        &self,
+        label: &str,
+        params: &P,
+        call: F,
+    ) -> Result<Value, CallbackError>
+    where
+        P: serde::Serialize,
+        F: FnOnce(Arc<dyn RuntimeCallbackAPI>, String, Value) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, CallbackError>>,
+    {
+        let client = self.inner.as_ref().cloned().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "callback {label} called without an inner UDS client (socket missing)"
+            ))
+        })?;
+        let value = serde_json::to_value(params).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!("serialize {label} params: {error}"))
+        })?;
+        call(client, self.thread_id.clone(), value).await
     }
 
     /// Report this process's pid so the daemon records the runtime's process
@@ -484,17 +671,17 @@ impl CallbackClient {
         })?;
         let request = crate::callback::SpawnFollowChildRequest {
             thread_id: self.thread_id.clone(),
-            project_path: self.project_path.clone(),
             graph_run_id: graph_run_id.to_string(),
             follow_node: follow_node.to_string(),
             step_count,
+            result_shape: crate::callback::FollowResultShape::Single,
             children: vec![crate::callback::FollowChildSpec {
                 item_ref: child_item_ref.to_string(),
                 ref_bindings,
                 parameters: child_parameters,
                 facets: None,
             }],
-            launch_window_width: None,
+            launch_window_width: Some(1),
             frontier_id,
             completion,
         };
@@ -523,10 +710,10 @@ impl CallbackClient {
         client
             .spawn_follow_child(crate::callback::SpawnFollowChildRequest {
                 thread_id: self.thread_id.clone(),
-                project_path: self.project_path.clone(),
                 graph_run_id: graph_run_id.to_string(),
                 follow_node: follow_node.to_string(),
                 step_count,
+                result_shape: crate::callback::FollowResultShape::Cohort,
                 children,
                 launch_window_width,
                 frontier_id,
@@ -560,6 +747,32 @@ impl CallbackClient {
         })?;
         client
             .publish_state_anchor(&self.thread_id, request)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    /// Authoritative: exact retry must return the original durable event and
+    /// divergent stable-ID reuse must fail the graph commit.
+    pub async fn publish_project_observation(
+        &self,
+        graph_run_id: &str,
+        node: &str,
+        step: u32,
+        observation: crate::ProjectObservationRequest,
+    ) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback publish_project_observation called without an inner UDS client (socket missing)"
+            )
+        })?;
+        client
+            .publish_project_observation(crate::ProjectObservationPublishParams {
+                thread_id: self.thread_id.clone(),
+                graph_run_id: graph_run_id.to_string(),
+                node: node.to_string(),
+                step,
+                observation,
+            })
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -715,22 +928,6 @@ impl CallbackClient {
         }
     }
 
-    /// Resume-critical: must hard-fail on disconnect.
-    pub async fn replay_events_for(&self, thread_id: &str) -> Result<ReplayResponse> {
-        let client = self.inner.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "callback replay_events_for called without an inner UDS client \
-                 (socket missing); runtime cannot replay events for resume"
-            )
-        })?;
-        let raw: Value = client
-            .replay_events(serde_json::json!({ "thread_id": thread_id }))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        serde_json::from_value::<ReplayResponse>(raw)
-            .map_err(|e| anyhow::anyhow!("invalid ReplayResponse from daemon: {e}"))
-    }
-
     /// Resume-critical: fold an entire chain (every thread sharing the
     /// `chain_root_id`) into one ordered event list. Hard-fails on disconnect.
     /// NB: a chain namespace can include non-continuation child threads
@@ -738,20 +935,42 @@ impl CallbackClient {
     /// continuation path for rehydration so sibling-branch events don't pollute
     /// the transcript.
     pub async fn replay_chain(&self, chain_root_id: &str) -> Result<ReplayResponse> {
-        self.replay_paged("chain_root_id", chain_root_id).await
+        self.replay_paged(
+            "chain_root_id",
+            chain_root_id,
+            &mut RuntimeReplayBudget::default(),
+        )
+        .await
     }
 
     /// Resume-critical: fold ONE thread's own events (thread-scoped), paginated.
     /// Used to fold the linear continuation path turn-by-turn — thread scoping
     /// structurally excludes child/sibling threads that share the chain root.
     pub async fn replay_thread(&self, thread_id: &str) -> Result<ReplayResponse> {
-        self.replay_paged("thread_id", thread_id).await
+        self.replay_thread_with_budget(thread_id, &mut RuntimeReplayBudget::default())
+            .await
+    }
+
+    /// Replay one thread while charging a budget shared by the caller's whole
+    /// recovery fold. Reuse the same budget when concatenating continuation
+    /// threads; creating one budget per thread defeats the aggregate ceiling.
+    pub async fn replay_thread_with_budget(
+        &self,
+        thread_id: &str,
+        budget: &mut RuntimeReplayBudget,
+    ) -> Result<ReplayResponse> {
+        self.replay_paged("thread_id", thread_id, budget).await
     }
 
     /// Page through `after_chain_seq` cursors for a single replay scope
     /// (`chain_root_id` or `thread_id`) until exhausted, so long histories don't
     /// silently lose events. Hard-fails on disconnect.
-    async fn replay_paged(&self, scope_key: &str, scope_value: &str) -> Result<ReplayResponse> {
+    async fn replay_paged(
+        &self,
+        scope_key: &str,
+        scope_value: &str,
+        budget: &mut RuntimeReplayBudget,
+    ) -> Result<ReplayResponse> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback replay_paged called without an inner UDS client \
@@ -780,8 +999,14 @@ impl CallbackClient {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let page: ReplayResponse = serde_json::from_value(raw)
                 .map_err(|e| anyhow::anyhow!("invalid ReplayResponse from daemon: {e}"))?;
-            all_events.extend(page.events);
-            match page.next_cursor {
+            match append_replay_page(
+                &mut all_events,
+                budget,
+                after_chain_seq,
+                page,
+                MAX_RUNTIME_REPLAY_TOTAL_EVENTS,
+                MAX_RUNTIME_REPLAY_TOTAL_SERIALIZED_BYTES,
+            )? {
                 Some(cursor) => after_chain_seq = Some(cursor),
                 None => break,
             }
@@ -881,19 +1106,19 @@ impl CallbackClient {
     /// `reasoning_content` and `interrupted: true`, and deliberately NO
     /// `tool_calls` — an interrupted cognition didn't complete its tool call, so
     /// the folded wire history carries no unpaired tool call. Durable (indexed):
-    /// resume folds it as an assistant message so the redirect has honest context.
+    /// resume renders it into the provider transcript so the redirect has honest context.
     pub async fn emit_turn_interrupted(
         &self,
         turn: u32,
-        partial_message: Option<Value>,
+        content: Option<Value>,
+        reasoning_content: Option<String>,
     ) -> Result<()> {
         let mut data = serde_json::json!({ "turn": turn, "interrupted": true });
-        if let Some(Value::Object(message)) = partial_message {
-            for key in ["content", "reasoning_content"] {
-                if let Some(value) = message.get(key) {
-                    data[key] = value.clone();
-                }
-            }
+        if let Some(content) = content {
+            data["content"] = content;
+        }
+        if let Some(reasoning_content) = reasoning_content {
+            data["reasoning_content"] = Value::String(reasoning_content);
         }
         self.append_runtime_event(RuntimeEventType::CognitionOut, data)
             .await
@@ -905,16 +1130,20 @@ impl CallbackClient {
         &self,
         turn: u32,
         tokens: Option<(u64, u64)>,
-        assistant_message: Option<Value>,
+        content: Option<Value>,
+        tool_calls: Option<Value>,
+        reasoning_content: Option<String>,
         provider_accounting: Option<Value>,
     ) -> Result<()> {
         let mut data = serde_json::json!({"turn": turn});
-        if let Some(Value::Object(message)) = assistant_message {
-            for key in ["content", "tool_calls", "reasoning_content"] {
-                if let Some(value) = message.get(key) {
-                    data[key] = value.clone();
-                }
-            }
+        if let Some(content) = content {
+            data["content"] = content;
+        }
+        if let Some(tool_calls) = tool_calls {
+            data["tool_calls"] = tool_calls;
+        }
+        if let Some(reasoning_content) = reasoning_content {
+            data["reasoning_content"] = Value::String(reasoning_content);
         }
         if let Some((input, output)) = tokens {
             data["input_tokens"] = serde_json::json!(input);
@@ -933,11 +1162,18 @@ impl CallbackClient {
     /// authorized to do at dispatch time.
     pub async fn emit_tool_dispatch(
         &self,
+        operation_id: &str,
         tool: &str,
         call_id: Option<&str>,
         effective_caps: &[String],
     ) -> Result<()> {
-        let mut data = serde_json::json!({"tool": tool});
+        if !crate::callback::valid_action_operation_id(operation_id) {
+            anyhow::bail!("tool dispatch operation_id is not a canonical lowercase SHA-256 digest");
+        }
+        let mut data = serde_json::json!({
+            "operation_id": operation_id,
+            "tool": tool,
+        });
         if let Some(id) = call_id {
             data["call_id"] = serde_json::json!(id);
         }
@@ -949,10 +1185,10 @@ impl CallbackClient {
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to `tool_call_result`.
     ///
-    /// `body` is the model-visible result string (the same content the
-    /// runtime pushes into the LLM message stream). When the body is
-    /// larger than the inline cap, callers pass `body=None` plus
-    /// `truncated_reason=Some("size_cap_exceeded")` and `result_size_bytes`.
+    /// `body` is the exact bounded model-visible result string (the same JSON
+    /// string value the runtime pushes into the provider message stream). It is
+    /// retained as `result_text` without reparsing so crash recovery reproduces
+    /// the identical value and provider wire shape.
     ///
     /// `tool` is the canonical ref (e.g. `apps_tv_tracker_workspace_render_chart`)
     /// so SSE consumers can route results without cross-referencing tool_call_start.
@@ -961,40 +1197,36 @@ impl CallbackClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn emit_tool_result(
         &self,
+        operation_id: &str,
         call_id: &str,
         tool: &str,
-        body: Option<&str>,
+        body: &str,
         truncated: bool,
         truncated_reason: Option<&str>,
         result_size_bytes: u64,
         duplicate_of: Option<&str>,
     ) -> Result<()> {
+        if !crate::callback::valid_action_operation_id(operation_id) {
+            anyhow::bail!("tool result operation_id is not a canonical lowercase SHA-256 digest");
+        }
+        if body.len() > TOOL_RESULT_INLINE_MAX_BYTES {
+            anyhow::bail!(
+                "tool result model content is {} bytes; maximum is {}",
+                body.len(),
+                TOOL_RESULT_INLINE_MAX_BYTES
+            );
+        }
         let mut data = serde_json::json!({
+            "operation_id": operation_id,
             "call_id": call_id,
             "tool": tool,
             "truncated": truncated,
             "result_size_bytes": result_size_bytes,
         });
-        if let Some(body_str) = body {
-            if let Some(hash) = duplicate_of {
-                data["result_text"] = serde_json::json!(body_str);
-                data["deduplicated"] = serde_json::json!(true);
-                data["duplicate_of"] = serde_json::json!(hash);
-            } else {
-                match serde_json::from_str::<serde_json::Value>(body_str) {
-                    Ok(parsed) => data["result"] = parsed,
-                    Err(e) => {
-                        tracing::warn!(
-                            call_id,
-                            tool,
-                            error = %e,
-                            "emit_tool_result received non-JSON body; preserving as result_text"
-                        );
-                        data["result_text"] = serde_json::json!(body_str);
-                        data["result_parse_error"] = serde_json::json!(e.to_string());
-                    }
-                }
-            }
+        data["result_text"] = serde_json::json!(body);
+        if let Some(hash) = duplicate_of {
+            data["deduplicated"] = serde_json::json!(true);
+            data["duplicate_of"] = serde_json::json!(hash);
         }
         if let Some(reason) = truncated_reason {
             data["truncated_reason"] = serde_json::json!(reason);
@@ -1114,6 +1346,9 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    const TEST_OPERATION_ID: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
 
     #[test]
     fn progressive_cognition_out_is_ephemeral() {
@@ -1360,12 +1595,14 @@ mod tests {
     // ── New emit_tool_result tests ───────────────────────────────────
 
     #[tokio::test]
-    async fn emit_tool_result_inlines_small_body_as_json() {
+    async fn emit_tool_result_retains_exact_model_visible_text() {
         let (cb, recorder) = make_recorder_client();
+        let body = r#"{"ok":true,"workspace_card":{"chart_kind":"callout"}}"#;
         cb.emit_tool_result(
+            TEST_OPERATION_ID,
             "call_1",
             "test/render_chart",
-            Some(r#"{"ok":true,"workspace_card":{"chart_kind":"callout"}}"#),
+            body,
             false,
             None,
             58,
@@ -1379,33 +1616,88 @@ mod tests {
         assert_eq!(evt["tool"], "test/render_chart");
         assert_eq!(evt["truncated"], false);
         assert_eq!(evt["result_size_bytes"], 58);
-        assert_eq!(evt["result"]["ok"], true);
-        assert_eq!(evt["result"]["workspace_card"]["chart_kind"], "callout");
+        assert_eq!(evt["result_text"], body);
+        assert!(evt.get("result").is_none());
         assert!(evt.get("truncated_reason").is_none());
     }
 
     #[tokio::test]
-    async fn emit_tool_result_omits_body_when_size_capped() {
-        let (cb, recorder) = make_recorder_client();
-        cb.emit_tool_result(
-            "call_2",
-            "test/search",
-            None,
-            true,
-            Some("size_cap_exceeded"),
-            524_288,
-            None,
-        )
-        .await
-        .unwrap();
+    async fn tool_start_and_result_retain_one_exact_operation_id() {
+        let (callback, recorder) = make_recorder_client();
+        callback
+            .emit_tool_dispatch(TEST_OPERATION_ID, "test/tool", Some("call-1"), &[])
+            .await
+            .unwrap();
+        callback
+            .emit_tool_result(
+                TEST_OPERATION_ID,
+                "call-1",
+                "test/tool",
+                r#"{"ok":true}"#,
+                false,
+                None,
+                11,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let evt = recorder.last("tool_call_result").unwrap();
-        assert_eq!(evt["truncated"], true);
-        assert_eq!(evt["tool"], "test/search");
-        assert_eq!(evt["truncated_reason"], "size_cap_exceeded");
-        assert_eq!(evt["result_size_bytes"], 524_288);
-        assert!(evt.get("result").is_none());
-        assert!(evt.get("result_text").is_none());
+        assert_eq!(
+            recorder.last("tool_call_start").unwrap()["operation_id"],
+            TEST_OPERATION_ID
+        );
+        assert_eq!(
+            recorder.last("tool_call_result").unwrap()["operation_id"],
+            TEST_OPERATION_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_start_and_result_reject_uppercase_operation_ids_before_append() {
+        let (callback, recorder) = make_recorder_client();
+        let uppercase = "A".repeat(64);
+        let start = callback
+            .emit_tool_dispatch(&uppercase, "test/tool", Some("call-1"), &[])
+            .await
+            .unwrap_err();
+        let result = callback
+            .emit_tool_result(
+                &uppercase,
+                "call-1",
+                "test/tool",
+                r#"{"ok":true}"#,
+                false,
+                None,
+                11,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(start.to_string().contains("canonical lowercase"));
+        assert!(result.to_string().contains("canonical lowercase"));
+        assert!(recorder.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn emit_tool_result_rejects_unbounded_model_content_before_append() {
+        let (cb, recorder) = make_recorder_client();
+        let body = "x".repeat(TOOL_RESULT_INLINE_MAX_BYTES + 1);
+        let error = cb
+            .emit_tool_result(
+                TEST_OPERATION_ID,
+                "call_2",
+                "test/search",
+                &body,
+                true,
+                Some("result_guard"),
+                body.len() as u64,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("maximum"));
+        assert!(recorder.events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1413,9 +1705,10 @@ mod tests {
         let (cb, recorder) = make_recorder_client();
         let body = r#"{"ok":true,"data":{"nested":[1,2,3]}}"#;
         cb.emit_tool_result(
+            TEST_OPERATION_ID,
             "call_4",
             "test/nested",
-            Some(body),
+            body,
             false,
             None,
             body.len() as u64,
@@ -1424,11 +1717,8 @@ mod tests {
         .await
         .unwrap();
         let evt = recorder.last("tool_call_result").unwrap();
-        assert_eq!(evt["result"]["data"]["nested"][2], 3);
-        assert!(
-            evt.get("result_text").is_none(),
-            "result_text must never appear — all callers produce JSON"
-        );
+        assert_eq!(evt["result_text"], body);
+        assert!(evt.get("result").is_none());
     }
 
     #[tokio::test]
@@ -1436,9 +1726,10 @@ mod tests {
         let (cb, recorder) = make_recorder_client();
         let body = "[truncated json";
         cb.emit_tool_result(
+            TEST_OPERATION_ID,
             "call_bad_json",
             "test/search",
-            Some(body),
+            body,
             true,
             Some("result_guard"),
             body.len() as u64,
@@ -1453,7 +1744,7 @@ mod tests {
         assert_eq!(evt["truncated_reason"], "result_guard");
         assert_eq!(evt["result_text"], body);
         assert!(evt.get("result").is_none());
-        assert!(!evt["result_parse_error"].as_str().unwrap().is_empty());
+        assert!(evt.get("result_parse_error").is_none());
     }
 
     #[tokio::test]
@@ -1461,9 +1752,10 @@ mod tests {
         let (cb, recorder) = make_recorder_client();
         let body = "[duplicate result omitted — hash deadbeefdeadbeef]";
         cb.emit_tool_result(
+            TEST_OPERATION_ID,
             "call_duplicate",
             "test/search",
-            Some(body),
+            body,
             false,
             None,
             2048,
@@ -1491,7 +1783,7 @@ mod tests {
     }
 
     fn make_client() -> CallbackClient {
-        CallbackClient::new(&make_callback(), "T-test", "/project", "tat-test")
+        CallbackClient::new(&make_callback(), "T-test", "tat-test")
     }
 
     #[tokio::test]
@@ -1503,9 +1795,8 @@ mod tests {
         let client = make_client();
         let req = DispatchActionRequest {
             thread_id: "T-test".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
-                operation_id: None,
+                operation_id: Some(TEST_OPERATION_ID.to_string()),
                 item_id: "my/tool".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
@@ -1515,6 +1806,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: None,
+            effect_dispatch: None,
         };
         let err = client.dispatch_action(req).await.unwrap_err();
         let msg = err.to_string();
@@ -1631,18 +1923,10 @@ mod tests {
         assert!(err.to_string().contains("socket missing"), "got: {err}");
     }
 
-    #[tokio::test]
-    async fn replay_events_for_errors_when_disconnected() {
-        let client = make_client();
-        let err = client.replay_events_for("T-other").await.unwrap_err();
-        assert!(err.to_string().contains("socket missing"), "got: {err}");
-    }
-
     #[test]
-    fn thread_id_and_project_path_accessors() {
+    fn thread_id_accessor() {
         let client = make_client();
         assert_eq!(client.thread_id(), "T-test");
-        assert_eq!(client.project_path(), "/project");
     }
 
     #[test]
@@ -1650,7 +1934,6 @@ mod tests {
         let client = make_client();
         let cloned = client.clone();
         assert_eq!(cloned.thread_id(), "T-test");
-        assert_eq!(cloned.project_path(), "/project");
     }
 
     #[tokio::test]
@@ -1787,17 +2070,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_turn_complete_persists_final_assistant_summary() {
+    async fn emit_turn_complete_persists_final_cognition() {
         let (cb, recorder) = make_recorder_client();
         cb.emit_turn_complete(
             1,
             Some((10, 5)),
-            Some(json!({
-                "content": "final answer",
-                "tool_calls": [{"id": "c1", "name": "search", "arguments": {"q": "x"}}],
-                "reasoning_content": "hidden",
-                "delta": "must not be copied",
-            })),
+            Some(json!("final answer")),
+            Some(json!([{"id": "c1", "name": "search", "arguments": {"q": "x"}}])),
+            Some("hidden".to_owned()),
             Some(json!({
                 "requested_output_tokens": 32768,
                 "generation_header_id": "generation-1",
@@ -1954,5 +2234,179 @@ mod tests {
             "all pages must fold in chain order"
         );
         assert!(resp.next_cursor.is_none());
+    }
+
+    fn replay_event(event_type: &str, payload: Value) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn replay_page_requires_a_nonempty_monotonically_advancing_cursor() {
+        let mut events = Vec::new();
+        let mut budget = RuntimeReplayBudget::default();
+        let cursor = append_replay_page(
+            &mut events,
+            &mut budget,
+            None,
+            ReplayResponse {
+                events: vec![replay_event("a", json!({}))],
+                next_cursor: Some(2),
+            },
+            8,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(cursor, Some(2));
+
+        let repeated = append_replay_page(
+            &mut events,
+            &mut budget,
+            cursor,
+            ReplayResponse {
+                events: vec![replay_event("b", json!({}))],
+                next_cursor: Some(2),
+            },
+            8,
+            1024,
+        )
+        .unwrap_err();
+        assert!(format!("{repeated:#}").contains("did not advance monotonically"));
+
+        let zero = append_replay_page(
+            &mut Vec::new(),
+            &mut RuntimeReplayBudget::default(),
+            None,
+            ReplayResponse {
+                events: vec![replay_event("zero", json!({}))],
+                next_cursor: Some(0),
+            },
+            8,
+            1024,
+        )
+        .unwrap_err();
+        assert!(format!("{zero:#}").contains("did not advance monotonically"));
+
+        let empty = append_replay_page(
+            &mut Vec::new(),
+            &mut RuntimeReplayBudget::default(),
+            None,
+            ReplayResponse {
+                events: vec![],
+                next_cursor: Some(1),
+            },
+            8,
+            1024,
+        )
+        .unwrap_err();
+        assert!(format!("{empty:#}").contains("empty page with continuation cursor"));
+    }
+
+    #[test]
+    fn replay_page_enforces_page_count_total_count_and_exact_byte_bounds() {
+        let oversized_page = ReplayResponse {
+            events: (0..=MAX_RUNTIME_REPLAY_PAGE_LIMIT)
+                .map(|index| replay_event("event", json!({"index": index})))
+                .collect(),
+            next_cursor: None,
+        };
+        let page_error = append_replay_page(
+            &mut Vec::new(),
+            &mut RuntimeReplayBudget::default(),
+            None,
+            oversized_page,
+            usize::MAX,
+            usize::MAX,
+        )
+        .unwrap_err();
+        assert!(format!("{page_error:#}").contains("runtime replay page contains"));
+
+        let two_events = vec![
+            replay_event("a", json!({"value": 1})),
+            replay_event("b", json!({"value": 2})),
+        ];
+        let count_error = append_replay_page(
+            &mut Vec::new(),
+            &mut RuntimeReplayBudget::default(),
+            None,
+            ReplayResponse {
+                events: two_events.clone(),
+                next_cursor: None,
+            },
+            1,
+            usize::MAX,
+        )
+        .unwrap_err();
+        assert!(format!("{count_error:#}").contains("2 events; maximum is 1"));
+
+        let exact_bytes = serde_json::to_vec(&two_events).unwrap().len();
+        let byte_error = append_replay_page(
+            &mut Vec::new(),
+            &mut RuntimeReplayBudget::default(),
+            None,
+            ReplayResponse {
+                events: two_events.clone(),
+                next_cursor: None,
+            },
+            2,
+            exact_bytes - 1,
+        )
+        .unwrap_err();
+        assert!(format!("{byte_error:#}").contains("runtime replay serializes to"));
+
+        let mut accepted = Vec::new();
+        let mut accepted_budget = RuntimeReplayBudget::default();
+        assert_eq!(
+            append_replay_page(
+                &mut accepted,
+                &mut accepted_budget,
+                None,
+                ReplayResponse {
+                    events: two_events,
+                    next_cursor: None,
+                },
+                2,
+                exact_bytes,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(accepted_budget.total_serialized_bytes, exact_bytes);
+    }
+
+    #[test]
+    fn replay_budget_rejects_aggregate_overflow_across_thread_scopes() {
+        let mut budget = RuntimeReplayBudget::default();
+        let mut first_thread_events = Vec::new();
+        append_replay_page(
+            &mut first_thread_events,
+            &mut budget,
+            None,
+            ReplayResponse {
+                events: vec![replay_event("first", json!({}))],
+                next_cursor: None,
+            },
+            1,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let mut second_thread_events = Vec::new();
+        let error = append_replay_page(
+            &mut second_thread_events,
+            &mut budget,
+            None,
+            ReplayResponse {
+                events: vec![replay_event("second", json!({}))],
+                next_cursor: None,
+            },
+            1,
+            usize::MAX,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("2 events; maximum is 1"));
+        assert!(second_thread_events.is_empty());
     }
 }

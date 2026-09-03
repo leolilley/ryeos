@@ -67,32 +67,49 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     let health = client.get_health().await?;
     let pubkey = client.get_public_key().await?;
+    let configured_identity = pubkey.validate_configured_identity(&remote_cfg);
+    let configured_identity_matches = configured_identity.is_ok();
+    let configured_identity_error = configured_identity
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    let configured_principal_matches = pubkey.principal_id == remote_cfg.principal_id;
+    let configured_site_matches = pubkey.site_id == remote_cfg.site_id;
+    let configured_vault_matches = pubkey.vault_fingerprint == remote_cfg.vault_fingerprint;
     let local_public_key = format!(
         "ed25519:{}",
         base64::engine::general_purpose::STANDARD.encode(state.identity.verifying_key().as_bytes())
     );
     let local_fingerprint = state.identity.fingerprint().to_string();
     let local_principal_id = state.identity.principal_id();
-    let auth_probe = match client.threads_list(1).await {
-        Ok(_) => serde_json::json!({
-            "signed_probe": "ok",
-            "authorized": true,
-        }),
-        Err(e) => {
-            let detail = format!("{e:#}");
-            let signed_probe = if detail.contains("401") || detail.contains("Unauthorized") {
-                "unauthorized"
-            } else if detail.contains("403") || detail.contains("Forbidden") {
-                "forbidden"
-            } else {
-                "error"
-            };
-            serde_json::json!({
-                "signed_probe": signed_probe,
-                "authorized": false,
-                "detail": detail,
-            })
+    let auth_probe = if configured_identity_matches {
+        match client.threads_list(1).await {
+            Ok(_) => serde_json::json!({
+                "signed_probe": "ok",
+                "authorized": true,
+            }),
+            Err(e) => {
+                let detail = format!("{e:#}");
+                let signed_probe = if detail.contains("401") || detail.contains("Unauthorized") {
+                    "unauthorized"
+                } else if detail.contains("403") || detail.contains("Forbidden") {
+                    "forbidden"
+                } else {
+                    "error"
+                };
+                serde_json::json!({
+                    "signed_probe": signed_probe,
+                    "authorized": false,
+                    "detail": detail,
+                })
+            }
         }
+    } else {
+        serde_json::json!({
+            "signed_probe": "skipped_identity_mismatch",
+            "authorized": false,
+            "detail": "signed probe skipped because the live identity does not match the configured remote",
+        })
     };
     let bootstrap_scopes = [
         "ryeos.execute.service.objects/has",
@@ -120,8 +137,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             "url": remote_cfg.url,
             "health": health,
             "principal_id": pubkey.principal_id,
+            "configured_principal_id": remote_cfg.principal_id,
+            "configured_principal_matches": configured_principal_matches,
             "fingerprint": pubkey.fingerprint,
+            "site_id": pubkey.site_id,
+            "configured_site_id": remote_cfg.site_id,
+            "configured_site_matches": configured_site_matches,
             "vault_fingerprint": pubkey.vault_fingerprint,
+            "configured_vault_fingerprint": remote_cfg.vault_fingerprint,
+            "configured_vault_matches": configured_vault_matches,
+            "pinned_identity_matches": configured_identity_matches,
+            "identity_error": configured_identity_error,
         },
         "local_identity": {
             "principal_id": local_principal_id,

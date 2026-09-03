@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:dc04c6f6e139d322077100a898902acbf078b761dfc477a15c5f0799d65673b4:geO0JMUHjT2TNNhFsnlX3gVhsuCaRgjSG2zBJFSH2Y+3VSbFi+HQvFk6MTfa6EhfpZToFB1zJKRXaz5udXY0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:29Z:dc04c6f6e139d322077100a898902acbf078b761dfc477a15c5f0799d65673b4:geO0JMUHjT2TNNhFsnlX3gVhsuCaRgjSG2zBJFSH2Y+3VSbFi+HQvFk6MTfa6EhfpZToFB1zJKRXaz5udXY0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, architecture, parse, compose, execute]

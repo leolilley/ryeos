@@ -10,6 +10,7 @@ pub mod invokers;
 pub mod seat_auth;
 pub mod session_bus;
 pub mod state;
+mod thread_authorization;
 
 pub use browser_session::{BrowserSession, BrowserSessionStore, LaunchContext};
 pub use session_bus::SessionBus;
@@ -19,7 +20,7 @@ pub use state::UiState;
 ///
 /// This intentionally has no compatibility range. Launchers must advertise
 /// the same revision before the daemon will create a browser session.
-pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v2";
+pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v3";
 
 /// Register UI extensions into the provided registries.
 ///

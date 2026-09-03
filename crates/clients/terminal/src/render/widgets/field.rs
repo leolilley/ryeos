@@ -235,7 +235,8 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         + field.warnings.len().min(3)
         + usize::from(selected_entity.is_some())
         + usize::from(!field.provenance.is_empty());
-    let available = bottom.saturating_sub(y + footer_lines);
+    let footer_y = bottom.saturating_sub(footer_lines).max(y).min(bottom);
+    let available = footer_y.saturating_sub(y);
     let selected_line = lines.iter().position(|line| match line {
         FieldLine::Entity { entity, .. } => selected == Some(entity.id.as_str()),
         FieldLine::Group {
@@ -331,6 +332,11 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
             grid,
         );
     }
+
+    // Detail, warnings, evidence, and controls are stable chrome. Anchor them
+    // to the bottom of the field instead of immediately after a short entity
+    // list, where they can overwrite the adjacent preview grid.
+    y = footer_y;
 
     if y < bottom
         && let Some(entity) = selected_entity
@@ -489,7 +495,7 @@ mod tests {
 
     fn fixture() -> RyeOsFieldVm {
         serde_json::from_value(serde_json::json!({
-            "schema_version": "ryeos.ui.field.vm.v1",
+            "schema_version": "ryeos.ui.field.vm.v2",
             "id": "field:test",
             "title": "Execution field",
             "revision": "all",
@@ -564,6 +570,16 @@ mod tests {
             .find(|y| row_text(&surface, *y).contains("▸ Work (1)"))
             .expect("group row");
         assert_eq!(surface.get(0, group_row).bg, ACCENT);
+    }
+
+    #[test]
+    fn footer_is_bottom_anchored_when_the_entity_list_is_short() {
+        let mut surface = TextSurface::new(80, 30);
+        draw_field(&mut surface, Rect::new(0, 0, 80, 30), &fixture());
+
+        assert!(row_text(&surface, 29).contains("/ search"));
+        assert!(row_text(&surface, 28).contains("evidence:"));
+        assert!(row_text(&surface, 27).contains("step:one"));
     }
 
     #[test]

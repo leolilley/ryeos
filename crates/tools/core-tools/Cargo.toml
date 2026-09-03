@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-core-tools"
-version = "0.5.76"
+version = "0.5.77"
 edition = "2024"
 license.workspace = true
 
@@ -26,6 +26,7 @@ toml = { workspace = true }
 
 # Engine + state
 ryeos-engine = { workspace = true }
+ryeos-handler-protocol = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-runtime = { workspace = true }
 

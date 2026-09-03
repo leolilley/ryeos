@@ -31,8 +31,9 @@ where
 pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
-const STAGED_ROOTS_SCHEMA: u32 = 1;
-const DURABLE_UPLOAD_SCHEMA: u32 = 1;
+const STAGED_ROOTS_SCHEMA: u32 = 2;
+const DURABLE_UPLOAD_SCHEMA: u32 = 2;
+const MAX_RECOVERY_RECORD_BYTES: u64 = 1024 * 1024;
 const REMOTE_PULL_JOURNAL_KEY: &str = "remote-pull-journal.key";
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -197,6 +198,7 @@ struct StagedCasRootsRecord {
     created_at: String,
     object_hashes: BTreeSet<String>,
     blob_hashes: BTreeSet<String>,
+    large_object_hashes: BTreeSet<String>,
 }
 
 /// Typed, canonical publication namespace bound to one durable upload stage.
@@ -208,6 +210,9 @@ pub enum DurableCasPublicationKey {
     ProjectHead {
         principal_key: String,
         project_hash: String,
+    },
+    ExternalContentImport {
+        request_digest: String,
     },
 }
 
@@ -221,6 +226,14 @@ impl DurableCasPublicationKey {
         Ok(key)
     }
 
+    pub fn external_content_import(request_digest: &str) -> Result<Self> {
+        let key = Self::ExternalContentImport {
+            request_digest: request_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Self::ProjectHead {
@@ -229,6 +242,9 @@ impl DurableCasPublicationKey {
             } => {
                 validate_hash("durable upload project principal key", principal_key)?;
                 validate_hash("durable upload project hash", project_hash)
+            }
+            Self::ExternalContentImport { request_digest } => {
+                validate_hash("external-content import request digest", request_digest)
             }
         }
     }
@@ -251,12 +267,14 @@ struct DurableCasUploadRecord {
     created_at: String,
     object_hashes: BTreeSet<String>,
     blob_hashes: BTreeSet<String>,
+    large_object_hashes: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StagedCasRootHashes {
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
+    pub large_object_hashes: Vec<String>,
 }
 
 /// Durable temporary GC roots for async CAS staging. The OS lock remains held
@@ -469,6 +487,17 @@ impl DurableCasUploadStage {
         Ok(())
     }
 
+    pub fn ensure_protects_large_object(&self, hash: &str) -> Result<()> {
+        self.ensure_active()?;
+        validate_hash("durable staged large-object root", hash)?;
+        if !self.record.large_object_hashes.contains(hash) {
+            anyhow::bail!(
+                "large-object root {hash} was not imported under this staging capability"
+            );
+        }
+        Ok(())
+    }
+
     pub fn protect_cas_closure<'a, O, B>(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -503,6 +532,21 @@ impl DurableCasUploadStage {
         Ok(())
     }
 
+    pub fn protect_large_object_hash(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        hash: &str,
+    ) -> Result<()> {
+        self.ensure_active()?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        validate_hash("durable staged large-object root", hash)?;
+        if self.record.large_object_hashes.insert(hash.to_owned()) {
+            self.recovery
+                .write_durable_upload(&self.directory, &self.record)?;
+        }
+        Ok(())
+    }
+
     pub fn finish_admitted(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -518,6 +562,7 @@ impl DurableCasUploadStage {
         self.record.admitted_at = Some(lillux::time::iso8601_now());
         self.record.object_hashes.clear();
         self.record.blob_hashes.clear();
+        self.record.large_object_hashes.clear();
         self.recovery
             .write_durable_upload(&self.directory, &self.record)?;
         if let Err(error) = self
@@ -666,6 +711,20 @@ impl StagedCasRootLease {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS blob root", hash)?;
         if self.record.blob_hashes.insert(hash.to_string()) {
+            self.recovery
+                .write_staged_roots(&self.directory, &self.record)?;
+        }
+        Ok(())
+    }
+
+    pub fn protect_large_object_hash_admitted(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        hash: &str,
+    ) -> Result<()> {
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        validate_hash("staged large-object root", hash)?;
+        if self.record.large_object_hashes.insert(hash.to_owned()) {
             self.recovery
                 .write_staged_roots(&self.directory, &self.record)?;
         }
@@ -825,21 +884,28 @@ impl PendingTransitionCursor {
 /// write and hold it through durable head publication.
 pub struct CasMutationGuard {
     _file: Rc<File>,
+    // A CAS guard owns a descriptor-backed flock. Keep direct-attachment
+    // forks quiesced until the last clone of that lock authority is released,
+    // regardless of which application layer acquired the guard.
+    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
     exclusive: bool,
     depth: GuardDepth,
     _not_send: std::marker::PhantomData<Rc<()>>,
 }
 
 impl CasMutationGuard {
+    #[track_caller]
     pub(crate) fn acquire_existing_shared_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
         if exclusive_depth != 0 {
             let file = current_guard_file_for_pinned_runtime(runtime)?;
             EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
             return Ok(Self {
                 _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Exclusive,
                 _not_send: std::marker::PhantomData,
@@ -851,6 +917,7 @@ impl CasMutationGuard {
             SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
             return Ok(Self {
                 _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Shared,
                 _not_send: std::marker::PhantomData,
@@ -881,28 +948,33 @@ impl CasMutationGuard {
         SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         Ok(Self {
             _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: false,
             depth: GuardDepth::Shared,
             _not_send: std::marker::PhantomData,
         })
     }
 
+    #[track_caller]
     pub(crate) fn acquire_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
         Self::acquire_exclusive_in_pinned_runtime_mode(runtime, true)
     }
 
+    #[track_caller]
     pub(crate) fn acquire_existing_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
         Self::acquire_exclusive_in_pinned_runtime_mode(runtime, false)
     }
 
+    #[track_caller]
     fn acquire_exclusive_in_pinned_runtime_mode(
         runtime: &lillux::PinnedDirectory,
         create: bool,
     ) -> Result<Self> {
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         if EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
             || SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0
         {
@@ -944,6 +1016,7 @@ impl CasMutationGuard {
         EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         Ok(Self {
             _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: true,
             depth: GuardDepth::Exclusive,
             _not_send: std::marker::PhantomData,
@@ -958,6 +1031,7 @@ impl CasMutationGuard {
         Ok(())
     }
 
+    #[track_caller]
     pub fn acquire_shared(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, false, true)
     }
@@ -965,10 +1039,12 @@ impl CasMutationGuard {
     /// Acquire the established guard in shared mode without creating recovery
     /// state. GC dry-runs use this for per-chain consistency checks before the
     /// later exclusive sweep inspection.
+    #[track_caller]
     pub fn acquire_existing_shared(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, false, false)
     }
 
+    #[track_caller]
     pub fn acquire_exclusive(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, true, true)
     }
@@ -976,10 +1052,12 @@ impl CasMutationGuard {
     /// Acquire the established guard without creating recovery state. Used by
     /// strict read-only verification, where absence is an error rather than an
     /// invitation to mutate the node merely by inspecting it.
+    #[track_caller]
     pub fn acquire_existing_exclusive(runtime_state_dir: &Path) -> Result<Self> {
         Self::acquire(runtime_state_dir, true, false)
     }
 
+    #[track_caller]
     pub fn shared_from_cas_root(cas_root: &Path) -> Result<Self> {
         let runtime_state_dir = cas_root
             .parent()
@@ -987,6 +1065,7 @@ impl CasMutationGuard {
         Self::acquire_shared(runtime_state_dir)
     }
 
+    #[track_caller]
     pub fn exclusive_from_cas_root(cas_root: &Path) -> Result<Self> {
         let runtime_state_dir = cas_root
             .parent()
@@ -1061,7 +1140,9 @@ impl CasMutationGuard {
         Ok(())
     }
 
+    #[track_caller]
     fn acquire(runtime_state_dir: &Path, exclusive: bool, create_if_missing: bool) -> Result<Self> {
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         if exclusive {
             let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
             if exclusive_depth != 0 {
@@ -1069,6 +1150,7 @@ impl CasMutationGuard {
                 EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
                 return Ok(Self {
                     _file: file,
+                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: true,
                     depth: GuardDepth::Exclusive,
                     _not_send: std::marker::PhantomData,
@@ -1087,6 +1169,7 @@ impl CasMutationGuard {
                 EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
                 return Ok(Self {
                     _file: file,
+                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: false,
                     depth: GuardDepth::Exclusive,
                     _not_send: std::marker::PhantomData,
@@ -1098,6 +1181,7 @@ impl CasMutationGuard {
                 SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
                 return Ok(Self {
                     _file: file,
+                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: false,
                     depth: GuardDepth::Shared,
                     _not_send: std::marker::PhantomData,
@@ -1156,6 +1240,7 @@ impl CasMutationGuard {
         };
         Ok(Self {
             _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive,
             depth,
             _not_send: std::marker::PhantomData,
@@ -1430,14 +1515,14 @@ impl RecoveryStore {
         };
         let entries = directory.regular_files()?;
         for entry in &entries {
-            if entry.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
                 anyhow::bail!(
                     "unexpected pending transition file: {}",
-                    entry.path.display()
+                    entry.path().display()
                 );
             }
             let chain_root_id = entry
-                .path
+                .path()
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("non-UTF8 pending transition filename"))?;
@@ -1446,9 +1531,9 @@ impl RecoveryStore {
         if !dry_run {
             for entry in &entries {
                 directory
-                    .remove_if_same(&entry.name, &entry.file)
+                    .remove_pinned_regular_if_same(entry)
                     .with_context(|| {
-                        format!("discard pending transition {}", entry.path.display())
+                        format!("discard pending transition {}", entry.path().display())
                     })?;
             }
         }
@@ -1506,6 +1591,7 @@ impl RecoveryStore {
             created_at: lillux::time::iso8601_now(),
             object_hashes: BTreeSet::new(),
             blob_hashes: BTreeSet::new(),
+            large_object_hashes: BTreeSet::new(),
         };
         self.write_staged_roots(&staged_directory, &record)?;
         Ok(StagedCasRootLease {
@@ -1558,6 +1644,7 @@ impl RecoveryStore {
             created_at: lillux::time::iso8601_now(),
             object_hashes: BTreeSet::new(),
             blob_hashes: BTreeSet::new(),
+            large_object_hashes: BTreeSet::new(),
         };
         self.write_durable_upload(&durable_directory, &record)?;
         Ok(DurableCasUploadStage {
@@ -1604,6 +1691,122 @@ impl RecoveryStore {
         })
     }
 
+    /// Settle every retained upload for one exact, already-proved
+    /// publication. The caller must first verify that `admitted_target_hash`
+    /// is the authoritative current target for this owner/publication key
+    /// while holding the same CAS guard and the publication barrier that
+    /// serializes upload creation and head advance. This closes duplicate
+    /// retry stages without age-based retirement or touching unrelated
+    /// uploads.
+    pub fn settle_durable_cas_uploads_for_existing_publication(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        owner_principal: &str,
+        purpose: &str,
+        publication_key: &DurableCasPublicationKey,
+        admitted_target_hash: &str,
+    ) -> Result<usize> {
+        validate_upload_owner(owner_principal)?;
+        validate_staging_purpose(purpose)?;
+        publication_key.validate()?;
+        validate_hash(
+            "existing durable upload publication target",
+            admitted_target_hash,
+        )?;
+        self.ensure_guard(cas_mutation_guard)?;
+        let Some(directory) = self.open_child_directory("durable-cas-uploads")? else {
+            return Ok(0);
+        };
+        let mut records = Vec::new();
+        let mut locks = BTreeMap::new();
+        for entry in directory.regular_files()? {
+            match entry.path().extension().and_then(|value| value.to_str()) {
+                Some("json") => records.push(entry),
+                Some("lock") => {
+                    locks.insert(entry.name().to_os_string(), entry);
+                }
+                _ => anyhow::bail!(
+                    "unexpected durable CAS upload entry: {}",
+                    entry.path().display()
+                ),
+            }
+        }
+
+        let mut settled = 0;
+        for record_entry in records {
+            let observed = self.read_durable_upload_pinned(&record_entry)?;
+            // Upload identity is immutable after creation. Filter on the
+            // enumerated inode before taking a stage lock so this exact
+            // publication cannot block behind unrelated project/import work.
+            // The current inode is still reopened and checked below before a
+            // matching stage is settled.
+            if observed.owner_principal != owner_principal
+                || observed.purpose != purpose
+                || observed.publication_key != *publication_key
+            {
+                let lock_name = std::ffi::OsString::from(format!("{}.lock", observed.staging_id));
+                locks.remove(&lock_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "durable CAS upload {} has no lock file",
+                        observed.staging_id
+                    )
+                })?;
+                continue;
+            }
+            let lock_name = std::ffi::OsString::from(format!("{}.lock", observed.staging_id));
+            let lock_entry = locks.remove(&lock_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "durable CAS upload {} has no lock file",
+                    observed.staging_id
+                )
+            })?;
+            lock_entry
+                .lock_exclusive()
+                .context("lock durable upload for publication settlement")?;
+            // The record is atomically replaced as it advances. Re-open it
+            // only after acquiring the stage lock so settlement never acts on
+            // the stale inode observed during namespace enumeration.
+            let current_file = directory
+                .open_pinned_regular(record_entry.name(), false)?
+                .ok_or_else(|| anyhow::anyhow!("durable CAS upload record disappeared"))?;
+            let record = self.read_durable_upload_pinned(&current_file)?;
+            if record.owner_principal != owner_principal
+                || record.purpose != purpose
+                || record.publication_key != *publication_key
+            {
+                continue;
+            }
+            if let Some(target) = record.admitted_target_hash.as_deref() {
+                if target != admitted_target_hash {
+                    anyhow::bail!(
+                        "matching durable upload receipt contradicts the existing publication target"
+                    );
+                }
+                continue;
+            }
+            let mut stage = DurableCasUploadStage {
+                recovery: self.clone(),
+                directory: directory.try_clone()?,
+                record,
+                lock_file: Some(lock_entry.try_clone_descriptor()?),
+            };
+            stage.protect_cas_closure(
+                cas_mutation_guard,
+                std::iter::once(admitted_target_hash),
+                std::iter::empty(),
+            )?;
+            stage.finish_admitted(cas_mutation_guard, admitted_target_hash)?;
+            settled += 1;
+        }
+        if let Some((_name, orphan)) = locks.into_iter().next() {
+            anyhow::bail!(
+                "orphan durable CAS upload lock: {}",
+                orphan.path().display()
+            );
+        }
+        Ok(settled)
+    }
+
     /// Retire abandoned durable upload stages selected by an authoritative
     /// maintenance policy. There is deliberately no built-in age: callers must
     /// pass the signed policy's canonical cutoff, and omission means retain.
@@ -1624,21 +1827,20 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
                 _ => anyhow::bail!(
                     "unexpected durable CAS upload entry: {}",
-                    entry.path.display()
+                    entry.path().display()
                 ),
             }
         }
         let mut retired = 0;
         for record_entry in records {
-            let record =
-                self.read_durable_upload_file(record_entry.file.try_clone()?, &record_entry.path)?;
+            let record = self.read_durable_upload_pinned(&record_entry)?;
             let lock_name = std::ffi::OsString::from(format!("{}.lock", record.staging_id));
             let lock_entry = locks.remove(&lock_name).ok_or_else(|| {
                 anyhow::anyhow!("durable CAS upload {} has no lock file", record.staging_id)
@@ -1646,7 +1848,10 @@ impl RecoveryStore {
             if record.created_at.as_str() >= created_before {
                 continue;
             }
-            if !try_lock_exclusive(&lock_entry.file, "lock durable upload for retirement")? {
+            if !lock_entry
+                .try_lock_exclusive()
+                .context("lock durable upload for retirement")?
+            {
                 tracing::debug!(
                     staging_id = %record.staging_id,
                     "preserving active durable CAS upload past the retirement cutoff"
@@ -1655,15 +1860,18 @@ impl RecoveryStore {
             }
             self.retire_durable_blob_parts(&record.staging_id)?;
             directory
-                .remove_if_same(&record_entry.name, &record_entry.file)
+                .remove_pinned_regular_if_same(&record_entry)
                 .context("retire durable CAS upload record")?;
             directory
-                .remove_if_same(&lock_entry.name, &lock_entry.file)
+                .remove_pinned_regular_if_same(&lock_entry)
                 .context("retire durable CAS upload lock")?;
             retired += 1;
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
+            anyhow::bail!(
+                "orphan durable CAS upload lock: {}",
+                orphan.path().display()
+            );
         }
         Ok(retired)
     }
@@ -1705,19 +1913,23 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
-                _ => anyhow::bail!("unexpected staged CAS root entry: {}", entry.path.display()),
+                _ => anyhow::bail!(
+                    "unexpected staged CAS root entry: {}",
+                    entry.path().display()
+                ),
             }
         }
         let mut object_hashes = BTreeSet::new();
         let mut blob_hashes = BTreeSet::new();
+        let mut large_object_hashes = BTreeSet::new();
         for record_entry in records {
             let lease_id = record_entry
-                .path
+                .path()
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("non-UTF8 staged CAS root filename"))?;
@@ -1726,60 +1938,43 @@ impl RecoveryStore {
             let lock_entry = locks
                 .remove(&lock_name)
                 .ok_or_else(|| anyhow::anyhow!("staged CAS root {lease_id} has no lock file"))?;
-            #[cfg(unix)]
-            let active = {
-                use std::os::fd::AsRawFd;
-                let result = unsafe {
-                    libc::flock(lock_entry.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-                };
-                if result == 0 {
-                    false
-                } else {
-                    let error = std::io::Error::last_os_error();
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        true
-                    } else {
-                        return Err(error).context("inspect staged CAS root lease lock");
-                    }
-                }
-            };
-            #[cfg(not(unix))]
-            anyhow::bail!("staged CAS root locking is unavailable on this platform");
+            let active = !lock_entry
+                .try_lock_exclusive()
+                .context("inspect staged CAS root lease lock")?;
             if !active {
                 self.retire_staged_blob_parts(lease_id)?;
                 directory
-                    .remove_if_same(&record_entry.name, &record_entry.file)
+                    .remove_pinned_regular_if_same(&record_entry)
                     .context("remove abandoned staged CAS roots")?;
                 directory
-                    .remove_if_same(&lock_entry.name, &lock_entry.file)
+                    .remove_pinned_regular_if_same(&lock_entry)
                     .context("remove abandoned staged CAS root lock")?;
                 continue;
             }
-            let record =
-                self.read_staged_roots_file(record_entry.file.try_clone()?, &record_entry.path)?;
+            let record = self.read_staged_roots_pinned(&record_entry)?;
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
+            large_object_hashes.extend(record.large_object_hashes);
         }
         for (_name, lock_entry) in locks {
-            #[cfg(unix)]
+            if lock_entry
+                .try_lock_exclusive()
+                .context("inspect orphan staged CAS root lock")?
             {
-                use std::os::fd::AsRawFd;
-                if unsafe {
-                    libc::flock(lock_entry.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-                } == 0
-                {
-                    directory
-                        .remove_if_same(&lock_entry.name, &lock_entry.file)
-                        .context("remove orphan staged CAS root lock")?;
-                }
+                directory
+                    .remove_pinned_regular_if_same(&lock_entry)
+                    .context("remove orphan staged CAS root lock")?;
             }
-            #[cfg(not(unix))]
-            anyhow::bail!("staged CAS root locking is unavailable on this platform");
         }
-        self.collect_durable_upload_roots(&mut object_hashes, &mut blob_hashes)?;
+        self.collect_durable_upload_roots(
+            &mut object_hashes,
+            &mut blob_hashes,
+            &mut large_object_hashes,
+        )?;
         Ok(StagedCasRootHashes {
             object_hashes: object_hashes.into_iter().collect(),
             blob_hashes: blob_hashes.into_iter().collect(),
+            large_object_hashes: large_object_hashes.into_iter().collect(),
         })
     }
 
@@ -1791,41 +1986,56 @@ impl RecoveryStore {
     pub fn inspect_staged_cas_root_hashes_read_only(&self) -> Result<StagedCasRootHashes> {
         let mut object_hashes = BTreeSet::new();
         let mut blob_hashes = BTreeSet::new();
+        let mut large_object_hashes = BTreeSet::new();
         let Some(directory) = self.open_child_directory("staged-cas-roots")? else {
-            self.collect_durable_upload_roots(&mut object_hashes, &mut blob_hashes)?;
+            self.collect_durable_upload_roots(
+                &mut object_hashes,
+                &mut blob_hashes,
+                &mut large_object_hashes,
+            )?;
             return Ok(StagedCasRootHashes {
                 object_hashes: object_hashes.into_iter().collect(),
                 blob_hashes: blob_hashes.into_iter().collect(),
+                large_object_hashes: large_object_hashes.into_iter().collect(),
             });
         };
 
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
-                _ => anyhow::bail!("unexpected staged CAS root entry: {}", entry.path.display()),
+                _ => anyhow::bail!(
+                    "unexpected staged CAS root entry: {}",
+                    entry.path().display()
+                ),
             }
         }
         for entry in records {
-            let record = self.read_staged_roots_file(entry.file, &entry.path)?;
+            let record = self.read_staged_roots_pinned(&entry)?;
             let lock_name = std::ffi::OsString::from(format!("{}.lock", record.lease_id));
             if locks.remove(&lock_name).is_none() {
                 anyhow::bail!("staged CAS root {} has no lock file", record.lease_id);
             }
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
+            large_object_hashes.extend(record.large_object_hashes);
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan staged CAS root lock: {}", orphan.path.display());
+            anyhow::bail!("orphan staged CAS root lock: {}", orphan.path().display());
         }
-        self.collect_durable_upload_roots(&mut object_hashes, &mut blob_hashes)?;
+        self.collect_durable_upload_roots(
+            &mut object_hashes,
+            &mut blob_hashes,
+            &mut large_object_hashes,
+        )?;
         Ok(StagedCasRootHashes {
             object_hashes: object_hashes.into_iter().collect(),
             blob_hashes: blob_hashes.into_iter().collect(),
+            large_object_hashes: large_object_hashes.into_iter().collect(),
         })
     }
 
@@ -1888,7 +2098,7 @@ impl RecoveryStore {
         let entries = directory.regular_files()?;
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
-            let path = &entry.path;
+            let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 anyhow::bail!("unexpected pending transition file: {}", path.display());
             }
@@ -1897,7 +2107,7 @@ impl RecoveryStore {
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("non-UTF8 pending transition filename"))?;
             validate_chain_root_id(stem)?;
-            records.push(decode_pending_file(entry.file, stem)?);
+            records.push(decode_pending_pinned(&entry, stem)?);
         }
         records.sort_by(|left, right| left.chain_root_id.cmp(&right.chain_root_id));
         Ok(records)
@@ -1921,7 +2131,7 @@ impl RecoveryStore {
         if let Some(directory) = directory.as_ref() {
             for entry in directory.regular_files()? {
                 check()?;
-                entries.push(entry.name);
+                entries.push(entry.name().to_os_string());
             }
         }
         check()?;
@@ -2187,6 +2397,7 @@ impl RecoveryStore {
         &self,
         object_hashes: &mut BTreeSet<String>,
         blob_hashes: &mut BTreeSet<String>,
+        large_object_hashes: &mut BTreeSet<String>,
     ) -> Result<()> {
         let Some(directory) = self.open_child_directory("durable-cas-uploads")? else {
             return Ok(());
@@ -2194,28 +2405,32 @@ impl RecoveryStore {
         let mut records = Vec::new();
         let mut locks = BTreeMap::new();
         for entry in directory.regular_files()? {
-            match entry.path.extension().and_then(|value| value.to_str()) {
+            match entry.path().extension().and_then(|value| value.to_str()) {
                 Some("json") => records.push(entry),
                 Some("lock") => {
-                    locks.insert(entry.name.clone(), entry);
+                    locks.insert(entry.name().to_os_string(), entry);
                 }
                 _ => anyhow::bail!(
                     "unexpected durable CAS upload entry: {}",
-                    entry.path.display()
+                    entry.path().display()
                 ),
             }
         }
         for entry in records {
-            let record = self.read_durable_upload_file(entry.file, &entry.path)?;
+            let record = self.read_durable_upload_pinned(&entry)?;
             let lock_name = std::ffi::OsString::from(format!("{}.lock", record.staging_id));
             if locks.remove(&lock_name).is_none() {
                 anyhow::bail!("durable CAS upload {} has no lock file", record.staging_id);
             }
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
+            large_object_hashes.extend(record.large_object_hashes);
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
+            anyhow::bail!(
+                "orphan durable CAS upload lock: {}",
+                orphan.path().display()
+            );
         }
         Ok(())
     }
@@ -2240,6 +2455,9 @@ impl RecoveryStore {
         for hash in &record.blob_hashes {
             validate_hash("staged CAS blob root", hash)?;
         }
+        for hash in &record.large_object_hashes {
+            validate_hash("staged large-object root", hash)?;
+        }
         let value = serde_json::to_value(record)?;
         let bytes = lillux::canonical_json(&value).context("canonicalize staged CAS roots")?;
         let name = format!("{}.json", record.lease_id);
@@ -2250,8 +2468,12 @@ impl RecoveryStore {
             .context("durably write staged CAS roots")
     }
 
-    fn read_staged_roots_file(&self, file: File, path: &Path) -> Result<StagedCasRootsRecord> {
-        decode_staged_roots(file, path)
+    fn read_staged_roots_pinned(
+        &self,
+        file: &lillux::PinnedRegularFile,
+    ) -> Result<StagedCasRootsRecord> {
+        let bytes = file.read_bounded(MAX_RECOVERY_RECORD_BYTES)?;
+        decode_staged_roots_bytes(&bytes, file.path())
     }
 
     fn write_durable_upload(
@@ -2274,13 +2496,19 @@ impl RecoveryStore {
     fn read_durable_upload_file(&self, file: File, path: &Path) -> Result<DurableCasUploadRecord> {
         decode_durable_upload(file, path)
     }
+
+    fn read_durable_upload_pinned(
+        &self,
+        file: &lillux::PinnedRegularFile,
+    ) -> Result<DurableCasUploadRecord> {
+        let bytes = file.read_bounded(MAX_RECOVERY_RECORD_BYTES)?;
+        decode_durable_upload_bytes(&bytes, file.path())
+    }
 }
 
-fn decode_staged_roots(mut file: File, path: &Path) -> Result<StagedCasRootsRecord> {
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+fn decode_staged_roots_bytes(bytes: &[u8], path: &Path) -> Result<StagedCasRootsRecord> {
     let record: StagedCasRootsRecord =
-        serde_json::from_slice(&bytes).context("decode staged CAS roots")?;
+        serde_json::from_slice(bytes).context("decode staged CAS roots")?;
     if record.schema != STAGED_ROOTS_SCHEMA {
         anyhow::bail!("unsupported staged CAS roots schema: {}", record.schema);
     }
@@ -2302,11 +2530,14 @@ fn decode_staged_roots(mut file: File, path: &Path) -> Result<StagedCasRootsReco
     Ok(record)
 }
 
-fn decode_durable_upload(mut file: File, path: &Path) -> Result<DurableCasUploadRecord> {
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+fn decode_durable_upload(file: File, path: &Path) -> Result<DurableCasUploadRecord> {
+    let bytes = lillux::read_open_regular_file_bounded(file, MAX_RECOVERY_RECORD_BYTES)?;
+    decode_durable_upload_bytes(&bytes, path)
+}
+
+fn decode_durable_upload_bytes(bytes: &[u8], path: &Path) -> Result<DurableCasUploadRecord> {
     let record: DurableCasUploadRecord =
-        serde_json::from_slice(&bytes).context("decode durable CAS upload stage")?;
+        serde_json::from_slice(bytes).context("decode durable CAS upload stage")?;
     validate_durable_upload_record(&record)?;
     if path.file_stem().and_then(|value| value.to_str()) != Some(record.staging_id.as_str()) {
         anyhow::bail!("durable CAS upload path/record mismatch");
@@ -2372,7 +2603,10 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
             validate_hash("durable upload admitted target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
                 .context("durable upload admitted_at is not canonical")?;
-            if !record.object_hashes.is_empty() || !record.blob_hashes.is_empty() {
+            if !record.object_hashes.is_empty()
+                || !record.blob_hashes.is_empty()
+                || !record.large_object_hashes.is_empty()
+            {
                 anyhow::bail!("admitted durable upload receipt still carries staging roots");
             }
         }
@@ -2386,6 +2620,9 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
     for hash in &record.blob_hashes {
         validate_hash("durable staged blob root", hash)?;
     }
+    for hash in &record.large_object_hashes {
+        validate_hash("durable staged large-object root", hash)?;
+    }
     Ok(())
 }
 
@@ -2397,27 +2634,6 @@ fn lock_exclusive(file: &File, label: &str) -> Result<()> {
             return Err(std::io::Error::last_os_error()).with_context(|| label.to_string());
         }
         Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, label);
-        anyhow::bail!("staged CAS root locking is unavailable on this platform")
-    }
-}
-
-fn try_lock_exclusive(file: &File, label: &str) -> Result<bool> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(true);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            Ok(false)
-        } else {
-            Err(error).with_context(|| label.to_string())
-        }
     }
     #[cfg(not(unix))]
     {
@@ -2439,9 +2655,23 @@ fn secure_open_regular(path: &Path, writable: bool) -> Result<Option<File>> {
     parent.open_regular(name, writable)
 }
 
-fn decode_pending_file(mut file: File, chain_root_id: &str) -> Result<PendingChainHeadTransition> {
+fn decode_pending_file(file: File, chain_root_id: &str) -> Result<PendingChainHeadTransition> {
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(MAX_RECOVERY_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("read pending chain transition")?;
+    if bytes.len() as u64 > MAX_RECOVERY_RECORD_BYTES {
+        anyhow::bail!("pending chain transition exceeds byte limit");
+    }
+    decode_pending_bytes(&bytes, chain_root_id)
+}
+
+fn decode_pending_pinned(
+    file: &lillux::PinnedRegularFile,
+    chain_root_id: &str,
+) -> Result<PendingChainHeadTransition> {
+    let bytes = file
+        .read_bounded(MAX_RECOVERY_RECORD_BYTES)
         .context("read pending chain transition")?;
     decode_pending_bytes(&bytes, chain_root_id)
 }
@@ -2527,6 +2757,7 @@ mod tests {
             "created_at": "2026-07-14T12:00:00Z",
             "object_hashes": [],
             "blob_hashes": [],
+            "large_object_hashes": [],
         })
     }
 
@@ -2552,6 +2783,174 @@ mod tests {
         wire["publication_key"] =
             serde_json::Value::String(format!("project-head:{}:{}", hash("a"), hash("b")));
         assert!(serde_json::from_value::<DurableCasUploadRecord>(wire).is_err());
+    }
+
+    #[test]
+    fn durable_upload_can_settle_an_already_current_publication_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        let target_hash = hash("b");
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &hash("c"),
+                "idempotent-publication",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let staging_id = stage.staging_id().to_owned();
+
+        assert!(stage.finish_admitted(&guard, &target_hash).is_err());
+        stage
+            .protect_cas_closure(
+                &guard,
+                std::iter::once(target_hash.as_str()),
+                std::iter::empty(),
+            )
+            .unwrap();
+        stage.finish_admitted(&guard, &target_hash).unwrap();
+        drop(stage);
+
+        let reopened = store
+            .open_durable_cas_upload_admitted(&guard, &staging_id, &hash("c"))
+            .unwrap();
+        reopened
+            .ensure_publication_contract(&publication_key, None)
+            .unwrap();
+        assert_eq!(reopened.admitted_target_hash(), Some(target_hash.as_str()));
+        assert!(
+            reopened
+                .ensure_protects_object(&target_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("admitted receipt")
+        );
+    }
+
+    #[test]
+    fn existing_publication_settles_only_its_exact_duplicate_uploads() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let owner = hash("a");
+        let publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("b")).unwrap();
+        let other_key = DurableCasPublicationKey::external_content_import(&hash("c")).unwrap();
+        let target_hash = hash("d");
+        let first = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let first_id = first.staging_id().to_owned();
+        drop(first);
+        let second = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let second_id = second.staging_id().to_owned();
+        drop(second);
+        let other = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &other_key,
+                None,
+            )
+            .unwrap();
+        let other_id = other.staging_id().to_owned();
+        drop(other);
+
+        assert_eq!(
+            store
+                .settle_durable_cas_uploads_for_existing_publication(
+                    &guard,
+                    &owner,
+                    "managed-external-content-import",
+                    &publication_key,
+                    &target_hash,
+                )
+                .unwrap(),
+            2
+        );
+        for staging_id in [first_id, second_id] {
+            let stage = store
+                .open_durable_cas_upload_admitted(&guard, &staging_id, &owner)
+                .unwrap();
+            assert_eq!(stage.admitted_target_hash(), Some(target_hash.as_str()));
+        }
+        let other = store
+            .open_durable_cas_upload_admitted(&guard, &other_id, &owner)
+            .unwrap();
+        assert_eq!(other.admitted_target_hash(), None);
+    }
+
+    #[test]
+    fn existing_publication_refuses_a_contradictory_duplicate_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let owner = hash("a");
+        let publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("b")).unwrap();
+        let admitted_target = hash("c");
+        let requested_target = hash("d");
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        stage
+            .protect_cas_closure(
+                &guard,
+                std::iter::once(admitted_target.as_str()),
+                std::iter::empty(),
+            )
+            .unwrap();
+        stage.finish_admitted(&guard, &admitted_target).unwrap();
+        drop(stage);
+
+        let error = store
+            .settle_durable_cas_uploads_for_existing_publication(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                &requested_target,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("contradicts the existing publication target")
+        );
     }
 
     #[test]

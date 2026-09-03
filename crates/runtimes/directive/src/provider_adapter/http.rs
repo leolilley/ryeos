@@ -1,8 +1,4 @@
-//! Shared response types for the provider adapter. The non-streaming
-//! HTTP `call_provider` previously lived here; the live launch path
-//! now uses `streaming::call_provider_streaming` exclusively, so this
-//! module is reduced to the typed response shape both the streaming
-//! function and downstream cost accounting depend on.
+//! Shared response and accounting types for provider transports.
 
 use crate::directive::ProviderMessage;
 use serde::Serialize;

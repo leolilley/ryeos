@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -446,6 +452,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "cron"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -790,10 +805,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "fluent-uri"
@@ -1027,17 +1062,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
-]
-
-[[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link",
 ]
 
 [[package]]
@@ -1453,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.76"
+version = "0.5.77"
 dependencies = [
  "anyhow",
  "base64",
@@ -1555,6 +1579,16 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
 
 [[package]]
 name = "mio"
@@ -2008,7 +2042,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2346,7 +2380,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 name = "ryeos-accounting"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "lillux",
+ "ryeos-provider-contract",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2363,6 +2399,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "flate2",
  "form_urlencoded",
  "glob",
  "hmac",
@@ -2375,10 +2412,13 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
- "ryeos-directive-core",
+ "ryeos-core-tools",
+ "ryeos-directive-definition",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-handler-protocol",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -2388,6 +2428,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "subtle",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2408,7 +2449,6 @@ dependencies = [
  "base64",
  "chrono",
  "directories",
- "hostname",
  "libc",
  "lillux",
  "once_cell",
@@ -2417,11 +2457,15 @@ dependencies = [
  "rusqlite",
  "ryeos-accounting",
  "ryeos-bundle",
+ "ryeos-effect-contract",
  "ryeos-engine",
+ "ryeos-graph-definition",
  "ryeos-isolation-protocol",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
+ "ryeos-tracing",
  "ryeos-vault",
  "serde",
  "serde_json",
@@ -2433,6 +2477,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -2468,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.76"
+version = "0.5.77"
 dependencies = [
  "anyhow",
  "base64",
@@ -2484,7 +2529,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-core-tools",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
  "ryeos-engine",
  "ryeos-node",
  "ryeos-runtime",
@@ -2492,12 +2537,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "uuid",
  "zeroize",
 ]
 
@@ -2568,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.76"
+version = "0.5.77"
 dependencies = [
  "anyhow",
  "base64",
@@ -2581,6 +2628,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
+ "ryeos-handler-protocol",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2596,12 +2644,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-directive-core"
+name = "ryeos-directive-definition"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "lillux",
  "ryeos-accounting",
+ "ryeos-effect-contract",
+ "ryeos-runtime",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2623,8 +2673,9 @@ dependencies = [
  "regex",
  "reqwest",
  "ryeos-accounting",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
  "ryeos-engine",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2640,6 +2691,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-effect-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lillux",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-engine"
 version = "0.1.0"
 dependencies = [
@@ -2651,6 +2713,7 @@ dependencies = [
  "lillux",
  "regex",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "ryeos-expression",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
@@ -2679,9 +2742,11 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -2706,6 +2771,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-graph-definition"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ryeos-bundle",
+ "ryeos-effect-contract",
+ "ryeos-engine",
+ "ryeos-expression",
+ "ryeos-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-graph-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2718,6 +2797,7 @@ dependencies = [
  "regex",
  "ryeos-bundle",
  "ryeos-engine",
+ "ryeos-graph-definition",
  "ryeos-runtime",
  "ryeos-tracing",
  "serde",
@@ -2738,7 +2818,10 @@ dependencies = [
  "anyhow",
  "base64",
  "regex",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
+ "ryeos-effect-contract",
+ "ryeos-engine",
+ "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "serde",
  "serde_json",
@@ -2749,6 +2832,7 @@ dependencies = [
 name = "ryeos-handler-protocol"
 version = "0.1.0"
 dependencies = [
+ "ryeos-effect-contract",
  "serde",
  "serde_json",
 ]
@@ -2806,8 +2890,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-provider-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lillux",
+ "ryeos-effect-contract",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "ryeos-runtime"
-version = "0.5.76"
+version = "0.5.77"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2818,6 +2915,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-expression",
  "ryeos-state",
@@ -2851,6 +2949,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-session-exec"
+version = "0.5.77"
+
+[[package]]
 name = "ryeos-state"
 version = "0.1.0"
 dependencies = [
@@ -2861,8 +2963,10 @@ dependencies = [
  "libc",
  "lillux",
  "rand 0.8.6",
+ "regex",
  "rusqlite",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "ryeos-tracing",
  "serde",
  "serde_json",
@@ -2870,6 +2974,26 @@ dependencies = [
  "sha2",
  "tempfile",
  "tracing",
+ "url",
+]
+
+[[package]]
+name = "ryeos-structured-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jsonschema",
+ "libc",
+ "lillux",
+ "ryeos-engine",
+ "ryeos-handler-bins",
+ "ryeos-handler-protocol",
+ "ryeos-runtime",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2941,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.76"
+version = "0.5.77"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2972,10 +3096,12 @@ dependencies = [
  "ryeos-api",
  "ryeos-app",
  "ryeos-core-tools",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-isolation-protocol",
  "ryeos-node",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -3231,6 +3357,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3339,6 +3471,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
 ]
 
 [[package]]
@@ -4430,6 +4573,16 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

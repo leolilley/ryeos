@@ -827,6 +827,67 @@ pub(crate) fn read_thread_snapshot_with_trust(
     trust_store: &TrustStore,
     head_cache: &mut HeadCache,
 ) -> anyhow::Result<Option<ThreadSnapshot>> {
+    let Some((_head_hash, chain_state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    if !chain_state.threads.contains_key(thread_id) {
+        return Ok(None);
+    }
+    read_current_snapshot_for_mutation(cas_root, Some(chain_lock), &chain_state, thread_id)
+        .map(Some)
+}
+
+/// Read one thread's current snapshot and exact entry-final event from the
+/// same trust-verified signed head. A snapshot may intentionally lag the
+/// thread entry when an append does not change lifecycle state, so the event
+/// must be selected from `ChainThreadEntry`, never `ThreadSnapshot`.
+pub(crate) fn read_thread_snapshot_with_entry_last_event_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<(String, ThreadSnapshot, Option<(String, ThreadEvent)>)>> {
+    let Some((head_hash, chain_state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(entry) = chain_state.threads.get(thread_id) else {
+        return Ok(None);
+    };
+    let snapshot =
+        read_current_snapshot_for_mutation(cas_root, Some(chain_lock), &chain_state, thread_id)?;
+    let last_event =
+        read_entry_last_event_object(cas_root, chain_lock, chain_root_id, thread_id, entry)?;
+    Ok(Some((head_hash, snapshot, last_event)))
+}
+
+fn read_chain_state_with_verified_head(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<(String, ChainState)>> {
     validate_chain_root_id(chain_root_id)?;
     chain_lock.ensure_protects(refs_root, chain_root_id)?;
     let Some(signed_ref) = chain_lock.read_verified_head(trust_store)? else {
@@ -869,11 +930,7 @@ pub(crate) fn read_thread_snapshot_with_trust(
         )?,
     };
 
-    if !chain_state.threads.contains_key(thread_id) {
-        return Ok(None);
-    }
-    read_current_snapshot_for_mutation(cas_root, Some(chain_lock), &chain_state, thread_id)
-        .map(Some)
+    Ok(Some((signed_ref.target_hash, chain_state)))
 }
 
 /// Read the exact append position for one thread from a trust-verified signed
@@ -3069,7 +3126,7 @@ mod tests {
             item_trust_class: CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: hash,
             resolved_from: CapturedPolicyProvenance::NodeDefault {
-                node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
             },
         }))
         .build()

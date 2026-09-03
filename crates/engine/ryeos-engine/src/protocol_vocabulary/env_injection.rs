@@ -16,9 +16,9 @@ pub enum EnvInjectionSource {
     ThreadId,
     /// Effective project root path on disk.
     ProjectPath,
-    /// Callback authorization/state anchor. This is the deliberate state-root
-    /// override when present, otherwise the effective project root.
-    CallbackProjectPath,
+    /// Opaque durable-state namespace derived from admitted project identity.
+    /// Projectless executions receive an empty value.
+    ProjectStateScope,
     /// Acting principal fingerprint (key used to authorize the dispatch).
     ActingPrincipal,
     /// Path to the daemon's CAS root (objects directory).
@@ -57,19 +57,9 @@ pub fn produce_env_value(
             .to_str()
             .map(str::to_owned)
             .ok_or_else(|| EngineError::Internal("project path is not valid UTF-8".into())),
-        EnvInjectionSource::CallbackProjectPath => request
-            .callback_project_path
-            .as_ref()
-            .ok_or_else(|| {
-                EngineError::Internal(
-                    "callback_project_path requested but no callback project path available".into(),
-                )
-            })?
-            .to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                EngineError::Internal("callback project path is not valid UTF-8".into())
-            }),
+        EnvInjectionSource::ProjectStateScope => {
+            Ok(request.project_state_scope.clone().unwrap_or_default())
+        }
         EnvInjectionSource::ActingPrincipal => Ok(request.acting_principal.clone()),
         EnvInjectionSource::CasRoot => request
             .cas_root
@@ -126,7 +116,7 @@ mod tests {
             cas_root: PathBuf::from("/cas/root"),
             callback_token: Some("tok-abc".to_string()),
             callback_socket_path: Some("/tmp/ryeos-callback.sock".to_string()),
-            callback_project_path: Some(PathBuf::from("/project-state")),
+            project_state_scope: Some("a".repeat(64)),
             thread_auth_token: Some("tat-abc123".to_string()),
             params: serde_json::json!({}),
             resolution_output: None,
@@ -140,7 +130,7 @@ mod tests {
             EnvInjectionSource::CallbackToken,
             EnvInjectionSource::ThreadId,
             EnvInjectionSource::ProjectPath,
-            EnvInjectionSource::CallbackProjectPath,
+            EnvInjectionSource::ProjectStateScope,
             EnvInjectionSource::ActingPrincipal,
             EnvInjectionSource::CasRoot,
             EnvInjectionSource::ThreadAuthToken,
@@ -172,10 +162,17 @@ mod tests {
     }
 
     #[test]
-    fn producer_callback_project_path() {
-        let req = make_request();
-        let val = produce_env_value(EnvInjectionSource::CallbackProjectPath, &req).unwrap();
-        assert_eq!(val, "/project-state");
+    fn producer_project_state_scope_is_opaque_and_projectless_is_empty() {
+        let mut req = make_request();
+        let val = produce_env_value(EnvInjectionSource::ProjectStateScope, &req).unwrap();
+        assert_eq!(val, "a".repeat(64));
+        assert!(!val.contains('/'));
+
+        req.project_state_scope = None;
+        assert_eq!(
+            produce_env_value(EnvInjectionSource::ProjectStateScope, &req).unwrap(),
+            ""
+        );
     }
 
     #[test]

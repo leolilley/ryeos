@@ -9,11 +9,11 @@ pub async fn write_node_receipt(
     graph_run_id: &str,
     receipt: &NodeReceipt,
 ) -> anyhow::Result<Value> {
-    let receipt_json = json!({
+    let mut receipt_json = json!({
         "node": receipt.node,
         "step": receipt.step,
         "definition_ref": receipt.definition_ref,
-        "definition_hash": receipt.definition_hash,
+        "effective_definition_digest": receipt.effective_definition_digest,
         "graph_run_id": graph_run_id,
         "node_result_hash": receipt.result_hash,
         "cache_hit": receipt.cache_hit,
@@ -22,6 +22,17 @@ pub async fn write_node_receipt(
         "error": receipt.error,
         "cost": receipt.cost,
     });
+    // Replay provenance appears only when a record was actually served,
+    // mirroring the receipt struct's skip-when-absent wire shape.
+    if let Some(replayed_from) = &receipt.replayed_from {
+        receipt_json["replayed_from"] = json!(replayed_from);
+    }
+    if let Some(dispatch) = &receipt.dispatch {
+        receipt_json["dispatch"] = serde_json::to_value(dispatch)?;
+    }
+    if let Some(fanout) = &receipt.fanout {
+        receipt_json["fanout"] = serde_json::to_value(fanout)?;
+    }
 
     callback
         .publish_artifact(json!({
@@ -154,15 +165,30 @@ mod tests {
         (client, mock)
     }
 
+    fn live_dispatch(byte: char) -> ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+        ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+            action_digest: byte.to_string().repeat(64),
+            effect_identity: None,
+            publication:
+                ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        }
+    }
+
     #[tokio::test]
     async fn write_node_receipt_formats_correctly() {
         let receipt = NodeReceipt {
             node: "step1".to_string(),
             step: 1,
             definition_ref: "graph:test".to_string(),
-            definition_hash: "def123".to_string(),
+            effective_definition_digest: "def123".to_string(),
             result_hash: Some("abc123".to_string()),
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms: 142,
             error: None,
             cost: None,
@@ -175,7 +201,7 @@ mod tests {
         assert_eq!(output["cache_hit"], false);
         assert_eq!(output["elapsed_ms"], 142);
         assert_eq!(output["definition_ref"], "graph:test");
-        assert_eq!(output["definition_hash"], "def123");
+        assert_eq!(output["effective_definition_digest"], "def123");
         assert_eq!(output["node_result_hash"], "abc123");
         assert!(output.get("timestamp").is_some());
 
@@ -192,9 +218,11 @@ mod tests {
             node: "step1".to_string(),
             step: 0,
             definition_ref: "graph:test".to_string(),
-            definition_hash: "def123".to_string(),
+            effective_definition_digest: "def123".to_string(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms: 5,
             error: Some("boom".to_string()),
             cost: None,
@@ -208,7 +236,7 @@ mod tests {
 
         assert_eq!(output["graph_run_id"], "gr-err");
         assert_eq!(output["definition_ref"], "graph:test");
-        assert_eq!(output["definition_hash"], "def123");
+        assert_eq!(output["effective_definition_digest"], "def123");
         assert_eq!(output["node_result_hash"], Value::Null);
         assert_eq!(output["error"], "boom");
 
@@ -227,9 +255,11 @@ mod tests {
             node: "reason".to_string(),
             step: 1,
             definition_ref: "graph:test".to_string(),
-            definition_hash: "def123".to_string(),
+            effective_definition_digest: "def123".to_string(),
             result_hash: Some("h".to_string()),
             cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
             elapsed_ms: 12,
             error: None,
             cost: Some(ryeos_runtime::envelope::RuntimeCost {
@@ -249,5 +279,42 @@ mod tests {
         assert_eq!(output["cost"]["output_tokens"], 20);
         let artifacts = mock.artifacts.lock().unwrap();
         assert_eq!(artifacts[0]["metadata"]["cost"]["input_tokens"], 100);
+    }
+
+    #[tokio::test]
+    async fn write_node_receipt_persists_unary_and_fanout_dispatch_evidence() {
+        let unary = live_dispatch('a');
+        let fanout = live_dispatch('b');
+        let receipt = NodeReceipt {
+            node: "dispatch".to_owned(),
+            step: 4,
+            definition_ref: "graph:test".to_owned(),
+            effective_definition_digest: "d".repeat(64),
+            result_hash: Some("e".repeat(64)),
+            cache_hit: false,
+            replayed_from: None,
+            dispatch: Some(unary.clone()),
+            elapsed_ms: 8,
+            error: None,
+            cost: None,
+            fanout: Some(crate::model::FanoutReceiptSummary {
+                statuses: vec![crate::model::FanoutItemStatus::Completed],
+                failed: 0,
+                expected: 1,
+                results: None,
+                dispatches: vec![fanout.clone()],
+            }),
+        };
+        let (callback, mock) = make_callback();
+        let output = write_node_receipt(&callback, "gr-evidence", &receipt)
+            .await
+            .unwrap();
+
+        assert_eq!(output["dispatch"], serde_json::to_value(unary).unwrap());
+        assert_eq!(
+            output["fanout"]["dispatches"],
+            json!([serde_json::to_value(fanout).unwrap()])
+        );
+        assert_eq!(mock.artifacts.lock().unwrap()[0]["metadata"], output);
     }
 }

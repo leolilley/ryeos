@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:55Z:7cb4de829b5b2e50e9b0d9f030f8b580f9126b3dc775a938b65685b94f1a3d80:z1QqGj+z5Iw20Wq5fqGLdb9O32VFqRc9godugHlL85a3ISXNDdfcYcBUBuFd83XcMu4uWU8lu9G49ouO1fxxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-03T11:56:15Z:8abce39e683c2abb098874647068fb6a1f44e5455b9179e0993f39315403a54d:lcCLjNxl/mGUDJo/oLorr0G1xRE8yKrPQAIybFcyZCEO+X49lvPE7fQqMeCnhQ+OQp4UaLH88IzxGcAfAk7XDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -42,6 +42,7 @@ Bundles are signed content trees. Derived bundle state (`.ai/bin`, `.ai/objects`
 |---|---|---|
 | Core | `bundles/core/` | kind schemas, parsers, handlers, protocols, services, core tools, routes, CLI aliases/verbs |
 | Standard | `bundles/standard/` | directive/graph/knowledge runtimes, model provider config, user-facing clients/tools/directives |
+| Local inference | `bundles/local-inference/` | optional local-model workers, provider routes, activation fixtures, and acceptance probes |
 
 Important bundle subdirs:
 
@@ -81,8 +82,10 @@ generic composed dispatch fields. Avoid kind-specific CLI descriptor parsing.
   arbitrary ambient directories.
 - Bundle-owned binaries must be resolved from signed bundle bin trees. Do not
   install handler/runtime/tool binaries on PATH as a workaround.
-- Isolation activation and OS controls come only from
-  `<app-root>/.ai/node/isolation.yaml`; items cannot override the node snapshot.
+- Isolation activation and OS controls come only from the `isolation` member
+  of the complete signed generation at
+  `<app-root>/.ai/node/policies/isolation.yaml`; items cannot override the
+  compiled node-policy snapshot.
 
 See `knowledge:ryeos/core/node/execution-isolation` for node-owned confinement
 and `knowledge:ryeos/core/execution/attachment-before-execution` for the
@@ -110,13 +113,15 @@ well as `ai_only` (config can add to them but never remove):
 Classification order is `never_deploy_secrets → ignore → node_owned →
 deployable → unknown/non-ai`, so an ignored file inside a deployable surface
 (e.g. `.ai/tools/x/__pycache__/y.pyc`) is dropped, not shipped. The ingest
-ignore matcher (`.ai/node/ingest/ignore.yaml`) supports **path-anchored**
+ignore policy (`.ai/node/policies/ingest_ignore.yaml`) supports **path-anchored**
 patterns (e.g. `/.ai/config/remotes/`, which is ignored by default for fresh
 inits — a project's remotes config is environment-specific and must not travel).
+It is a member of the complete node-signed policy generation and is changed
+through the stopped-node policy workflow, not edited in place.
 
 `ryeos init` writes a generated, **read-only** `.ai/node/sync/policy.yaml` that
 documents the effective policy — deployable surfaces, both floors, and a pointer
-to the editable ignore source. It is a discovery window, not a control surface:
+to the signed ignore-policy source. It is a discovery window, not a control surface:
 floors and surfaces are enforced in code, and editing the file changes nothing.
 Source: `crates/state/ryeos-state/src/{project_sync,ignore}.rs`.
 
@@ -170,7 +175,8 @@ the apply lock's job).
 | Need | Likely area |
 |---|---|
 | Item resolution/composition behavior | `crates/engine/ryeos-engine/src/` |
-| Node-config/bootstrap/bundle root loading | `crates/daemon/ryeos-app/src/node_config/` and `crates/daemon/ryeos-bundle/src/installed.rs` |
+| Operational node config/bootstrap and bundle root loading | `crates/daemon/ryeos-app/src/node_config/` and `crates/daemon/ryeos-bundle/src/installed.rs` |
+| Node-owned semantic policy and complete policy generation | `crates/daemon/ryeos-app/src/node_policy/` |
 | Project AI sync/deploy surfaces | `crates/state/ryeos-state/src/project_sync.rs` and `crates/daemon/ryeos-api/src/project_deploy/` |
 | Schedule runtime behavior | `crates/state/ryeos-scheduler/` plus scheduler service handlers in `crates/daemon/ryeos-api/src/handlers/` |
 | CLI command behavior | `crates/bin/cli/src/` plus bundle alias/verb descriptors |

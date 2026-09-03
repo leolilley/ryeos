@@ -26,6 +26,32 @@ pub enum ResolvedProjectSpec {
     Explicit(PathBuf),
 }
 
+/// A command's `project.bind_parameter` is an internal service-field mapping,
+/// not a second user-facing project selector. Accepting both it and the
+/// canonical `--project` flag makes command resolution and payload binding
+/// disagree about which project owns the target item.
+pub fn reject_bound_project_parameter_flag(
+    tail: &[String],
+    bind_parameter: Option<&str>,
+) -> Result<(), CliError> {
+    let mut forbidden = vec!["--project-path".to_owned()];
+    if let Some(bind_parameter) = bind_parameter {
+        let flag = format!("--{}", bind_parameter.replace('_', "-"));
+        if flag != "--project" && !forbidden.contains(&flag) {
+            forbidden.push(flag);
+        }
+    }
+    if let Some(flag) = forbidden.iter().find(|flag| {
+        tail.iter()
+            .any(|token| token == *flag || token.starts_with(&format!("{flag}=")))
+    }) {
+        return Err(CliError::ProjectResolution(format!(
+            "{flag} is a runtime-bound service field, not a project selector; use --project <path>"
+        )));
+    }
+    Ok(())
+}
+
 /// Process the tail of a project-bearing command, returning a rewritten
 /// tail where `--project` and `--no-project` are in their canonical
 /// daemon-friendly form (absolute paths, no `-p`/`--project=foo`
@@ -207,6 +233,16 @@ mod tests {
     }
 
     #[test]
+    fn runtime_bound_project_path_is_not_a_second_selector() {
+        let error = reject_bound_project_parameter_flag(
+            &["--project-path=/tmp/project".to_string()],
+            Some("project_path"),
+        )
+        .unwrap_err();
+        assert!(format!("{error}").contains("use --project <path>"));
+    }
+
+    #[test]
     fn default_uses_cwd_when_cwd_contains_dot_ai() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join(ryeos_engine::AI_DIR)).unwrap();
@@ -222,5 +258,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolved = resolve_spec_from_cwd(false, None, dir.path()).unwrap();
         assert_eq!(resolved, ResolvedProjectSpec::NoProject);
+    }
+
+    #[test]
+    fn canonical_project_flag_is_allowed_when_it_is_the_bind_name() {
+        let tail = vec!["--project".into(), "/project".into()];
+        reject_bound_project_parameter_flag(&tail, Some("project"))
+            .expect("canonical selector must remain user-facing");
+    }
+
+    #[test]
+    fn project_path_alias_is_rejected_even_when_the_bind_name_is_project() {
+        let tail = vec!["--project-path=/project".into()];
+        let error = reject_bound_project_parameter_flag(&tail, Some("project"))
+            .expect_err("legacy second selector must be refused");
+        assert!(format!("{error}").contains("use --project <path>"));
     }
 }
