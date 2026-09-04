@@ -132,7 +132,7 @@ class CodexContractTests(unittest.TestCase):
             environment_activation,
         )
         for line in (
-            "  - id: developer-tools",
+            "  - id: command-tools",
             "    storage: content",
             "        member: codex-path/rg",
             "        target: bin/rg",
@@ -173,7 +173,9 @@ class CodexContractTests(unittest.TestCase):
         ).hexdigest()
         self.assertEqual(manifest_digest, "f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5")
         self.assertIn(f"    digest: {manifest_digest}", environment)
-        self.assertIn("    - realization_id: developer-tools", environment)
+        self.assertIn("    - realization_id: command-tools", environment)
+        self.assertIn("schema: ryeos.worker_environment.v3", environment)
+        self.assertIn("  process_environment: {}", environment)
         self.assertIn("      relative_directory: bin", environment)
 
     def test_hosted_workflow_profile_admits_the_signed_worker(self) -> None:

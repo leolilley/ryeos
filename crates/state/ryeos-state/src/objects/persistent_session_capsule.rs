@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, DirectExecutableIdentity,
@@ -15,8 +15,11 @@ use super::{
 };
 
 pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 5;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 6;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
+pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
+pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
+pub const SESSION_PROCESS_ENVIRONMENT_ENV: &str = "RYEOS_SESSION_PROCESS_ENVIRONMENT";
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -347,6 +350,122 @@ impl ExecutableSearchPathEntry {
     }
 }
 
+/// One path-free environment value retained in the exact session capsule.
+/// Path variants name only authorities already owned by the launch: an exact
+/// pinned realization or the daemon-owned runtime view below the workspace's
+/// non-bypassable capture floor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionProcessEnvironmentValue {
+    Literal {
+        value: String,
+    },
+    RealizationPath {
+        realization_id: String,
+        relative_path: String,
+        path_kind: SessionProcessEnvironmentPathKind,
+    },
+    RuntimeViewDirectory {
+        relative_path: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionProcessEnvironmentPathKind {
+    File,
+    Directory,
+}
+
+pub fn validate_session_process_environment(
+    environment: &BTreeMap<String, SessionProcessEnvironmentValue>,
+) -> anyhow::Result<()> {
+    if environment.len() > MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES {
+        anyhow::bail!("session process environment exceeds its entry bound");
+    }
+    for (name, value) in environment {
+        validate_session_process_environment_name(name)?;
+        match value {
+            SessionProcessEnvironmentValue::Literal { value } => {
+                if value.len() > 4096 || value.chars().any(char::is_control) {
+                    anyhow::bail!("session process environment literal is not bounded");
+                }
+            }
+            SessionProcessEnvironmentValue::RealizationPath {
+                realization_id,
+                relative_path,
+                ..
+            } => {
+                if realization_id.is_empty()
+                    || realization_id.len() > 64
+                    || !realization_id.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'_' | b'-')
+                    })
+                {
+                    anyhow::bail!("session process environment realization id is not canonical");
+                }
+                validate_session_process_environment_relative_path(relative_path)?;
+            }
+            SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } => {
+                validate_session_process_environment_relative_path(relative_path)?;
+            }
+        }
+    }
+    let encoded = serde_json::to_vec(environment)?;
+    if encoded.len() > MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES {
+        anyhow::bail!(
+            "session process environment exceeds its encoded byte bound of {}",
+            MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_session_process_environment_name(name: &str) -> anyhow::Result<()> {
+    let mut bytes = name.bytes();
+    if name.is_empty()
+        || name.len() > 128
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte == b'_' || byte.is_ascii_uppercase())
+        || !bytes.all(|byte| byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        || matches!(
+            name,
+            "PATH"
+                | "HOME"
+                | "USER"
+                | "SHELL"
+                | "TERM"
+                | "LANG"
+                | "LC_ALL"
+                | "PWD"
+                | "OLDPWD"
+                | "BASH_ENV"
+                | "ENV"
+                | "PYTHONHOME"
+                | "PYTHONPATH"
+        )
+        || name.starts_with("LD_")
+        || name.starts_with("DYLD_")
+        || name.starts_with("RYEOS_")
+        || name.starts_with("RYEOSD_")
+        || name.starts_with("RUST_")
+    {
+        anyhow::bail!("session process environment contains a protected or invalid name");
+    }
+    Ok(())
+}
+
+pub fn validate_session_process_environment_relative_path(path: &str) -> anyhow::Result<()> {
+    if path != "." {
+        super::validate_canonical_project_relative_path(path)
+            .map_err(|error| anyhow::anyhow!("session process environment path: {error}"))?;
+    }
+    Ok(())
+}
+
 impl PersistentSessionAuthority {
     pub fn validate(&self) -> anyhow::Result<()> {
         super::thread_snapshot::validate_canonical_hash(
@@ -426,6 +545,9 @@ pub struct AdmittedPersistentSessionCapsule {
     /// Ordered search path compiled from signed content dependencies. This is
     /// a logical realization-relative contract, never an ambient host PATH.
     pub executable_search: Vec<ExecutableSearchPathEntry>,
+    /// Environment bindings compiled from signed launch contributions. No
+    /// absolute host path is retained in the capsule.
+    pub process_environment: BTreeMap<String, SessionProcessEnvironmentValue>,
     pub runtime_ref: String,
     pub executor_ref: String,
 }
@@ -524,6 +646,25 @@ impl AdmittedPersistentSessionCapsule {
                 anyhow::bail!(
                     "executable-search realization `{}` is not tree-shaped",
                     entry.realization_id
+                );
+            }
+        }
+        validate_session_process_environment(&self.process_environment)?;
+        for value in self.process_environment.values() {
+            let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
+            else {
+                continue;
+            };
+            if realized
+                .as_ref()
+                .and_then(|set| set.iter().find(|item| item.id == *realization_id))
+                .is_none_or(|realization| {
+                    realization.kind != super::ExternalContentKind::Tree
+                        || realization.mode != super::ExternalContentMode::Pinned
+                })
+            {
+                anyhow::bail!(
+                    "session process environment realization `{realization_id}` is absent or not a pinned tree"
                 );
             }
         }
@@ -733,5 +874,54 @@ mod tests {
                 }))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn session_process_environment_accepts_only_typed_unprotected_bindings() {
+        let valid = BTreeMap::from([
+            (
+                "CARGO_HOME".to_owned(),
+                SessionProcessEnvironmentValue::RuntimeViewDirectory {
+                    relative_path: "cargo/home".to_owned(),
+                },
+            ),
+            (
+                "RUSTUP_HOME".to_owned(),
+                SessionProcessEnvironmentValue::RealizationPath {
+                    realization_id: "rust-toolchain".to_owned(),
+                    relative_path: "rustup".to_owned(),
+                    path_kind: SessionProcessEnvironmentPathKind::Directory,
+                },
+            ),
+            (
+                "CARGO_NET_OFFLINE".to_owned(),
+                SessionProcessEnvironmentValue::Literal {
+                    value: "true".to_owned(),
+                },
+            ),
+        ]);
+        validate_session_process_environment(&valid).unwrap();
+        validate_session_process_environment_relative_path(".").unwrap();
+
+        for name in ["PATH", "HOME", "RYEOS_WORKSPACE", "LD_PRELOAD", "RUST_LOG"] {
+            let invalid = BTreeMap::from([(
+                name.to_owned(),
+                SessionProcessEnvironmentValue::Literal {
+                    value: "value".to_owned(),
+                },
+            )]);
+            assert!(
+                validate_session_process_environment(&invalid).is_err(),
+                "{name}"
+            );
+        }
+
+        let oversized = BTreeMap::from([(
+            "CARGO_TARGET_DIR".to_owned(),
+            SessionProcessEnvironmentValue::Literal {
+                value: "x".repeat(MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES),
+            },
+        )]);
+        assert!(validate_session_process_environment(&oversized).is_err());
     }
 }

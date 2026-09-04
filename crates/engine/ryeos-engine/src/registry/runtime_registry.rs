@@ -45,6 +45,9 @@ const MAX_LAUNCH_EXECUTION_DEPENDENCIES: usize = 8;
 const MAX_LAUNCH_CONTENT_DEPENDENCIES: usize = 8;
 const MAX_LAUNCH_CONTENT_TARGETS: usize = 8;
 const MAX_LAUNCH_EXECUTABLE_SEARCH_ENTRIES: usize = 32;
+const MAX_LAUNCH_ENVIRONMENT_CONTRIBUTIONS: usize = 8;
+const MAX_LAUNCH_ENVIRONMENT_TARGETS: usize = 8;
+const MAX_LAUNCH_ENVIRONMENT_VARIABLES: usize = 32;
 const MAX_LAUNCH_SECRET_NAMES: usize = 32;
 const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
 const MAX_LAUNCH_NAME_BYTES: usize = 64;
@@ -169,6 +172,10 @@ pub struct LaunchContractDecl {
     /// Kind/space/trust remain authoritative in `ref_bindings` and are not
     /// repeated here.
     pub content_dependencies: LaunchContentDependencyPolicy,
+    /// Signed mechanical ceiling for path-free environment contributions to
+    /// named execution dependencies. Values may reference admitted content
+    /// dependencies, but are not themselves content authority.
+    pub environment_contributions: LaunchEnvironmentContributionPolicy,
     /// Required declaration of the financial authority this runtime's launch
     /// preparation must produce. `none` states the runtime exercises no
     /// direct financial boundary; an accounting runtime declares the exact
@@ -188,6 +195,14 @@ pub struct LaunchExecutionDependencyPolicy {
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<LaunchItemSpace>,
     pub allowed_trust: Vec<TrustClass>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchEnvironmentContributionPolicy {
+    pub max_contributions: u16,
+    pub max_targets_per_contribution: u16,
+    pub max_variables_per_contribution: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1220,6 +1235,38 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
         }
     }
 
+    let environment_policy = &contract.environment_contributions;
+    if usize::from(environment_policy.max_contributions) > MAX_LAUNCH_ENVIRONMENT_CONTRIBUTIONS
+        || usize::from(environment_policy.max_targets_per_contribution)
+            > MAX_LAUNCH_ENVIRONMENT_TARGETS
+        || usize::from(environment_policy.max_variables_per_contribution)
+            > MAX_LAUNCH_ENVIRONMENT_VARIABLES
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.environment_contributions exceeds a daemon count ceiling",
+        );
+    }
+    let environment_disabled = environment_policy.max_contributions == 0;
+    if environment_disabled
+        != (environment_policy.max_targets_per_contribution == 0
+            && environment_policy.max_variables_per_contribution == 0)
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.environment_contributions must be wholly zero exactly when max_contributions is zero",
+        );
+    }
+    if !environment_disabled
+        && (environment_policy.max_targets_per_contribution == 0
+            || environment_policy.max_variables_per_contribution == 0)
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "enabled launch environment contributions require nonzero target and variable ceilings",
+        );
+    }
+
     if matches!(&contract.preparation, LaunchPreparationDecl::None)
         && (!contract.config_inputs.is_empty()
             || secret_policy.max_requirements != 0
@@ -1227,11 +1274,12 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             || !contract.required_runtime_data.is_empty()
             || !contract.runtime_facts.is_empty()
             || contract.execution_dependencies.max_dependencies != 0
-            || contract.content_dependencies.max_dependencies != 0)
+            || contract.content_dependencies.max_dependencies != 0
+            || contract.environment_contributions.max_contributions != 0)
     {
         return runtime_yaml_error(
             yaml_path,
-            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, execution dependencies, and content dependencies",
+            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, execution dependencies, content dependencies, and environment contributions",
         );
     }
 
@@ -1427,6 +1475,11 @@ mod tests {
                     max_executable_search_entries: 0,
                     external_content: None,
                 },
+                environment_contributions: LaunchEnvironmentContributionPolicy {
+                    max_contributions: 0,
+                    max_targets_per_contribution: 0,
+                    max_variables_per_contribution: 0,
+                },
                 financial_authority: FinancialAuthorityDecl::None,
                 external_effect_authority: ExternalEffectAuthorityDecl::None,
             },
@@ -1471,6 +1524,10 @@ mod tests {
         "    max_targets_per_dependency: 0\n",
         "    max_executable_search_entries: 0\n",
         "    external_content: null\n",
+        "  environment_contributions:\n",
+        "    max_contributions: 0\n",
+        "    max_targets_per_contribution: 0\n",
+        "    max_variables_per_contribution: 0\n",
         "  financial_authority:\n",
         "    kind: none\n",
         "  external_effect_authority:\n",

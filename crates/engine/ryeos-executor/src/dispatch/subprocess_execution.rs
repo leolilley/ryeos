@@ -426,6 +426,7 @@ async fn dispatch_managed_subprocess(
                 "binding_records": dependencies.binding_records,
                 "execution_dependencies": dependencies.execution_dependencies,
                 "content_dependencies": dependencies.content_dependencies,
+                "environment_contributions": dependencies.environment_contributions,
                 "credential_readiness": {
                     "status": credential_readiness,
                     "required_count": credential_names.len(),

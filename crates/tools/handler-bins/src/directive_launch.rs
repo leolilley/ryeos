@@ -227,6 +227,7 @@ fn prepare_inner(
         runtime_facts: prepared.runtime_facts,
         execution_dependencies,
         content_dependencies: BTreeMap::new(),
+        environment_contributions: BTreeMap::new(),
         financial_authority: FinancialAuthorityResultWire::Accounting { authority },
         external_effect_authority: ExternalEffectAuthorityResultWire::External {
             authority: serde_json::to_value(external_effect_authority).map_err(|error| {
@@ -586,6 +587,18 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         || request.content_dependencies.external_content.is_some()
     {
         return Err("content_dependencies must be disabled".into());
+    }
+    if request.environment_contributions.max_contributions != 0
+        || request
+            .environment_contributions
+            .max_targets_per_contribution
+            != 0
+        || request
+            .environment_contributions
+            .max_variables_per_contribution
+            != 0
+    {
+        return Err("environment_contributions must be disabled".into());
     }
 
     if request.secret_policy.max_requirements != 4 {

@@ -705,6 +705,16 @@ fn run() -> Result<()> {
         &external_realizations,
         executable_search.as_deref(),
     )?;
+    let session_process_environment =
+        optional_env(ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV)?;
+    let (session_process_environment, mut environment_descriptors) =
+        resolve_session_process_environment(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&external_root),
+            &external_realizations,
+            session_process_environment.as_deref(),
+        )?;
+    inherited_descriptors.append(&mut environment_descriptors);
     inherited_descriptors.append(&mut workload_handles);
     reset_compatibility_baseline_config(
         std::path::Path::new(&workload_home),
@@ -745,6 +755,7 @@ fn run() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("descriptor-rooted workload argv[0] is not valid UTF-8"))?,
         executable_path.as_deref(),
+        &session_process_environment,
         inherited_descriptors,
     )?;
     app.initialize()?;
@@ -1205,6 +1216,106 @@ fn resolve_pinned_executable_search(
     Ok((Some(paths.join(":")), handles))
 }
 
+fn resolve_session_process_environment(
+    workspace: &std::path::Path,
+    external_root: &std::path::Path,
+    sealed_realizations: &str,
+    encoded: Option<&str>,
+) -> Result<(
+    BTreeMap<String, String>,
+    Vec<lillux::InheritedDescriptorAuthority>,
+)> {
+    let Some(encoded) = encoded else {
+        return Ok((BTreeMap::new(), Vec::new()));
+    };
+    let bindings: BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue> =
+        serde_json::from_str(encoded).context("decode admitted session process environment")?;
+    ryeos_state::objects::validate_session_process_environment(&bindings)?;
+    let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+        &serde_json::from_str(sealed_realizations)
+            .context("decode sealed external realizations for session process environment")?,
+    )?;
+    let workspace = lillux::PinnedDirectory::open(workspace)?
+        .ok_or_else(|| anyhow!("worker runtime workspace is unavailable"))?;
+    let mut runtime_view = workspace;
+    for component in [".ai", "cache", "ryeos-runtime"] {
+        runtime_view = runtime_view
+            .open_or_create_child(std::ffi::OsStr::new(component), 0o700)
+            .with_context(|| format!("open worker runtime-view component `{component}`"))?;
+    }
+    runtime_view.tighten_owner_private_directory()?;
+
+    let mut resolved = BTreeMap::new();
+    let mut handles = Vec::new();
+    for (name, binding) in bindings {
+        let value = match binding {
+            ryeos_state::objects::SessionProcessEnvironmentValue::Literal { value } => value,
+            ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory {
+                relative_path,
+            } => {
+                let mut directory = runtime_view.try_clone()?;
+                if relative_path != "." {
+                    for component in std::path::Path::new(&relative_path).components() {
+                        let std::path::Component::Normal(component) = component else {
+                            unreachable!("runtime-view path was validated");
+                        };
+                        directory = directory.open_or_create_child(component, 0o700)?;
+                    }
+                }
+                directory.tighten_owner_private_directory()?;
+                let handle = directory.into_inherited_descriptor_path()?;
+                let value = handle
+                    .path()
+                    .to_str()
+                    .ok_or_else(|| anyhow!("runtime-view descriptor path is not UTF-8"))?
+                    .to_owned();
+                handles.push(handle);
+                value
+            }
+            ryeos_state::objects::SessionProcessEnvironmentValue::RealizationPath {
+                realization_id,
+                relative_path,
+                path_kind,
+            } => {
+                let realization = realizations
+                    .iter()
+                    .find(|realization| realization.id == realization_id)
+                    .ok_or_else(|| {
+                        anyhow!("session process environment names an absent realization")
+                    })?;
+                if realization.kind != ryeos_state::objects::ExternalContentKind::Tree
+                    || realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+                {
+                    bail!("session process environment requires a pinned tree realization");
+                }
+                let mut relative = std::path::PathBuf::from(&realization.mount);
+                if relative_path != "." {
+                    relative.push(&relative_path);
+                }
+                let handle = match path_kind {
+                    ryeos_state::objects::SessionProcessEnvironmentPathKind::Directory => {
+                        open_pinned_directory(external_root, &relative)?
+                            .into_inherited_descriptor_path()?
+                    }
+                    ryeos_state::objects::SessionProcessEnvironmentPathKind::File => {
+                        open_pinned_regular_file(external_root, &relative)?
+                            .into_inherited_descriptor_path()?
+                    }
+                };
+                let value = handle
+                    .path()
+                    .to_str()
+                    .ok_or_else(|| anyhow!("realization descriptor path is not UTF-8"))?
+                    .to_owned();
+                handles.push(handle);
+                value
+            }
+        };
+        resolved.insert(name, value);
+    }
+    Ok((resolved, handles))
+}
+
 fn open_pinned_directory(
     root: &std::path::Path,
     relative: &std::path::Path,
@@ -1271,6 +1382,7 @@ impl StructuredWorkload {
         control_results: SyncSender<WorkloadCommandResult>,
         workload_argv0: &str,
         executable_path: Option<&str>,
+        session_process_environment: &BTreeMap<String, String>,
         inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
     ) -> Result<Self> {
         let mut command = Command::new(executable);
@@ -1290,6 +1402,7 @@ impl StructuredWorkload {
         if let Some(path) = executable_path {
             command.env("PATH", path);
         }
+        command.envs(session_process_environment);
         lillux::configure_owner_private_creation_mask(&mut command);
         lillux::configure_inherited_descriptor_authorities(&mut command, &inherited_descriptors)
             .map_err(anyhow::Error::msg)?;
@@ -2703,6 +2816,7 @@ mod tests {
             result_sender,
             "/bin/sh",
             None,
+            &BTreeMap::new(),
             Vec::new(),
         )
         .unwrap();
@@ -3142,5 +3256,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bound.as_deref(), Some("session-one"));
+    }
+
+    #[test]
+    fn session_process_environment_materializes_only_the_owned_runtime_view() {
+        let root = tempfile::tempdir().unwrap();
+        let bindings = BTreeMap::from([
+            (
+                "CARGO_HOME".to_owned(),
+                ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory {
+                    relative_path: "cargo/home".to_owned(),
+                },
+            ),
+            (
+                "CARGO_NET_OFFLINE".to_owned(),
+                ryeos_state::objects::SessionProcessEnvironmentValue::Literal {
+                    value: "true".to_owned(),
+                },
+            ),
+        ]);
+        let encoded = lillux::canonical_json(&serde_json::to_value(bindings).unwrap()).unwrap();
+        let (resolved, handles) =
+            resolve_session_process_environment(root.path(), root.path(), "[]", Some(&encoded))
+                .unwrap();
+        assert_eq!(
+            resolved.get("CARGO_NET_OFFLINE").map(String::as_str),
+            Some("true")
+        );
+        assert!(
+            resolved
+                .get("CARGO_HOME")
+                .is_some_and(|path| path.starts_with("/proc/self/fd/"))
+        );
+        assert_eq!(handles.len(), 1);
+        assert!(
+            root.path()
+                .join(".ai/cache/ryeos-runtime/cargo/home")
+                .is_dir()
+        );
     }
 }

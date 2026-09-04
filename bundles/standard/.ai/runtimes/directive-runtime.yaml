@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-01T00:15:48Z:35a31f321759af37f5af4b1755b80774a1680bfff94a21c8382812badef04c9e:5BNKvD+MgtyP2hjfgELhBncg4GRVzVeTjsC3OE/MMfLvaqK5GP312KlZHfxErCQ880Y3znWn5rHVXScO06q6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-04T05:54:47Z:8700fa99b22e541fce74c07dceb063c31ae11aa54945ac8d0c3e59290ab31a98:lilyuSwig2Upk2H0stog1aEObJRiHCndZRw9D7c/Ma6V4aEefOkxVYR3dxBvGta700q4L6TNvvFEFySI7H/7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -84,6 +84,10 @@ launch_contract:
     max_targets_per_dependency: 0
     max_executable_search_entries: 0
     external_content: null
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   financial_authority:
     kind: accounting
   external_effect_authority:

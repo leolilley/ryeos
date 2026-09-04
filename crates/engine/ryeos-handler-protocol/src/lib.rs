@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 pub const HANDLER_PROTOCOL_JSON_MAX_DEPTH: usize = 32;
-pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 3;
+pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 4;
 
 // ── Request / Response envelope ──────────────────────────────────
 
@@ -410,6 +410,11 @@ pub struct LaunchPrepareSuccess {
     /// admitted ref-binding; handlers cannot supply bytes, paths, trust, or
     /// manifest claims.
     pub content_dependencies: BTreeMap<String, LaunchContentDependencyRequestWire>,
+    /// Path-free subprocess-environment contributions for named execution
+    /// dependencies. These are independent of content dependencies: literal
+    /// and runtime-view values require no external content, while a content
+    /// path must explicitly name the content dependency granting it.
+    pub environment_contributions: BTreeMap<String, LaunchEnvironmentContributionRequestWire>,
     /// Financial authority result declared by the runtime launch contract.
     /// Required — an absent field is a protocol error, never a default.
     /// The executor validates the payload strictly against the declared
@@ -437,11 +442,46 @@ pub struct LaunchContentDependencyRequestWire {
     pub executable_search: Vec<ExecutableSearchPathEntryWire>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchEnvironmentContributionRequestWire {
+    pub targets: Vec<String>,
+    pub variables: BTreeMap<String, LaunchEnvironmentValueWire>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutableSearchPathEntryWire {
     pub realization_id: String,
     pub relative_directory: String,
+}
+
+/// Path-free environment value selected by a signed launch preparer. Generic
+/// launch code retains this declaration; the target session substrate resolves
+/// path-bearing variants only from its already-pinned realization and
+/// runtime-workspace authorities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchEnvironmentValueWire {
+    Literal {
+        value: String,
+    },
+    ContentPath {
+        content_dependency: String,
+        realization_id: String,
+        relative_path: String,
+        path_kind: LaunchEnvironmentPathKindWire,
+    },
+    RuntimeViewDirectory {
+        relative_path: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchEnvironmentPathKindWire {
+    File,
+    Directory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +589,10 @@ pub struct ValidateLaunchPreparerConfigRequest {
     /// the preparer. Kind/space/trust remain owned by `ref_bindings` and are
     /// deliberately not repeated here.
     pub content_dependencies: LaunchContentDependencyPolicyWire,
+    /// Signed ceiling for path-free environment contributions selected by the
+    /// preparer. The executor remains authoritative for resolving and applying
+    /// the selected values to their named execution dependencies.
+    pub environment_contributions: LaunchEnvironmentContributionPolicyWire,
     /// Required financial-authority contract term. A preparer that does not
     /// understand this term fails strict decoding instead of silently
     /// acknowledging a contract it cannot satisfy.
@@ -573,6 +617,14 @@ pub struct LaunchContentDependencyPolicyWire {
     pub max_targets_per_dependency: u16,
     pub max_executable_search_entries: u16,
     pub external_content: Option<LaunchContentExternalPolicyWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchEnvironmentContributionPolicyWire {
+    pub max_contributions: u16,
+    pub max_targets_per_contribution: u16,
+    pub max_variables_per_contribution: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

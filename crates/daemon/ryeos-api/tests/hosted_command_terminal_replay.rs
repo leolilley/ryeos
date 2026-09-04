@@ -95,6 +95,7 @@ fn store_structured_session_capsule(state: &ryeos_app::state::AppState) -> (Stri
             baseline_destination: "config.toml".to_owned(),
         }),
         executable_search: Vec::new(),
+        process_environment: std::collections::BTreeMap::new(),
         runtime_ref: "runtime:fixture/session".to_owned(),
         executor_ref: "native:fixture".to_owned(),
     };

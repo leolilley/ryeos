@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-03T13:38:40Z:144f1497b41169e0390ca4286b9f3780077c3e512a59e837b5a16f8938c0bc43:6PdPIo7gtO4tQgdHOXVn3pZTNxNPlgJWFXOPXs+Xun8AMAk+nYWVI+/uG4+ceLjT7aZQLe5Nynf++fLfqnneAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T06:00:33Z:34d43e0e79639b37438999e9ea50251e21a9f29ba87ecdbb2b08e685d4cec79b:ms+ps3sDXhDK66XB4lW2fECpg8+YzCTx08GCRqRYBRAuX+J+yCVOyL1ItxFpuh6KquxIeIaUl2wcyJWJwYIvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.5.0"
+version: "1.6.0"
 ```
 
 # Worker-Hosted Execution
@@ -167,7 +167,7 @@ A project worker execution selects its signed portable environment through the
 runtime-declared `environment` ref binding. The selector is not an ordinary
 parameter and cannot be smuggled through the worker input envelope. The generic
 launch preparer accepts only a trusted bundle/project `config` with the closed
-`ryeos.worker_environment.v2` schema, derives the exact worker dependency from
+`ryeos.worker_environment.v3` schema, derives the exact worker dependency from
 it, and retains the engine-resolved path-free binding record in the outer
 admitted program. The environment may additionally declare locator-free pinned
 external content and an ordered executable-search list over those exact tree
@@ -176,6 +176,34 @@ existing external-content authority; the bridge receives only descriptor-
 rooted search directories and never inherits an ambient host `PATH`. Changing
 the config bytes at the same canonical ref therefore changes
 `exact_program_hash`.
+
+The v3 configuration may also declare `process_environment`. This is not an
+extension of content authority and is not a project/vault environment overlay.
+The kind-owned preparer emits a generic path-free environment contribution as
+a sibling of execution and content dependencies. Every contribution names its
+target execution dependency; a `realization_path` is compiled into a
+`content_path` that additionally names the exact content-dependency key which
+grants the realization. Literal and daemon-owned `runtime_view_directory`
+values do
+not require external content. The signed runtime descriptor independently caps
+contribution, target, and variable counts. Generic admission rejects missing
+targets, duplicate variables, absent content dependencies, target mismatches,
+non-tree realizations, and paths whose retained manifest type differs from the
+declared file/directory type.
+
+The persistent-session capsule retains only the validated path-free process
+environment, capped at 32 entries and 4096 serialized bytes so the sealed relay
+uses the existing bounded runtime-environment path without a second transport.
+Placement resolves it against that capsule's pinned realization set and the
+node-owned `.ai/cache/ryeos-runtime` view. The session protocol must explicitly
+allow the sealed `RYEOS_SESSION_PROCESS_ENVIRONMENT` relay through its existing
+`runtime_env_allowlist`; otherwise admission fails. The receiving bridge clears
+its inherited environment and deliberately installs only these resolved values
+alongside its fixed minimal environment. Existing
+`RuntimeEnvSource::EnginePlan`, subprocess composition, and node isolation
+policy remain the final enforcement path. No host environment, absolute
+authored path, credential home, project ignore entry, or kind-specific engine
+branch becomes environment authority.
 
 The outer program projection classifies every sealed invocation field. It
 retains executable semantics, trust, exact source content, composed resolution,

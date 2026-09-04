@@ -65,10 +65,18 @@ pub(crate) struct ContentDependencyValidationPreview {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct EnvironmentContributionValidationPreview {
+    pub(crate) targets: Vec<String>,
+    pub(crate) variables: BTreeMap<String, ryeos_handler_protocol::LaunchEnvironmentValueWire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct PreparedDependencyValidationPreview {
     pub(crate) binding_records: BTreeMap<String, RefBindingLaunchRecord>,
     pub(crate) execution_dependencies: BTreeMap<String, ExecutionDependencyValidationPreview>,
     pub(crate) content_dependencies: BTreeMap<String, ContentDependencyValidationPreview>,
+    pub(crate) environment_contributions:
+        BTreeMap<String, EnvironmentContributionValidationPreview>,
     pub(crate) admission_ready: bool,
 }
 
@@ -268,17 +276,31 @@ pub(crate) fn admit_or_verify_prepared_sessions(
     recovered: bool,
 ) -> Result<AdmittedSessionPublications> {
     let mut expected_names = BTreeSet::new();
-    let (content_by_target, search_by_target, mut publications) =
+    let (content_by_target, search_by_target, realizations_by_dependency, mut publications) =
         admit_or_verify_content_dependencies(state, prepared, recovered)?;
+    let environment_by_target = resolve_target_environments(
+        state,
+        &prepared.environment_contributions,
+        &realizations_by_dependency,
+    )?;
     let (dependencies, admitted_sessions) = (
         &mut prepared.execution_dependencies,
         &mut prepared.admitted_sessions,
     );
+    let empty_environment = BTreeMap::new();
     for (name, dependency) in dependencies {
         dependency
             .validate()
             .with_context(|| format!("validate persistent-session dependency `{name}`"))?;
+        let target_environment = environment_by_target
+            .get(name)
+            .unwrap_or(&empty_environment);
         if recovered {
+            if !target_environment.is_empty() && !admitted_sessions.contains_key(name) {
+                bail!(
+                    "environment contribution target `{name}` has no admitted persistent-session capsule"
+                );
+            }
             let Some(hash) = admitted_sessions.get(name) else {
                 continue;
             };
@@ -289,10 +311,17 @@ pub(crate) fn admit_or_verify_prepared_sessions(
                 dependency,
                 hash,
                 search_by_target.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                target_environment,
             )
             .with_context(|| format!("verify recovered session dependency `{name}`"))?;
         } else {
-            let Some((declaration, protocol)) = session_contract(engine, dependency)? else {
+            let session = session_contract(engine, dependency)?;
+            if !target_environment.is_empty() && session.is_none() {
+                bail!(
+                    "environment contribution target `{name}` is not a persistent-session dependency"
+                );
+            }
+            let Some((declaration, protocol)) = session else {
                 continue;
             };
             expected_names.insert(name.clone());
@@ -307,6 +336,7 @@ pub(crate) fn admit_or_verify_prepared_sessions(
                 &protocol,
                 content_by_target.get(name),
                 search_by_target.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                target_environment,
             )
             .inspect_err(|error| {
                 tracing::warn!(
@@ -362,11 +392,13 @@ pub(crate) fn preview_prepared_dependencies(
     let roots = engine.resolution_roots(None);
     let mut execution_dependencies = BTreeMap::new();
     let mut content_dependencies = BTreeMap::new();
+    let mut environment_contributions = BTreeMap::new();
     let mut entries_by_target: BTreeMap<
         String,
         Vec<ryeos_engine::external_realization::RealizedExternalContent>,
     > = BTreeMap::new();
     let mut search_by_target: TargetExecutableSearch = BTreeMap::new();
+    let mut realizations_by_dependency = BTreeMap::new();
     let mut admission_ready = true;
 
     for (name, dependency) in &prepared.execution_dependencies {
@@ -456,6 +488,7 @@ pub(crate) fn preview_prepared_dependencies(
                         }),
                 );
             }
+            realizations_by_dependency.insert(name.clone(), realized.clone());
         }
         admission_ready &= ready;
         content_dependencies.insert(
@@ -473,11 +506,37 @@ pub(crate) fn preview_prepared_dependencies(
         );
     }
     validate_content_target_aggregation(entries_by_target, search_by_target)?;
+    let environment_by_target = resolve_target_environments(
+        state,
+        &prepared.environment_contributions,
+        &realizations_by_dependency,
+    )?;
+    for (target, environment) in &environment_by_target {
+        if !environment.is_empty()
+            && execution_dependencies
+                .get(target)
+                .is_none_or(|dependency| dependency.session.is_none())
+        {
+            bail!(
+                "environment contribution target `{target}` is not a persistent-session dependency"
+            );
+        }
+    }
+    for (name, contribution) in &prepared.environment_contributions {
+        environment_contributions.insert(
+            name.clone(),
+            EnvironmentContributionValidationPreview {
+                targets: contribution.targets.clone(),
+                variables: contribution.variables.clone(),
+            },
+        );
+    }
 
     Ok(PreparedDependencyValidationPreview {
         binding_records: prepared.binding_records.clone(),
         execution_dependencies,
         content_dependencies,
+        environment_contributions,
         admission_ready,
     })
 }
@@ -485,6 +544,10 @@ pub(crate) fn preview_prepared_dependencies(
 type TargetContentSets =
     BTreeMap<String, ryeos_engine::external_realization::RealizedExternalContentSet>;
 type TargetExecutableSearch = BTreeMap<String, Vec<ExecutableSearchPathEntry>>;
+type TargetSessionProcessEnvironment =
+    BTreeMap<String, BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>>;
+type RealizationsByDependency =
+    BTreeMap<String, ryeos_engine::external_realization::RealizedExternalContentSet>;
 
 fn admit_or_verify_content_dependencies(
     state: &AppState,
@@ -493,6 +556,7 @@ fn admit_or_verify_content_dependencies(
 ) -> Result<(
     TargetContentSets,
     TargetExecutableSearch,
+    RealizationsByDependency,
     Vec<ryeos_state::PendingCasPublication>,
 )> {
     let mut entries_by_target: BTreeMap<
@@ -500,6 +564,7 @@ fn admit_or_verify_content_dependencies(
         Vec<ryeos_engine::external_realization::RealizedExternalContent>,
     > = BTreeMap::new();
     let mut search_by_target: TargetExecutableSearch = BTreeMap::new();
+    let mut realizations_by_dependency = BTreeMap::new();
     let mut publications = Vec::new();
     for (name, dependency) in &mut prepared.content_dependencies {
         dependency
@@ -545,10 +610,16 @@ fn admit_or_verify_content_dependencies(
                     }),
             );
         }
+        realizations_by_dependency.insert(name.clone(), realized);
     }
     let (content_by_target, search_by_target) =
         validate_content_target_aggregation(entries_by_target, search_by_target)?;
-    Ok((content_by_target, search_by_target, publications))
+    Ok((
+        content_by_target,
+        search_by_target,
+        realizations_by_dependency,
+        publications,
+    ))
 }
 
 fn validate_content_target_aggregation(
@@ -582,6 +653,18 @@ fn validate_content_target_aggregation(
         }
     }
     Ok((content_by_target, search_by_target))
+}
+
+fn merge_target_environment(
+    target: &mut BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
+    additional: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
+) -> Result<()> {
+    for (name, value) in additional {
+        if target.insert(name.clone(), value.clone()).is_some() {
+            bail!("combined session process environment contains duplicate variable `{name}`");
+        }
+    }
+    Ok(())
 }
 
 fn realization_set(
@@ -671,6 +754,197 @@ fn validate_dependency_search(
                 search.realization_id
             );
         }
+    }
+    Ok(())
+}
+
+fn resolve_target_environments(
+    state: &AppState,
+    contributions: &BTreeMap<String, super::launch_preparation::PreparedEnvironmentContribution>,
+    realizations_by_dependency: &RealizationsByDependency,
+) -> Result<TargetSessionProcessEnvironment> {
+    let mut by_target = TargetSessionProcessEnvironment::new();
+    for (name, contribution) in contributions {
+        contribution
+            .validate()
+            .with_context(|| format!("validate environment contribution `{name}`"))?;
+        let resolved = validate_environment_contribution(
+            state,
+            name,
+            contribution,
+            realizations_by_dependency,
+        )?;
+        for target in &contribution.targets {
+            merge_target_environment(by_target.entry(target.clone()).or_default(), &resolved)?;
+        }
+    }
+    for environment in by_target.values() {
+        ryeos_state::objects::validate_session_process_environment(environment)?;
+    }
+    Ok(by_target)
+}
+
+fn validate_environment_contribution(
+    state: &AppState,
+    name: &str,
+    contribution: &super::launch_preparation::PreparedEnvironmentContribution,
+    realizations_by_dependency: &RealizationsByDependency,
+) -> Result<BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>> {
+    use ryeos_handler_protocol::LaunchEnvironmentValueWire as Wire;
+    use ryeos_state::objects::SessionProcessEnvironmentValue as Retained;
+
+    let mut retained = BTreeMap::new();
+    for (variable, value) in &contribution.variables {
+        let value = match value {
+            Wire::Literal { value } => Retained::Literal {
+                value: value.clone(),
+            },
+            Wire::RuntimeViewDirectory { relative_path } => Retained::RuntimeViewDirectory {
+                relative_path: relative_path.clone(),
+            },
+            Wire::ContentPath {
+                content_dependency,
+                realization_id,
+                relative_path,
+                path_kind,
+            } => {
+                let realized = realizations_by_dependency
+                    .get(content_dependency)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "environment contribution `{name}` has no realized content dependency `{content_dependency}`"
+                        )
+                    })?;
+                let entry = realized
+                    .iter()
+                    .find(|entry| entry.id == *realization_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "environment contribution `{name}` content dependency `{content_dependency}` names absent realization `{realization_id}`"
+                        )
+                    })?;
+                if entry.kind != ryeos_state::objects::ExternalContentKind::Tree
+                    || entry.mode != ryeos_state::objects::ExternalContentMode::Pinned
+                {
+                    bail!(
+                        "environment contribution `{name}` content dependency `{content_dependency}` names a realization that is not a pinned tree: `{realization_id}`"
+                    );
+                }
+                validate_realization_path_exists(
+                    state,
+                    content_dependency,
+                    entry,
+                    relative_path,
+                    *path_kind,
+                    "environment",
+                )?;
+                Retained::RealizationPath {
+                    realization_id: realization_id.clone(),
+                    relative_path: relative_path.clone(),
+                    path_kind: match path_kind {
+                        ryeos_handler_protocol::LaunchEnvironmentPathKindWire::File => {
+                            ryeos_state::objects::SessionProcessEnvironmentPathKind::File
+                        }
+                        ryeos_handler_protocol::LaunchEnvironmentPathKindWire::Directory => {
+                            ryeos_state::objects::SessionProcessEnvironmentPathKind::Directory
+                        }
+                    },
+                }
+            }
+        };
+        retained.insert(variable.clone(), value);
+    }
+    ryeos_state::objects::validate_session_process_environment(&retained)?;
+    Ok(retained)
+}
+
+fn validate_realization_path_exists(
+    state: &AppState,
+    dependency_name: &str,
+    realization: &ryeos_engine::external_realization::RealizedExternalContent,
+    relative_path: &str,
+    expected_kind: ryeos_handler_protocol::LaunchEnvironmentPathKindWire,
+    use_kind: &str,
+) -> Result<()> {
+    if relative_path == "." {
+        if expected_kind != ryeos_handler_protocol::LaunchEnvironmentPathKindWire::Directory {
+            bail!("a realization root environment path must be a directory");
+        }
+        return Ok(());
+    }
+    let cas_read = state.acquire_cas_read()?;
+    let object = cas_read
+        .cas()
+        .get_object(&realization.manifest_hash)?
+        .ok_or_else(|| {
+            anyhow!(
+                "content dependency `{dependency_name}` {use_kind} realization `{}` has no retained manifest",
+                realization.id
+            )
+        })?;
+    let observed_kind = match object.get("kind").and_then(Value::as_str) {
+        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+            let manifest =
+                ryeos_state::objects::ExternalContentManifestObject::from_value(&object)?;
+            manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == relative_path)
+                .map(|entry| entry.kind)
+                .or_else(|| {
+                    manifest
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path.starts_with(&format!("{relative_path}/")))
+                        .then_some(ryeos_state::objects::ExternalContentManifestEntryKind::Dir)
+                })
+        }
+        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+            let manifest =
+                ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&object)?;
+            manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == relative_path)
+                .map(|entry| entry.kind)
+                .or_else(|| {
+                    manifest
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path.starts_with(&format!("{relative_path}/")))
+                        .then_some(ryeos_state::objects::ExternalContentManifestEntryKind::Dir)
+                })
+        }
+        Some(other) => bail!(
+            "content dependency `{dependency_name}` {use_kind} realization `{}` names unsupported manifest kind `{other}`",
+            realization.id
+        ),
+        None => bail!(
+            "content dependency `{dependency_name}` {use_kind} realization `{}` manifest has no kind",
+            realization.id
+        ),
+    };
+    let Some(observed_kind) = observed_kind else {
+        bail!(
+            "content dependency `{dependency_name}` {use_kind} path `{relative_path}` is absent from realization `{}`",
+            realization.id
+        );
+    };
+    let kind_matches = matches!(
+        (expected_kind, observed_kind),
+        (
+            ryeos_handler_protocol::LaunchEnvironmentPathKindWire::File,
+            ryeos_state::objects::ExternalContentManifestEntryKind::File
+        ) | (
+            ryeos_handler_protocol::LaunchEnvironmentPathKindWire::Directory,
+            ryeos_state::objects::ExternalContentManifestEntryKind::Dir
+        )
+    );
+    if !kind_matches {
+        bail!(
+            "content dependency `{dependency_name}` {use_kind} path `{relative_path}` has the wrong entry kind in realization `{}`",
+            realization.id
+        );
     }
     Ok(())
 }
@@ -815,6 +1089,7 @@ fn admit_session_capsule(
     protocol: &VerifiedProtocol,
     inherited_content: Option<&ryeos_engine::external_realization::RealizedExternalContentSet>,
     executable_search: &[ExecutableSearchPathEntry],
+    environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
 ) -> Result<(String, Vec<ryeos_state::PendingCasPublication>)> {
     let roots = engine.resolution_roots(None);
     let mut resolution = dependency.resolution.clone();
@@ -875,6 +1150,16 @@ fn admit_session_capsule(
     let workspace = logical_admission_workspace();
     let lifecycle = lifecycle_contract(declaration)?;
     let wire = wire_contract(protocol)?;
+    if !environment.is_empty()
+        && !protocol.descriptor.session.as_ref().is_some_and(|session| {
+            session
+                .runtime_env_allowlist
+                .iter()
+                .any(|name| name == ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV)
+        })
+    {
+        bail!("persistent-session protocol does not authorize a session process environment");
+    }
     let verified = dependency.captured_verified_subject()?;
     let mut request = direct_request(state, dependency, &verified, String::new())?;
     let mut plan = prepare_captured_item_plan(
@@ -982,6 +1267,7 @@ fn admit_session_capsule(
             .transpose()?,
         structured_session_profile,
         executable_search: executable_search.to_vec(),
+        process_environment: environment.clone(),
         runtime_ref: session_authority.runtime_ref,
         executor_ref,
     };
@@ -1011,6 +1297,7 @@ fn verify_session_capsule(
     dependency: &PreparedExecutionDependency,
     capsule_hash: &str,
     executable_search: &[ExecutableSearchPathEntry],
+    environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule = load_capsule(state, capsule_hash)?;
     let exact: PersistentSessionExactProgram =
@@ -1025,6 +1312,9 @@ fn verify_session_capsule(
     }
     if capsule.executable_search != executable_search {
         bail!("persistent-session capsule contradicts its executable-search dependency");
+    }
+    if &capsule.process_environment != environment {
+        bail!("persistent-session capsule contradicts its process-environment contribution");
     }
     let observed_digest = exact.resolution_output.effective_definition_digest()?;
     if observed_digest.as_str() != exact.effective_definition_digest {
@@ -1371,6 +1661,12 @@ fn spawn_capsule_process_held(
                 .map_err(anyhow::Error::from)
         })
         .transpose()?;
+    let session_process_environment = (!capsule.process_environment.is_empty())
+        .then(|| {
+            lillux::canonical_json(&serde_json::to_value(&capsule.process_environment)?)
+                .map_err(anyhow::Error::from)
+        })
+        .transpose()?;
     plan.bind_persistent_session_spawn_environment(
         external_env.as_deref(),
         external_env.as_ref().map(|_| realization_workspace),
@@ -1378,11 +1674,21 @@ fn spawn_capsule_process_held(
         source_entry,
         executable_search_env.as_deref(),
     )?;
+    let mut runtime_environment = runtime_environment.clone();
+    if let Some(environment) = session_process_environment {
+        let name = ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV.to_owned();
+        if runtime_environment
+            .insert(name.clone(), environment)
+            .is_some()
+        {
+            bail!("session process environment collides with runtime authority");
+        }
+    }
     let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
     if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
         runtime_env_allowlist.push(name.clone());
     }
-    plan.bind_persistent_session_runtime_environment(runtime_environment, &runtime_env_allowlist)?;
+    plan.bind_persistent_session_runtime_environment(&runtime_environment, &runtime_env_allowlist)?;
     // `realization_workspace` is only the daemon-owned location for sealed
     // runtime inputs when outer isolation is disabled.  The process authority
     // remains the canonical runtime-workspace `project` child; substituting
@@ -2059,6 +2365,7 @@ mod tests {
             source_binding_hash: None,
             structured_session_profile: None,
             executable_search: Vec::new(),
+            process_environment: BTreeMap::new(),
             runtime_ref: "runtime:fixture/session".to_owned(),
             executor_ref: "native:fixture".to_owned(),
         }
