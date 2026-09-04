@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-11T02:28:03Z:701ec3387d97448c87d8faefd7899ad61dde58c658ffdf4c0a9d92c6f83a053a:djhNQsPx/Qp9VvNbqyYO1hDPLoaED56UxXmLiVV+IZbsJMvL1YgikwAeapM7ctgkUgXLqp1hZXmWcpOr+VogAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-04T06:00:33Z:eca40b1ba629cf921459eaac256f5c0c723339498540c023ca71355c555efa93:HfCpdrWnvg4tqo4B1dtKG2XfbNleexg03SqSp7m4NdufKdkizLeolZFqRt5fAkOQwoKd3BXA0spncvjmjtCGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
-version: "1.0.0"
+version: "1.1.0"
 location:
   directory: runtimes
 effective_trust:
@@ -70,6 +70,8 @@ composed_value_contract:
             elements: { type: single, prim: string }
           runtime_facts: { type: single, prim: mapping }
           execution_dependencies: { type: single, prim: mapping }
+          content_dependencies: { type: single, prim: mapping }
+          environment_contributions: { type: single, prim: mapping }
           financial_authority: { type: single, prim: mapping }
           external_effect_authority: { type: single, prim: mapping }
   optional:

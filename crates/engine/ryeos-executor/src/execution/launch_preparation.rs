@@ -43,6 +43,7 @@ const MAX_REF_BINDING_NAME_BYTES: usize = 64;
 const MAX_REF_BINDING_VALUE_BYTES: usize = 2_048;
 const MAX_EXECUTION_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CONTENT_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ENVIRONMENT_CONTRIBUTION_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +78,10 @@ pub struct PreparedRuntimeLaunch {
     /// kind-owned; generic launch code applies only the signed mechanical
     /// policy and never interprets workload configuration fields.
     pub content_dependencies: BTreeMap<String, PreparedContentDependency>,
+    /// Path-free, target-bound environment declarations selected by the
+    /// preparer. They remain separate from content authority; content-backed
+    /// values explicitly reference a prepared content dependency.
+    pub environment_contributions: BTreeMap<String, PreparedEnvironmentContribution>,
     /// Session capsules admitted from execution dependencies before the outer
     /// launch capsule is minted. Keys remain preparer-owned opaque dependency
     /// names; generic launch code validates and retains only their hashes.
@@ -155,6 +160,72 @@ impl PreparedContentDependency {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedEnvironmentContribution {
+    pub targets: Vec<String>,
+    pub variables: BTreeMap<String, ryeos_handler_protocol::LaunchEnvironmentValueWire>,
+}
+
+impl PreparedEnvironmentContribution {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.targets.is_empty() || self.targets.windows(2).any(|pair| pair[0] >= pair[1]) {
+            anyhow::bail!("prepared environment contribution target set is not canonical");
+        }
+        for (name, value) in &self.variables {
+            validate_launch_environment_binding(name, value)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_launch_environment_binding(
+    name: &str,
+    value: &ryeos_handler_protocol::LaunchEnvironmentValueWire,
+) -> anyhow::Result<()> {
+    ryeos_state::objects::validate_session_process_environment_name(name)?;
+    use ryeos_handler_protocol::LaunchEnvironmentValueWire;
+    match value {
+        LaunchEnvironmentValueWire::Literal { value } => {
+            if value.len() > 4096 || value.chars().any(char::is_control) {
+                anyhow::bail!("prepared literal environment value is not bounded");
+            }
+        }
+        LaunchEnvironmentValueWire::ContentPath {
+            content_dependency,
+            realization_id,
+            relative_path,
+            ..
+        } => {
+            if !valid_ref_binding_name(content_dependency)
+                || realization_id.is_empty()
+                || realization_id.len() > 64
+                || !realization_id.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                || ryeos_state::objects::validate_session_process_environment_relative_path(
+                    relative_path,
+                )
+                .is_err()
+            {
+                anyhow::bail!("prepared realization environment path is not canonical");
+            }
+        }
+        LaunchEnvironmentValueWire::RuntimeViewDirectory { relative_path } => {
+            if ryeos_state::objects::validate_session_process_environment_relative_path(
+                relative_path,
+            )
+            .is_err()
+            {
+                anyhow::bail!("prepared runtime-view environment path is not canonical");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1540,6 +1611,7 @@ fn finish_runtime_launch_preparation_parts(
             runtime_facts: BTreeMap::new(),
             execution_dependencies: BTreeMap::new(),
             content_dependencies: BTreeMap::new(),
+            environment_contributions: BTreeMap::new(),
             financial_authority: ryeos_handler_protocol::FinancialAuthorityResultWire::None,
             external_effect_authority:
                 ryeos_handler_protocol::ExternalEffectAuthorityResultWire::None,
@@ -1573,6 +1645,12 @@ fn finish_runtime_launch_preparation_parts(
         &execution_dependencies,
         result.content_dependencies,
     )?;
+    let environment_contributions = resolve_environment_contributions(
+        contract,
+        &execution_dependencies,
+        &content_dependencies,
+        result.environment_contributions,
+    )?;
     let config_contributors = collect_config_contributors(&inputs.config_inputs);
     let financial_authority = validate_financial_authority(contract, result.financial_authority)?;
     let external_effect_authority =
@@ -1591,11 +1669,141 @@ fn finish_runtime_launch_preparation_parts(
         binding_records: inputs.binding_records.clone(),
         execution_dependencies,
         content_dependencies,
+        environment_contributions,
         admitted_sessions: BTreeMap::new(),
         config_contributors,
         financial_authority,
         external_effect_authority,
     })
+}
+
+fn resolve_environment_contributions(
+    contract: &ryeos_engine::runtime_registry::LaunchContractDecl,
+    execution_dependencies: &BTreeMap<String, PreparedExecutionDependency>,
+    content_dependencies: &BTreeMap<String, PreparedContentDependency>,
+    requests: BTreeMap<String, ryeos_handler_protocol::LaunchEnvironmentContributionRequestWire>,
+) -> Result<BTreeMap<String, PreparedEnvironmentContribution>, DispatchError> {
+    let policy = &contract.environment_contributions;
+    if requests.len() > usize::from(policy.max_contributions) {
+        return Err(preparation_error(
+            "environment_contribution_limit_exceeded",
+            "launch preparation exceeded its signed environment-contribution ceiling",
+            LaunchPrepareErrorClass::Internal,
+        ));
+    }
+    let mut aggregate_bytes = 0usize;
+    let mut variables_by_target: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut prepared = BTreeMap::new();
+    for (name, request) in requests {
+        if !valid_ref_binding_name(&name) {
+            return Err(preparation_error(
+                "environment_contribution_name_invalid",
+                format!("environment contribution `{name}` has a noncanonical name"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        if request.targets.len() > usize::from(policy.max_targets_per_contribution)
+            || request.variables.is_empty()
+            || request.variables.len() > usize::from(policy.max_variables_per_contribution)
+        {
+            return Err(preparation_error(
+                "environment_contribution_limit_exceeded",
+                format!("environment contribution `{name}` exceeds its signed shape"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let contribution = PreparedEnvironmentContribution {
+            targets: request.targets,
+            variables: request.variables,
+        };
+        contribution.validate().map_err(|error| {
+            preparation_error(
+                "environment_contribution_invalid",
+                format!("environment contribution `{name}` is invalid: {error}"),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        for target in &contribution.targets {
+            if !execution_dependencies.contains_key(target) {
+                return Err(preparation_error(
+                    "environment_contribution_target_invalid",
+                    format!("environment contribution `{name}` names absent target `{target}`"),
+                    LaunchPrepareErrorClass::Internal,
+                ));
+            }
+            let names = variables_by_target.entry(target.clone()).or_default();
+            for variable in contribution.variables.keys() {
+                if !names.insert(variable.clone()) {
+                    return Err(preparation_error(
+                        "environment_contribution_variable_conflict",
+                        format!(
+                            "target `{target}` receives duplicate environment variable `{variable}`"
+                        ),
+                        LaunchPrepareErrorClass::Internal,
+                    ));
+                }
+            }
+        }
+        for value in contribution.variables.values() {
+            let ryeos_handler_protocol::LaunchEnvironmentValueWire::ContentPath {
+                content_dependency,
+                ..
+            } = value
+            else {
+                continue;
+            };
+            let dependency = content_dependencies.get(content_dependency).ok_or_else(|| {
+                preparation_error(
+                    "environment_contribution_content_invalid",
+                    format!("environment contribution `{name}` names absent content dependency `{content_dependency}`"),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+            if contribution
+                .targets
+                .iter()
+                .any(|target| dependency.targets.binary_search(target).is_err())
+            {
+                return Err(preparation_error(
+                    "environment_contribution_content_target_invalid",
+                    format!(
+                        "content dependency `{content_dependency}` does not authorize every target of environment contribution `{name}`"
+                    ),
+                    LaunchPrepareErrorClass::Internal,
+                ));
+            }
+        }
+        aggregate_bytes = aggregate_bytes
+            .checked_add(
+                serde_json::to_vec(&contribution)
+                    .map_err(|error| {
+                        preparation_error(
+                            "environment_contribution_serialize_failed",
+                            error.to_string(),
+                            LaunchPrepareErrorClass::Internal,
+                        )
+                    })?
+                    .len(),
+            )
+            .ok_or_else(|| {
+                preparation_error(
+                    "environment_contribution_size_exceeded",
+                    "environment contribution size overflow",
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+        if aggregate_bytes > MAX_ENVIRONMENT_CONTRIBUTION_BYTES {
+            return Err(preparation_error(
+                "environment_contribution_size_exceeded",
+                format!(
+                    "environment contributions exceed the daemon limit of {MAX_ENVIRONMENT_CONTRIBUTION_BYTES} bytes"
+                ),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        prepared.insert(name, contribution);
+    }
+    Ok(prepared)
 }
 
 fn resolve_execution_dependencies(

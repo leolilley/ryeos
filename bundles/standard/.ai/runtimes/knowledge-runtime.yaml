@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-27T09:11:06Z:280981d35dd1bdd255a143c9e50e3ff535411469fda1bc04fb56f01b33b838f5:mTyDKC8TBG9z0Yh8Wr43glg2UVtFUqTdLsqGsbIFNxszU/4Or+BzCo4X3dVJ7nMat1MKeSv9zOHT+NO7nViVAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-04T05:54:47Z:2208e771c7d89d96222eb507e83dd98e0250449cf7638f9d4920d4a2ecce253d:aI6djGwgMMAjxkCl+eXaU/YcVEgCHZQksYOR5LQq2sw6FO53cVXn69tA9a0CElv0knIWQmylGfXhY7m7ktF5Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: knowledge
 default: true
@@ -30,6 +30,10 @@ launch_contract:
     max_targets_per_dependency: 0
     max_executable_search_entries: 0
     external_content: null
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   financial_authority:
     kind: none
   external_effect_authority:

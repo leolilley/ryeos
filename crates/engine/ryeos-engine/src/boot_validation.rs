@@ -50,10 +50,10 @@ use ryeos_handler_protocol::{
     ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, FinancialAuthorityDeclWire,
     HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchConfigInputDeclWire,
     LaunchContentDependencyPolicyWire, LaunchContentExternalPolicyWire,
-    LaunchExecutionDependencyPolicyWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
-    RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
-    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
-    ValidateParserConfigRequest,
+    LaunchEnvironmentContributionPolicyWire, LaunchExecutionDependencyPolicyWire,
+    LaunchSecretPolicyDeclWire, RefBindingDeclWire, RuntimeFactDeclWire, RuntimeFactKindWire,
+    TrustClassWire, ValidateComposerConfigRequest, ValidateLaunchPreparerConfigRequest,
+    ValidateLaunchPreparerConfigResponse, ValidateParserConfigRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,6 +749,15 @@ fn launch_preparer_validation_request(
                     large_content_max_total_bytes: external.large_content_max_total_bytes,
                 },
             ),
+        },
+        environment_contributions: LaunchEnvironmentContributionPolicyWire {
+            max_contributions: contract.environment_contributions.max_contributions,
+            max_targets_per_contribution: contract
+                .environment_contributions
+                .max_targets_per_contribution,
+            max_variables_per_contribution: contract
+                .environment_contributions
+                .max_variables_per_contribution,
         },
         financial_authority: match contract.financial_authority {
             crate::runtime_registry::FinancialAuthorityDecl::None => {

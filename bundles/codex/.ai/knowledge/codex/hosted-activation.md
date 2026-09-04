@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-03T14:48:16Z:bfc715239fbf3130446eeeac9b85a4903ec2be06abb15c73bd69a8bfb95c61de:hdS0gTwGBkq0fqHloRXmR4AEqksTvEST4XWoHxtFonOHuySiOZa43ZTV6uYJaqyOZOa4zJyT5ZhEiW0GgFjUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T06:00:33Z:8db62f784c73540345662edaf8354168a899cf6f6ac87675af3f1ef5a0c50193:N77KkxugHx31fLiaEHxkjCbDLSsMF97PZ48GxJ9rAI8BDfpwKTxb3clb+EtWqLNdwJQfbCaM/W8ZZDRmmhndCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.6.0"
+version: "1.7.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -118,6 +118,20 @@ knowledge bundle.
    every node that may become a placement target. `offline` is accepted only
    when the exact archive is already present in that node's private managed
    cache.
+
+   `config:codex/environments/default` uses the closed
+   `ryeos.worker_environment.v3` contract. Its `executable_search` contributes
+   only the exact activated command-tool tree to `PATH`. Its independent
+   `process_environment` map may contribute bounded literals, paths inside an
+   explicitly named activated realization, or directories below the
+   session-owned `.ai/cache/ryeos-runtime` view. RyeOS freezes those values in
+   the persistent-session capsule and resolves target-local paths only at
+   placement. The complete retained map is limited to 32 entries and 4096
+   serialized bytes. Values are never inherited from the daemon, read from the Codex
+   credential home, or encoded as authored absolute paths. The pinned base
+   environment currently leaves `process_environment` empty; a separately
+   promoted development environment must name its own exact toolchain content
+   and cache bindings rather than borrowing tools from the container image.
 4. Keep the source operator private key at its operator endpoint and the
    hosted node's independent local operator private key at the hosted node.
    First admit the source node key on the target
@@ -297,6 +311,11 @@ whose accepted effect is proven to remain inside the identical frozen
 permission profile.
 
 App Server inherits a cleared minimal environment and no RyeOS control FD.
+When the selected signed environment contains a process-environment
+contribution, the bridge deliberately resolves and installs only that
+capsule-bound map after clearing inheritance; the structured-session protocol
+authorizes the sealed relay by name. Codex cannot add variables or redirect a
+realization/runtime-view path through request payloads.
 Model commands receive the signed Codex permission profile and cannot access
 profile home, boot/capsule metadata, callback authority, DBus/keyring
 coordinates, or direct network through that contract. Without an enforced

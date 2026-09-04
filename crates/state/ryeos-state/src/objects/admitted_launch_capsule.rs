@@ -11,7 +11,10 @@ use super::{
 // root execution request. v18 binds a remotely adopted invocation to its
 // exact target-node operator grant generation; predecessor capsules cannot be
 // interpreted as current private-execution authority.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 18;
+// v19 requires the generic, target-bound environment-contribution projection
+// in every prepared managed-runtime launch. Predecessor capsules cannot be
+// interpreted as current portable launch authority.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 19;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 
 const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[

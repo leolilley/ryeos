@@ -1708,7 +1708,7 @@ mod tests {
         let mut prepared = prepared_plan(plan);
         assert!(
             prepared
-                .bind_persistent_session_spawn_environment(None, None, Some("sealed"), None, None,)
+                .bind_persistent_session_spawn_environment(None, None, Some("sealed"), None, None)
                 .unwrap_err()
                 .to_string()
                 .contains("must be bound together")

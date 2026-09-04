@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-01T22:25:21Z:2cb77de884287c30e7dd9427111a8c5198199dda5b85c660f14d33113e05932e:YA90kh3bhegTKh2gZfj7UGwwRa3Q/ttgrZQ/RFXbPquqF60tvBOVTXcpbOPSgmDOnOQIUeKO6frQcnSktnEKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T06:00:33Z:593e6b434c4cfa91ec60127e1c6f9e3d09ce9baabd4cd79e3fc9b71f938b29b3:bxqouLGLISf+ix01o+jMU37ZcOTUXwBDLhwH4P75RfBn+vs30MdNx+Uw4N35wyJgMYU2BdudXFntaFU36e6gBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.0.4"
+version: "1.1.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -128,9 +128,17 @@ export GATE_TEST_THREADS=<bounded-threads>
 These variables describe the host-controlled build/test layer. A pushed
 project does not carry `target/`, and a default RyeOS execution sandbox does
 not gain access to `/var/tmp` merely because the variable names it. If a build
-is itself run as an admitted RyeOS item, its node-local cache path must be an
-explicit target deployment/isolation contract; otherwise use a disposable
-project-local build and make no persistent-cache claim.
+is itself run as an admitted persistent-session item, use its signed
+worker-environment contract: the preparer emits a generic target-bound
+environment contribution, the capsule retains only bounded path-free values,
+and placement resolves a `runtime_view_directory` below the daemon-owned
+`.ai/cache/ryeos-runtime` view. Content-backed values must explicitly name the
+pinned content dependency that grants them. The protocol runtime-environment
+allowlist and existing subprocess/isolation compiler remain the enforcement
+path. An ambient host variable, absolute authored path, project ignore rule, or
+credential home is never cache authority. For other execution shapes, use a
+disposable project-local build and make no persistent-cache claim until their
+signed runtime contract provides equivalent authority.
 
 Record toolchain versions and every command's exit status in an evidence
 directory outside the checkout and both app roots. A typical build and focused

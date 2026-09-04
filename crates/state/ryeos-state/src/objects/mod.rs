@@ -137,9 +137,13 @@ pub use persistent_session_capsule::{
     AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
     CredentialSubjectProjectionContract, ExecutableSearchPathEntry,
     MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+    MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES,
     PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
     PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
     PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
+    SESSION_PROCESS_ENVIRONMENT_ENV, SessionProcessEnvironmentPathKind,
+    SessionProcessEnvironmentValue, validate_session_process_environment,
+    validate_session_process_environment_name, validate_session_process_environment_relative_path,
 };
 pub use placement_runtime_seed::{
     MAX_PLACEMENT_RUNTIME_METADATA_BYTES, PLACEMENT_RUNTIME_SEED_KIND,

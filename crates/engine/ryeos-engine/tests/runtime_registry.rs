@@ -57,7 +57,7 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
 
 fn with_empty_launch_contract(body: &str, serves: &str) -> String {
     format!(
-        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
     )
 }
 
@@ -128,6 +128,16 @@ launch_contract:
     allowed_kinds: []
     allowed_spaces: []
     allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -158,6 +168,16 @@ launch_contract:
     allowed_kinds: []
     allowed_spaces: []
     allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -218,6 +238,27 @@ fn parse_runtime_yaml_success() {
         yaml.description.as_deref(),
         Some("Default directive runtime")
     );
+}
+
+#[test]
+fn runtime_environment_contribution_policy_is_required_and_closed() {
+    let absent = FULL_RUNTIME_YAML.replace(
+        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n",
+        "",
+    );
+    assert!(matches!(
+        parse_via_registry(&absent).unwrap_err(),
+        EngineError::RuntimeYamlInvalid { .. }
+    ));
+
+    let inconsistent = FULL_RUNTIME_YAML.replace(
+        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n",
+        "  environment_contributions:\n    max_contributions: 1\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 1\n",
+    );
+    assert!(matches!(
+        parse_via_registry(&inconsistent).unwrap_err(),
+        EngineError::RuntimeYamlInvalid { .. }
+    ));
 }
 
 #[test]

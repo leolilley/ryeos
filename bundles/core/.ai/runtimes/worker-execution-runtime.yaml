@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-27T09:10:45Z:cd7aa94278408b45c06ae989143ed3698a1862c992305efcddad09fc585e33c1:4qblYIwbSsonoEVujMRADwq5T/KII3mXNne4sG4RMcLhKJgumpVzL5ZP4ljLQmTW/6WKxKeZe8pwGy19xzw2DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-04T05:54:47Z:bbd7d5e1a2b0e657752e18ed45c6c67699809abcc29c0db4f5809c4d72d83698:S1An1Oy5IthsDdlFgTF6AWiowkkWNyazl+xMXYl/AiEyfT5RgTZa1PeP+4keTBAYzvpSBCYS3g+yFanAI2ItBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: worker_execution
 default: true
@@ -38,6 +38,10 @@ launch_contract:
     external_content:
       max_declarations: 8
       large_content_max_total_bytes: 4294967296
+  environment_contributions:
+    max_contributions: 1
+    max_targets_per_contribution: 1
+    max_variables_per_contribution: 32
   financial_authority: {kind: none}
   external_effect_authority: {kind: external}
   secret_policy:

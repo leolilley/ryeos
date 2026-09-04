@@ -5,11 +5,13 @@ use ryeos_handler_protocol::{
     ExecutableSearchPathEntryWire, ExternalEffectAuthorityDeclWire,
     ExternalEffectAuthorityResultWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire,
     HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchContentDependencyRequestWire,
-    LaunchExecutionDependencyRequestWire, LaunchPrepareError, LaunchPrepareErrorClass,
-    LaunchPrepareResponse, LaunchPrepareSuccess, LaunchPreparedItemWire, TrustClassWire,
-    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    LaunchEnvironmentContributionRequestWire, LaunchEnvironmentPathKindWire,
+    LaunchEnvironmentValueWire, LaunchExecutionDependencyRequestWire, LaunchPrepareError,
+    LaunchPrepareErrorClass, LaunchPrepareResponse, LaunchPrepareSuccess, LaunchPreparedItemWire,
+    TrustClassWire, ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
     ValidateLaunchPreparerConfigSuccess,
 };
+use serde::Deserialize;
 
 const DEPENDENCY_NAME: &str = "session_worker";
 const ENVIRONMENT_BINDING: &str = "environment";
@@ -25,6 +27,23 @@ struct ValidatedWorkerEnvironment {
     worker_ref: String,
     has_external_content: bool,
     executable_search: Vec<ExecutableSearchPathEntryWire>,
+    process_environment: BTreeMap<String, AuthoredWorkerEnvironmentValue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum AuthoredWorkerEnvironmentValue {
+    Literal {
+        value: String,
+    },
+    RealizationPath {
+        realization_id: String,
+        relative_path: String,
+        path_kind: LaunchEnvironmentPathKindWire,
+    },
+    RuntimeViewDirectory {
+        relative_path: String,
+    },
 }
 
 fn main() {
@@ -90,7 +109,7 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                 )
             })?;
         let selection = validate_execution_config(&config)?;
-        let (worker_ref, content_dependencies) = match selection {
+        let (worker_ref, content_dependencies, environment_contributions) = match selection {
             WorkerSelection::Direct(worker_ref) => {
                 if !request.ref_bindings.is_empty() {
                     return Err(wire_error(
@@ -98,7 +117,7 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                         "direct worker execution cannot carry an environment binding",
                     ));
                 }
-                (worker_ref, BTreeMap::new())
+                (worker_ref, BTreeMap::new(), BTreeMap::new())
             }
             WorkerSelection::Environment(binding_name) => {
                 if request.ref_bindings.len() != 1 {
@@ -126,7 +145,47 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                 } else {
                     BTreeMap::new()
                 };
-                (environment.worker_ref, content_dependencies)
+                let variables = environment
+                    .process_environment
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let value = match value {
+                            AuthoredWorkerEnvironmentValue::Literal { value } => {
+                                LaunchEnvironmentValueWire::Literal { value }
+                            }
+                            AuthoredWorkerEnvironmentValue::RealizationPath {
+                                realization_id,
+                                relative_path,
+                                path_kind,
+                            } => LaunchEnvironmentValueWire::ContentPath {
+                                content_dependency: ENVIRONMENT_BINDING.to_owned(),
+                                realization_id,
+                                relative_path,
+                                path_kind,
+                            },
+                            AuthoredWorkerEnvironmentValue::RuntimeViewDirectory {
+                                relative_path,
+                            } => LaunchEnvironmentValueWire::RuntimeViewDirectory { relative_path },
+                        };
+                        (name, value)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let environment_contributions = (!variables.is_empty())
+                    .then(|| {
+                        BTreeMap::from([(
+                            ENVIRONMENT_BINDING.to_owned(),
+                            LaunchEnvironmentContributionRequestWire {
+                                targets: vec![DEPENDENCY_NAME.to_owned()],
+                                variables,
+                            },
+                        )])
+                    })
+                    .unwrap_or_default();
+                (
+                    environment.worker_ref,
+                    content_dependencies,
+                    environment_contributions,
+                )
             }
         };
         let mut effective_config = config;
@@ -152,6 +211,7 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                 },
             )]),
             content_dependencies,
+            environment_contributions,
             financial_authority: FinancialAuthorityResultWire::None,
             external_effect_authority: ExternalEffectAuthorityResultWire::External {
                 authority: serde_json::json!({
@@ -207,6 +267,15 @@ fn validate(request: ValidateLaunchPreparerConfigRequest) -> ValidateLaunchPrepa
                 external.max_declarations == 8
                     && external.large_content_max_total_bytes == Some(4_294_967_296)
             })
+        && request.environment_contributions.max_contributions == 1
+        && request
+            .environment_contributions
+            .max_targets_per_contribution
+            == 1
+        && request
+            .environment_contributions
+            .max_variables_per_contribution
+            == 32
         && matches!(
             request.financial_authority,
             FinancialAuthorityDeclWire::None
@@ -456,7 +525,7 @@ fn validate_worker_environment(
         ));
     }
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("ryeos.worker_environment.v2")
+        != Some("ryeos.worker_environment.v3")
         || value
             .get("category")
             .and_then(serde_json::Value::as_str)
@@ -468,7 +537,7 @@ fn validate_worker_environment(
     {
         return Err(wire_error(
             "worker_environment_invalid",
-            "worker environment is outside the admitted v2 contract",
+            "worker environment is outside the admitted v3 contract",
         ));
     }
     let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
@@ -515,10 +584,13 @@ fn validate_worker_environment(
                 "worker environment configuration must be an object",
             )
         })?;
-    if configuration.len() != 1 || !configuration.contains_key("executable_search") {
+    if configuration.len() != 2
+        || !configuration.contains_key("executable_search")
+        || !configuration.contains_key("process_environment")
+    {
         return Err(wire_error(
             "worker_environment_invalid",
-            "worker environment configuration must contain only executable_search",
+            "worker environment configuration must contain executable_search and process_environment",
         ));
     }
     let executable_search: Vec<ExecutableSearchPathEntryWire> =
@@ -560,6 +632,55 @@ fn validate_worker_environment(
             return Err(wire_error(
                 "worker_environment_executable_search_invalid",
                 "worker environment executable search requires tree realizations",
+            ));
+        }
+    }
+    let process_environment: BTreeMap<String, AuthoredWorkerEnvironmentValue> =
+        serde_json::from_value(configuration["process_environment"].clone()).map_err(|_| {
+            wire_error(
+                "worker_environment_variables_invalid",
+                "worker environment variables are malformed",
+            )
+        })?;
+    if process_environment.len() > 32 {
+        return Err(wire_error(
+            "worker_environment_variables_invalid",
+            "worker environment variables exceed their signed ceiling",
+        ));
+    }
+    for (name, value) in &process_environment {
+        if ryeos_state::objects::validate_session_process_environment_name(name).is_err() {
+            return Err(wire_error(
+                "worker_environment_variables_invalid",
+                "worker environment contains a protected or invalid variable name",
+            ));
+        }
+        let valid = match value {
+            AuthoredWorkerEnvironmentValue::Literal { value } => {
+                value.len() <= 4096 && !value.chars().any(char::is_control)
+            }
+            AuthoredWorkerEnvironmentValue::RealizationPath {
+                realization_id,
+                relative_path,
+                ..
+            } => {
+                declaration_ids.contains(realization_id.as_str())
+                    && ryeos_state::objects::validate_session_process_environment_relative_path(
+                        relative_path,
+                    )
+                    .is_ok()
+            }
+            AuthoredWorkerEnvironmentValue::RuntimeViewDirectory { relative_path } => {
+                ryeos_state::objects::validate_session_process_environment_relative_path(
+                    relative_path,
+                )
+                .is_ok()
+            }
+        };
+        if !valid {
+            return Err(wire_error(
+                "worker_environment_variables_invalid",
+                "worker environment contains an invalid value binding",
             ));
         }
     }
@@ -609,6 +730,7 @@ fn validate_worker_environment(
         worker_ref,
         has_external_content: !declarations.is_empty(),
         executable_search,
+        process_environment,
     })
 }
 
@@ -689,10 +811,19 @@ mod tests {
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
                     "category":"fixture/environments",
-                    "schema":"ryeos.worker_environment.v2",
+                    "schema":"ryeos.worker_environment.v3",
                     "worker_ref":"worker:fixture/hosted",
                     "external_content":[],
-                    "configuration":{"executable_search":[]},
+                    "configuration":{
+                        "executable_search":[],
+                        "process_environment":{
+                            "CARGO_NET_OFFLINE":{"kind":"literal","value":"true"},
+                            "CARGO_HOME":{
+                                "kind":"runtime_view_directory",
+                                "relative_path":"cargo/home"
+                            }
+                        }
+                    },
                     "credential_requirement":{
                         "workload_family":"fixture",
                         "required_state":"active",
@@ -708,6 +839,7 @@ mod tests {
         let validated = validate_worker_environment(&environment).unwrap();
         assert_eq!(validated.worker_ref, "worker:fixture/hosted");
         assert!(validated.executable_search.is_empty());
+        assert_eq!(validated.process_environment.len(), 2);
 
         let mut malformed = environment;
         malformed.composed.composed["configuration"]["ambient_path"] =
@@ -715,6 +847,121 @@ mod tests {
         assert_eq!(
             validate_worker_environment(&malformed).unwrap_err().code,
             "worker_environment_invalid"
+        );
+    }
+
+    #[test]
+    fn preparation_keeps_process_environment_independent_from_content() {
+        let mut config = valid_config();
+        config["worker_ref"] = serde_json::Value::Null;
+        config["environment_binding"] = serde_json::json!(ENVIRONMENT_BINDING);
+        let primary = LaunchPreparedItemWire {
+            canonical_ref: "worker_execution:fixture/session".to_owned(),
+            source_space: ItemSpaceWire::Bundle,
+            effective_trust_class: TrustClassWire::TrustedBundle,
+            composed: ryeos_handler_protocol::LaunchComposedViewWire {
+                composed: serde_json::json!({"config": config}),
+                derived: BTreeMap::new(),
+                policy_facts: BTreeMap::new(),
+            },
+            resolution_digest: serde_json::json!({"digest":"primary"}),
+        };
+        let environment = LaunchPreparedItemWire {
+            canonical_ref: "config:fixture/environments/default".to_owned(),
+            source_space: ItemSpaceWire::Bundle,
+            effective_trust_class: TrustClassWire::TrustedBundle,
+            composed: ryeos_handler_protocol::LaunchComposedViewWire {
+                composed: serde_json::json!({
+                    "category":"fixture/environments",
+                    "schema":"ryeos.worker_environment.v3",
+                    "worker_ref":"worker:fixture/hosted",
+                    "external_content":[],
+                    "configuration":{
+                        "executable_search":[],
+                        "process_environment":{
+                            "CARGO_HOME":{
+                                "kind":"runtime_view_directory",
+                                "relative_path":"cargo/home"
+                            }
+                        }
+                    },
+                    "credential_requirement":{
+                        "workload_family":"fixture",
+                        "required_state":"active",
+                        "subject_projection_contract":"fixture.account.v1"
+                    },
+                    "portable_state_contract":"ryeos.worker_session.restore.v1"
+                }),
+                derived: BTreeMap::new(),
+                policy_facts: BTreeMap::new(),
+            },
+            resolution_digest: serde_json::json!({"digest":"environment"}),
+        };
+        let LaunchPrepareResponse::Success { result } =
+            prepare(ryeos_handler_protocol::LaunchPrepareRequest {
+                handler_config: serde_json::json!({}),
+                primary,
+                ref_bindings: BTreeMap::from([(ENVIRONMENT_BINDING.to_owned(), environment)]),
+                config_inputs: BTreeMap::new(),
+            })
+        else {
+            panic!("valid environment-backed preparation must succeed");
+        };
+        assert!(result.content_dependencies.is_empty());
+        let contribution = result
+            .environment_contributions
+            .get(ENVIRONMENT_BINDING)
+            .expect("process environment contribution");
+        assert_eq!(contribution.targets, [DEPENDENCY_NAME]);
+        assert!(matches!(
+            contribution.variables.get("CARGO_HOME"),
+            Some(LaunchEnvironmentValueWire::RuntimeViewDirectory { relative_path })
+                if relative_path == "cargo/home"
+        ));
+    }
+
+    #[test]
+    fn worker_environment_rejects_protected_names_and_absent_realizations() {
+        let mut environment = LaunchPreparedItemWire {
+            canonical_ref: "config:fixture/environments/default".to_string(),
+            source_space: ItemSpaceWire::Bundle,
+            effective_trust_class: TrustClassWire::TrustedBundle,
+            composed: ryeos_handler_protocol::LaunchComposedViewWire {
+                composed: serde_json::json!({
+                    "category":"fixture/environments",
+                    "schema":"ryeos.worker_environment.v3",
+                    "worker_ref":"worker:fixture/hosted",
+                    "external_content":[],
+                    "configuration":{"executable_search":[],"process_environment":{}},
+                    "credential_requirement":{
+                        "workload_family":"fixture",
+                        "required_state":"active",
+                        "subject_projection_contract":"fixture.account.v1"
+                    },
+                    "portable_state_contract":"ryeos.worker_session.restore.v1"
+                }),
+                derived: BTreeMap::new(),
+                policy_facts: BTreeMap::new(),
+            },
+            resolution_digest: serde_json::json!({"digest":"retained"}),
+        };
+        environment.composed.composed["configuration"]["process_environment"]["RYEOS_WORKSPACE"] =
+            serde_json::json!({"kind":"literal","value":"forged"});
+        assert_eq!(
+            validate_worker_environment(&environment).unwrap_err().code,
+            "worker_environment_variables_invalid"
+        );
+        environment.composed.composed["configuration"]["process_environment"] = serde_json::json!({
+            "CARGO_HOME":{
+                "kind":"realization_path",
+                "realization_id":"missing",
+                "relative_path":"cargo",
+                "path_kind":"directory"
+            }
+        });
+        assert_eq!(
+            validate_worker_environment(&environment).unwrap_err().code,
+            "worker_environment_variables_invalid"
         );
     }
 
