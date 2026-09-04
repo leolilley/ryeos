@@ -254,7 +254,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
-      - name: Resolve immutable and candidate image tags
+      - name: Resolve immutable image tags
         id: resolve-images
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
@@ -306,47 +306,20 @@ jobs:
           resolve_tag "$STANDARD_VERSION" standard
           resolve_tag "$CENTRAL_VERSION" central
           resolve_tag "$HOSTED_WORKFLOW_VERSION" hosted_workflow
-          if [[ "$(grep '^standard_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
-            resolve_tag "$STANDARD_CANDIDATE" standard_candidate
-          else
-            {
-              echo "standard_candidate_exists=false"
-              echo "standard_candidate_digest="
-            } >> "$GITHUB_OUTPUT"
-          fi
-          if [[ "$(grep '^central_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
-            resolve_tag "$CENTRAL_CANDIDATE" central_candidate
-          else
-            {
-              echo "central_candidate_exists=false"
-              echo "central_candidate_digest="
-            } >> "$GITHUB_OUTPUT"
-          fi
-          if [[ "$(grep '^hosted_workflow_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
-            resolve_tag "$HOSTED_WORKFLOW_CANDIDATE" hosted_workflow_candidate
-          else
-            {
-              echo "hosted_workflow_candidate_exists=false"
-              echo "hosted_workflow_candidate_digest="
-            } >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Plan one release construction solve
         id: release-plan
         env:
           ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
           STANDARD_EXISTS: ${{ steps.resolve-images.outputs.standard_exists }}
-          STANDARD_CANDIDATE_EXISTS: ${{ steps.resolve-images.outputs.standard_candidate_exists }}
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
-          CENTRAL_CANDIDATE_EXISTS: ${{ steps.resolve-images.outputs.central_candidate_exists }}
           HOSTED_WORKFLOW_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
-          HOSTED_WORKFLOW_CANDIDATE_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_exists }}
         run: |
           targets=()
           [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
-          [[ "$STANDARD_EXISTS" == true || "$STANDARD_CANDIDATE_EXISTS" == true ]] || targets+=(standard)
-          [[ "$CENTRAL_EXISTS" == true || "$CENTRAL_CANDIDATE_EXISTS" == true ]] || targets+=(central-host)
-          [[ "$HOSTED_WORKFLOW_EXISTS" == true || "$HOSTED_WORKFLOW_CANDIDATE_EXISTS" == true ]] || targets+=(hosted-workflow)
+          [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
+          [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
+          [[ "$HOSTED_WORKFLOW_EXISTS" == true ]] || targets+=(hosted-workflow)
           TARGETS="$(IFS=,; printf '%s' "${targets[*]}")"
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "Release construction targets: ${TARGETS:-none}"
@@ -384,15 +357,15 @@ jobs:
           METADATA="$BAKE_METADATA"
           [[ -n "$METADATA" ]] || METADATA='{}'
           {
-            echo "standard=$(jq -r '.standard[\"containerimage.digest\"] // empty' <<<"$METADATA")"
-            echo "central=$(jq -r '.[\"central-host\"][\"containerimage.digest\"] // empty' <<<"$METADATA")"
-            echo "hosted_workflow=$(jq -r '.[\"hosted-workflow\"][\"containerimage.digest\"] // empty' <<<"$METADATA")"
+            echo "standard=$(jq -r '.standard["containerimage.digest"] // empty' <<<"$METADATA")"
+            echo "central=$(jq -r '.["central-host"]["containerimage.digest"] // empty' <<<"$METADATA")"
+            echo "hosted_workflow=$(jq -r '.["hosted-workflow"]["containerimage.digest"] // empty' <<<"$METADATA")"
           } >> "$GITHUB_OUTPUT"
 
       # Sign the exact digests returned by this authorized solve before any
-      # later publication step can make a retry observe unsigned candidates.
-      # Pre-existing candidates are not signed here; recovery accepts them only
-      # through the independent signature check below.
+      # later publication step. Candidate tags are mutable staging locations,
+      # never recovery authority: every retry whose immutable image is absent
+      # overwrites the candidate and uses only the current Bake's digest.
       - name: Cosign newly baked image candidates
         env:
           COSIGN_EXPERIMENTAL: "true"
@@ -453,28 +426,25 @@ jobs:
             --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
             --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
-      - name: Resolve candidate release digests
+      - name: Resolve release image digests
         id: release-digests
         env:
           EXISTING_STANDARD: ${{ steps.resolve-images.outputs.standard_digest }}
-          CANDIDATE_STANDARD: ${{ steps.resolve-images.outputs.standard_candidate_digest }}
           PUSHED_STANDARD: ${{ steps.baked-digests.outputs.standard }}
           EXISTING_CENTRAL: ${{ steps.resolve-images.outputs.central_digest }}
-          CANDIDATE_CENTRAL: ${{ steps.resolve-images.outputs.central_candidate_digest }}
           PUSHED_CENTRAL: ${{ steps.baked-digests.outputs.central }}
           EXISTING_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_digest }}
-          CANDIDATE_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_digest }}
           PUSHED_HOSTED_WORKFLOW: ${{ steps.baked-digests.outputs.hosted_workflow }}
         run: |
-          STANDARD_DIGEST="${EXISTING_STANDARD:-${CANDIDATE_STANDARD:-$PUSHED_STANDARD}}"
-          CENTRAL_DIGEST="${EXISTING_CENTRAL:-${CANDIDATE_CENTRAL:-$PUSHED_CENTRAL}}"
-          HOSTED_WORKFLOW_DIGEST="${EXISTING_HOSTED_WORKFLOW:-${CANDIDATE_HOSTED_WORKFLOW:-$PUSHED_HOSTED_WORKFLOW}}"
+          STANDARD_DIGEST="${EXISTING_STANDARD:-$PUSHED_STANDARD}"
+          CENTRAL_DIGEST="${EXISTING_CENTRAL:-$PUSHED_CENTRAL}"
+          HOSTED_WORKFLOW_DIGEST="${EXISTING_HOSTED_WORKFLOW:-$PUSHED_HOSTED_WORKFLOW}"
           [[ "$STANDARD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$CENTRAL_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$HOSTED_WORKFLOW_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ -z "$EXISTING_STANDARD" && -z "$CANDIDATE_STANDARD" ]] && STANDARD_CURRENT=true || STANDARD_CURRENT=false
-          [[ -z "$EXISTING_CENTRAL" && -z "$CANDIDATE_CENTRAL" ]] && CENTRAL_CURRENT=true || CENTRAL_CURRENT=false
-          [[ -z "$EXISTING_HOSTED_WORKFLOW" && -z "$CANDIDATE_HOSTED_WORKFLOW" ]] && HOSTED_WORKFLOW_CURRENT=true || HOSTED_WORKFLOW_CURRENT=false
+          [[ -z "$EXISTING_STANDARD" ]] && STANDARD_CURRENT=true || STANDARD_CURRENT=false
+          [[ -z "$EXISTING_CENTRAL" ]] && CENTRAL_CURRENT=true || CENTRAL_CURRENT=false
+          [[ -z "$EXISTING_HOSTED_WORKFLOW" ]] && HOSTED_WORKFLOW_CURRENT=true || HOSTED_WORKFLOW_CURRENT=false
           {
             echo "standard=$STANDARD_DIGEST"
             echo "central=$CENTRAL_DIGEST"
@@ -484,7 +454,7 @@ jobs:
             echo "hosted_workflow_current=$HOSTED_WORKFLOW_CURRENT"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Authenticate recovered image digests before inspection
+      - name: Authenticate recovered immutable image digests before inspection
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
@@ -544,7 +514,7 @@ jobs:
             jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/${label}-sbom.json"
           done
 
-      - name: Verify candidate image signatures
+      - name: Verify release image signatures
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}

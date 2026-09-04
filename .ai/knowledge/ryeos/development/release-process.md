@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-04T02:18:15Z:9ec0c7da9f6d1813c6d5106c98fbafd44c74c1b3e69e2ac2ba2154bb8209e89d:76vmj63TAWd530JqUvfesB4OAId6mzqeKLpfSoZa012VgnyNx9SzAWJOWNvk7v0sLDJCYFZafTT2/GcBm7kGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T02:44:28Z:153467ad522677d85c37b5ef345c31ed253ac1237a5ffc57b307dd3f7f71a3fd:Ts+SzAUoxt2YTfeZlEvytygBpPepJ295gZHkYb2CTA2IwNBQOck7cwpjc0w7C3o6r3hUd64QQWbfFhURlAqxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.5.0"
+version: "1.5.1"
 ```
 
 # RyeOS Release Process
@@ -337,6 +337,13 @@ provenance, and SBOM; an existing bundle archive and checksum are downloaded
 and verified again; and an archive-only upload may remain canonical after its
 officially signed bundle contents pass structural and cryptographic preflight.
 Mutable `latest` tags move only after every immutable output passes again.
+
+Source/build-date-scoped candidate image tags are mutable staging, not recovery
+authority. If an immutable image is absent, every retry re-exports that image to
+its candidate tag and uses only the digest returned by the current authorized
+Bake solve. It never adopts a candidate merely because the tag already exists.
+This closes the crash window between registry export and signing without
+weakening immutable image recovery.
 
 Two ambiguous states require operator intervention:
 
