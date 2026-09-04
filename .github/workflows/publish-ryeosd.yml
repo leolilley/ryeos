@@ -39,6 +39,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       build_date: ${{ steps.source.outputs.build_date }}
       source_sha: ${{ steps.source.outputs.sha }}
+      source_date_epoch: ${{ steps.source.outputs.source_date_epoch }}
     steps:
       # On manual recovery, begin with the workflow revision selected by the
       # operator so version validation cannot execute code from an unvalidated
@@ -95,9 +96,13 @@ jobs:
           else
             BUILD_DATE="$(git show -s --format=%cI "$TAG_COMMIT")"
           fi
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$TAG_COMMIT")"
 
-          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$SOURCE_SHA"
+            echo "build_date=$BUILD_DATE"
+            echo "source_date_epoch=$SOURCE_DATE_EPOCH"
+          } >> "$GITHUB_OUTPUT"
           echo "Source SHA: $SOURCE_SHA"
           echo "Tag commit: $TAG_COMMIT"
           echo "Build date: $BUILD_DATE"
@@ -233,96 +238,12 @@ jobs:
           fi
           echo "Publisher key fingerprint matches."
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Build and preflight official bundle archive
-        if: steps.bundle-assets.outputs.archive_exists != 'true'
-        env:
-          PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
-          VERSION: ${{ needs.qualify.outputs.version }}
-          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
-          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
-        run: |
-          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
-          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_SHA")"
-          if [[ -e "$ARTIFACT_DIR" ]]; then
-            echo "::error::Bundle artifact output already exists: $ARTIFACT_DIR"
-            exit 1
-          fi
-          mkdir "$ARTIFACT_DIR"
-          docker buildx build \
-            --file Dockerfile.release-bundles \
-            --target artifact \
-            --platform linux/amd64 \
-            --cache-from type=gha,scope=ryeos-release-image \
-            --cache-from type=gha,scope=ryeos-release-bundles \
-            --cache-to type=gha,scope=ryeos-release-bundles,mode=max \
-            --output "type=local,dest=${ARTIFACT_DIR}" \
-            --secret id=publisher-key,env=PUBLISHER_KEY \
-            --build-arg "VERSION=${VERSION}" \
-            --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
-            --build-arg "VCS_REF=${SOURCE_SHA}" \
-            --build-arg "BUILD_DATE=${BUILD_DATE}" \
-            .
-          (
-            cd "$ARTIFACT_DIR"
-            sha256sum -c "ryeos-bundles-${VERSION}-x86_64.tar.gz.sha256"
-          )
-
-      # Publish the verified archive before image construction. If a later
-      # image step fails, the immutable archive becomes the canonical retry
-      # input and is downloaded instead of rebuilt.
-      - name: Publish immutable official bundle assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.qualify.outputs.version }}
-          ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
-          CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
-        run: |
-          TAG="v${VERSION}"
-          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
-          ARCHIVE="$ARTIFACT_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
-          CHECKSUM="${ARCHIVE}.sha256"
-          test -s "$ARCHIVE"
-          test -s "$CHECKSUM"
-          scripts/release/verify-bundle-artifact.sh \
-            --version "$VERSION" \
-            --archive "$ARCHIVE" \
-            --checksum "$CHECKSUM"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --verify-tag \
-              --title "RyeOS ${VERSION}" \
-              --generate-notes
-          fi
-          # Archive first makes an interrupted upload safely resumable: the
-          # missing checksum can be derived from the already-canonical bytes.
-          # No --clobber is ever used.
-          if [[ "$ARCHIVE_EXISTS" != true ]]; then
-            gh release upload "$TAG" "$ARCHIVE"
-          fi
-          if [[ "$CHECKSUM_EXISTS" != true ]]; then
-            gh release upload "$TAG" "$CHECKSUM"
-          fi
-
-          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-bundle"
-          [[ ! -e "$PUBLISHED_DIR" ]]
-          mkdir "$PUBLISHED_DIR"
-          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
-            --pattern "$(basename "$ARCHIVE")" \
-            --pattern "$(basename "$CHECKSUM")"
-          scripts/release/verify-bundle-artifact.sh \
-            --version "$VERSION" \
-            --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
-            --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
-
-      # Registry credentials are unavailable until the signed bundle archive
-      # has been built and verified. Image provenance and signatures are
-      # checked against the immutable pushed digests below.
+      # The archive and all image candidates are one BuildKit solve. Registry
+      # credentials are needed before that solve can publish image outputs;
+      # provenance and signatures are checked against the pushed digests below.
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -410,83 +331,140 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      # Build once to a source/build-date-scoped candidate. Qualification and
-      # immutable promotion below operate on this exact pushed digest.
-      - name: Build and push attested standard candidate
-        id: push-standard
-        if: steps.resolve-images.outputs.standard_exists != 'true' && steps.resolve-images.outputs.standard_candidate_exists != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ./Dockerfile.standard
-          platforms: linux/amd64
-          push: true
-          pull: true
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=ryeos-release-image
-          cache-to: type=gha,scope=ryeos-release-image,mode=max
-          build-args: |
-            VCS_REF=${{ needs.qualify.outputs.source_sha }}
-            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: ${{ steps.resolve-images.outputs.standard_candidate_tag }}
-          secrets: |
-            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+      - name: Plan one release construction solve
+        id: release-plan
+        env:
+          ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
+          STANDARD_EXISTS: ${{ steps.resolve-images.outputs.standard_exists }}
+          STANDARD_CANDIDATE_EXISTS: ${{ steps.resolve-images.outputs.standard_candidate_exists }}
+          CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
+          CENTRAL_CANDIDATE_EXISTS: ${{ steps.resolve-images.outputs.central_candidate_exists }}
+          HOSTED_WORKFLOW_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
+          HOSTED_WORKFLOW_CANDIDATE_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_exists }}
+        run: |
+          targets=()
+          [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
+          [[ "$STANDARD_EXISTS" == true || "$STANDARD_CANDIDATE_EXISTS" == true ]] || targets+=(standard)
+          [[ "$CENTRAL_EXISTS" == true || "$CENTRAL_CANDIDATE_EXISTS" == true ]] || targets+=(central-host)
+          [[ "$HOSTED_WORKFLOW_EXISTS" == true || "$HOSTED_WORKFLOW_CANDIDATE_EXISTS" == true ]] || targets+=(hosted-workflow)
+          TARGETS="$(IFS=,; printf '%s' "${targets[*]}")"
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "Release construction targets: ${TARGETS:-none}"
 
-      - name: Build and push attested central-host candidate
-        id: push-central-host
-        if: steps.resolve-images.outputs.central_exists != 'true' && steps.resolve-images.outputs.central_candidate_exists != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      # Bake evaluates all requested targets in one BuildKit solve. Their
+      # shared `published` stage therefore compiles and signs exactly once.
+      - name: Build release archive and attested image candidates once
+        id: release-build
+        if: steps.release-plan.outputs.targets != ''
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          # Image targets declare max provenance explicitly. Suppress the
+          # action's implicit attestation on the local archive exporter.
+          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         with:
-          context: .
-          file: ./Dockerfile.central-host
-          platforms: linux/amd64
-          push: true
-          pull: true
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=ryeos-release-image
-          cache-to: type=gha,scope=ryeos-release-image,mode=max
-          build-args: |
+          source: .
+          files: ./docker-bake.release.hcl
+          targets: ${{ steps.release-plan.outputs.targets }}
+          vars: |
+            VERSION=${{ needs.qualify.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
             VCS_REF=${{ needs.qualify.outputs.source_sha }}
             BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: ${{ steps.resolve-images.outputs.central_candidate_tag }}
-          secrets: |
-            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+            ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
+            STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
+            CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
+            HOSTED_WORKFLOW_TAG=${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
 
-      - name: Build and push attested hosted-workflow candidate
-        id: push-hosted-workflow
-        if: steps.resolve-images.outputs.hosted_workflow_exists != 'true' && steps.resolve-images.outputs.hosted_workflow_candidate_exists != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ./Dockerfile.hosted-workflow
-          platforms: linux/amd64
-          push: true
-          pull: true
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=ryeos-release-image
-          cache-to: type=gha,scope=ryeos-release-image,mode=max
-          build-args: |
-            VCS_REF=${{ needs.qualify.outputs.source_sha }}
-            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
-          secrets: |
-            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+      - name: Resolve newly baked candidate digests
+        id: baked-digests
+        env:
+          BAKE_METADATA: ${{ steps.release-build.outputs.metadata }}
+        run: |
+          METADATA="$BAKE_METADATA"
+          [[ -n "$METADATA" ]] || METADATA='{}'
+          {
+            echo "standard=$(jq -r '.standard[\"containerimage.digest\"] // empty' <<<"$METADATA")"
+            echo "central=$(jq -r '.[\"central-host\"][\"containerimage.digest\"] // empty' <<<"$METADATA")"
+            echo "hosted_workflow=$(jq -r '.[\"hosted-workflow\"][\"containerimage.digest\"] // empty' <<<"$METADATA")"
+          } >> "$GITHUB_OUTPUT"
+
+      # Sign the exact digests returned by this authorized solve before any
+      # later publication step can make a retry observe unsigned candidates.
+      # Pre-existing candidates are not signed here; recovery accepts them only
+      # through the independent signature check below.
+      - name: Cosign newly baked image candidates
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          STANDARD_DIGEST: ${{ steps.baked-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.baked-digests.outputs.central }}
+          HOSTED_WORKFLOW_DIGEST: ${{ steps.baked-digests.outputs.hosted_workflow }}
+        run: |
+          for spec in \
+            "ryeos-standard $STANDARD_DIGEST" \
+            "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
+          do
+            read -r image digest <<<"$spec"
+            [[ -n "$digest" ]] || continue
+            cosign sign --yes "ghcr.io/leolilley/${image}@${digest}"
+          done
+
+      - name: Publish immutable official bundle assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+          ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
+          CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
+        run: |
+          TAG="v${VERSION}"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
+          ARCHIVE="$ARTIFACT_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          test -s "$ARCHIVE"
+          test -s "$CHECKSUM"
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$ARCHIVE" \
+            --checksum "$CHECKSUM"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "RyeOS ${VERSION}" \
+              --generate-notes
+          fi
+          # Archive-first publication keeps interrupted upload recovery safe.
+          # Existing canonical bytes are never overwritten.
+          if [[ "$ARCHIVE_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$ARCHIVE"
+          fi
+          if [[ "$CHECKSUM_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$CHECKSUM"
+          fi
+
+          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-bundle"
+          [[ ! -e "$PUBLISHED_DIR" ]]
+          mkdir "$PUBLISHED_DIR"
+          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")"
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
+            --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
       - name: Resolve candidate release digests
         id: release-digests
         env:
           EXISTING_STANDARD: ${{ steps.resolve-images.outputs.standard_digest }}
           CANDIDATE_STANDARD: ${{ steps.resolve-images.outputs.standard_candidate_digest }}
-          PUSHED_STANDARD: ${{ steps.push-standard.outputs.digest }}
+          PUSHED_STANDARD: ${{ steps.baked-digests.outputs.standard }}
           EXISTING_CENTRAL: ${{ steps.resolve-images.outputs.central_digest }}
           CANDIDATE_CENTRAL: ${{ steps.resolve-images.outputs.central_candidate_digest }}
-          PUSHED_CENTRAL: ${{ steps.push-central-host.outputs.digest }}
+          PUSHED_CENTRAL: ${{ steps.baked-digests.outputs.central }}
           EXISTING_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_digest }}
           CANDIDATE_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_candidate_digest }}
-          PUSHED_HOSTED_WORKFLOW: ${{ steps.push-hosted-workflow.outputs.digest }}
+          PUSHED_HOSTED_WORKFLOW: ${{ steps.baked-digests.outputs.hosted_workflow }}
         run: |
           STANDARD_DIGEST="${EXISTING_STANDARD:-${CANDIDATE_STANDARD:-$PUSHED_STANDARD}}"
           CENTRAL_DIGEST="${EXISTING_CENTRAL:-${CANDIDATE_CENTRAL:-$PUSHED_CENTRAL}}"
@@ -565,27 +543,6 @@ jobs:
               --format '{{ json .SBOM }}' > "$RUNNER_TEMP/${label}-sbom.json"
             jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/${label}-sbom.json"
           done
-
-      - name: Cosign sign newly pushed standard image
-        if: steps.release-digests.outputs.standard_current == 'true'
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          DIGEST: ${{ steps.release-digests.outputs.standard }}
-        run: cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
-
-      - name: Cosign sign newly pushed central-host image
-        if: steps.release-digests.outputs.central_current == 'true'
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          DIGEST: ${{ steps.release-digests.outputs.central }}
-        run: cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
-
-      - name: Cosign sign newly pushed hosted-workflow image
-        if: steps.release-digests.outputs.hosted_workflow_current == 'true'
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
-        run: cosign sign --yes "ghcr.io/leolilley/ryeos-hosted-workflow@${DIGEST}"
 
       - name: Verify candidate image signatures
         env:

@@ -30,6 +30,13 @@ ryeos_bundle_set_names() {
     standard)        printf '%s\n' core central-auth standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
     hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex ;;
+    # Internal publication superset. This is not an installable bundle set and
+    # deliberately has no node init profile: one release build publishes every
+    # bundle needed by the native archive and release images, whose final
+    # stages still select one exact deployable set above.
+    release-artifacts)
+      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference tv-tracker-authoring
+      ;;
     *) return 1 ;;
   esac
 }

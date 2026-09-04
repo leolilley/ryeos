@@ -10,7 +10,7 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|full-sandbox|central-host|standard|hosted-node|hosted-workflow] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|full-sandbox|central-host|standard|hosted-node|hosted-workflow|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
 #   full            core + central-auth + standard + web + browser + ryeos-ui +
@@ -23,6 +23,8 @@
 #   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
 #   hosted-workflow core + central-auth + standard + hosted-node + codex — hosted
 #                   node that also runs scheduler/graph/directive and Codex workloads
+#   release-artifacts internal non-installable union used to compile and publish
+#                   the native archive and every release image in one build
 #
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
@@ -90,7 +92,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|full-sandbox|central-host|standard|hosted-node|hosted-workflow) ;;
+  full|full-sandbox|central-host|standard|hosted-node|hosted-workflow|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -263,7 +265,7 @@ staged_payload_records_for_set() {
     core ryeos-worker-execution-launch-preparer ryeos-structured-session static \
     core ryeos-worker-execution-runtime ryeos-structured-session static
   case "$BUNDLE_SET" in
-    full|full-sandbox|central-host|standard|hosted-workflow)
+    full|full-sandbox|central-host|standard|hosted-workflow|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         standard ryeos-directive-runtime ryeos-directive-runtime release \
         standard ryeos-directive-launch-preparer ryeos-handler-bins release \
@@ -274,12 +276,12 @@ staged_payload_records_for_set() {
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox|central-host)
+    full|full-sandbox|central-host|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' web ryeos-web-tools ryeos-web-tools release
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox)
+    full|full-sandbox|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         ryeos-ui ryeos-tui ryeos-client-terminal release \
         ryeos-ui web ryeos-client-web release \
@@ -287,7 +289,7 @@ staged_payload_records_for_set() {
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox|hosted-workflow)
+    full|full-sandbox|hosted-workflow|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         codex ryeos-structured-session-bridge ryeos-structured-session static
       ;;
@@ -370,7 +372,7 @@ prepare_bundle_trees() {
     rm -rf "$bundle_dir/.ai/refs"
     rm -f  "$bundle_dir/PUBLISHER_TRUST.toml"
   done
-  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
+  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "release-artifacts" ]]; then
     rm -rf "$LOCAL_INFERENCE/.ai/bin"
     rm -rf "$LOCAL_INFERENCE/.ai/objects"
     rm -rf "$LOCAL_INFERENCE/.ai/refs"
@@ -392,7 +394,7 @@ prepare_bundle_trees() {
 
 # Cargo package list per bundle set (the default when --crates is not given).
 case "$BUNDLE_SET" in
-  full|full-sandbox)
+  full|full-sandbox|release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web ryeos-structured-session)
@@ -498,7 +500,7 @@ materialize_staged_payloads
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-session-exec"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-launch-preparer"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-runtime"
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-structured-session-bridge"
 fi
 if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
@@ -555,7 +557,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$R
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing standard bundle" "signed manifests"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
@@ -564,14 +566,14 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing web bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "central-host" ]]; then
+if [[ "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   # tv-tracker-authoring — source-only bundle (tool kind from core); ships the
   # operator context-doc author/read wrappers. No compiled binary of its own.
   ryeos_term_update "publishing tv-tracker-authoring bundle" "signed manifests"
@@ -581,7 +583,7 @@ if [[ "$BUNDLE_SET" == "central-host" ]]; then
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing browser bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
@@ -594,14 +596,14 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing hosted-node bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$HOSTED_NODE" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing codex bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \
@@ -616,7 +618,7 @@ if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing local-inference bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$LOCAL_INFERENCE" \
     --registry-root "$CORE" \

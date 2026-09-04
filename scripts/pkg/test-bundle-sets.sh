@@ -8,6 +8,7 @@ source "$ROOT/scripts/pkg/bundle-sets.sh"
 mapfile -t full < <(ryeos_bundle_set_names full)
 mapfile -t sandbox < <(ryeos_bundle_set_names full-sandbox)
 mapfile -t hosted_workflow < <(ryeos_bundle_set_names hosted-workflow)
+mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
 mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
 mapfile -t sandbox_bin_managed < <(ryeos_bundle_set_bin_managed_names full-sandbox)
 
@@ -65,9 +66,11 @@ for set_name in "${bundle_set_ids[@]}"; do
 done
 
 [[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex" ]]
+[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex local-inference tv-tracker-authoring" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
 done
+! ryeos_bundle_set_node_init_profile release-artifacts
 ! ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
