@@ -1,0 +1,169 @@
+# syntax=docker/dockerfile:1.7
+#
+# One release solve owns compilation and official bundle publication. The
+# native archive and every runtime image below derive from that exact published
+# generation; final stages copy only their declared deployable bundle set.
+
+FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS published
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
+        libcap-dev binutils python3 python3-yaml && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+ARG VERSION
+ARG SOURCE_DATE_EPOCH
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+ENV RYEOS_VCS_REF=$VCS_REF
+ENV RYEOS_BUILD_DATE=$BUILD_DATE
+
+# COPY-provided bundle directories can live in a lower overlay rename domain.
+# Materialize the tree in this writable layer before atomic publication. Cargo
+# produces the ordinary host closure once and the explicitly static worker
+# closure once; every output target below shares this completed stage.
+RUN --mount=type=secret,id=publisher-key,required=true \
+    --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    cp -a bundles .bundles-writable && \
+    rm -rf bundles && \
+    mv .bundles-writable bundles && \
+    test -n "$VERSION" && \
+    test -n "$SOURCE_DATE_EPOCH" && \
+    test -s /run/secrets/publisher-key && \
+    CARGO_TARGET_DIR=/build/target-cache \
+    ./scripts/populate-bundles.sh \
+      --key /run/secrets/publisher-key \
+      --owner ryeos-official \
+      --bundle-set release-artifacts \
+      --build-profile "$BUNDLE_BUILD_PROFILE" \
+      --all && \
+    mkdir -p /build/target/release /out && \
+    cp /build/target-cache/release/ryeosd /build/target/release/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/release/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/release/ryeos-core-tools && \
+    ./scripts/release/package-bundle-artifact.sh \
+      --version "$VERSION" \
+      --source /build/bundles \
+      --output "/out/ryeos-bundles-${VERSION}-x86_64.tar.gz" \
+      --source-date-epoch "$SOURCE_DATE_EPOCH" \
+      --ryeos-bin /build/target/release/ryeos
+
+FROM scratch AS bundle-artifact
+COPY --from=published /out/ /
+
+FROM node:22-trixie-slim@sha256:e6d9a389d34ff9678438af985c9913fbd1eb6ed36e80fea56644f4b4f6dd70ba AS node-runtime
+RUN npm install --global npm@12.0.1 && npm cache clean --force
+
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS workflow-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates python3 python3-venv python3-pip tini && \
+    rm -rf /var/lib/apt/lists/*
+RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/python3
+COPY --from=node-runtime /usr/local/ /usr/local/
+WORKDIR /app
+
+FROM workflow-runtime AS ryeos-standard
+COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
+COPY --from=published /build/bundles/core         /opt/ryeos/core
+COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=published /build/bundles/standard     /opt/ryeos/standard
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=standard
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="standard"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+FROM workflow-runtime AS ryeos-central-host
+COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=published /build/bundles/.ai                   /opt/ryeos/.ai
+COPY --from=published /build/bundles/core                  /opt/ryeos/core
+COPY --from=published /build/bundles/central-auth          /opt/ryeos/central-auth
+COPY --from=published /build/bundles/standard              /opt/ryeos/standard
+COPY --from=published /build/bundles/web                   /opt/ryeos/web
+COPY --from=published /build/bundles/tv-tracker-authoring  /opt/ryeos/tv-tracker-authoring
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=central-host
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="central-host"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS hosted-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates python3 tini && \
+    rm -rf /var/lib/apt/lists/*
+RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/python3
+WORKDIR /app
+
+FROM hosted-runtime AS ryeos-hosted-workflow
+COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
+COPY --from=published /build/bundles/core         /opt/ryeos/core
+COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=published /build/bundles/standard     /opt/ryeos/standard
+COPY --from=published /build/bundles/hosted-node  /opt/ryeos/hosted-node
+COPY --from=published /build/bundles/codex        /opt/ryeos/codex
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=hosted-workflow
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="hosted-workflow"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

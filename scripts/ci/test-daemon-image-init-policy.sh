@@ -60,11 +60,34 @@ dockerfile_instructions() {
 
 for path in "$root"/Dockerfile*; do
     [[ -f "$path" ]] || continue
+    # Dockerfile.release deliberately contains three named runtime targets.
+    # They are asserted individually below rather than misclassified as one
+    # final-stage daemon image by this single-image discovery pass.
+    [[ "$(basename "$path")" != Dockerfile.release ]] || continue
     instructions="$(dockerfile_instructions "$path")"
     if grep -Eqi '^copy .*ryeosd|^label .*io\.ryeos\.' <<<"$instructions"; then
         discovered_images+=("$(basename "$path")")
     fi
 done
+
+dockerfile_stage_instructions() {
+    local path="$1" wanted_stage="$2"
+    dockerfile_instructions "$path" | awk -v wanted="$wanted_stage" '
+        BEGIN { capture = 0; found = 0 }
+        tolower($1) == "from" {
+            capture = 0
+            for (i = 1; i <= NF; i++) {
+                if (tolower($i) == "as" && $(i + 1) == wanted) {
+                    capture = 1
+                    found = 1
+                    break
+                }
+            }
+        }
+        capture { print }
+        END { if (!found) exit 1 }
+    '
+}
 
 expected="$(printf '%s\n' "${daemon_images[@]}" | sort)"
 discovered="$(printf '%s\n' "${discovered_images[@]}" | sort)"
@@ -123,22 +146,48 @@ for image in "${daemon_images[@]}"; do
     fi
 done
 
+for stage in ryeos-standard ryeos-central-host ryeos-hosted-workflow; do
+    final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
+    if ! grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$final_stage"; then
+        # The named final stages inherit the separately asserted runtime base.
+        runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
+        [[ "$stage" == ryeos-hosted-workflow ]] && \
+            runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" hosted-runtime)"
+        grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$runtime_stage" || {
+            echo "Dockerfile.release target $stage does not inherit an installed tini" >&2
+            exit 1
+        }
+        [[ "$(grep -Eic '^run test -x /usr/bin/tini$' <<<"$runtime_stage")" -eq 1 ]] || {
+            echo "Dockerfile.release target $stage does not inherit a proven tini" >&2
+            exit 1
+        }
+    fi
+    if [[ "$(grep -Fxc "$required_entrypoint" <<<"$final_stage")" -ne 1 ]]; then
+        echo "Dockerfile.release target $stage must declare the exact tini-wrapped entrypoint once" >&2
+        exit 1
+    fi
+done
+
 # Images that promise an exact source bundle set must copy that same set into
 # their final stage. Publishing a bundle in the builder but omitting it from
 # /opt/ryeos makes a green image that cannot install the advertised workload.
 # shellcheck source=scripts/pkg/bundle-sets.sh
 source "$root/scripts/pkg/bundle-sets.sh"
 assert_runtime_bundle_inventory() {
-    local image="$1" bundle_set="$2" instructions final_stage expected_bundles actual_bundles
+    local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_bundles actual_bundles
     instructions="$(dockerfile_instructions "$root/$image")"
-    final_stage="$(awk '
-        tolower($1) == "from" { stage = "" }
-        { stage = stage $0 ORS }
-        END { printf "%s", stage }
-    ' <<<"$instructions")"
+    if [[ -n "$stage" ]]; then
+        final_stage="$(dockerfile_stage_instructions "$root/$image" "$stage")"
+    else
+        final_stage="$(awk '
+            tolower($1) == "from" { stage = "" }
+            { stage = stage $0 ORS }
+            END { printf "%s", stage }
+        ' <<<"$instructions")"
+    fi
     expected_bundles="$(ryeos_bundle_set_names "$bundle_set" | sort)"
     actual_bundles="$(sed -nE \
-        -e 's#^COPY --from=builder /build/bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
+        -e 's#^COPY --from=[^ ]+ /build/bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
         -e 's#^COPY bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
         <<<"$final_stage" | awk '
         $1 != $2 {
@@ -165,15 +214,22 @@ assert_runtime_bundle_inventory Dockerfile.standard standard
 assert_runtime_bundle_inventory Dockerfile.hosted-node hosted-node
 assert_runtime_bundle_inventory Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.central-host central-host
+assert_runtime_bundle_inventory Dockerfile.release standard ryeos-standard
+assert_runtime_bundle_inventory Dockerfile.release central-host ryeos-central-host
+assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-hosted-workflow
 
 assert_runtime_init_profile() {
-    local image="$1" bundle_set="$2" instructions final_stage expected_selector actual_selector
+    local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_selector actual_selector
     instructions="$(dockerfile_instructions "$root/$image")"
-    final_stage="$(awk '
-        tolower($1) == "from" { stage = "" }
-        { stage = stage $0 ORS }
-        END { printf "%s", stage }
-    ' <<<"$instructions")"
+    if [[ -n "$stage" ]]; then
+        final_stage="$(dockerfile_stage_instructions "$root/$image" "$stage")"
+    else
+        final_stage="$(awk '
+            tolower($1) == "from" { stage = "" }
+            { stage = stage $0 ORS }
+            END { printf "%s", stage }
+        ' <<<"$instructions")"
+    fi
     expected_selector="$(ryeos_bundle_set_node_init_profile "$bundle_set")"
     actual_selector="$(sed -nE 's/^ENV RYEOS_INIT_NODE_PROFILE=([^[:space:]]+)$/\1/p' <<<"$final_stage")"
     if [[ "$actual_selector" != "$expected_selector" ]]; then
@@ -190,6 +246,9 @@ assert_runtime_init_profile Dockerfile.standard standard
 assert_runtime_init_profile Dockerfile.hosted-node hosted-node
 assert_runtime_init_profile Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_init_profile Dockerfile.central-host central-host
+assert_runtime_init_profile Dockerfile.release standard ryeos-standard
+assert_runtime_init_profile Dockerfile.release central-host ryeos-central-host
+assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-workflow
 
 # The shared entrypoint consumes only a generic selector and must not infer
 # provider/workload policy from the bundles present in an image.
@@ -253,11 +312,46 @@ for image in "${daemon_images[@]}"; do
         exit 1
     fi
 done
+for stage in ryeos-standard ryeos-central-host ryeos-hosted-workflow; do
+    final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
+    runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
+    [[ "$stage" == ryeos-hosted-workflow ]] && \
+        runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" hosted-runtime)"
+    [[ "$(grep -Eic '^run test -x /usr/bin/python3$' <<<"$runtime_stage")" -eq 1 ]] || {
+        echo "Dockerfile.release target $stage does not inherit a proven Python runtime" >&2
+        exit 1
+    }
+done
 
-release_bundle_instructions="$(dockerfile_instructions "$root/Dockerfile.release-bundles")"
-if grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)|^entrypoint |^env RYEOS_INIT_NODE_PROFILE=' <<<"$release_bundle_instructions"; then
-    echo "Dockerfile.release-bundles is an artifact export and must not gain runtime init policy" >&2
+release_instructions="$(dockerfile_instructions "$root/Dockerfile.release")"
+[[ "$(grep -Fc './scripts/populate-bundles.sh' <<<"$release_instructions")" -eq 1 ]]
+grep -Fq -- '--bundle-set release-artifacts' <<<"$release_instructions"
+if grep -Eq 'cargo[[:space:]]+test|test_contract\.py|scripts/(ci|gate)' \
+    "$root/Dockerfile.release" "$root/.github/workflows/publish-ryeosd.yml"; then
+    echo "release construction must not run repository or runtime tests" >&2
     exit 1
 fi
+
+release_workflow="$root/.github/workflows/publish-ryeosd.yml"
+release_bake="$root/docker-bake.release.hcl"
+[[ "$(grep -Fc 'uses: docker/bake-action@' "$release_workflow")" -eq 1 ]] || {
+    echo "release workflow must use exactly one unified Bake action" >&2
+    exit 1
+}
+if grep -Fq 'uses: docker/build-push-action@' "$release_workflow" \
+    || grep -Fq 'docker buildx build' "$release_workflow"; then
+    echo "release workflow contains an independent image or archive build" >&2
+    exit 1
+fi
+for target in bundle-artifact standard central-host hosted-workflow; do
+    grep -Fq "target \"$target\"" "$release_bake" || {
+        echo "release Bake contract is missing target $target" >&2
+        exit 1
+    }
+done
+[[ "$(grep -Fc 'cache-to' "$release_bake")" -eq 1 ]] || {
+    echo "release Bake contract must export its shared build cache exactly once" >&2
+    exit 1
+}
 
 echo "daemon image init policy cases passed"

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-04T00:11:05Z:fc4b4455b710a42bbaf21c35bc6e599c00eb7bcb0c317a614a8ba1bb561f17d6:vn8bq2jReADt7lYiQ6KVJB0Pces0f7iUJzO7zZIqIvwO7cooNF9ZuCZ3w+pvJh60fj6CDXASfRfTzijNg+HVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T02:18:15Z:9ec0c7da9f6d1813c6d5106c98fbafd44c74c1b3e69e2ac2ba2154bb8209e89d:76vmj63TAWd530JqUvfesB4OAId6mzqeKLpfSoZa012VgnyNx9SzAWJOWNvk7v0sLDJCYFZafTT2/GcBm7kGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.4.1"
+version: "1.5.0"
 ```
 
 # RyeOS Release Process
@@ -35,6 +35,12 @@ scaffolding, but AUR is not currently an active release channel.
   failures without blocking an explicitly authorized release. Publication
   still fails closed on source identity, artifact digests, signatures,
   attestations, immutable-tag conflicts, and required dependency availability.
+- One release uses one BuildKit Bake solve. Its internal, non-installable
+  `release-artifacts` publication set compiles and signs the union required by
+  the native archive and all release images exactly once. The archive,
+  standard, central-host, and hosted-workflow outputs derive from that shared
+  stage; each final image still copies only its exact deployable bundle set.
+  Do not reintroduce independent per-image release builds.
 - Do **not** check out `main` in `/home/leo/projects/ryeos-next` if `main` is
   already checked out in `/home/leo/projects/ryeos`.
 - Do **not** move a release tag that has already been pushed or consumed. Cut a
@@ -211,9 +217,10 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
 `--crates "<Cargo package ...>"` for a focused development rebuild (e.g.
 `--crates ryeosd` for a daemon-only correction). `--jobs N` caps Cargo
-parallelism if a full release build exhausts memory. The release Dockerfiles
-already pass `--all`; this builds and publishes the exact payload closure but
-does not execute repository, bundle-contract, runtime, model, or image tests.
+parallelism if a full release build exhausts memory. The unified release
+Dockerfile passes `--all`; this builds and publishes the exact payload closure
+but does not execute repository, bundle-contract, runtime, model, or image
+tests.
 
 Do not manually copy binaries into bundle trees or hand-edit signed bundle YAML
 as a release fix.
@@ -368,11 +375,21 @@ GHCR image tags:
   ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
-The workflow checks provenance and SBOM attestations, verifies keyless
-signatures, promotes the immutable version tags, and only then advances all
-`latest` tags. Runtime qualification is separate and non-gating. Verify the
-immutable tags, release assets, and successful publication workflow run; do not
-use the mutable tags as the release identity.
+The workflow asks BuildKit to construct the archive and three image candidates
+in one Bake invocation. Their common published stage performs one host Cargo
+build, one static-worker build closure, and one signed bundle publication. The
+four outputs then fan out without recompiling RyeOS. The workflow checks
+provenance and SBOM attestations, verifies keyless signatures, promotes the
+immutable version tags, and only then advances all `latest` tags. Runtime
+qualification is separate and non-gating. Verify the immutable tags, release
+assets, and successful publication workflow run; do not use the mutable tags as
+the release identity.
+
+The shared GHA BuildKit cache is exported by the archive target only. Attaching
+the same cache export to every image target would upload the common compilation
+closure repeatedly. Interrupted-release recovery may omit outputs that already
+exist; all requested missing outputs still resolve through the same shared
+published stage.
 
 ## 9. AUR is deferred, not the active release channel
 
