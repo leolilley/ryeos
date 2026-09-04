@@ -1,9 +1,9 @@
 //! End-to-end gate tests for V5.2 service dispatch.
 //!
 //! Validates the full chain:
-//!   1. Every service ref in the descriptor table resolves through the engine
+//!   1. Every installed item admitted to the Services registry resolves
 //!   2. Every resolved service verifies (trust chain)
-//!   3. Every verified service's `endpoint` field matches a registered handler
+//!   3. Every verified item has an exact compiled descriptor and endpoint
 //!   4. Every verified service's `required_caps` is consistent with expectations
 //!   5. Capability enforcement rejects callers without required caps
 //!
@@ -20,12 +20,48 @@ use ryeos_engine::trust::TrustStore;
 
 /// Iterate the canonical descriptor table.
 fn descriptors() -> &'static [ServiceDescriptor] {
-    service_handlers::ALL
+    static DESCRIPTORS: once_cell::sync::Lazy<Vec<ServiceDescriptor>> =
+        once_cell::sync::Lazy::new(|| {
+            service_handlers::ALL
+                .iter()
+                .chain(ryeos_ui::handlers::ALL.iter())
+                .copied()
+                .collect()
+        });
+    &DESCRIPTORS
 }
 
-/// Iterate every `service_ref` in the descriptor table.
-fn service_refs() -> Vec<&'static str> {
-    descriptors().iter().map(|d| d.service_ref).collect()
+/// Enumerate the installed operational corpus from signed kind execution
+/// contracts. Compiled descriptors are implementation capability, not the
+/// authority deciding which services this bundle set installed.
+fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
+    let refs = ryeos_engine::item_resolution::enumerate_in_process_registry_refs(
+        &engine.resolution_roots(None),
+        &engine.kinds,
+        ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+    )
+    .expect("enumerate installed Services-registry items");
+    refs.into_iter()
+        .filter(|canonical| {
+            let effective = engine
+                .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: canonical.clone(),
+                    expected_kind: Some(canonical.kind.clone()),
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                })
+                .unwrap_or_else(|error| {
+                    panic!("compose installed Services-registry item `{canonical}`: {error}")
+                });
+            ryeos_app::service_registry::requires_compiled_service_handler(
+                &effective.composed_value,
+            )
+            .unwrap_or_else(|error| {
+                panic!("classify installed Services-registry item `{canonical}`: {error}")
+            })
+        })
+        .collect()
 }
 
 fn manifest_dir() -> PathBuf {
@@ -97,20 +133,17 @@ fn local_plan_ctx() -> PlanContext {
     }
 }
 
-/// Gate 1: Every operational service ref resolves through the engine.
+/// Gate 1: Every installed Services-registry item resolves through the engine.
 #[test]
 fn gate_all_services_resolve() {
     let engine = build_test_engine();
     let ctx = local_plan_ctx();
-    let services = service_refs();
+    let services = service_refs(&engine);
 
     let mut missing = Vec::new();
-    for svc_ref in &services {
-        let canonical = CanonicalRef::parse(svc_ref).unwrap_or_else(|e| {
-            panic!("descriptor table contains unparseable ref `{svc_ref}`: {e}")
-        });
-        if engine.resolve(&ctx, &canonical).is_err() {
-            missing.push(*svc_ref);
+    for canonical in &services {
+        if engine.resolve(&ctx, canonical).is_err() {
+            missing.push(canonical.to_string());
         }
     }
 
@@ -125,18 +158,18 @@ fn gate_all_services_resolve() {
 fn gate_all_services_verify() {
     let engine = build_test_engine();
     let ctx = local_plan_ctx();
-    let services = service_refs();
+    let services = service_refs(&engine);
 
     let mut failed = Vec::new();
-    for svc_ref in &services {
-        let canonical = CanonicalRef::parse(svc_ref).unwrap();
-        let resolved = engine.resolve(&ctx, &canonical).unwrap_or_else(|e| {
+    for canonical in &services {
+        let service_ref = canonical.to_string();
+        let resolved = engine.resolve(&ctx, canonical).unwrap_or_else(|e| {
             panic!(
-                "service `{svc_ref}` should resolve (gate_all_services_resolve covers this): {e}"
+                "service `{service_ref}` should resolve (gate_all_services_resolve covers this): {e}"
             )
         });
         if let Err(e) = engine.verify(&ctx, resolved) {
-            failed.push((*svc_ref, format!("{e}")));
+            failed.push((service_ref, format!("{e}")));
         }
     }
 
@@ -154,8 +187,12 @@ fn gate_all_services_have_registered_handler() {
     let ctx = local_plan_ctx();
 
     let mut unregistered = Vec::new();
-    for desc in descriptors() {
-        let canonical = CanonicalRef::parse(desc.service_ref).unwrap();
+    for canonical in service_refs(&engine) {
+        let service_ref = canonical.to_string();
+        let descriptor = descriptors()
+            .iter()
+            .find(|candidate| candidate.service_ref == service_ref)
+            .unwrap_or_else(|| panic!("installed item `{service_ref}` has no compiled descriptor"));
         let resolved = engine.resolve(&ctx, &canonical).unwrap();
         let verified = engine.verify(&ctx, resolved).unwrap();
         let extra = &verified.resolved.metadata.extra;
@@ -166,15 +203,34 @@ fn gate_all_services_have_registered_handler() {
             .map(|s| s.to_string());
 
         match endpoint {
-            Some(ep) if ep == desc.endpoint => {}
+            Some(ep) if ep == descriptor.endpoint => {}
             Some(ep) => unregistered.push((
-                desc.service_ref,
+                service_ref,
                 format!(
                     "bundle endpoint `{ep}` != descriptor endpoint `{}`",
-                    desc.endpoint
+                    descriptor.endpoint
                 ),
             )),
-            None => unregistered.push((desc.service_ref, "<no endpoint field>".into())),
+            None => unregistered.push((service_ref, "<no endpoint field>".into())),
+        }
+
+        let mut signed_caps = ryeos_app::service_registry::extract_required_caps(extra);
+        signed_caps.sort();
+        signed_caps.dedup();
+        let mut compiled_caps = descriptor
+            .required_caps
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>();
+        compiled_caps.sort();
+        compiled_caps.dedup();
+        if signed_caps != compiled_caps {
+            unregistered.push((
+                descriptor.service_ref.to_owned(),
+                format!(
+                    "signed required_caps {signed_caps:?} != descriptor assertion {compiled_caps:?}"
+                ),
+            ));
         }
     }
 
@@ -300,44 +356,44 @@ fn gate_cap_enforcement_logic() {
     assert_eq!(eff.len(), 2);
 }
 
-/// Gate 6: `service` kind is present in the live bundle.
+/// Gate 6: the live bundle contains a signed kind selecting the Services
+/// in-process registry. The concrete kind name is deliberately irrelevant.
 #[test]
-fn gate_service_kind_in_bundle() {
+fn gate_services_registry_has_an_admitted_kind() {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
 
     let kinds_dir = workspace_root().join("bundles/core/.ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("load kinds");
 
+    let selected = kinds
+        .kinds_for_in_process_registry(ryeos_engine::kind_registry::InProcessRegistryKind::Services)
+        .map(|(kind, _)| kind)
+        .collect::<Vec<_>>();
     assert!(
-        kinds.contains("service"),
-        "live bundle must contain `service` kind; loaded kinds = {:?}",
-        kinds.kinds().collect::<Vec<_>>()
-    );
-
-    let service_kind = kinds.get("service").expect("service kind");
-    // V5.3 Task 0a.2: service kind is now schema-driven via the
-    // `in_process_handler { services }` terminator. Backed by the same
-    // ServiceDescriptor table; the schema just declares the dispatch
-    // path. Wired by 0a.3.
-    assert!(
-        service_kind.is_executable(),
-        "`service` kind must declare an execution block in V5.3 \
-         (terminator: in_process_handler, registry: services)"
+        !selected.is_empty(),
+        "live bundle must admit at least one kind to the Services registry"
     );
 }
 
-/// Gate 7: Service descriptor table size regression guard.
-///
-/// Update this count when adding or removing service handlers.
+/// Gate 7: compiled descriptor identity is unambiguous. Adding or removing a
+/// handler does not require editing a count in Rust.
 #[test]
-fn gate_service_count_matches_expected() {
-    let services = service_refs();
-    assert_eq!(
-        services.len(),
-        98,
-        "service descriptor table count drifted from expected 98"
-    );
+fn gate_compiled_service_descriptors_are_unique() {
+    let mut refs = std::collections::BTreeSet::new();
+    let mut endpoints = std::collections::BTreeSet::new();
+    for descriptor in descriptors() {
+        assert!(
+            refs.insert(descriptor.service_ref),
+            "duplicate compiled service ref `{}`",
+            descriptor.service_ref
+        );
+        assert!(
+            endpoints.insert(descriptor.endpoint),
+            "duplicate compiled service endpoint `{}`",
+            descriptor.endpoint
+        );
+    }
 }
 
 /// Gate 8: Rust descriptors and bundle service YAMLs agree on
@@ -354,8 +410,12 @@ fn gate_yaml_caps_match_descriptor_caps() {
     let mut mismatched = Vec::new();
     let mut malformed = Vec::new();
 
-    for desc in descriptors() {
-        let canonical = CanonicalRef::parse(desc.service_ref).unwrap();
+    for canonical in service_refs(&engine) {
+        let service_ref = canonical.to_string();
+        let desc = descriptors()
+            .iter()
+            .find(|candidate| candidate.service_ref == service_ref)
+            .unwrap_or_else(|| panic!("installed item `{service_ref}` has no descriptor"));
         let resolved = engine.resolve(&ctx, &canonical).unwrap();
         let verified = engine.verify(&ctx, resolved).unwrap();
         let extra = &verified.resolved.metadata.extra;

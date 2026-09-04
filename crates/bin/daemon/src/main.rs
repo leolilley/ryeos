@@ -67,13 +67,28 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
     &DESCRIPTORS
 }
 
-fn build_service_registry() -> ryeos_app::service_registry::ServiceRegistry {
-    ryeos_api::registry::build_service_registry_from(service_descriptors())
+fn build_service_registry() -> Result<ryeos_app::service_registry::ServiceRegistry> {
+    let mut refs = BTreeSet::new();
+    let mut endpoints = BTreeSet::new();
+    for descriptor in service_descriptors() {
+        anyhow::ensure!(
+            refs.insert(descriptor.service_ref),
+            "duplicate compiled service ref `{}`",
+            descriptor.service_ref
+        );
+        anyhow::ensure!(
+            endpoints.insert(descriptor.endpoint),
+            "duplicate compiled service endpoint `{}`",
+            descriptor.endpoint
+        );
+    }
+    Ok(ryeos_api::registry::build_service_registry_from(
+        service_descriptors(),
+    ))
 }
 
 enum ServiceCatalogCheck {
     Healthy,
-    Missing,
     Failed(String),
 }
 
@@ -86,12 +101,14 @@ fn check_service_catalog_entry(
 ) -> ServiceCatalogCheck {
     let resolved = match resolved {
         Ok(resolved) => resolved,
-        Err(_) => {
-            tracing::warn!(
+        Err(error) => {
+            let message = error.to_string();
+            tracing::error!(
                 service = desc.service_ref,
-                "operational service not found in bundle"
+                error = %message,
+                "installed operational service resolution FAILED"
             );
-            return ServiceCatalogCheck::Missing;
+            return ServiceCatalogCheck::Failed(message);
         }
     };
     let verified = match engine.verify(plan_ctx, resolved) {
@@ -114,6 +131,37 @@ fn check_service_catalog_entry(
             return ServiceCatalogCheck::Failed(message);
         }
     };
+    if endpoint != desc.endpoint {
+        let message = format!(
+            "installed item names endpoint `{endpoint}` but compiled handler descriptor names `{}`",
+            desc.endpoint
+        );
+        tracing::error!(
+            service = desc.service_ref,
+            installed_endpoint = %endpoint,
+            compiled_endpoint = desc.endpoint,
+            %message
+        );
+        return ServiceCatalogCheck::Failed(message);
+    }
+    let mut signed_caps =
+        ryeos_app::service_registry::extract_required_caps(&verified.resolved.metadata.extra);
+    signed_caps.sort();
+    signed_caps.dedup();
+    let mut compiled_caps = desc
+        .required_caps
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    compiled_caps.sort();
+    compiled_caps.dedup();
+    if signed_caps != compiled_caps {
+        let message = format!(
+            "signed capability requirements {signed_caps:?} differ from compiled descriptor assertion {compiled_caps:?}"
+        );
+        tracing::error!(service = desc.service_ref, %message);
+        return ServiceCatalogCheck::Failed(message);
+    }
     if !services.has(&endpoint) {
         let message =
             format!("service resolves to endpoint '{endpoint}' but no handler registered");
@@ -130,13 +178,27 @@ fn check_service_catalog_entry(
     ServiceCatalogCheck::Healthy
 }
 
+fn installed_service_refs(
+    engine: &ryeos_engine::engine::Engine,
+) -> Result<Vec<ryeos_engine::canonical_ref::CanonicalRef>> {
+    let roots = engine.resolution_roots(None);
+    ryeos_engine::item_resolution::enumerate_in_process_registry_refs(
+        &roots,
+        &engine.kinds,
+        ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+    )
+    .context("enumerate installed Services-registry items")
+}
+
 fn build_route_table(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     ui: std::sync::Arc<ryeos_ui::UiState>,
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
 ) -> anyhow::Result<ryeos_api::routes::RouteTable> {
     let mut mode_registry =
         ryeos_api::routes::response_modes::ResponseModeRegistry::with_api_builtins_from(
             service_descriptors(),
+            Arc::new(kinds.clone()),
         );
     let mut extensions = ryeos_api::routes::RouteExtensionRegistry {
         auth: ryeos_api::routes::invokers::AuthInvokerRegistry::with_api_builtins(),
@@ -161,10 +223,11 @@ fn build_route_table(
 
 fn prospective_node_config_validator(
     ui: Arc<ryeos_ui::UiState>,
+    engine: Arc<ryeos_engine::engine::Engine>,
 ) -> Arc<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator> {
     Arc::new(
         ryeos_app::prospective_admission::ProspectiveNodeConfigValidator::new(move |snapshot| {
-            build_route_table(snapshot, ui.clone())
+            build_route_table(snapshot, ui.clone(), &engine.kinds)
                 .map(|_| ())
                 .context("prospective route-table compilation failed")
         }),
@@ -446,14 +509,18 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 bootstrap::load_node_config_two_phase(&config)?;
 
             // Build the service registry early — self-check needs it.
-            let services = Arc::new(build_service_registry());
+            let services = Arc::new(build_service_registry()?);
 
             // Self-check: verify every registered service resolves and is trusted.
             // Every service must resolve, verify, extract an endpoint, AND have a
             // registered handler. Any failure prevents daemon start (fail-closed).
             let catalog_health = engine.with_checked_bundle_generation(
                 |generation| -> anyhow::Result<ryeos_app::state::CatalogHealth> {
-                    let operational_services = service_descriptors();
+                    // Signed installed service items define the operational
+                    // catalog. The all-feature daemon may compile handlers for
+                    // services belonging to bundles that this node deliberately
+                    // does not install; those handlers are capability, not a
+                    // second mandatory-service authority.
                     let node_principal = identity.principal_id();
 
                     let plan_ctx = ryeos_engine::contracts::PlanContext {
@@ -473,32 +540,72 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     };
 
                     let mut failed = Vec::new();
-                    let mut missing = Vec::new();
-                    let mut resolvable = Vec::with_capacity(operational_services.len());
-                    for desc in operational_services {
-                        match ryeos_engine::canonical_ref::CanonicalRef::parse(desc.service_ref) {
-                            Ok(canonical) => resolvable.push((desc, canonical)),
-                            Err(error) => failed.push((
-                                desc.service_ref,
-                                format!("operational service ref parse failed: {error}"),
+                    let installed_refs = installed_service_refs(&engine)?;
+                    let effective_requests = installed_refs
+                        .iter()
+                        .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
+                            item_ref: canonical.clone(),
+                            expected_kind: Some(canonical.kind.clone()),
+                            project_root: None,
+                            subject_resolution_authority:
+                                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut operational_services = Vec::new();
+                    for (canonical, effective) in installed_refs
+                        .into_iter()
+                        .zip(generation.effective_items(&effective_requests))
+                    {
+                        let service_ref = canonical.to_string();
+                        let effective = match effective {
+                            Ok(effective) => effective,
+                            Err(error) => {
+                                failed.push((service_ref, error.to_string()));
+                                continue;
+                            }
+                        };
+                        if !effective.trusted {
+                            failed.push((
+                                service_ref,
+                                "installed Services-registry item is not trusted".into(),
+                            ));
+                            continue;
+                        }
+                        match ryeos_app::service_registry::requires_compiled_service_handler(
+                            &effective.composed_value,
+                        ) {
+                            Ok(false) => continue,
+                            Err(error) => {
+                                failed.push((service_ref, error.to_string()));
+                                continue;
+                            }
+                            Ok(true) => {}
+                        }
+                        match service_descriptors()
+                            .iter()
+                            .find(|candidate| candidate.service_ref == service_ref)
+                        {
+                            Some(descriptor) => operational_services.push((descriptor, canonical)),
+                            None => failed.push((
+                                service_ref,
+                                "installed operational service has no compiled handler".into(),
                             )),
                         }
                     }
-                    let canonical_refs = resolvable
+                    let canonical_refs = operational_services
                         .iter()
                         .map(|(_, canonical)| canonical.clone())
                         .collect::<Vec<_>>();
                     let resolved = generation.resolve_many(&plan_ctx, &canonical_refs);
-                    for ((desc, _), resolved) in resolvable.into_iter().zip(resolved) {
+                    for ((desc, _), resolved) in operational_services.into_iter().zip(resolved) {
                         let service_ref = desc.service_ref;
                         let check = check_service_catalog_entry(
                             desc, resolved, &engine, &plan_ctx, &services,
                         );
                         match check {
                             ServiceCatalogCheck::Healthy => {}
-                            ServiceCatalogCheck::Missing => missing.push(service_ref),
                             ServiceCatalogCheck::Failed(error) => {
-                                failed.push((service_ref, error));
+                                failed.push((service_ref.to_owned(), error));
                             }
                         }
                     }
@@ -517,32 +624,14 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             );
                     }
 
-                    // Missing items are NOT a boot failure: a lean node (e.g. the
-                    // hosted-node image) deliberately installs a subset of bundles,
-                    // so descriptors whose service YAML ships in an absent bundle
-                    // simply don't resolve. The node boots degraded:
-                    // `service:health/status` reports `missing_services`, and
-                    // executing one returns the structured `service_not_installed`
-                    // error. Only verification failures (tampered/unsigned items)
-                    // remain fail-closed above.
-                    if missing.is_empty() {
-                        Ok(ryeos_app::state::CatalogHealth {
-                            status: "ok".into(),
-                            missing_services: vec![],
-                        })
-                    } else {
-                        for svc in &missing {
-                            tracing::warn!(
-                                svc,
-                                "operational service not found in installed bundles; \
-                     starting degraded — executing it will return service_not_installed"
-                            );
-                        }
-                        Ok(ryeos_app::state::CatalogHealth {
-                            status: "degraded".into(),
-                            missing_services: missing.iter().map(|s| s.to_string()).collect(),
-                        })
-                    }
+                    // An absent optional service has no installed item and is
+                    // therefore outside this node's catalog. Dispatching it
+                    // still returns `service_not_installed`; it does not make a
+                    // deliberately lean bundle set unhealthy.
+                    Ok(ryeos_app::state::CatalogHealth {
+                        status: "ok".into(),
+                        missing_services: vec![],
+                    })
                 },
             )?;
 
@@ -550,12 +639,13 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
             let ui_state_for_hints = ui_state.clone();
             let prospective_node_config_validator =
-                prospective_node_config_validator(ui_state.clone());
+                prospective_node_config_validator(ui_state.clone(), engine.clone());
 
             // Build the route table from the node-config snapshot.
             let route_table = {
-                let table = build_route_table(&node_config_snapshot, ui_state.clone())
-                    .context("route table build failed at startup — check route YAML files")?;
+                let table =
+                    build_route_table(&node_config_snapshot, ui_state.clone(), &engine.kinds)
+                        .context("route table build failed at startup — check route YAML files")?;
                 Arc::new(arc_swap::ArcSwap::from_pointee(table))
             };
             tracing::info!(routes = route_table.load().all.len(), "route table built");
@@ -2898,7 +2988,7 @@ async fn run_service_standalone(
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
     )));
-    let services = Arc::new(build_service_registry());
+    let services = Arc::new(build_service_registry()?);
 
     let runtime_state_dir = config.runtime_state_dir();
     let runtime_db_path = config.db_path.clone();
@@ -2974,7 +3064,7 @@ async fn run_service_standalone(
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
     let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
     let standalone_node_config_validator =
-        prospective_node_config_validator(standalone_ui_state.clone());
+        prospective_node_config_validator(standalone_ui_state.clone(), engine.clone());
     let standalone_scheduler_db = match standalone_state_access {
         ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
             let scheduler_path = config
@@ -3101,9 +3191,15 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod shutdown_mapping_tests {
+    use super::build_service_registry;
     use ryeos_app::process::{ShutdownAction, resolve_shutdown_action};
     use ryeos_engine::contracts::CancellationMode;
     use std::time::Duration;
+
+    #[test]
+    fn composed_service_registry_has_unique_refs_and_endpoints() {
+        build_service_registry().expect("composed service registry must be unambiguous");
+    }
 
     #[test]
     fn hard_mode_maps_to_hard_kill() {

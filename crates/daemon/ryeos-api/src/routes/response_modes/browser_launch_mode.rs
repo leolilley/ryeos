@@ -23,6 +23,7 @@ use ryeos_app::route_raw::RawRouteSpec;
 
 pub struct BrowserLaunchMode {
     pub service_descriptors: &'static [crate::registry::ServiceDescriptor],
+    pub kinds: std::sync::Arc<ryeos_engine::kind_registry::KindRegistry>,
 }
 
 pub struct CompiledBrowserLaunchMode {
@@ -67,10 +68,11 @@ impl ResponseMode for BrowserLaunchMode {
             }
         })?;
 
-        let invoker = crate::routes::invokers::compile_canonical_ref_invoker_with_descriptors(
+        let (invoker, _) = crate::routes::invokers::compile_canonical_ref_invoker_with_descriptors(
             source_str,
             &raw.id,
             self.service_descriptors,
+            &self.kinds,
         )?;
 
         if !raw.response.source_config.is_null() {

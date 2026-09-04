@@ -58,15 +58,18 @@ impl ResponseModeRegistry {
     /// Build a registry with API-only builtins (no UI extensions).
     pub fn with_api_builtins_from(
         service_descriptors: &'static [crate::registry::ServiceDescriptor],
+        kinds: Arc<ryeos_engine::kind_registry::KindRegistry>,
     ) -> Self {
         let mut r = Self::new();
         r.register(Arc::new(launch_mode::LaunchMode::default()));
         r.register(Arc::new(handler_mode::HandlerMode));
         r.register(Arc::new(json_mode::JsonMode {
             service_descriptors,
+            kinds: kinds.clone(),
         }));
         r.register(Arc::new(browser_launch_mode::BrowserLaunchMode {
             service_descriptors,
+            kinds,
         }));
         r.register(Arc::new(execute_mode::ExecuteMode));
         r.register(Arc::new(launch_mode::LaunchMode::with_key("accepted")));
@@ -74,8 +77,8 @@ impl ResponseModeRegistry {
     }
 
     /// Build a registry with API-only builtins using default descriptors.
-    pub fn with_builtins() -> Self {
-        Self::with_api_builtins_from(crate::handlers::ALL)
+    pub fn with_builtins(kinds: Arc<ryeos_engine::kind_registry::KindRegistry>) -> Self {
+        Self::with_api_builtins_from(crate::handlers::ALL, kinds)
     }
 
     /// Register an additional stream source in the event_stream response mode.
@@ -103,7 +106,9 @@ mod tests {
 
     #[test]
     fn builtins_register_static_event_stream_and_launch() {
-        let r = ResponseModeRegistry::with_builtins();
+        let r = ResponseModeRegistry::with_builtins(Arc::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+        ));
         assert!(r.get("static").is_some());
         assert!(r.get("event_stream").is_some());
         assert!(r.get("launch").is_some());
@@ -126,7 +131,9 @@ mod tests {
 
     #[test]
     fn accepted_alias_compiles_same_as_launch() {
-        let r = ResponseModeRegistry::with_builtins();
+        let r = ResponseModeRegistry::with_builtins(Arc::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+        ));
         let accepted = r.get("accepted").expect("accepted must exist");
         let launch = r.get("launch").expect("launch must exist");
         // Both resolve to the same compile logic (same key family).

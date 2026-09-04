@@ -1,7 +1,7 @@
 //! Compiled route invokers — one trait, many implementations.
 //!
 //! Every route source becomes a compiled invoker at route-table-build time:
-//! - `service:` refs → `CompiledServiceInvocation` (generic wrapper)
+//! - schema-selected Services-registry refs → `CompiledServiceInvocation`
 //! - Auth verifiers → `CompiledNoneVerifier`, `CompiledRyeosSignedVerifier`, `CompiledHmacVerifier`
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
@@ -144,58 +144,41 @@ pub fn compile_auth_invoker_with_registry(
     }
 }
 
-/// Compile an invoker from any canonical ref.
-///
-/// Dispatches on the ref's kind:
-/// - `service:` → `CompiledServiceInvocation` (in-process handler)
-/// - `tool:` / `directive:` / `graph:` → `CompiledDispatchInvoker` (engine dispatch)
+/// Execution mechanics selected from the source kind's admitted schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalRefInvocationMechanics {
+    InProcess(ryeos_engine::kind_registry::InProcessRegistryKind),
+    EngineDispatch,
+}
+
+/// Compile an invoker from any canonical ref using the API handler set.
 pub fn compile_canonical_ref_invoker(
     source_ref: &str,
     route_id: &str,
-) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    let parsed = crate::routes::parsed_ref::ParsedItemRef::parse(source_ref).map_err(|e| {
-        RouteConfigError::InvalidSourceConfig {
-            id: route_id.into(),
-            src: source_ref.into(),
-            reason: format!("source '{source_ref}' is not a valid canonical ref: {e}"),
-        }
-    })?;
-
-    match parsed.kind() {
-        "service" => compile_service_invoker_inner(source_ref, route_id, &parsed),
-        "tool" | "directive" | "graph" => {
-            Ok(Arc::new(dispatch_invocation::CompiledDispatchInvoker {
-                item_ref: source_ref.to_string(),
-                authority: dispatch_invocation::DispatchAuthority::CallerPrincipal,
-            }))
-        }
-        other => Err(RouteConfigError::InvalidSourceConfig {
-            id: route_id.into(),
-            src: source_ref.into(),
-            reason: format!(
-                "unsupported source kind '{}' in '{}'; expected service/tool/directive/graph",
-                other, source_ref
-            ),
-        }),
-    }
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+) -> Result<
+    (
+        Arc<dyn CompiledRouteInvocation>,
+        CanonicalRefInvocationMechanics,
+    ),
+    RouteConfigError,
+> {
+    compile_canonical_ref_invoker_with_descriptors(
+        source_ref,
+        route_id,
+        crate::handlers::ALL,
+        kinds,
+    )
 }
 
-/// Inner: compile a `service:` ref into a `CompiledServiceInvocation`.
-fn compile_service_invoker_inner(
-    source_ref: &str,
-    route_id: &str,
-    _parsed: &crate::routes::parsed_ref::ParsedItemRef,
-) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    compile_service_invoker_from(source_ref, route_id, crate::handlers::ALL)
-}
-
-/// Compile a `service:` ref using a provided descriptor set.
+/// Compile an item admitted to the daemon's Services registry.
 ///
 /// This is the composition-root variant: the daemon passes the full
 /// composed descriptor table (API + UI), while API-only tests can pass
 /// `handlers::ALL` directly.
 pub fn compile_service_invoker_from(
     source_ref: &str,
+    subject_kind: &str,
     route_id: &str,
     descriptors: &[crate::registry::ServiceDescriptor],
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
@@ -226,6 +209,7 @@ pub fn compile_service_invoker_from(
 
     Ok(Arc::new(service_invocation::CompiledServiceInvocation {
         service_ref: source_ref.to_string(),
+        subject_kind: subject_kind.to_string(),
         endpoint: descriptor.endpoint.to_string(),
     }))
 }
@@ -239,7 +223,14 @@ pub fn compile_canonical_ref_invoker_with_descriptors(
     source_ref: &str,
     route_id: &str,
     descriptors: &[crate::registry::ServiceDescriptor],
-) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+) -> Result<
+    (
+        Arc<dyn CompiledRouteInvocation>,
+        CanonicalRefInvocationMechanics,
+    ),
+    RouteConfigError,
+> {
     let parsed = crate::routes::parsed_ref::ParsedItemRef::parse(source_ref).map_err(|e| {
         RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
@@ -247,29 +238,53 @@ pub fn compile_canonical_ref_invoker_with_descriptors(
             reason: format!("source '{source_ref}' is not a valid canonical ref: {e}"),
         }
     })?;
-
-    match parsed.kind() {
-        "service" => compile_service_invoker_from(source_ref, route_id, descriptors),
-        "tool" | "directive" | "graph" => {
-            Ok(Arc::new(dispatch_invocation::CompiledDispatchInvoker {
-                item_ref: source_ref.to_string(),
-                authority: dispatch_invocation::DispatchAuthority::CallerPrincipal,
-            }))
-        }
-        other => Err(RouteConfigError::InvalidSourceConfig {
+    let schema = kinds
+        .get(parsed.kind())
+        .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
             src: source_ref.into(),
             reason: format!(
-                "unsupported source kind '{}' in '{}'; expected service/tool/directive/graph",
-                other, source_ref
+                "source kind `{}` has no admitted kind schema",
+                parsed.kind()
             ),
-        }),
+        })?;
+    let execution = schema
+        .execution()
+        .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
+            id: route_id.into(),
+            src: source_ref.into(),
+            reason: format!("source kind `{}` is not executable", parsed.kind()),
+        })?;
+
+    match execution.terminator.as_ref() {
+        Some(ryeos_engine::kind_registry::TerminatorDecl::InProcess { registry, .. }) => {
+            let invocation = match registry {
+                ryeos_engine::kind_registry::InProcessRegistryKind::Services => {
+                    compile_service_invoker_from(source_ref, parsed.kind(), route_id, descriptors)?
+                }
+            };
+            Ok((
+                invocation,
+                CanonicalRefInvocationMechanics::InProcess(*registry),
+            ))
+        }
+        _ => Ok((
+            Arc::new(dispatch_invocation::CompiledDispatchInvoker {
+                item_ref: source_ref.to_string(),
+                authority: dispatch_invocation::DispatchAuthority::CallerPrincipal,
+            }),
+            CanonicalRefInvocationMechanics::EngineDispatch,
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn live_kinds() -> ryeos_engine::kind_registry::KindRegistry {
+        ryeos_engine::test_support::load_live_kind_registry()
+    }
 
     #[test]
     fn compile_auth_invoker_unknown_verifier_rejected() {
@@ -329,7 +344,15 @@ mod tests {
 
     #[test]
     fn canonical_ref_compiler_accepts_service() {
-        let invoker = compile_canonical_ref_invoker("service:threads/get", "r1").unwrap();
+        let kinds = live_kinds();
+        let (invoker, mechanics) =
+            compile_canonical_ref_invoker("service:threads/get", "r1", &kinds).unwrap();
+        assert_eq!(
+            mechanics,
+            CanonicalRefInvocationMechanics::InProcess(
+                ryeos_engine::kind_registry::InProcessRegistryKind::Services
+            )
+        );
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,
@@ -339,7 +362,10 @@ mod tests {
 
     #[test]
     fn canonical_ref_compiler_accepts_tool() {
-        let invoker = compile_canonical_ref_invoker("tool:ryeos/core/execute", "r1").unwrap();
+        let kinds = live_kinds();
+        let (invoker, mechanics) =
+            compile_canonical_ref_invoker("tool:ryeos/core/execute", "r1", &kinds).unwrap();
+        assert_eq!(mechanics, CanonicalRefInvocationMechanics::EngineDispatch);
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,
@@ -349,7 +375,10 @@ mod tests {
 
     #[test]
     fn canonical_ref_compiler_accepts_directive() {
-        let invoker = compile_canonical_ref_invoker("directive:my/agent", "r1").unwrap();
+        let kinds = live_kinds();
+        let (invoker, mechanics) =
+            compile_canonical_ref_invoker("directive:my/agent", "r1", &kinds).unwrap();
+        assert_eq!(mechanics, CanonicalRefInvocationMechanics::EngineDispatch);
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,
@@ -359,7 +388,10 @@ mod tests {
 
     #[test]
     fn canonical_ref_compiler_accepts_graph() {
-        let invoker = compile_canonical_ref_invoker("graph:workflows/approval", "r1").unwrap();
+        let kinds = live_kinds();
+        let (invoker, mechanics) =
+            compile_canonical_ref_invoker("graph:workflows/approval", "r1", &kinds).unwrap();
+        assert_eq!(mechanics, CanonicalRefInvocationMechanics::EngineDispatch);
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,
@@ -369,18 +401,20 @@ mod tests {
 
     #[test]
     fn canonical_ref_compiler_rejects_unknown_kind() {
-        let result = compile_canonical_ref_invoker("fictional:item/path", "r1");
+        let kinds = live_kinds();
+        let result = compile_canonical_ref_invoker("fictional:item/path", "r1", &kinds);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("unsupported source kind"), "got: {msg}");
+        assert!(msg.contains("has no admitted kind schema"), "got: {msg}");
     }
 
     #[test]
     fn service_invoker_rejects_unknown_service() {
-        let result = compile_canonical_ref_invoker("service:nonexistent/handler", "r1");
+        let kinds = live_kinds();
+        let result = compile_canonical_ref_invoker("service:nonexistent/handler", "r1", &kinds);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -393,10 +427,12 @@ mod tests {
 
     #[test]
     fn with_descriptors_accepts_known_service() {
-        let invoker = compile_canonical_ref_invoker_with_descriptors(
+        let kinds = live_kinds();
+        let (invoker, _) = compile_canonical_ref_invoker_with_descriptors(
             "service:threads/get",
             "r1",
             crate::handlers::ALL,
+            &kinds,
         )
         .unwrap();
         let contract = invoker.contract();
@@ -408,10 +444,12 @@ mod tests {
 
     #[test]
     fn with_descriptors_rejects_unknown_service() {
+        let kinds = live_kinds();
         let result = compile_canonical_ref_invoker_with_descriptors(
             "service:nonexistent/handler",
             "r1",
             crate::handlers::ALL,
+            &kinds,
         );
         let err = match result {
             Err(e) => e,
@@ -446,10 +484,12 @@ mod tests {
             handler: fake_handler,
         };
         let descriptors = &[ext_descriptor];
-        let invoker = compile_canonical_ref_invoker_with_descriptors(
+        let kinds = live_kinds();
+        let (invoker, _) = compile_canonical_ref_invoker_with_descriptors(
             "service:ui/session/current",
             "r1",
             descriptors,
+            &kinds,
         )
         .unwrap();
         let contract = invoker.contract();
@@ -462,8 +502,13 @@ mod tests {
     #[test]
     fn with_descriptors_rejects_extension_service_when_not_provided() {
         // Same ref, empty descriptor set → must fail.
-        let result =
-            compile_canonical_ref_invoker_with_descriptors("service:ui/session/current", "r1", &[]);
+        let kinds = live_kinds();
+        let result = compile_canonical_ref_invoker_with_descriptors(
+            "service:ui/session/current",
+            "r1",
+            &[],
+            &kinds,
+        );
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -475,9 +520,14 @@ mod tests {
     #[test]
     fn with_descriptors_accepts_tool_kind() {
         // Non-service refs work the same regardless of descriptor set.
-        let invoker =
-            compile_canonical_ref_invoker_with_descriptors("tool:ryeos/core/execute", "r1", &[])
-                .unwrap();
+        let kinds = live_kinds();
+        let (invoker, _) = compile_canonical_ref_invoker_with_descriptors(
+            "tool:ryeos/core/execute",
+            "r1",
+            &[],
+            &kinds,
+        )
+        .unwrap();
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,

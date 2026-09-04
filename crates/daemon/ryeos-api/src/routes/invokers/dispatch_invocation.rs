@@ -1,5 +1,6 @@
-//! Compiled dispatch invoker — synchronous waited dispatch for non-service
-//! canonical refs (`tool:`, `directive:`, `graph:`) in json-mode routes.
+//! Compiled dispatch invoker — synchronous waited dispatch for canonical refs
+//! whose admitted kind schema selects engine execution rather than an
+//! in-process registry.
 //!
 //! Unlike the service invoker (in-process handler call) or the launch/gateway
 //! invokers (background task), this calls `dispatch::dispatch` synchronously
@@ -20,7 +21,7 @@ use crate::routes::invocation::{
     RouteInvocationOutput, RouteInvocationResult,
 };
 
-/// Typed input shape for non-service dispatch invokers.
+/// Typed input shape for engine-dispatched route sources.
 ///
 /// Parsed from the interpolated `source_config`. `project_path` is required;
 /// `parameters` defaults to an empty object.
@@ -35,7 +36,7 @@ pub(crate) struct DispatchSourceConfig {
     pub parameters: serde_json::Value,
 }
 
-/// Synchronous dispatch invoker for `tool:` / `directive:` / `graph:` sources.
+/// Synchronous invoker for an engine-dispatched canonical source.
 ///
 /// At compile time the `item_ref` is stored. At runtime the invoker parses
 /// a typed `DispatchSourceConfig` from `ctx.input`, constructs a
@@ -83,13 +84,12 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             })?;
 
         // Parse typed dispatch config — project_path is required, no fallback.
-        let config: DispatchSourceConfig = serde_json::from_value(ctx.input.clone()).map_err(
-            |e| {
+        let config: DispatchSourceConfig =
+            serde_json::from_value(ctx.input.clone()).map_err(|e| {
                 RouteDispatchError::BadRequest(format!(
-                    "non-service dispatch requires {{ project_path, parameters }} in source_config: {e}"
+                    "engine dispatch requires {{ project_path, parameters }} in source_config: {e}"
                 ))
-            },
-        )?;
+            })?;
 
         let project_path = std::path::PathBuf::from(&config.project_path);
 

@@ -25,6 +25,7 @@ use base64::Engine as _;
 use lillux::crypto::{DecodePublicKey, VerifyingKey};
 
 use crate::handlers::HandlerRegistry;
+use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserRegistry;
 use crate::parsers::descriptor::ParserDescriptor;
 use crate::parsers::dispatcher::ParserDispatcher;
@@ -102,6 +103,23 @@ pub fn live_trust_store() -> TrustStore {
             label: Some("test-support: dev publisher".into()),
         },
     ])
+}
+
+/// Load the signed kind schemas from the live Core and Standard bundles.
+pub fn load_live_kind_registry() -> KindRegistry {
+    let trust_store = live_trust_store();
+    KindRegistry::load_base(
+        &[
+            core_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+            standard_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+        ],
+        &trust_store,
+    )
+    .expect("live kind registry must load from bundles/{core,standard}")
 }
 
 /// Load the live `HandlerRegistry` from both `bundles/core/` and

@@ -145,6 +145,41 @@ pub fn extract_required_caps(metadata_extra: &HashMap<String, Value>) -> Vec<Str
         .unwrap_or_default()
 }
 
+/// Whether an effective item admitted to the Services registry requires a
+/// compiled daemon handler.
+///
+/// `local_execute` is an authored offline bridge. It replaces a compiled
+/// handler only when the item is unavailable to the live daemon. `both`
+/// still requires a handler for its live surface, while `daemon_only` may not
+/// contradict itself by also naming an offline bridge. Omitted availability
+/// retains the signed service contract's `daemon_only` default.
+pub fn requires_compiled_service_handler(composed: &Value) -> Result<bool> {
+    let object = composed
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("effective service value must be a mapping"))?;
+    let availability = match object.get("availability") {
+        None => "daemon_only",
+        Some(Value::String(value)) => value.as_str(),
+        Some(_) => anyhow::bail!("service field 'availability' must be a string"),
+    };
+    let local_execute = match object.get("local_execute") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => anyhow::bail!("service field 'local_execute' must be a string"),
+    };
+
+    match availability {
+        "daemon_only" if local_execute.is_some() => anyhow::bail!(
+            "daemon_only service may not declare local_execute; use local, stopped_node, or both"
+        ),
+        "daemon_only" | "both" => Ok(true),
+        "local" | "stopped_node" => Ok(local_execute.is_none()),
+        other => anyhow::bail!(
+            "service field 'availability' has invalid value '{other}'; expected daemon_only | local | stopped_node | both"
+        ),
+    }
+}
+
 /// Whether a verified service invocation should create a durable lifecycle
 /// thread. Auditability remains the secure default.
 pub fn extract_record_thread(metadata_extra: &HashMap<String, Value>) -> Result<bool> {
@@ -218,6 +253,44 @@ pub fn extract_ui_dispatch(metadata_extra: &HashMap<String, Value>) -> Result<Ui
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_handler_requirement_follows_effective_service_contract() {
+        assert!(
+            requires_compiled_service_handler(&serde_json::json!({"endpoint": "daemon"})).unwrap()
+        );
+        assert!(
+            requires_compiled_service_handler(&serde_json::json!({
+                "endpoint": "both",
+                "availability": "both",
+                "local_execute": "tool:example/offline"
+            }))
+            .unwrap()
+        );
+        assert!(
+            !requires_compiled_service_handler(&serde_json::json!({
+                "endpoint": "local",
+                "availability": "local",
+                "local_execute": "tool:example/offline"
+            }))
+            .unwrap()
+        );
+        assert!(
+            requires_compiled_service_handler(&serde_json::json!({
+                "endpoint": "local-standalone",
+                "availability": "local"
+            }))
+            .unwrap()
+        );
+        assert!(
+            requires_compiled_service_handler(&serde_json::json!({
+                "endpoint": "bad",
+                "availability": "daemon_only",
+                "local_execute": "tool:example/offline"
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn standalone_state_access_rejects_present_non_string() {
