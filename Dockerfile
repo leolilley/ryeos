@@ -28,12 +28,23 @@ ENV RYEOS_BUILD_DATE=$BUILD_DATE
 # The publisher key is injected via BuildKit secret mount — the build
 # fails if the secret is missing or empty.
 RUN --mount=type=secret,id=publisher-key \
+    --mount=type=cache,id=ryeos-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-cargo-target,target=/build/target-cache,sharing=locked \
+    cp -a bundles .bundles-writable && \
+    rm -rf bundles && \
+    mv .bundles-writable bundles && \
     test -s /run/secrets/publisher-key && \
+    CARGO_TARGET_DIR=/build/target-cache \
     ./scripts/populate-bundles.sh \
       --key /run/secrets/publisher-key \
       --owner ryeos-official \
       --build-profile "$BUNDLE_BUILD_PROFILE" \
-      --all
+      --all && \
+    mkdir -p /build/target/release && \
+    cp /build/target-cache/release/ryeosd /build/target/release/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/release/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/release/ryeos-core-tools
 
 # ── Stage 2: Runtime image ──
 # Keep the runtime Debian generation compatible with the Rust builder image;

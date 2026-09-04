@@ -77,6 +77,28 @@ if [[ "$discovered" != "$expected" ]]; then
     exit 1
 fi
 
+# Bundle publication exchanges a complete sibling generation atomically. A
+# Docker COPY may reside in a lower overlay layer whose rename domain differs
+# from the writable layer, so every image that runs population must first
+# materialize the whole bundle tree in the same RUN instruction. This is an
+# artifact-construction requirement, not a test or runtime fallback.
+for path in "$root"/Dockerfile*; do
+    [[ -f "$path" ]] || continue
+    instructions="$(dockerfile_instructions "$path")"
+    if ! grep -Fq './scripts/populate-bundles.sh' <<<"$instructions"; then
+        continue
+    fi
+    for required in \
+        'cp -a bundles .bundles-writable' \
+        'rm -rf bundles' \
+        'mv .bundles-writable bundles'; do
+        if ! grep -Fq "$required" <<<"$instructions"; then
+            echo "$(basename "$path") publishes bundles without same-layer materialization: $required" >&2
+            exit 1
+        fi
+    done
+done
+
 required_entrypoint='ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]'
 for image in "${daemon_images[@]}"; do
     path="$root/$image"
