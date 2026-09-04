@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
@@ -605,7 +606,32 @@ pub async fn execute_service(
     state: &AppState,
     recording: ServiceRecordingContext<'_>,
 ) -> Result<ServiceExecutionResult> {
-    let verified = resolve_and_verify(&ctx.engine, &ctx.plan_ctx, service_ref, Some("service"))?;
+    let canonical = CanonicalRef::parse(service_ref).map_err(|error| {
+        anyhow::anyhow!("invalid service-registry ref `{service_ref}`: {error}")
+    })?;
+    let schema = ctx.engine.kinds.get(&canonical.kind).ok_or_else(|| {
+        anyhow::anyhow!("service-registry ref `{service_ref}` has no admitted kind schema")
+    })?;
+    let admitted = schema.execution().is_some_and(|execution| {
+        matches!(
+            execution.terminator.as_ref(),
+            Some(ryeos_engine::kind_registry::TerminatorDecl::InProcess {
+                registry: ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                ..
+            })
+        )
+    });
+    anyhow::ensure!(
+        admitted,
+        "kind `{}` is not admitted to the Services in-process registry",
+        canonical.kind
+    );
+    let verified = resolve_and_verify(
+        &ctx.engine,
+        &ctx.plan_ctx,
+        service_ref,
+        Some(&canonical.kind),
+    )?;
     execute_service_verified(
         verified,
         service_ref,

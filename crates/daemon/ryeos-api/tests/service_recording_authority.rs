@@ -127,6 +127,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
 
     let invoker = CompiledServiceInvocation {
         service_ref: "service:federation/capabilities".to_string(),
+        subject_kind: "service".to_string(),
         endpoint: "federation.capabilities".to_string(),
     };
     let principal = RoutePrincipal {
@@ -190,6 +191,7 @@ async fn public_identity_bootstrap_is_unrecorded() {
     let (_tmp, state) = test_state::build_test_state_with_bundles();
     let invoker = CompiledServiceInvocation {
         service_ref: "service:identity/public_key".to_string(),
+        subject_kind: "service".to_string(),
         endpoint: "identity.public_key".to_string(),
     };
     let result = invoker
@@ -250,9 +252,9 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
         },
         source_file: "/test/identity-public-key.yaml".into(),
     };
-    let table =
-        ryeos_api::routes::build_route_table(&[raw], &ResponseModeRegistry::with_builtins())
-            .expect("compile recorded public route");
+    let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
+    let table = ryeos_api::routes::build_route_table(&[raw], &modes)
+        .expect("compile recorded public route");
     let api_state = ApiState {
         app: Arc::new(state.clone()),
         route_table: Arc::new(ArcSwap::from_pointee(table)),
@@ -311,9 +313,9 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
         },
         source_file: "/test/identity-public-key-failure.yaml".into(),
     };
-    let table =
-        ryeos_api::routes::build_route_table(&[raw], &ResponseModeRegistry::with_builtins())
-            .expect("compile failing recorded public route");
+    let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
+    let table = ryeos_api::routes::build_route_table(&[raw], &modes)
+        .expect("compile failing recorded public route");
     let api_state = ApiState {
         app: Arc::new(state.clone()),
         route_table: Arc::new(ArcSwap::from_pointee(table)),
@@ -349,6 +351,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
     let (_tmp, state) = test_state::build_test_state_with_bundles();
     let invoker = CompiledServiceInvocation {
         service_ref: "service:scheduler/pause".to_string(),
+        subject_kind: "service".to_string(),
         endpoint: "scheduler.pause".to_string(),
     };
     let error = match invoker
@@ -390,6 +393,7 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
     let (_tmp, state) = test_state::build_test_state_with_bundles();
     let invoker = CompiledServiceInvocation {
         service_ref: "service:scheduler/pause".to_string(),
+        subject_kind: "service".to_string(),
         endpoint: "scheduler.pause".to_string(),
     };
     let error = match invoker

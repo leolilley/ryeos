@@ -1,4 +1,4 @@
-//! Generic compiled invoker for service canonical refs.
+//! Generic compiled invoker for the daemon's Services in-process registry.
 //!
 //! A single `CompiledServiceInvocation` executes any verified service item
 //! through the shared service executor. No per-service hand-written invoker
@@ -11,7 +11,8 @@ use crate::routes::invocation::{
     RouteInvocationOutput, RouteInvocationResult,
 };
 
-/// Generic invoker for `service:` canonical refs.
+/// Generic invoker for a canonical ref whose signed kind schema selects the
+/// Services in-process registry.
 ///
 /// At compile time the endpoint is validated against the service descriptor
 /// list. At runtime the endpoint is looked up in the `ServiceRegistry` and
@@ -19,6 +20,9 @@ use crate::routes::invocation::{
 pub struct CompiledServiceInvocation {
     /// Canonical verified service subject.
     pub service_ref: String,
+    /// Kind selected by the canonical ref and admitted to the Services
+    /// in-process registry by its signed schema.
+    pub subject_kind: String,
     /// Service endpoint string (e.g., `"threads.get"`).
     /// Retained for compile/runtime catalog drift diagnostics.
     pub endpoint: String,
@@ -112,7 +116,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             &exec_ctx.engine,
             &exec_ctx.plan_ctx,
             &self.service_ref,
-            Some("service"),
+            Some(&self.subject_kind),
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(

@@ -13,7 +13,7 @@ use crate::contracts::{
     ItemSourceRoot, ItemSpace, ProbedAbsence, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
 };
 use crate::error::EngineError;
-use crate::kind_registry::KindSchema;
+use crate::kind_registry::{InProcessRegistryKind, KindRegistry, KindSchema};
 
 /// Maximum source bytes accepted for one resolvable RyeOS item.
 ///
@@ -509,6 +509,25 @@ pub fn enumerate_kind_refs(
     kind: &str,
 ) -> Vec<CanonicalRef> {
     enumerate_kind_refs_inner(roots, kind_schema, kind, None).unwrap_or_default()
+}
+
+/// Enumerate the installed item corpus whose signed kind schemas select one
+/// daemon-owned in-process registry.
+///
+/// This is the registry-side discovery boundary: callers name the registry
+/// they implement, while kind names, directories, formats, and item IDs all
+/// remain authored by admitted schemas and installed content.
+pub fn enumerate_in_process_registry_refs(
+    roots: &ResolutionRoots,
+    kinds: &KindRegistry,
+    registry: InProcessRegistryKind,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    let mut refs = Vec::new();
+    for (kind, schema) in kinds.kinds_for_in_process_registry(registry) {
+        refs.extend(enumerate_kind_refs_inner(roots, schema, kind, None)?);
+    }
+    refs.sort_by_key(ToString::to_string);
+    Ok(refs)
 }
 
 pub fn enumerate_kind_refs_under_project_authority(

@@ -86,13 +86,14 @@ pub struct AppState {
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,
-    /// Result of the operational tool catalog self-check at startup.
+    /// Result of the installed in-process registry self-check at startup.
     pub catalog_health: CatalogHealth,
-    /// Service handler registry for in-process `kind: service` dispatch.
+    /// Handler registry for items whose signed kind schema selects the
+    /// Services in-process terminator.
     pub services: Arc<ServiceRegistry>,
-    /// Catalog of all known service descriptors. Source of truth for
-    /// per-endpoint availability lookups. Populated at startup from the
-    /// daemon's `services::handlers::ALL` static table.
+    /// Catalog of compiled Services-registry implementations. Signed installed
+    /// items remain the operational catalog; this table supplies handler and
+    /// per-endpoint availability mechanics for exact matching items.
     pub service_descriptors: &'static [ServiceDescriptor],
     /// Node-config snapshot loaded at startup.
     pub node_config: Arc<NodeConfigSnapshot>,

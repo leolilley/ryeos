@@ -244,8 +244,9 @@ pub fn build_route_table_with_extensions(
 
 pub fn build_route_table_from_snapshot(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
-    let mode_registry = ResponseModeRegistry::with_builtins();
+    let mode_registry = ResponseModeRegistry::with_builtins(Arc::new(kinds.clone()));
     build_route_table(&snapshot.routes, &mode_registry)
 }
 
@@ -259,8 +260,9 @@ pub fn build_route_table_from_snapshot_with_extensions(
 
 pub fn build_route_table_or_bail(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
 ) -> anyhow::Result<RouteTable> {
-    build_route_table_from_snapshot(snapshot).map_err(|errors| {
+    build_route_table_from_snapshot(snapshot, kinds).map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         anyhow::anyhow!(
             "route table build failed at startup ({} error(s)): {}",
@@ -306,7 +308,9 @@ mod tests {
     }
 
     fn build_table(raws: &[RawRouteSpec]) -> Result<RouteTable, Vec<RouteConfigError>> {
-        let mode_registry = ResponseModeRegistry::with_builtins();
+        let mode_registry = ResponseModeRegistry::with_builtins(Arc::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+        ));
         build_route_table(raws, &mode_registry)
     }
 

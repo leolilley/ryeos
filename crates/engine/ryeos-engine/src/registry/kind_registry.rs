@@ -1551,6 +1551,28 @@ impl KindRegistry {
         self.schemas.keys().map(|s| s.as_str())
     }
 
+    /// Kinds whose signed execution contract terminates in one daemon-owned
+    /// in-process registry.
+    ///
+    /// Registry consumers use this to discover their installed item corpus
+    /// without naming a concrete kind or duplicating its directory and format
+    /// rules. The kind schemas remain the authority that bind item kinds to an
+    /// in-process registry.
+    pub fn kinds_for_in_process_registry(
+        &self,
+        registry: InProcessRegistryKind,
+    ) -> impl Iterator<Item = (&str, &KindSchema)> {
+        self.schemas.iter().filter_map(move |(kind, schema)| {
+            let execution = schema.execution()?;
+            match execution.terminator.as_ref() {
+                Some(TerminatorDecl::InProcess {
+                    registry: declared, ..
+                }) if *declared == registry => Some((kind.as_str(), schema)),
+                _ => None,
+            }
+        })
+    }
+
     /// Number of registered kinds.
     pub fn len(&self) -> usize {
         self.schemas.len()
@@ -3578,6 +3600,36 @@ metadata:
 
         // Service has no execution aliases (no resolve_extends_chain)
         assert!(svc.execution.is_none());
+    }
+
+    #[test]
+    fn in_process_registry_discovery_uses_the_signed_terminator_not_a_kind_name() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let schema = "\
+location:
+  directory: daemon-operations
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+";
+        sign_and_write_schema(&tmp, "daemon_operation", schema, &sk);
+
+        let registry = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts).unwrap();
+        let selected = registry
+            .kinds_for_in_process_registry(InProcessRegistryKind::Services)
+            .map(|(kind, _)| kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(selected, ["daemon_operation"]);
+        assert!(!registry.contains("service"));
     }
 
     #[test]

@@ -7,10 +7,10 @@
 //! a fault → 500 for mutations (non-GET), where a null is a wrong dispatch
 //! target or handler bug rather than a legitimate not-found.
 //!
-//! Supported source kinds:
-//! - `service:` — in-process handler (flat source_config as params)
-//! - `tool:` / `directive:` / `graph:` — engine dispatch
-//!   (source_config must have `{ project_path, parameters }`)
+//! Source invocation mechanics come from the admitted kind schema. Items
+//! terminating in the daemon's Services registry consume flat handler params;
+//! other executable items use engine dispatch with
+//! `{ project_path, parameters }`.
 
 use std::sync::Arc;
 
@@ -33,6 +33,9 @@ pub struct JsonMode {
     /// The composition root provides the full set (API + UI); API-only tests
     /// can pass `handlers::ALL`.
     pub service_descriptors: &'static [crate::registry::ServiceDescriptor],
+    /// Immutable signed kind schemas used to select source invocation
+    /// mechanics without naming concrete kinds in the route compiler.
+    pub kinds: std::sync::Arc<ryeos_engine::kind_registry::KindRegistry>,
 }
 
 /// Compiled state for a `json` mode route.
@@ -92,24 +95,26 @@ impl ResponseMode for JsonMode {
 
         // Compile the invoker via the universal canonical-ref compiler,
         // using the provided service descriptor set for `service:` ref lookup.
-        let invoker = crate::routes::invokers::compile_canonical_ref_invoker_with_descriptors(
-            source_str,
-            &raw.id,
-            self.service_descriptors,
-        )?;
+        let (invoker, mechanics) =
+            crate::routes::invokers::compile_canonical_ref_invoker_with_descriptors(
+                source_str,
+                &raw.id,
+                self.service_descriptors,
+                &self.kinds,
+            )?;
 
-        // Non-service sources require typed { project_path, parameters } config.
-        let parsed_kind = crate::routes::parsed_ref::ParsedItemRef::parse(source_str)
-            .map(|r| r.kind().to_string())
-            .unwrap_or_default();
-        if parsed_kind != "service" {
+        // Engine-dispatched sources require the typed project execution
+        // envelope. In-process registry items consume handler parameters
+        // directly. This distinction follows admitted execution mechanics,
+        // never a canonical kind name.
+        if mechanics == crate::routes::invokers::CanonicalRefInvocationMechanics::EngineDispatch {
             let config_obj = raw.response.source_config.as_object();
             match config_obj {
                 None => {
                     return Err(RouteConfigError::InvalidSourceConfig {
                         id: raw.id.clone(),
                         src: source_str.into(),
-                        reason: "non-service json source requires source_config with \
+                        reason: "engine-dispatched json source requires source_config with \
                             { project_path: \"...\", parameters: { ... } }"
                             .into(),
                     });
@@ -119,7 +124,7 @@ impl ResponseMode for JsonMode {
                         return Err(RouteConfigError::InvalidSourceConfig {
                             id: raw.id.clone(),
                             src: source_str.into(),
-                            reason: "non-service json source requires \
+                            reason: "engine-dispatched json source requires \
                                 'project_path' in source_config"
                                 .into(),
                         });
@@ -349,6 +354,7 @@ mod tests {
     fn api_mode() -> JsonMode {
         JsonMode {
             service_descriptors: crate::handlers::ALL,
+            kinds: Arc::new(ryeos_engine::test_support::load_live_kind_registry()),
         }
     }
 
@@ -469,7 +475,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("unsupported source kind"), "got: {msg}");
+        assert!(msg.contains("has no admitted kind schema"), "got: {msg}");
     }
 
     #[test]
