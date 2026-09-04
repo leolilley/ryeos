@@ -90,6 +90,12 @@ jobs:
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
 
+      - name: Check Codex authored contract
+        run: python3 bundles/codex/test_contract.py
+
+      - name: Check local-inference authored contract
+        run: python3 bundles/local-inference/test_contract.py
+
       - name: Check canonical naming
         run: ./scripts/lint-naming.sh
 

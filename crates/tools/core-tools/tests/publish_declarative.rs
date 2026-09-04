@@ -90,10 +90,10 @@ fn stage_core_handler_binaries(registry: &Path) {
 request="$(cat)"
 case "$request" in
   *'"command":"validate_parser_config"'*)
-    response='{"result":"validate_ok"}'
+    response='{"schema_version":3,"response":{"result":"validate_ok"}}'
     ;;
   *)
-    response='{"result":"parse_ok","value":{"version":"1"}}'
+    response='{"schema_version":3,"response":{"result":"parse_ok","value":{"version":"1"}}}'
     ;;
 esac
 printf '%s\n' "$response"

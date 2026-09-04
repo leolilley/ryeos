@@ -319,12 +319,16 @@ pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
 /// Node-owned runtime state that belongs to whichever node runs it (not project
 /// content). **Code-enforced floor**: enforced for every sync scope; config may
 /// only *add*. Deploying these would clobber or leak the remote's own state.
+pub const NODE_ROUTES_ROOT: &str = ".ai/node/routes";
+pub const NODE_SCHEDULES_ROOT: &str = ".ai/node/schedules";
+pub const NODE_BUNDLES_ROOT: &str = ".ai/node/bundles";
+
 pub const NODE_OWNED: &[&str] = &[
     ".ai/state",
     ".ai/cache",
-    ".ai/node/schedules",
-    ".ai/node/routes",
-    ".ai/node/bundles",
+    NODE_SCHEDULES_ROOT,
+    NODE_ROUTES_ROOT,
+    NODE_BUNDLES_ROOT,
 ];
 
 /// Central, non-bypassable live-execution control-plane floor. The same
