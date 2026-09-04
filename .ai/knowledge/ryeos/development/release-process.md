@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-03T23:12:45Z:92c77e21502cf425b63870da1bdc86a6dece6804da63cc5b767bcc3435e0c2aa:sWKrxOeErAR9B7NEeVYkqxtvG2VoqnpVBuUrxdRvR3WxjD1pYe3QiXdqi6Fu071ErjaNn+7ZXfj/9vVhzQ/DCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T00:11:05Z:fc4b4455b710a42bbaf21c35bc6e599c00eb7bcb0c317a614a8ba1bb561f17d6:vn8bq2jReADt7lYiQ6KVJB0Pces0f7iUJzO7zZIqIvwO7cooNF9ZuCZ3w+pvJh60fj6CDXASfRfTzijNg+HVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.4.0"
+version: "1.4.1"
 ```
 
 # RyeOS Release Process
@@ -193,7 +193,10 @@ bash -n scripts/pkg/install-local-direct.sh
 
 Do not run or wait for the broader local/CI test gate during the release cut.
 CI and explicit qualification remain independent evidence streams; release
-publication does not invoke them.
+publication does not invoke them. `populate-bundles.sh` is an artifact
+constructor and signer, not a test runner. The Codex and local-inference
+authored-contract tests run as explicit CI steps instead of being hidden inside
+population.
 
 For bundle-aware changes, ensure bundles are freshly populated/signed:
 
@@ -209,7 +212,8 @@ set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
 `--crates "<Cargo package ...>"` for a focused development rebuild (e.g.
 `--crates ryeosd` for a daemon-only correction). `--jobs N` caps Cargo
 parallelism if a full release build exhausts memory. The release Dockerfiles
-already pass `--all`.
+already pass `--all`; this builds and publishes the exact payload closure but
+does not execute repository, bundle-contract, runtime, model, or image tests.
 
 Do not manually copy binaries into bundle trees or hand-edit signed bundle YAML
 as a release fix.

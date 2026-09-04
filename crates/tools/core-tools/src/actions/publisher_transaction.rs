@@ -78,7 +78,7 @@ pub(super) fn with_staged_bundle_generation<T>(
     pinned_live
         .copy_contents_to_filtered(&pinned_staging, PUBLISHER_TRAVERSAL, |relative| {
             let relative = canonical_publisher_relative_path(relative)?;
-            Ok(ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&relative))
+            Ok(is_bundle_publisher_floor_excluded(&relative))
         })
         .with_context(|| {
             format!(
@@ -363,6 +363,31 @@ fn publisher_tree_identity(path: &Path) -> Result<lillux::PinnedDirectoryIdentit
     directory.identity()
 }
 
+/// Bundle publication and project snapshotting deliberately have different
+/// ownership rules. Declarative `.ai/node/` content is node-owned when found
+/// in a live project, but publisher-authored when it lives in a bundle. Secret
+/// identity/auth/vault paths are classified first and remain excluded.
+/// Everything else in the shared durable-capture floor remains local and must
+/// stay outside the published generation.
+fn is_bundle_publisher_floor_excluded(relative: &str) -> bool {
+    use ryeos_state::project_sync::{
+        NODE_BUNDLES_ROOT, NODE_ROUTES_ROOT, NODE_SCHEDULES_ROOT, ProjectAiPathClass,
+        classify_project_ai_path, is_durable_content_capture_floor_excluded,
+    };
+
+    match classify_project_ai_path(relative, None) {
+        ProjectAiPathClass::NodeOwned { prefix }
+            if matches!(
+                prefix,
+                NODE_ROUTES_ROOT | NODE_SCHEDULES_ROOT | NODE_BUNDLES_ROOT
+            ) =>
+        {
+            false
+        }
+        _ => is_durable_content_capture_floor_excluded(relative),
+    }
+}
+
 fn ensure_no_floor_excluded_content(root: &Path, relative_root: &Path) -> Result<()> {
     let root = lillux::PinnedDirectory::open(root)?
         .ok_or_else(|| anyhow!("staged publisher generation is unavailable"))?;
@@ -388,7 +413,7 @@ fn ensure_no_floor_excluded_content_open(
     for entry in entries {
         let relative = relative_root.join(&entry.name);
         let relative_string = canonical_publisher_relative_path(&relative)?;
-        if ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&relative_string) {
+        if is_bundle_publisher_floor_excluded(&relative_string) {
             bail!("publisher authoring created floor-excluded content at {relative_string}");
         }
         match entry.entry_type {
@@ -443,7 +468,7 @@ fn restore_floor_excluded_content_open(
     for entry in entries {
         let relative = relative_root.join(&entry.name);
         let relative_string = canonical_publisher_relative_path(&relative)?;
-        if ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&relative_string) {
+        if is_bundle_publisher_floor_excluded(&relative_string) {
             match old.move_child_if_same_noreplace_to(&entry, live) {
                 Ok(true) => {}
                 Ok(false) => bail!(
@@ -676,24 +701,54 @@ mod tests {
     }
 
     #[test]
-    fn publisher_staging_uses_the_shared_durable_capture_floor() {
+    fn publisher_staging_preserves_bundle_node_declarations_and_excludes_local_content() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("bundle");
         fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/node/routes")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/node/schedules")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/node/bundles")).unwrap();
         fs::create_dir_all(bundle.join("src")).unwrap();
         fs::write(bundle.join("src/item"), b"authored").unwrap();
+        fs::write(bundle.join(".ai/node/routes/execute.yaml"), b"route").unwrap();
+        fs::write(bundle.join(".ai/node/schedules/nightly.yaml"), b"schedule").unwrap();
+        fs::write(bundle.join(".ai/node/bundles/runtime.yaml"), b"runtime").unwrap();
         symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
 
         with_staged_bundle_generation(&bundle, |staging| {
             assert!(!staging.join(".venv").exists());
+            assert_eq!(
+                fs::read(staging.join(".ai/node/routes/execute.yaml"))?,
+                b"route"
+            );
+            assert_eq!(
+                fs::read(staging.join(".ai/node/schedules/nightly.yaml"))?,
+                b"schedule"
+            );
+            assert_eq!(
+                fs::read(staging.join(".ai/node/bundles/runtime.yaml"))?,
+                b"runtime"
+            );
             assert_eq!(fs::read(staging.join("src/item"))?, b"authored");
             Ok(())
         })
-        .expect("floor-excluded dependency trees must not enter publisher staging");
+        .expect("bundle declarations must enter publisher staging without local content");
 
         assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert_eq!(
+            fs::read(bundle.join(".ai/node/routes/execute.yaml")).unwrap(),
+            b"route"
+        );
+        assert_eq!(
+            fs::read(bundle.join(".ai/node/schedules/nightly.yaml")).unwrap(),
+            b"schedule"
+        );
+        assert_eq!(
+            fs::read(bundle.join(".ai/node/bundles/runtime.yaml")).unwrap(),
+            b"runtime"
+        );
         assert_eq!(fs::read(bundle.join("src/item")).unwrap(), b"authored");
     }
 

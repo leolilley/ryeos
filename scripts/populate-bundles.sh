@@ -602,8 +602,6 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  ryeos_term_update "validating codex authored protocol" "bundle contract tests"
-  python3 "$CODEX/test_contract.py"
   ryeos_term_update "publishing codex bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \
@@ -619,8 +617,6 @@ if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
-  ryeos_term_update "validating local-inference authored contract" "bundle contract tests"
-  python3 "$LOCAL_INFERENCE/test_contract.py"
   ryeos_term_update "publishing local-inference bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$LOCAL_INFERENCE" \
     --registry-root "$CORE" \
