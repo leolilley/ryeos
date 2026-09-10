@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "question.rejected"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "requestID": {
+          "type": "string",
+          "pattern": "^que"
+        }
+      },
+      "required": [
+        "sessionID",
+        "requestID"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

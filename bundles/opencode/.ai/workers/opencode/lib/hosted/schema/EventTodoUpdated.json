@@ -1,0 +1,67 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "todo.updated"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Todo"
+          }
+        }
+      },
+      "required": [
+        "sessionID",
+        "todos"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Todo": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "Brief description of the task"
+        },
+        "status": {
+          "type": "string",
+          "description": "Current status of the task: pending, in_progress, completed, cancelled"
+        },
+        "priority": {
+          "type": "string",
+          "description": "Priority level of the task: high, medium, low"
+        }
+      },
+      "required": [
+        "content",
+        "status",
+        "priority"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

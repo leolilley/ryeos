@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.compaction.started"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "messageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "manual"
+          ]
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "messageID",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.compacted"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        }
+      },
+      "required": [
+        "sessionID"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

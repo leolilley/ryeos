@@ -3,8 +3,10 @@
 
 First-class signed integration for hosting the pinned Codex App Server on a
 RyeOS node. Codex-specific structured-session semantics live in signed bundle
-data and the bundle-owned bridge; durable process, session, workspace,
-authorization, and publication authority remain in generic RyeOS substrate.
+data; the generic `ryeos-structured-session-bridge` is core-owned and shared
+with every structured-session workload, while durable process, session,
+workspace, authorization, and publication authority remain in generic RyeOS
+substrate.
 
 This bundle does not provide RyeOS local inference and does not place ChatGPT
 credentials in NodeVault or bundle content.

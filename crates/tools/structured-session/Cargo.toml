@@ -18,11 +18,13 @@ path = "src/bin/session_runtime.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 jsonschema.workspace = true
 lillux.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
 ryeos-engine.workspace = true
 ryeos-handler-protocol.workspace = true
 ryeos-handler-bins = { path = "../handler-bins" }

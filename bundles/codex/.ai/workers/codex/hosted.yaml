@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T18:08:17Z:49afc412e3de3178697dd6de58f8987d847de4f53e944b6ba97ef5f48133a839:1dKDV/5mH9Ma/PAIUBbgnskDS0uioO2MDy0FRYs9da/qBUL37D8Croza7uIcRzYo2paS4E+oDXiYkD7jyGTiAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T10:35:03Z:3c7590046f5bf13413574b8a7f933e33b3de605b68360acdade0e60e3331256c:fmT/EeI8Uytgyx2bgLCjR9EmDHhVxfF+AlYPxCGIFYLALVLpCEGe90yHVc7ZCGE0JV7eRmtoHTC1xRzFEcd4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.3"
 executor_id: "@subprocess"
@@ -17,7 +17,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "bec95ff003800938f4b259d1e7e3221adcd51b43c2500513b72f37949eab5549"
+  digest: "d34113cca34a4d77faca6bfa67812ca374afb84009ddc1964c0b12a83a34daf4"
 
 external_content:
   # Runtime dependencies must never create mountpoints in the project CoW.
@@ -58,7 +58,7 @@ external_content:
     mount: codex-path/rg
 
 config:
-  command: "bin:codex/ryeos-structured-session-bridge"
+  command: "bin:core/ryeos-structured-session-bridge"
   args: ["${source.entry}"]
   env:
     PATH: ""

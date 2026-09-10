@@ -1,0 +1,59 @@
+{
+  "type": "object",
+  "properties": {
+    "timestamp": {
+      "type": "number"
+    },
+    "sessionID": {
+      "type": "string",
+      "pattern": "^ses"
+    },
+    "assistantMessageID": {
+      "type": "string",
+      "pattern": "^msg_"
+    },
+    "callID": {
+      "type": "string"
+    },
+    "tool": {
+      "type": "string"
+    },
+    "input": {
+      "type": "object"
+    },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "executed": {
+          "type": "boolean"
+        },
+        "metadata": {
+          "$ref": "#/$defs/LLMProviderMetadata"
+        }
+      },
+      "required": [
+        "executed"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "timestamp",
+    "sessionID",
+    "assistantMessageID",
+    "callID",
+    "tool",
+    "input",
+    "provider"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "LLMProviderMetadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      }
+    }
+  }
+}

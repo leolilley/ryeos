@@ -16,7 +16,16 @@ use ryeos_state::objects::AdmittedStructuredSessionProfile;
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 3;
+/// v6 makes the HTTP/SSE ignored-event representation explicit. Earlier
+/// profiles relied on a transport-side inference between an event envelope
+/// and its properties; that made the signed schema ambiguous. This remains a
+/// clean authority cut, so prior profiles are not reinterpreted.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 6;
+
+/// The closed workload transport vocabulary. The admission compiler and the
+/// bridge must accept exactly this set; adding a transport is a schema
+/// version decision, never a per-profile discovery.
+pub const STRUCTURED_SESSION_TRANSPORTS: [&str; 2] = ["stdio_jsonrpc", "http_sse"];
 
 /// Provider-neutral ingress mapping compiled as part of the signed protocol
 /// profile. It names wire fields, never a Tool implementation or live grant.
@@ -51,7 +60,7 @@ pub fn compile(
     let object = profile
         .as_object()
         .ok_or_else(|| anyhow!("structured-session profile must be an object"))?;
-    let required = [
+    let mut required = [
         "schema_version",
         "configuration_authority",
         "workload_realization_id",
@@ -71,14 +80,127 @@ pub fn compile(
         "notifications",
         "ignored_notifications",
         "server_requests",
-    ];
-    if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
-        bail!("structured-session profile has an unknown or missing top-level field");
-    }
+    ]
+    .to_vec();
     if object.get("schema_version").and_then(Value::as_u64)
         != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
     {
         bail!("structured-session profile schema is not admitted");
+    }
+    required.push("transport");
+    let http_transport = match object.get("transport").and_then(Value::as_str) {
+        Some(transport @ "http_sse") => {
+            if !STRUCTURED_SESSION_TRANSPORTS.contains(&transport) {
+                bail!("structured-session transport is not admitted");
+            }
+            true
+        }
+        Some("stdio_jsonrpc") => false,
+        _ => bail!("structured-session transport is not admitted"),
+    };
+    required.push("http_sse");
+    let mut http_credentials: Vec<&str> = Vec::new();
+    match (http_transport, object.get("http_sse")) {
+        (true, Some(credentials)) => {
+            let credentials = credentials.as_object().ok_or_else(|| {
+                anyhow!("structured-session HTTP credential environment block is invalid")
+            })?;
+            require_keys(
+                credentials,
+                &[
+                    "username_env",
+                    "password_env",
+                    "listener_stdout_prefix",
+                    "readiness_path",
+                    "readiness_schema",
+                    "event_path",
+                    "event_type_pointer",
+                    "event_properties_pointer",
+                    "ignored_notification_projection",
+                ],
+                &["seed_path_env"],
+            )?;
+            for key in ["username_env", "password_env"] {
+                let name = value_string(credentials, key)?;
+                crate::protocol_vocabulary::validate_env_name(name)
+                    .map_err(|error| anyhow!(error))?;
+                if http_credentials.contains(&name) {
+                    bail!("structured-session HTTP credential environments are duplicated");
+                }
+                http_credentials.push(name);
+            }
+            if let Some(seed) = credentials
+                .get("seed_path_env")
+                .filter(|value| !value.is_null())
+            {
+                let name = seed.as_str().ok_or_else(|| {
+                    anyhow!("structured-session seed path environment must be text")
+                })?;
+                crate::protocol_vocabulary::validate_env_name(name)
+                    .map_err(|error| anyhow!(error))?;
+                if http_credentials.contains(&name) {
+                    bail!("structured-session HTTP environment names are duplicated");
+                }
+                http_credentials.push(name);
+            }
+            let prefix = value_string(credentials, "listener_stdout_prefix")?;
+            if prefix.is_empty()
+                || prefix.len() > 512
+                || prefix.chars().any(char::is_control)
+                || !prefix.contains("http://127.0.0.1:")
+            {
+                bail!("structured-session HTTP listener prefix is not an exact loopback contract");
+            }
+            for key in ["readiness_path", "event_path"] {
+                validate_http_path(value_string(credentials, key)?, &[], false)?;
+            }
+            validate_relative_path(value_string(credentials, "readiness_schema")?)?;
+            for key in ["event_type_pointer", "event_properties_pointer"] {
+                validate_pointer(value_string(credentials, key)?)?;
+            }
+            match value_string(credentials, "ignored_notification_projection")? {
+                "envelope" | "properties" => {}
+                _ => {
+                    bail!("structured-session HTTP ignored-notification projection is not admitted")
+                }
+            }
+        }
+        (true, None) => {
+            bail!("structured-session HTTP transport lacks its credential environment block")
+        }
+        (false, Some(Value::Null)) => {}
+        (false, Some(_)) => {
+            bail!("structured-session HTTP credential block requires the HTTP transport");
+        }
+        (false, None) => {
+            bail!("structured-session HTTP credential block must be present and nullable");
+        }
+    }
+    if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
+        bail!("structured-session profile has an unknown or missing top-level field");
+    }
+    let home_env = value_string(object, "workload_home_env")?;
+    let mut admitted_environment: Vec<&str> = vec![home_env, "LANG", "LC_ALL", "HOME", "PATH"];
+    for name in bounded_array(object, "required_process_environment", 0, 64)? {
+        let name = name
+            .as_str()
+            .ok_or_else(|| anyhow!("required process environment name is not text"))?;
+        admitted_environment.push(name);
+    }
+    for name in &http_credentials {
+        if admitted_environment.contains(name) {
+            bail!(
+                "structured-session HTTP credential environment collides with admitted environment"
+            );
+        }
+    }
+    if http_transport
+        && !object
+            .get("initialization")
+            .and_then(Value::as_array)
+            .is_some_and(|steps| steps.is_empty())
+    {
+        bail!("structured-session HTTP transport admits no initialization handshake");
     }
     if object
         .get("configuration_authority")
@@ -164,6 +286,12 @@ pub fn compile(
         "credential_delete",
     ];
     let mut schema_ids = BTreeSet::new();
+    if http_transport {
+        let http = object["http_sse"]
+            .as_object()
+            .expect("HTTP contract was validated above");
+        schema_ids.insert(value_string(http, "readiness_schema")?.to_owned());
+    }
     for route in routes {
         let route = route
             .as_object()
@@ -190,6 +318,10 @@ pub fn compile(
                 "forbidden_fields",
                 "post_success_routes",
                 "progress_notifications",
+                "http_method",
+                "http_path",
+                "http_body_schema",
+                "http_path_parameters",
             ],
         )?;
         let id = value_string(route, "id")?;
@@ -199,6 +331,11 @@ pub fn compile(
         if !route_ids.insert(id.to_owned()) || !upstream_methods.insert(method.to_owned()) {
             bail!("structured-session route id or method is duplicated");
         }
+        let binding_action = route
+            .get("session_binding")
+            .and_then(Value::as_object)
+            .and_then(|binding| binding.get("action"))
+            .and_then(Value::as_str);
         if !allowed_effects.contains(&value_string(route, "effect_class")?) {
             bail!("structured-session route has an unknown effect class");
         }
@@ -333,6 +470,7 @@ pub fn compile(
         if binding_request_field.is_some_and(|field| controlled_fields.contains(field)) {
             bail!("structured-session binding field overlaps another route field policy");
         }
+        validate_route_transport_addressing(route, http_transport, binding_action)?;
         validate_predicates(route.get("response_predicates"), 32)?;
         validate_observations(route.get("observations"), 16)?;
         if !matches!(
@@ -348,6 +486,9 @@ pub fn compile(
         }
         schema_ids.insert(value_string(route, "request_schema")?.to_owned());
         schema_ids.insert(value_string(route, "response_schema")?.to_owned());
+        if http_transport {
+            schema_ids.insert(value_string(route, "http_body_schema")?.to_owned());
+        }
     }
 
     let route_sets = object
@@ -505,7 +646,7 @@ pub fn compile(
         }
     }
 
-    for step in bounded_array(object, "initialization", 1, 8)? {
+    for step in bounded_array(object, "initialization", usize::from(!http_transport), 8)? {
         let step = step
             .as_object()
             .ok_or_else(|| anyhow!("structured-session initialization step must be an object"))?;
@@ -693,8 +834,24 @@ pub fn compile(
                 "permission_delta_fields",
                 "display",
             ],
-            &["required_review_fields"],
+            &["required_review_fields", "reply_http_path"],
         )?;
+        match (http_transport, item.get("reply_http_path")) {
+            (true, Some(reply)) => validate_http_path(
+                reply.as_str().ok_or_else(|| {
+                    anyhow!("structured-session reply HTTP path must be a string")
+                })?,
+                &["request_id", "session_id"],
+                false,
+            )?,
+            (true, None) => {
+                bail!("structured-session HTTP server request lacks its reply path")
+            }
+            (false, Some(_)) => {
+                bail!("structured-session reply HTTP path requires the HTTP transport")
+            }
+            (false, None) => {}
+        }
         let method = value_string(item, "method")?;
         validate_identifier(method)?;
         if !server_request_methods.insert(method.to_owned())
@@ -1332,6 +1489,165 @@ fn validate_pointer(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Route HTTP addressing exists only under the HTTP transport, where it is
+/// mandatory. A stdio profile must not carry HTTP addressing, and an HTTP
+/// profile without complete addressing is not dispatchable.
+fn validate_route_transport_addressing(
+    route: &serde_json::Map<String, Value>,
+    http_transport: bool,
+    binding_action: Option<&str>,
+) -> Result<()> {
+    match (
+        http_transport,
+        route.get("http_method"),
+        route.get("http_path"),
+        route.get("http_body_schema"),
+        route.get("http_path_parameters"),
+    ) {
+        (true, Some(method), Some(path), Some(body_schema), Some(parameters)) => {
+            let method = method
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session route HTTP method must be a string"))?;
+            if !matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+                bail!("structured-session route HTTP method is not admitted");
+            }
+            let path = path
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session route HTTP path must be a string"))?;
+            // Syntax is checked here; exact placeholder ownership is checked
+            // against `http_path_parameters` immediately below.
+            validate_http_path(path, &["session_id"], true)?;
+            validate_relative_path(
+                body_schema.as_str().ok_or_else(|| {
+                    anyhow!("structured-session HTTP body schema must be a string")
+                })?,
+            )?;
+            let parameters = parameters.as_object().ok_or_else(|| {
+                anyhow!("structured-session HTTP path parameters must be an object")
+            })?;
+            if parameters.len() > 16 {
+                bail!("structured-session HTTP path parameter count exceeds its bound");
+            }
+            let placeholders = http_path_placeholders(path)?;
+            if placeholders.len() != parameters.len()
+                || placeholders
+                    .iter()
+                    .any(|name| !parameters.contains_key(name))
+            {
+                bail!(
+                    "structured-session HTTP path parameters do not exactly cover its placeholders"
+                );
+            }
+            for (name, projection) in parameters {
+                validate_field_name(name)?;
+                let projection = projection.as_object().ok_or_else(|| {
+                    anyhow!("structured-session HTTP path projection must be an object")
+                })?;
+                require_keys(projection, &["source"], &["field"])?;
+                match value_string(projection, "source")? {
+                    "bound_session" => {
+                        if name != "session_id"
+                            || projection
+                                .get("field")
+                                .is_some_and(|value| !value.is_null())
+                            || !matches!(binding_action, Some("require") | Some("bind_expected"))
+                        {
+                            bail!("structured-session bound-session path projection is invalid");
+                        }
+                    }
+                    "input" => {
+                        let field = value_string(projection, "field")?;
+                        validate_field_name(field)?;
+                        for policy in ["forbidden_fields", "forbidden_non_null_fields"] {
+                            if route
+                                .get(policy)
+                                .and_then(Value::as_array)
+                                .is_some_and(|values| values.iter().any(|value| value == field))
+                            {
+                                bail!(
+                                    "structured-session HTTP input path field `{field}` is not suppliable by its route"
+                                );
+                            }
+                        }
+                    }
+                    _ => bail!("structured-session HTTP path projection source is not admitted"),
+                }
+            }
+        }
+        (true, _, _, _, _) => {
+            bail!("structured-session HTTP route lacks its complete request projection")
+        }
+        (false, None, None, None, None) => {}
+        (false, _, _, _, _) => {
+            bail!("structured-session route HTTP addressing requires the HTTP transport");
+        }
+    }
+    Ok(())
+}
+
+/// An HTTP path template is bounded, absolute, carries no query or fragment,
+/// and its only parameterization is the named closed placeholder set. Route
+/// paths may additionally name payload fields, which must be suppliable
+/// through the route's own admitted parameter vocabulary.
+fn validate_http_path(value: &str, placeholders: &[&str], allow_fields: bool) -> Result<()> {
+    if value.len() > 512
+        || !value.starts_with('/')
+        || value.chars().any(char::is_control)
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains("//")
+    {
+        bail!("structured-session HTTP path template is invalid");
+    }
+    let mut remainder = value;
+    while let Some(start) = remainder.find('{') {
+        let end = remainder[start..]
+            .find('}')
+            .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unterminated"))?;
+        let name = &remainder[start + 1..start + end];
+        let admitted_field = allow_fields && validate_field_name(name).is_ok();
+        if !placeholders.contains(&name) && !admitted_field {
+            bail!("structured-session HTTP path placeholder is not admitted");
+        }
+        remainder = &remainder[start + end + 1..];
+        if remainder.starts_with('{') {
+            bail!("structured-session HTTP path placeholders are not separated");
+        }
+    }
+    if remainder.contains('}') {
+        bail!("structured-session HTTP path has a stray closing placeholder");
+    }
+    for segment in value.split('/') {
+        if segment.contains('{')
+            && !segment
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        {
+            bail!("structured-session HTTP path placeholder segment is not canonical");
+        }
+    }
+    Ok(())
+}
+
+fn http_path_placeholders(value: &str) -> Result<BTreeSet<String>> {
+    let mut placeholders = BTreeSet::new();
+    let mut remainder = value;
+    while let Some(start) = remainder.find('{') {
+        let end = remainder[start..]
+            .find('}')
+            .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unterminated"))?;
+        let name = &remainder[start + 1..start + end];
+        validate_field_name(name)?;
+        if !placeholders.insert(name.to_owned()) {
+            bail!("structured-session HTTP path placeholder is duplicated");
+        }
+        remainder = &remainder[start + end + 1..];
+    }
+    Ok(placeholders)
+}
+
 fn validate_string_array(
     object: &serde_json::Map<String, Value>,
     key: &str,
@@ -1598,6 +1914,8 @@ mod tests {
     fn fixture_profile(route_id: &str, method: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({
             "schema_version":STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"stdio_jsonrpc",
+            "http_sse":null,
             "workload_realization_id":"fixture-runtime",
             "workload_executable":"fixture-worker",
             "required_process_environment":[],
@@ -1653,6 +1971,26 @@ mod tests {
         ])
     }
 
+    fn configure_http_profile(profile: &mut Value) {
+        profile["transport"] = json!("http_sse");
+        profile["http_sse"] = json!({
+            "username_env":"FIXTURE_HTTP_USER",
+            "password_env":"FIXTURE_HTTP_PASSWORD",
+            "listener_stdout_prefix":"fixture listening on http://127.0.0.1:",
+            "readiness_path":"/health",
+            "readiness_schema":"schema/response.json",
+            "event_path":"/event",
+            "event_type_pointer":"/type",
+            "event_properties_pointer":"/properties",
+            "ignored_notification_projection":"properties"
+        });
+        profile["initialization"] = json!([]);
+        profile["routes"][0]["http_method"] = json!("POST");
+        profile["routes"][0]["http_path"] = json!("/session");
+        profile["routes"][0]["http_body_schema"] = json!("schema/request.json");
+        profile["routes"][0]["http_path_parameters"] = json!({});
+    }
+
     #[test]
     fn authored_profiles_compile_from_the_exact_local_source_set() {
         let root = crate::test_support::workspace_root()
@@ -1699,6 +2037,39 @@ mod tests {
             notification["upstream_session_pointer"] = pointer;
             assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &files).is_err());
         }
+    }
+
+    #[test]
+    fn opencode_http_profile_compiles_from_the_exact_local_source_set() {
+        let root = crate::test_support::workspace_root()
+            .join("bundles/opencode/.ai/workers/opencode/lib/hosted");
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        let profile = compile(&files["structured-session.profile.json"], &files)
+            .expect("the authored opencode profile must compile from its local source set");
+        assert_eq!(
+            profile.contract.get("transport").and_then(Value::as_str),
+            Some("http_sse")
+        );
     }
 
     #[test]
@@ -1935,5 +2306,162 @@ mod tests {
                 .to_string()
                 .contains("notification count exceeds its aggregate bound")
         );
+    }
+
+    #[test]
+    fn transport_is_required_and_closed() {
+        let profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("the current dialect must declare the stdio transport");
+
+        let mut missing = profile.clone();
+        missing.as_object_mut().unwrap().remove("transport");
+        assert!(compile(&serde_json::to_vec(&missing).unwrap(), &schemas()).is_err());
+
+        let mut retired = profile.clone();
+        retired["schema_version"] = json!(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION - 1);
+        assert!(compile(&serde_json::to_vec(&retired).unwrap(), &schemas()).is_err());
+
+        for invalid in ["", "stdio", "auto", "HTTP_SSE", "unix_socket"] {
+            let mut closed = profile.clone();
+            closed["transport"] = json!(invalid);
+            assert!(
+                compile(&serde_json::to_vec(&closed).unwrap(), &schemas()).is_err(),
+                "un admitted transport was accepted: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_addressing_is_gated_by_the_declared_transport() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
+        profile["routes"][0]["http_method"] = json!("POST");
+        profile["routes"][0]["http_path"] = json!("/session");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        let mut http = profile.clone();
+        configure_http_profile(&mut http);
+        compile(&serde_json::to_vec(&http).unwrap(), &schemas())
+            .expect("complete HTTP addressing must be admitted");
+
+        let mut missing_credentials = http.clone();
+        missing_credentials["http_sse"] = Value::Null;
+        assert!(
+            compile(
+                &serde_json::to_vec(&missing_credentials).unwrap(),
+                &schemas()
+            )
+            .is_err()
+        );
+
+        let mut stdio_credentials = http.clone();
+        stdio_credentials["transport"] = json!("stdio_jsonrpc");
+        assert!(compile(&serde_json::to_vec(&stdio_credentials).unwrap(), &schemas()).is_err());
+
+        let mut colliding = http.clone();
+        colliding["http_sse"]["password_env"] = json!("FIXTURE_HOME");
+        assert!(compile(&serde_json::to_vec(&colliding).unwrap(), &schemas()).is_err());
+
+        let mut handshake = http.clone();
+        handshake["initialization"] = json!([{
+            "method":"initialize","effect_class":"pure_read","params":{},
+            "response_schema":"schema/response.json","notification":null
+        }]);
+        assert!(compile(&serde_json::to_vec(&handshake).unwrap(), &schemas()).is_err());
+
+        let mut missing_path = http.clone();
+        missing_path["routes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("http_path");
+        assert!(compile(&serde_json::to_vec(&missing_path).unwrap(), &schemas()).is_err());
+
+        let mut bad_method = http.clone();
+        bad_method["routes"][0]["http_method"] = json!("TRACE");
+        assert!(compile(&serde_json::to_vec(&bad_method).unwrap(), &schemas()).is_err());
+
+        for bad_path in [
+            "session",
+            "/session?query=1",
+            "/session#fragment",
+            "/session/{turn}",
+            "/session/{session_id}{session_id}",
+            "/session/}",
+            "/session//message",
+        ] {
+            let mut invalid = http.clone();
+            invalid["routes"][0]["http_path"] = json!(bad_path);
+            assert!(
+                compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err(),
+                "invalid HTTP path was admitted: {bad_path}"
+            );
+        }
+
+        let mut bound = http.clone();
+        bound["routes"][0]["http_path"] = json!("/session/{session_id}/message");
+        assert!(compile(&serde_json::to_vec(&bound).unwrap(), &schemas()).is_err());
+
+        bound["routes"][0]["session_binding"] =
+            json!({"action":"require","request_field":"sessionID","response_pointer":null});
+        bound["routes"][0]["http_path_parameters"] =
+            json!({"session_id":{"source":"bound_session"}});
+        compile(&serde_json::to_vec(&bound).unwrap(), &schemas())
+            .expect("a bound session placeholder must be admitted");
+
+        let mut fielded = http.clone();
+        fielded["routes"][0]["http_path"] = json!("/auth/{provider}");
+        fielded["routes"][0]["http_path_parameters"] =
+            json!({"provider":{"source":"input","field":"provider"}});
+        compile(&serde_json::to_vec(&fielded).unwrap(), &schemas())
+            .expect("a payload field must be substitutable into its route path");
+
+        let mut forbidden = fielded.clone();
+        forbidden["routes"][0]["forbidden_fields"] = json!(["provider"]);
+        assert!(compile(&serde_json::to_vec(&forbidden).unwrap(), &schemas()).is_err());
+    }
+
+    #[test]
+    fn http_server_requests_require_an_admitted_reply_path() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
+        configure_http_profile(&mut profile);
+        profile["server_requests"] = json!([{
+            "method":"permission.asked",
+            "schema":"schema/request.json",
+            "operation_class":"command_execution",
+            "correlation":{
+                "upstream_session_pointer":"/message/params/sessionID",
+                "operation_pointer":"/message/params/permissionID"
+            },
+            "responses":{
+                "accept":{"op":"literal","value":{"response":"once"}},
+                "cancel":{"op":"literal","value":{"response":"deny"}},
+                "decline":{"op":"literal","value":{"response":"deny"}},
+                "expire":{"op":"literal","value":{"response":"deny"}}
+            },
+            "deny_only":true,
+            "permission_delta_fields":[],
+            "display":{"op":"object","fields":{}}
+        }]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        profile["server_requests"][0]["reply_http_path"] =
+            json!("/session/{permission}/permissions");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        profile["server_requests"][0]["reply_http_path"] = json!("/permissions/{request_id}");
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("a complete HTTP server request must be admitted");
+
+        profile["server_requests"][0]["reply_http_path"] =
+            json!("/session/{session_id}/permissions/{request_id}");
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("a session-scoped reply path must be admitted");
+
+        let mut stdio = profile.clone();
+        stdio["transport"] = json!("stdio_jsonrpc");
+        assert!(compile(&serde_json::to_vec(&stdio).unwrap(), &schemas()).is_err());
     }
 }

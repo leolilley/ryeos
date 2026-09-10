@@ -96,7 +96,7 @@ mode. The awaited producer returns the typed accepted-product result.
   `worker_execution:fixture/session`.
 
 Both Workers use the existing packaged
-`bin:codex/ryeos-structured-session-bridge`. That is binary packaging only:
+`bin:core/ryeos-structured-session-bridge`. That is binary packaging only:
 their definitions and worker-executions live alongside that binary in the
 disposable Codex Bundle, not in Standard with an undeclared cross-Bundle edge.
 the fixture never selects `worker:codex/hosted`, a Codex profile, Codex

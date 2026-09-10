@@ -26,17 +26,17 @@ ryeos_bundle_set_ids() {
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference ;;
+    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference ;;
     central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
     standard)        printf '%s\n' core central-auth standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
-    hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex ;;
+    hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex opencode ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference tv-tracker-authoring
+      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring
       ;;
     *) return 1 ;;
   esac

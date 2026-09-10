@@ -226,6 +226,7 @@ BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
 CODEX="$ROOT/bundles/codex"
+OPENCODE="$ROOT/bundles/opencode"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
 TVTA="$ROOT/bundles/tv-tracker-authoring"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
@@ -262,6 +263,7 @@ staged_payload_records_for_set() {
     core ryeos-session-exec ryeos-session-exec static \
     core ryeos-worker-execution-launch-preparer ryeos-structured-session static \
     core ryeos-worker-execution-runtime ryeos-structured-session static \
+    core ryeos-structured-session-bridge ryeos-structured-session static \
     core ryeos-lillux-isolation-adapter ryeos-lillux-isolation-adapter static
   case "$BUNDLE_SET" in
     full|central-host|standard|hosted-workflow|release-artifacts)
@@ -287,12 +289,6 @@ staged_payload_records_for_set() {
         ryeos-ui ryeos-tui ryeos-client-terminal release \
         ryeos-ui web ryeos-client-web release \
         browser ryeos-browser-tools ryeos-browser-tools release
-      ;;
-  esac
-  case "$BUNDLE_SET" in
-    full|hosted-workflow|release-artifacts)
-      printf '%s\t%s\t%s\t%s\n' \
-        codex ryeos-structured-session-bridge ryeos-structured-session static
       ;;
   esac
 }
@@ -511,7 +507,7 @@ require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-launch-prepar
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-runtime"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-structured-session-bridge"
+  require_static_payload "$PAYLOAD_STAGE/core/ryeos-structured-session-bridge"
 fi
 prepare_bundle_trees
 
@@ -604,6 +600,14 @@ fi
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing codex bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CODEX" \
+    --registry-root "$CORE" \
+    --registry-root "$STD" \
+    --owner "$OWNER" >/dev/null
+fi
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  ryeos_term_update "publishing opencode bundle" "signed manifests"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$OPENCODE" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null

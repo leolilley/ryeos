@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "permission": {
+      "$ref": "#/$defs/PermissionRuleset"
+    },
+    "time": {
+      "type": "object",
+      "properties": {
+        "archived": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PermissionRuleset": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PermissionRule"
+      }
+    },
+    "PermissionRule": {
+      "type": "object",
+      "properties": {
+        "permission": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/PermissionAction"
+        }
+      },
+      "required": [
+        "permission",
+        "pattern",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "PermissionAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny",
+        "ask"
+      ]
+    }
+  }
+}

@@ -19,6 +19,11 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_APP_SERVER_LINE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENTS: usize = 4_096;
 const MAX_PENDING_SERVER_REQUESTS: usize = 128;
+/// HTTP routes and server-request replies share this finite executor.  A
+/// provider cannot turn a backlog of long requests into unbounded bridge
+/// threads, while several workers preserve full-duplex event handling.
+const HTTP_REQUEST_WORKERS: usize = 4;
+const HTTP_REQUEST_QUEUE_CAPACITY: usize = 16;
 const APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
 // A route that is gated by an admitted server request must remain alive long
 // enough for that request to expire and send its fail-closed upstream reply.
@@ -51,7 +56,7 @@ struct Frame {
 
 struct StructuredWorkload {
     child: Child,
-    input: ChildStdin,
+    io: WorkloadIo,
     incoming: Receiver<Result<Value, String>>,
     responses: HashMap<String, Value>,
     server_requests: HashMap<String, PendingServerRequest>,
@@ -119,6 +124,35 @@ enum WorkloadInvocationDelivery {
     Submitted(Receiver<ryeos_runtime::workload_client::WorkloadClientResponseFrame>),
 }
 
+/// The admitted workload transport. Stdio exchanges line-delimited
+/// JSON-RPC over the child's pipes; HTTP runs a loopback server owned by
+/// the child, discovered from its stdout listening line, with requests and
+/// server-sent events carrying the same message envelopes.
+enum WorkloadIo {
+    Stdio(ChildStdin),
+    Http(HttpWorkload),
+}
+
+struct HttpWorkload {
+    base_url: String,
+    client: reqwest::blocking::Client,
+    authorization: String,
+    ignored_notification_projection: HttpEventProjection,
+    requests: SyncSender<HttpRequest>,
+}
+
+/// One admitted loopback exchange. A route request settles through the normal
+/// id-correlated incoming stream; a reply failure is fatal because RyeOS can
+/// no longer establish the decision it recorded for the upstream workload.
+struct HttpRequest {
+    client: reqwest::blocking::Client,
+    url: String,
+    method: String,
+    authorization: String,
+    body: Value,
+    id: Option<Value>,
+}
+
 struct ExpiredServerRequest {
     id: String,
     request_digest: String,
@@ -141,6 +175,9 @@ type WorkloadCommandResult = (String, std::result::Result<WorkloadCommandOutput,
 #[serde(deny_unknown_fields)]
 struct StructuredSessionProfile {
     schema_version: u32,
+    transport: ProfileTransport,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    http_sse: Option<HttpSseCredentials>,
     configuration_authority: ConfigurationAuthority,
     workload_realization_id: String,
     workload_executable: String,
@@ -161,6 +198,47 @@ struct StructuredSessionProfile {
     #[serde(default)]
     ignored_notifications: BTreeMap<String, String>,
     server_requests: Vec<ServerRequestRule>,
+}
+
+/// The workload transport selected by the admitted profile. The set mirrors
+/// the admission compiler exactly; the bridge never discovers a transport.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum ProfileTransport {
+    #[serde(rename = "stdio_jsonrpc")]
+    StdioJsonRpc,
+    #[serde(rename = "http_sse")]
+    HttpSse,
+}
+
+/// Environment names through which the bridge supplies per-boot HTTP basic
+/// authentication to the workload server. The bridge generates both values;
+/// the profile supplies only the names, so no workload-specific spelling
+/// lives in this bridge.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpSseCredentials {
+    username_env: String,
+    password_env: String,
+    #[serde(default)]
+    seed_path_env: Option<String>,
+    listener_stdout_prefix: String,
+    readiness_path: String,
+    readiness_schema: String,
+    event_path: String,
+    event_type_pointer: String,
+    event_properties_pointer: String,
+    ignored_notification_projection: HttpEventProjection,
+}
+
+/// Exact signed representation for schemas applied to ignored HTTP/SSE
+/// notifications. Normal notification and server-request rules always use
+/// the signed properties projection, because their templates are evaluated
+/// against `message.params`.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HttpEventProjection {
+    Envelope,
+    Properties,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,6 +311,31 @@ struct RouteRule {
     post_success_routes: Vec<String>,
     #[serde(default)]
     progress_notifications: Vec<String>,
+    #[serde(default)]
+    http_method: Option<String>,
+    #[serde(default)]
+    http_path: Option<String>,
+    #[serde(default)]
+    http_body_schema: Option<String>,
+    #[serde(default)]
+    http_path_parameters: BTreeMap<String, HttpPathParameter>,
+}
+
+/// Signed source of one HTTP path segment.  The bridge never treats a path
+/// template as permission to smuggle arbitrary request JSON into addressing.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpPathParameter {
+    source: HttpPathParameterSource,
+    #[serde(default)]
+    field: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HttpPathParameterSource {
+    Input,
+    BoundSession,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -334,6 +437,8 @@ struct ServerRequestRule {
     permission_delta_fields: Vec<String>,
     #[serde(default)]
     required_review_fields: Vec<String>,
+    #[serde(default)]
+    reply_http_path: Option<String>,
     display: ValueTemplate,
 }
 
@@ -426,6 +531,46 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
     }
     ryeos_engine::protocol_vocabulary::validate_env_name(&profile.workload_home_env)
         .map_err(|error| anyhow!(error))?;
+    let http_transport = profile.transport == ProfileTransport::HttpSse;
+    if http_transport != profile.http_sse.is_some() {
+        bail!("structured-session HTTP credential block contradicts its transport");
+    }
+    if let Some(credentials) = &profile.http_sse {
+        for name in [&credentials.username_env, &credentials.password_env] {
+            ryeos_engine::protocol_vocabulary::validate_env_name(name)
+                .map_err(|error| anyhow!(error))?;
+        }
+        if credentials.listener_stdout_prefix.is_empty()
+            || credentials.listener_stdout_prefix.len() > 512
+            || credentials
+                .listener_stdout_prefix
+                .chars()
+                .any(char::is_control)
+            || !credentials.readiness_path.starts_with('/')
+            || !credentials.event_path.starts_with('/')
+            || credentials.readiness_schema.is_empty()
+            || credentials.event_type_pointer.is_empty()
+            || credentials.event_properties_pointer.is_empty()
+        {
+            bail!("structured-session HTTP boot contract is invalid");
+        }
+    }
+    if http_transport && !profile.initialization.is_empty() {
+        bail!("structured-session HTTP transport admits no initialization handshake");
+    }
+    for route in &profile.routes {
+        if route.http_method.is_some() != http_transport
+            || route.http_path.is_some() != http_transport
+            || route.http_body_schema.is_some() != http_transport
+        {
+            bail!("structured-session route HTTP addressing contradicts its transport");
+        }
+    }
+    for request in &profile.server_requests {
+        if request.reply_http_path.is_some() != http_transport {
+            bail!("structured-session reply HTTP path contradicts its transport");
+        }
+    }
     if let Some(workload_client) = &profile.workload_client {
         if workload_client
             .cli_endpoint_env
@@ -1729,16 +1874,53 @@ impl StructuredWorkload {
             command.env("PATH", path);
         }
         command.envs(session_process_environment);
+        let http_boot = match (&profile.transport, &profile.http_sse) {
+            (ProfileTransport::HttpSse, Some(credentials)) => {
+                let username = hex_encode(&lillux::crypto::generate_random_bytes::<16>());
+                let password = hex_encode(&lillux::crypto::generate_random_bytes::<32>());
+                let mut generated = vec![
+                    (credentials.username_env.clone(), username),
+                    (credentials.password_env.clone(), password),
+                ];
+                // The HTTP transport homes the workload's XDG state inside
+                // the private home. XDG roots resolve through the OS user
+                // record rather than HOME, so redirection must be explicit.
+                for (name, value) in [
+                    ("XDG_CONFIG_HOME", format!("{workload_home}/.config")),
+                    ("XDG_DATA_HOME", format!("{workload_home}/.local/share")),
+                    ("XDG_STATE_HOME", format!("{workload_home}/.local/state")),
+                    ("XDG_CACHE_HOME", format!("{workload_home}/.cache")),
+                ] {
+                    if session_process_environment.contains_key(name) {
+                        bail!("admitted session inputs collide with the workload XDG home");
+                    }
+                    command.env(name, value);
+                }
+                if let Some(seed_env) = &credentials.seed_path_env {
+                    generated.push((
+                        seed_env.clone(),
+                        format!("{workload_home}/{}", profile.baseline_destination),
+                    ));
+                }
+                for (name, value) in &generated {
+                    if session_process_environment.contains_key(name) {
+                        bail!("HTTP credential environment collides with admitted session inputs");
+                    }
+                    command.env(name, value);
+                }
+                let authorization =
+                    base64_standard(format!("{}:{}", generated[0].1, generated[1].1));
+                Some(format!("Basic {authorization}"))
+            }
+            (ProfileTransport::StdioJsonRpc, None) => None,
+            _ => bail!("structured-session transport contradicts its credential block"),
+        };
         lillux::configure_owner_private_creation_mask(&mut command);
         lillux::configure_inherited_descriptor_authorities(&mut command, &inherited_descriptors)
             .map_err(anyhow::Error::msg)?;
         let mut child = command
             .spawn()
             .with_context(|| format!("start pinned structured-session workload `{executable}`"))?;
-        let input = child
-            .stdin
-            .take()
-            .context("capture structured workload stdin")?;
         let output = child
             .stdout
             .take()
@@ -1748,17 +1930,111 @@ impl StructuredWorkload {
             .take()
             .context("capture structured workload stderr")?;
         let (sender, incoming) = sync_channel(1024);
-        thread::Builder::new()
-            .name("ryeos-structured-session-workload-reader".to_owned())
-            .spawn(move || read_app_server(output, sender))
-            .context("start bounded structured workload reader")?;
+        let io = match http_boot {
+            None => {
+                let input = child
+                    .stdin
+                    .take()
+                    .context("capture structured workload stdin")?;
+                thread::Builder::new()
+                    .name("ryeos-structured-session-workload-reader".to_owned())
+                    .spawn({
+                        let sender = sender.clone();
+                        move || read_app_server(output, sender)
+                    })
+                    .context("start bounded structured workload reader")?;
+                WorkloadIo::Stdio(input)
+            }
+            Some(authorization) => {
+                let http_contract = profile
+                    .http_sse
+                    .as_ref()
+                    .expect("HTTP transport has its admitted contract");
+                let base_url = wait_for_loopback_listening(
+                    output,
+                    &http_contract.listener_stdout_prefix,
+                    MonotonicDeadline::after(Duration::from_secs(30)),
+                )?;
+                let client = reqwest::blocking::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(ROUTE_CALL_TIMEOUT)
+                    .build()
+                    .context("build structured workload HTTP client")?;
+                let readiness_url = format!("{}{}", base_url, http_contract.readiness_path);
+                let readiness = perform_http_request(
+                    &client,
+                    &readiness_url,
+                    "GET",
+                    &authorization,
+                    &json!({}),
+                )?;
+                validate_schema_from_map(&schemas, &http_contract.readiness_schema, &readiness)?;
+                // The event stream is a long-lived read; it must never inherit
+                // the request client's call deadline.
+                let sse_client = reqwest::blocking::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .context("build structured workload event client")?;
+                let asks: Vec<(String, String)> = profile
+                    .server_requests
+                    .iter()
+                    .map(|rule| {
+                        (
+                            rule.method.clone(),
+                            rule.correlation.operation_pointer.clone(),
+                        )
+                    })
+                    .collect();
+                let sse_base = base_url.clone();
+                let sse_authorization = authorization.clone();
+                let sse_sender = sender.clone();
+                let sse_path = http_contract.event_path.clone();
+                let event_type_pointer = http_contract.event_type_pointer.clone();
+                let event_properties_pointer = http_contract.event_properties_pointer.clone();
+                let ignored_notification_projection = http_contract.ignored_notification_projection;
+                thread::Builder::new()
+                    .name("ryeos-structured-session-event-reader".to_owned())
+                    .spawn(move || {
+                        read_http_events(
+                            sse_client,
+                            sse_base,
+                            sse_authorization,
+                            sse_path,
+                            event_type_pointer,
+                            event_properties_pointer,
+                            ignored_notification_projection,
+                            asks,
+                            sse_sender,
+                        )
+                    })
+                    .context("start structured workload event reader")?;
+                let (request_sender, request_receiver) =
+                    sync_channel::<HttpRequest>(HTTP_REQUEST_QUEUE_CAPACITY);
+                let request_receiver = Arc::new(Mutex::new(request_receiver));
+                for worker_index in 0..HTTP_REQUEST_WORKERS {
+                    let requests = Arc::clone(&request_receiver);
+                    let responses = sender.clone();
+                    thread::Builder::new()
+                        .name(format!("ryeos-structured-session-http-{worker_index}"))
+                        .spawn(move || http_request_worker(requests, responses))
+                        .context("start bounded structured workload HTTP executor")?;
+                }
+                WorkloadIo::Http(HttpWorkload {
+                    base_url,
+                    client,
+                    authorization,
+                    ignored_notification_projection: http_contract.ignored_notification_projection,
+                    requests: request_sender,
+                })
+            }
+        };
         thread::Builder::new()
             .name("ryeos-structured-session-stderr-drain".to_owned())
             .spawn(move || drain_private_stderr(stderr))
             .context("start bounded structured-session stderr drain")?;
         Ok(Self {
             child,
-            input,
+            io,
             incoming,
             responses: HashMap::new(),
             server_requests: HashMap::new(),
@@ -1890,19 +2166,7 @@ impl StructuredWorkload {
     }
 
     fn validate_schema(&self, identity: &str, value: &Value) -> Result<()> {
-        let schema = self
-            .schemas
-            .get(identity)
-            .ok_or_else(|| anyhow!("structured-session schema identity is not admitted"))?;
-        let validator = jsonschema::validator_for(schema)
-            .map_err(|error| anyhow!("compile admitted JSON schema `{identity}`: {error}"))?;
-        if validator.validate(value).is_err() {
-            let instance_digest = ryeos_state::objects::canonical_value_digest(value)?;
-            bail!(
-                "structured-session value failed schema `{identity}` (instance digest {instance_digest})"
-            );
-        }
-        Ok(())
+        validate_schema_from_map(&self.schemas, identity, value)
     }
 
     fn handle_approval_control(&mut self, control: &Map<String, Value>) -> Result<Value> {
@@ -2032,6 +2296,7 @@ impl StructuredWorkload {
             route.session_binding.as_ref(),
             &self.bound_session_id,
             &mut params,
+            self.profile.transport == ProfileTransport::StdioJsonRpc,
         )?;
         apply_route_parameters(&route, &mut params, workspace)?;
         if let Some(mapping) = self
@@ -2185,9 +2450,10 @@ impl StructuredWorkload {
             .server_requests
             .iter()
             .find(|rule| rule.method == method)
+            .cloned()
             .ok_or_else(|| anyhow!("pending server request has no admitted rule"))?;
         let context = json!({"message":pending});
-        if decision == "accept" && !approval_accept_allowed(rule, &context) {
+        if decision == "accept" && !approval_accept_allowed(&rule, &context) {
             bail!("approval with a filesystem, network, or policy delta cannot be accepted");
         }
         let response_template = match decision {
@@ -2197,7 +2463,7 @@ impl StructuredWorkload {
             _ => unreachable!("decision vocabulary checked above"),
         };
         let response = evaluate_template(response_template, &context)?;
-        self.send(&json!({"id":request_id,"result":response}))?;
+        self.deliver_server_request_response(request_id, &rule, &response)?;
         Ok(json!({"resolved":true}))
     }
 
@@ -2227,11 +2493,12 @@ impl StructuredWorkload {
                 .server_requests
                 .iter()
                 .find(|rule| rule.method == method)
+                .cloned()
                 .ok_or_else(|| anyhow!("expired server request has no admitted rule"))?;
             let context = json!({"message":pending});
-            let expiry_event = approval_expired_event(rule, &context)?;
+            let expiry_event = approval_expired_event(&rule, &context)?;
             let response = evaluate_template(&rule.responses.expire, &context)?;
-            self.send(&json!({"id":request_id,"result":response}))?;
+            self.deliver_server_request_response(&request_id, &rule, &response)?;
             self.push_event(expiry_event)?;
             self.expired_server_requests
                 .push_back(ExpiredServerRequest {
@@ -2296,14 +2563,154 @@ impl StructuredWorkload {
     }
 
     fn send(&mut self, message: &Value) -> Result<()> {
-        serde_json::to_writer(&mut self.input, message)
+        if matches!(self.io, WorkloadIo::Http(_)) {
+            return self.send_http(message);
+        }
+        let WorkloadIo::Stdio(input) = &mut self.io else {
+            bail!("structured-session transport is not current");
+        };
+        serde_json::to_writer(&mut *input, message)
             .context("encode structured workload message")?;
-        self.input
+        input
             .write_all(b"\n")
             .context("frame structured workload message")?;
-        self.input
-            .flush()
-            .context("flush structured workload message")
+        input.flush().context("flush structured workload message")
+    }
+
+    /// Dispatch one admitted message over the HTTP transport. Requests run
+    /// on their own thread and settle through the shared incoming channel,
+    /// so `call_raw`'s id correlation and deadline stay transport-neutral.
+    fn send_http(&mut self, message: &Value) -> Result<()> {
+        let (id, method, params) = match (
+            message.get("id").filter(|value| !value.is_null()),
+            message.get("method").and_then(Value::as_str),
+            message.get("params"),
+        ) {
+            (Some(id), Some(method), params) => (
+                id.clone(),
+                method,
+                params.cloned().unwrap_or_else(|| json!({})),
+            ),
+            _ => bail!("structured-session HTTP transport exchanges requests only"),
+        };
+        let route = self
+            .profile
+            .routes
+            .iter()
+            .find(|route| route.method == method)
+            .cloned()
+            .ok_or_else(|| anyhow!("structured-session HTTP route `{method}` is not admitted"))?;
+        let (http_method, http_path, http_body_schema) = match (
+            &route.http_method,
+            &route.http_path,
+            &route.http_body_schema,
+        ) {
+            (Some(http_method), Some(http_path), Some(http_body_schema)) => (
+                http_method.clone(),
+                http_path.clone(),
+                http_body_schema.clone(),
+            ),
+            _ => bail!("structured-session HTTP route lacks its addressing"),
+        };
+        let mut substitutions: Vec<(String, String)> = Vec::new();
+        let object = params
+            .as_object()
+            .ok_or_else(|| anyhow!("structured-session HTTP request input is not an object"))?;
+        let mut body = params.clone();
+        let body_object = body
+            .as_object_mut()
+            .expect("input object was established above");
+        for (placeholder, projection) in &route.http_path_parameters {
+            let value = match projection.source {
+                HttpPathParameterSource::BoundSession => self
+                    .bound_session_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("structured-session HTTP route is not session bound"))?
+                    .to_owned(),
+                HttpPathParameterSource::Input => {
+                    let field = projection.field.as_deref().ok_or_else(|| {
+                        anyhow!("structured-session HTTP input path projection lacks its field")
+                    })?;
+                    let value = object.get(field).and_then(Value::as_str).ok_or_else(|| {
+                        anyhow!("structured-session HTTP path field `{field}` is not bounded text")
+                    })?;
+                    body_object.remove(field);
+                    value.to_owned()
+                }
+            };
+            substitutions.push((placeholder.clone(), value));
+        }
+        let path = substitute_http_path(&http_path, &substitutions)?;
+        self.validate_schema(&http_body_schema, &body)?;
+        let WorkloadIo::Http(http) = &mut self.io else {
+            bail!("structured-session HTTP send requires the HTTP transport");
+        };
+        let url = format!("{}{}", http.base_url, path);
+        http.requests
+            .try_send(HttpRequest {
+                client: http.client.clone(),
+                url,
+                method: http_method,
+                authorization: http.authorization.clone(),
+                body,
+                id: Some(id),
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    anyhow!("structured-session HTTP request executor is saturated")
+                }
+                TrySendError::Disconnected(_) => {
+                    anyhow!("structured-session HTTP request executor stopped")
+                }
+            })
+    }
+
+    /// Deliver one approval or expiry decision. Stdio workloads receive a
+    /// JSON-RPC response; HTTP workloads POST the admitted decision body to
+    /// the rule's reply path, correlated by the pending request id.
+    fn deliver_server_request_response(
+        &mut self,
+        request_id: &Value,
+        rule: &ServerRequestRule,
+        response: &Value,
+    ) -> Result<()> {
+        if matches!(self.io, WorkloadIo::Stdio(_)) {
+            return self.send(&json!({"id":request_id,"result":response}));
+        }
+        let WorkloadIo::Http(http) = &mut self.io else {
+            bail!("structured-session transport is not current");
+        };
+        let reply_path = rule.reply_http_path.as_deref().ok_or_else(|| {
+            anyhow!("structured-session HTTP server request lacks its reply path")
+        })?;
+        let correlation = canonical_id(request_id)?;
+        let mut substitutions = vec![("request_id".to_owned(), correlation.clone())];
+        if reply_path.contains("{session_id}") {
+            let session = self
+                .bound_session_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("structured-session reply path is not session bound"))?;
+            substitutions.push(("session_id".to_owned(), session.to_owned()));
+        }
+        let path = substitute_http_path(reply_path, &substitutions)?;
+        let url = format!("{}{}", http.base_url, path);
+        http.requests
+            .try_send(HttpRequest {
+                client: http.client.clone(),
+                url,
+                method: "POST".to_owned(),
+                authorization: http.authorization.clone(),
+                body: response.clone(),
+                id: None,
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    anyhow!("structured-session HTTP reply executor is saturated")
+                }
+                TrySendError::Disconnected(_) => {
+                    anyhow!("structured-session HTTP reply executor stopped")
+                }
+            })
     }
 
     fn receive_one(&mut self, timeout: Duration) -> Result<()> {
@@ -2442,7 +2849,18 @@ impl StructuredWorkload {
             }
             (None, Some(method)) => {
                 if let Some(schema) = self.profile.ignored_notifications.get(method).cloned() {
-                    self.validate_schema(&schema, message.get("params").unwrap_or(&Value::Null))?;
+                    let value = match &self.io {
+                        WorkloadIo::Stdio(_) => message.get("params").unwrap_or(&Value::Null),
+                        WorkloadIo::Http(http) => match http.ignored_notification_projection {
+                            HttpEventProjection::Envelope => {
+                                message.get("envelope").unwrap_or(&Value::Null)
+                            }
+                            HttpEventProjection::Properties => {
+                                message.get("params").unwrap_or(&Value::Null)
+                            }
+                        },
+                    };
+                    self.validate_schema(&schema, value)?;
                     return Ok(());
                 }
                 let rule = self
@@ -3060,6 +3478,420 @@ fn drain_private_stderr(stderr: impl Read) {
     }
 }
 
+/// Wait until the workload announces its signed loopback listener contract on
+/// stdout.  The provider owns the prefix in its admitted profile; Core only
+/// accepts a decimal port appended to that prefix and constructs an exact
+/// loopback endpoint.  A reader thread owns the pipe for its whole lifetime:
+/// after reporting readiness it drains stdout, so a chatty workload cannot
+/// deadlock on a full pipe.  Waiting for the first report is deadline-bounded.
+fn wait_for_loopback_listening<R: Read + Send + 'static>(
+    output: R,
+    prefix: &str,
+    deadline: MonotonicDeadline,
+) -> Result<String> {
+    let prefix = prefix.to_owned();
+    let (announced, receiver) = sync_channel(1);
+    thread::Builder::new()
+        .name("ryeos-structured-session-http-stdout".to_owned())
+        .spawn(move || {
+            let mut reader = BufReader::new(output);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let read = (&mut reader)
+                    .take((MAX_APP_SERVER_LINE_BYTES + 1) as u64)
+                    .read_until(b'\n', &mut line);
+                let announcement = match read {
+                    Ok(0) => Err(
+                        "structured workload stdout closed before announcing its listener"
+                            .to_owned(),
+                    ),
+                    Ok(_) if line.len() > MAX_APP_SERVER_LINE_BYTES => {
+                        Err("structured workload listening line exceeds its bound".to_owned())
+                    }
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&line);
+                        let port = text.find(&prefix).and_then(|start| {
+                            let port = text[start + prefix.len()..]
+                                .trim_end()
+                                .trim_end_matches(['\r', '\n'])
+                                .trim();
+                            (port.len() <= 5
+                                && !port.is_empty()
+                                && port.bytes().all(|byte| byte.is_ascii_digit()))
+                            .then(|| format!("http://127.0.0.1:{port}"))
+                        });
+                        let Some(endpoint) = port else {
+                            continue;
+                        };
+                        Ok(endpoint)
+                    }
+                    Err(error) => Err(format!(
+                        "read structured workload listener announcement: {error}"
+                    )),
+                };
+                let ready = announcement.is_ok();
+                if announced.send(announcement).is_err() {
+                    return;
+                }
+                if ready {
+                    drain_discard(reader);
+                    return;
+                }
+                return;
+            }
+        })
+        .context("start bounded structured workload listener reader")?;
+    receiver
+        .recv_timeout(deadline.remaining())
+        .map_err(|error| {
+            anyhow!("structured workload did not announce its loopback listener: {error}")
+        })?
+        .map_err(|error| anyhow!(error))
+}
+
+fn drain_discard(output: impl Read) {
+    let mut reader = BufReader::new(output);
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Read the workload's server-sent event stream and deliver each event into
+/// the shared incoming channel using the stdio message envelopes: an event
+/// whose type matches a server-request rule arrives as that pending request
+/// (its operation pointer supplies the reply correlation id), everything
+/// else arrives as a notification. Notification matching, schema checks and
+/// fail-closed handling of unknown types stay in `route`.
+fn read_http_events(
+    client: reqwest::blocking::Client,
+    base_url: String,
+    authorization: String,
+    event_path: String,
+    event_type_pointer: String,
+    event_properties_pointer: String,
+    _ignored_notification_projection: HttpEventProjection,
+    asks: Vec<(String, String)>,
+    sender: SyncSender<Result<Value, String>>,
+) {
+    let deliver = |message: Result<Value, String>| {
+        if sender.send(message).is_err() {
+            return false;
+        }
+        true
+    };
+    let response = client
+        .get(format!("{base_url}{event_path}"))
+        .header("Accept", "text/event-stream")
+        .header("Authorization", &authorization)
+        .send();
+    let mut response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            deliver(Err(format!(
+                "open structured workload event stream: {error}"
+            )));
+            return;
+        }
+    };
+    if !response.status().is_success() {
+        deliver(Err(format!(
+            "structured workload refused the event stream: {}",
+            response.status()
+        )));
+        return;
+    }
+    let is_event_stream = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case("text/event-stream"))
+        });
+    if !is_event_stream {
+        deliver(Err(
+            "structured workload event stream has no text/event-stream content type".to_owned(),
+        ));
+        return;
+    }
+    let mut reader = BufReader::new(&mut response);
+    let mut event = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match (&mut reader)
+            .take((MAX_APP_SERVER_LINE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(0) => {
+                let message = if event.is_empty() {
+                    "structured workload event stream closed"
+                } else {
+                    "structured workload event stream closed with an unterminated event"
+                };
+                deliver(Err(message.to_owned()));
+                return;
+            }
+            Ok(_) if line.len() > MAX_APP_SERVER_LINE_BYTES => {
+                deliver(Err(
+                    "structured workload event line exceeds bound".to_owned()
+                ));
+                return;
+            }
+            Ok(_) => {
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                if line.is_empty() {
+                    if event.is_empty() {
+                        continue;
+                    }
+                    let decoded = match serde_json::from_slice::<Value>(&event) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            deliver(Err(format!(
+                                "invalid structured workload event JSON: {error}"
+                            )));
+                            return;
+                        }
+                    };
+                    let event_type = decoded
+                        .pointer(&event_type_pointer)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned);
+                    let properties = decoded.pointer(&event_properties_pointer).cloned();
+                    let (Some(event_type), Some(properties)) = (event_type, properties) else {
+                        deliver(Err("structured workload event contradicts its admitted envelope projection".to_owned()));
+                        return;
+                    };
+                    if let Some((_, pointer)) =
+                        asks.iter().find(|(method, _)| *method == event_type)
+                    {
+                        let message = json!({"method": event_type, "params": properties});
+                        let root = json!({"message": message});
+                        let Some(id) = pointer
+                            .strip_prefix("/message")
+                            .and_then(|rest| root.pointer(rest))
+                            .filter(|value| !value.is_null())
+                        else {
+                            deliver(Err(format!(
+                                "structured workload ask `{event_type}` lacks its correlation id"
+                            )));
+                            return;
+                        };
+                        let ask = json!({"id": id, "method": event_type, "params": properties, "envelope": decoded});
+                        if !deliver(Ok(ask)) {
+                            return;
+                        }
+                    } else {
+                        let notification = json!({"method": event_type, "params": properties, "envelope": decoded});
+                        if !deliver(Ok(notification)) {
+                            return;
+                        }
+                    }
+                    event.clear();
+                    continue;
+                }
+                if let Some(data) = line.strip_prefix(b"data: ") {
+                    if event.len().saturating_add(data.len()) > MAX_APP_SERVER_LINE_BYTES {
+                        deliver(Err(
+                            "structured workload aggregate event exceeds bound".to_owned()
+                        ));
+                        return;
+                    }
+                    event.extend_from_slice(data);
+                } else if line == b"data:" {
+                    // An empty data frame still separates frames; nothing to append.
+                } else if let Some(field) = line.strip_prefix(b"data:") {
+                    if event.len().saturating_add(field.len()) > MAX_APP_SERVER_LINE_BYTES {
+                        deliver(Err(
+                            "structured workload aggregate event exceeds bound".to_owned()
+                        ));
+                        return;
+                    }
+                    event.extend_from_slice(field);
+                }
+            }
+            Err(error) => {
+                deliver(Err(format!(
+                    "read structured workload event stream: {error}"
+                )));
+                return;
+            }
+        }
+    }
+}
+
+fn validate_schema_from_map(
+    schemas: &HashMap<String, Value>,
+    identity: &str,
+    value: &Value,
+) -> Result<()> {
+    let schema = schemas
+        .get(identity)
+        .ok_or_else(|| anyhow!("structured-session schema identity is not admitted"))?;
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|error| anyhow!("compile admitted JSON schema `{identity}`: {error}"))?;
+    if validator.validate(value).is_err() {
+        let instance_digest = ryeos_state::objects::canonical_value_digest(value)?;
+        bail!(
+            "structured-session value failed schema `{identity}` (instance digest {instance_digest})"
+        );
+    }
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn base64_standard(value: String) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(value)
+}
+
+/// Percent-encode one substituted path segment for unreserved characters
+/// only, so an upstream session or permission id can never reshape the path.
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn substitute_http_path(path: &str, substitutions: &[(String, String)]) -> Result<String> {
+    let mut resolved = String::new();
+    let mut remainder = path;
+    while let Some(start) = remainder.find('{') {
+        let end = remainder[start..]
+            .find('}')
+            .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unterminated"))?;
+        resolved.push_str(&remainder[..start]);
+        let name = &remainder[start + 1..start + end];
+        let value = substitutions
+            .iter()
+            .find(|(placeholder, _)| placeholder == name)
+            .map(|(_, value)| value.as_str())
+            .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unbound"))?;
+        resolved.push_str(&encode_path_segment(value));
+        remainder = &remainder[start + end + 1..];
+    }
+    resolved.push_str(remainder);
+    Ok(resolved)
+}
+
+/// Run the bounded HTTP executor. The receiver lock is held only while taking
+/// the next job; actual network contact is concurrent and never blocks the
+/// bridge's event/control loop.
+fn http_request_worker(
+    requests: Arc<Mutex<Receiver<HttpRequest>>>,
+    sender: SyncSender<Result<Value, String>>,
+) {
+    loop {
+        let request = match requests
+            .lock()
+            .expect("HTTP request receiver lock poisoned")
+            .recv()
+        {
+            Ok(request) => request,
+            Err(_) => return,
+        };
+        let result = perform_http_request(
+            &request.client,
+            &request.url,
+            &request.method,
+            &request.authorization,
+            &request.body,
+        );
+        let delivered = match request.id {
+            Some(id) => match result {
+                Ok(result) => Ok(json!({"id": id, "result": result})),
+                Err(error) => Ok(json!({"id": id, "error": {"message": error.to_string()}})),
+            },
+            None => match result {
+                Ok(_) => continue,
+                Err(error) => Err(format!(
+                    "deliver structured workload server-request reply: {error}"
+                )),
+            },
+        };
+        if sender.send(delivered).is_err() {
+            return;
+        }
+    }
+}
+
+/// Perform one bounded HTTP exchange with the loopback workload. Body
+/// methods carry the admitted params as JSON; bodyless methods carry flat
+/// scalar params as query entries. Empty and 204 responses settle as null
+/// so asynchronous routes can complete through durable events.
+fn perform_http_request(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    method: &str,
+    authorization: &str,
+    params: &Value,
+) -> Result<Value> {
+    let bodyless = matches!(method, "GET" | "DELETE");
+    let mut request = client
+        .request(
+            reqwest::Method::from_bytes(method.as_bytes())
+                .map_err(|_| anyhow!("structured-session HTTP method is not canonical"))?,
+            url,
+        )
+        .header("Authorization", authorization);
+    if bodyless {
+        if let Some(query) = params.as_object() {
+            for (key, value) in query {
+                let value = value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                request = request.query(&[(key, value)]);
+            }
+        }
+    } else {
+        request = request.json(params);
+    }
+    let response = request
+        .send()
+        .with_context(|| format!("contact structured workload `{method} {url}`"))?;
+    if !response.status().is_success() {
+        bail!(
+            "structured workload refused `{method} {url}` with {}",
+            response.status()
+        );
+    }
+    if matches!(response.status().as_u16(), 204) {
+        return Ok(Value::Null);
+    }
+    let mut body = Vec::new();
+    response
+        .take((MAX_APP_SERVER_LINE_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .context("read structured workload HTTP response")?;
+    if body.len() > MAX_APP_SERVER_LINE_BYTES {
+        bail!("structured workload HTTP response exceeds its bound");
+    }
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&body).context("decode structured workload HTTP response")
+}
+
 fn apply_route_parameters(route: &RouteRule, params: &mut Value, workspace: &str) -> Result<()> {
     let object = params
         .as_object_mut()
@@ -3092,6 +3924,7 @@ fn prepare_session_binding(
     binding: Option<&SessionBindingRule>,
     bound_session_id: &Option<String>,
     params: &mut Value,
+    inject_into_upstream_params: bool,
 ) -> Result<Option<String>> {
     let Some(binding) = binding else {
         return Ok(None);
@@ -3136,7 +3969,13 @@ fn prepare_session_binding(
             {
                 bail!("structured-session route attempted to target another session");
             }
-            object.insert(field.to_owned(), Value::String(bound.to_owned()));
+            // Stdio uses the binding field in the upstream message. HTTP
+            // routes address the bound session through their separately
+            // admitted path projection; injecting it into vendor JSON would
+            // violate a body schema that deliberately does not expose it.
+            if inject_into_upstream_params {
+                object.insert(field.to_owned(), Value::String(bound.to_owned()));
+            }
             Ok(Some(bound.to_owned()))
         }
     }
@@ -3472,6 +4311,8 @@ mod tests {
     fn gating_approval_profile() -> StructuredSessionProfile {
         serde_json::from_value(json!({
             "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"stdio_jsonrpc",
+            "http_sse":null,
             "configuration_authority":"immutable_argv",
             "workload_realization_id":"test-realization",
             "workload_executable":"sh",
@@ -3878,6 +4719,240 @@ mod tests {
         assert!(workload.server_requests.contains_key(&reused_key));
     }
 
+    const HTTP_FIXTURE_SERVER: &str = r#"
+import base64, json, os, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+expected = "Basic " + base64.b64encode(
+    ("%s:%s" % (os.environ["FX_HTTP_USER"], os.environ["FX_HTTP_PASSWORD"])).encode()
+).decode()
+
+for xdg in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+    if not os.environ.get(xdg, "").strip():
+        raise SystemExit("workload XDG home was not supplied: " + xdg)
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def authorized(self):
+        if self.headers.get("Authorization") != expected:
+            self.send_error(401)
+            return False
+        return True
+
+    def reply(self, status, value):
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if not self.authorized():
+            return
+        if self.path == "/session":
+            self.reply(200, {"session_id": "ses_fixture"})
+        else:
+            self.send_error(404)
+
+    def do_GET(self):
+        if not self.authorized():
+            return
+        if self.path == "/event":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(
+                b'data: {"id":"evt_1","type":"session.created","properties":{"sessionID":"ses_fixture"}}\n\n'
+            )
+            self.wfile.flush()
+            threading.Event().wait(300)
+        elif self.path == "/health":
+            self.reply(200, {"ok": True})
+        elif self.path.startswith("/session/"):
+            self.reply(200, {"ok": True, "path": self.path})
+        else:
+            self.send_error(404)
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+print("listening on http://127.0.0.1:%d" % server.server_port, flush=True)
+server.serve_forever()
+"#;
+
+    fn http_sse_profile() -> StructuredSessionProfile {
+        serde_json::from_value(json!({
+            "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"http_sse",
+            "http_sse":{
+                "username_env":"FX_HTTP_USER","password_env":"FX_HTTP_PASSWORD",
+                "listener_stdout_prefix":"listening on http://127.0.0.1:",
+                "readiness_path":"/health","readiness_schema":"health.json",
+            "event_path":"/event","event_type_pointer":"/type","event_properties_pointer":"/properties",
+            "ignored_notification_projection":"properties"
+            },
+            "configuration_authority":"immutable_argv",
+            "workload_realization_id":"fixture-http",
+            "workload_executable":"python3",
+            "workload_args":["-c",HTTP_FIXTURE_SERVER],
+            "workload_home_env":"FIXTURE_HOME",
+            "required_process_environment":[],
+            "workload_client":null,
+            "baseline_config":"baseline.conf",
+            "baseline_destination":"fixture.conf",
+            "portable_state":null,
+            "credential_subject":null,
+            "initialization":[],
+            "recovery":null,
+            "route_sets":{"session":["session.read","session.start"]},
+            "routes":[{
+                "id":"session.start",
+                "method":"session.start",
+                "effect_class":"session_mutation",
+                "http_method":"POST",
+                "http_path":"/session",
+                "http_body_schema":"empty.json",
+                "http_path_parameters":{},
+                "request_schema":"empty.json",
+                "response_schema":"start.json",
+                "fixed_params":{},
+                "workspace_fields":[],
+                "forbidden_non_null_fields":[],
+                "response_predicates":[],
+                "observations":[],
+                "result_retention":"ephemeral",
+                "ceremony":null,
+                "session_binding":{
+                    "action":"bind_new",
+                    "request_field":null,
+                    "response_pointer":"/result/session_id"
+                }
+            },{
+                "id":"session.read",
+                "method":"session.read",
+                "audience":"runtime",
+                "effect_class":"pure_read",
+                "http_method":"GET",
+                "http_path":"/session/{session_id}",
+                "http_body_schema":"empty.json",
+                "http_path_parameters":{"session_id":{"source":"bound_session"}},
+                "request_schema":"empty.json",
+                "response_schema":"read.json",
+                "fixed_params":{},
+                "workspace_fields":[],
+                "forbidden_non_null_fields":[],
+                "response_predicates":[],
+                "observations":[],
+                "result_retention":"ephemeral",
+                "ceremony":null,
+                "session_binding":{
+                    "action":"require",
+                    "request_field":"session_id",
+                    "response_pointer":null
+                }
+            }],
+            "notifications":[{
+                "method":"session.created",
+                "schema":"event.json",
+                "upstream_session_pointer":null,
+                "event_type":"session.created",
+                "durable":true,
+                "payload":{"op":"object","fields":{
+                    "session_id":{"op":"pointer","pointer":"/message/params/sessionID"}
+                }},
+                "observations":[],
+                "ceremony_clear":false
+            }],
+            "ignored_notifications":{},
+            "server_requests":[]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn http_sse_transport_binds_sessions_and_streams_events() {
+        let root = tempfile::tempdir().unwrap();
+        let workload_home = root.path().join("home");
+        std::fs::create_dir(&workload_home).unwrap();
+        let profile = http_sse_profile();
+        let schemas = HashMap::from([
+            ("empty.json".to_owned(), json!({"type":"object"})),
+            (
+                "start.json".to_owned(),
+                json!({"type":"object","required":["session_id"],"properties":{
+                    "session_id":{"type":"string"}
+                },"additionalProperties":false}),
+            ),
+            (
+                "read.json".to_owned(),
+                json!({"type":"object","required":["ok","path"],"properties":{
+                    "ok":{"const":true},"path":{"type":"string"}
+                },"additionalProperties":false}),
+            ),
+            ("event.json".to_owned(), json!({"type":"object"})),
+            (
+                "health.json".to_owned(),
+                json!({"type":"object","additionalProperties":true}),
+            ),
+        ]);
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let (control_sender, controls) = sync_channel(1);
+        let (result_sender, results) = sync_channel(1);
+        let _results = results;
+        let _control_keepalive = control_sender;
+        let mut workload = StructuredWorkload::start(
+            "/usr/bin/python3",
+            root.path().to_str().unwrap(),
+            workload_home.to_str().unwrap(),
+            profile,
+            "session".to_owned(),
+            HashSet::from([
+                RouteEffectClass::SessionMutation,
+                RouteEffectClass::PureRead,
+            ]),
+            schemas,
+            Arc::clone(&events),
+            controls,
+            result_sender,
+            "python3",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let workspace = root.path().to_str().unwrap().to_owned();
+        let started = workload
+            .handle(json!({"route_id":"session.start","payload":{}}), &workspace)
+            .unwrap();
+        assert_eq!(started["response"]["result"]["session_id"], "ses_fixture");
+        assert_eq!(workload.bound_session_id.as_deref(), Some("ses_fixture"));
+        let deadline = MonotonicDeadline::after(Duration::from_secs(10));
+        loop {
+            workload.drain_incoming().unwrap();
+            let observed = events.lock().unwrap().events.iter().any(|event| {
+                event["event_type"] == "session.created"
+                    && event["payload"]["session_id"] == "ses_fixture"
+            });
+            if observed {
+                break;
+            }
+            assert!(
+                !deadline.has_elapsed(),
+                "structured workload event stream did not deliver the durable session event"
+            );
+            lillux::time::sleep(Duration::from_millis(50));
+        }
+        let read = workload
+            .handle_control(json!({
+                "kind":"runtime_route",
+                "route_id":"session.read",
+                "payload":{}
+            }))
+            .unwrap();
+        assert_eq!(read["response"]["result"]["path"], "/session/ses_fixture");
+    }
+
     #[test]
     fn approval_without_reviewable_command_is_deny_only() {
         let rule = ServerRequestRule {
@@ -3896,6 +4971,7 @@ mod tests {
             },
             deny_only: false,
             permission_delta_fields: Vec::new(),
+            reply_http_path: None,
             required_review_fields: vec!["/message/params/command".to_owned()],
             display: ValueTemplate::Literal { value: Value::Null },
         };
@@ -3928,6 +5004,7 @@ mod tests {
             },
             deny_only: false,
             permission_delta_fields: Vec::new(),
+            reply_http_path: None,
             required_review_fields: Vec::new(),
             display: ValueTemplate::Literal { value: Value::Null },
         };
@@ -4470,19 +5547,20 @@ mod tests {
             request_field: Some("sessionKey".to_owned()),
             response_pointer: None,
         };
-        assert!(prepare_session_binding(Some(&require), &None, &mut json!({})).is_err());
+        assert!(prepare_session_binding(Some(&require), &None, &mut json!({}), true).is_err());
         let bound = Some("session-one".to_owned());
         assert!(
             prepare_session_binding(
                 Some(&require),
                 &bound,
                 &mut json!({"sessionKey":"session-two"}),
+                true,
             )
             .is_err()
         );
         let mut params = json!({});
         assert_eq!(
-            prepare_session_binding(Some(&require), &bound, &mut params).unwrap(),
+            prepare_session_binding(Some(&require), &bound, &mut params, true).unwrap(),
             Some("session-one".to_owned())
         );
         assert_eq!(params, json!({"sessionKey":"session-one"}));
@@ -4496,7 +5574,7 @@ mod tests {
             response_pointer: Some("/result/session/key".to_owned()),
         };
         let mut params = json!({"sessionKey":"session-one"});
-        let expected = prepare_session_binding(Some(&recovery), &None, &mut params).unwrap();
+        let expected = prepare_session_binding(Some(&recovery), &None, &mut params, true).unwrap();
         let mut bound = None;
         assert!(
             settle_session_binding(

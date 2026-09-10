@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "pty.created"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "info": {
+          "$ref": "#/$defs/Pty"
+        }
+      },
+      "required": [
+        "info"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Pty": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^pty"
+        },
+        "title": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "exited"
+          ]
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "command",
+        "args",
+        "cwd",
+        "status",
+        "pid"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "sessionID": {
+      "type": "string",
+      "pattern": "^ses"
+    }
+  },
+  "required": [
+    "sessionID"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

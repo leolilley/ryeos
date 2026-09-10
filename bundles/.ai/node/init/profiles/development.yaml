@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-09T09:15:12Z:9f3c2310a686172fe41396d18b63b19a57e1727a06054283f3038bcb399275cd:cOG3BNpgzB1Zb6zw42xjCOZo8V4FG3dlY/Q175N33u8wmgqRRhmnVnLnuOHvKDL2mPF7+oGraWGnfBiXIwtbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T10:35:03Z:ecdc4357b584bee2b9baf03dd52e9c6be0430920396db856ba2de0e7a2524666:THlEOE7BPR3PHzh970FeCo2cnUSkq5Xb8sm1/oy73z/g4nWvoVY0R/tNF2W97prLh7fZ3ShdZ3gLcY7OYzjKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
   - central-auth
   - codex
+  - opencode
   - core
   - hosted-node
   - local-inference
@@ -88,6 +89,7 @@ policies:
       central-auth: []
       codex:
         - ryeos.register.command.root.codex
+      opencode: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler

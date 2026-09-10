@@ -2997,9 +2997,11 @@ name = "ryeos-structured-session"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "jsonschema",
  "libc",
  "lillux",
+ "reqwest",
  "ryeos-engine",
  "ryeos-handler-bins",
  "ryeos-handler-protocol",

@@ -16,7 +16,7 @@ external_content: []
 config:
   # This is the existing generic bridge payload. No Codex Worker, credential,
   # profile, provider route or private state is selected by this fixture.
-  command: bin:codex/ryeos-structured-session-bridge
+  command: bin:core/ryeos-structured-session-bridge
   args: ["${source.entry}"]
   env:
     PATH: ""

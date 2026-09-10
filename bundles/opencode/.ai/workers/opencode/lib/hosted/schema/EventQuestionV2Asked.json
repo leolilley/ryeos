@@ -1,0 +1,119 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "question.v2.asked"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^que"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionV2Info"
+          },
+          "description": "Questions to ask"
+        },
+        "tool": {
+          "$ref": "#/$defs/QuestionV2Tool"
+        }
+      },
+      "required": [
+        "id",
+        "sessionID",
+        "questions"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "QuestionV2Info": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string",
+          "description": "Complete question"
+        },
+        "header": {
+          "type": "string",
+          "description": "Very short label (max 30 chars)"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionV2Option"
+          },
+          "description": "Available choices"
+        },
+        "multiple": {
+          "type": "boolean"
+        },
+        "custom": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "question",
+        "header",
+        "options"
+      ],
+      "additionalProperties": false
+    },
+    "QuestionV2Option": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "Display text (1-5 words, concise)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Explanation of choice"
+        }
+      },
+      "required": [
+        "label",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "QuestionV2Tool": {
+      "type": "object",
+      "properties": {
+        "messageID": {
+          "type": "string"
+        },
+        "callID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "messageID",
+        "callID"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

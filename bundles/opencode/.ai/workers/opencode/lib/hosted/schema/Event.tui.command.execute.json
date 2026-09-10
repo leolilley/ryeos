@@ -1,0 +1,59 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "tui.command.execute"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "session.list",
+                "session.new",
+                "session.share",
+                "session.interrupt",
+                "session.compact",
+                "session.page.up",
+                "session.page.down",
+                "session.line.up",
+                "session.line.down",
+                "session.half.page.up",
+                "session.half.page.down",
+                "session.first",
+                "session.last",
+                "prompt.clear",
+                "prompt.submit",
+                "agent.cycle"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

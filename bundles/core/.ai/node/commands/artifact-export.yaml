@@ -1,0 +1,15 @@
+tokens: [artifact, export]
+description: Export one retained artifact blob to a new local file
+help:
+  usage: "ryeos artifact export <blob-hash> <destination>"
+  examples:
+    - "ryeos artifact export 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ./result.bin"
+forms:
+  - slots:
+      - field: blob_hash
+      - field: destination
+        matcher: path
+dispatch:
+  kind: local_handler
+  handler: artifact_export
+  bootstrap: false
