@@ -214,8 +214,8 @@ profile=$qualification_bundle/codex/.ai/workers/fixture/lib/hosted/profile.json
 [[ -f $login && -f $session && -f $profile ]]
 [[ ! -e $qualification_bundle/standard/.ai/workers ]]
 [[ ! -e $qualification_bundle/standard/.ai/worker-executions ]]
-grep -F -q -- 'bin:codex/ryeos-structured-session-bridge' "$worker"
-grep -F -q -- 'bin:codex/ryeos-structured-session-bridge' "$enrollment_worker"
+grep -F -q -- 'bin:core/ryeos-structured-session-bridge' "$worker"
+grep -F -q -- 'bin:core/ryeos-structured-session-bridge' "$enrollment_worker"
 [[ $(grep -F -c -- "$expected_manifest" "$verifier") -eq 2 ]]
 grep -F -q -- 'mount_root: execution_runtime' "$verifier"
 grep -F -q -- 'type: realization_member' "$verifier"

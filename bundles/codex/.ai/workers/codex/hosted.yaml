@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T03:35:37Z:d346c3dbeca74c77e4a9f02fe6c0f8b67ad3c8307dd8dc768e8998140607976d:WLaeQPV8W+QKHwnwJNduQzWignD1+DcPtx4vpNmSEyal2jfHUOxkumvTdvR4WoIySnYbzsSAPZvxXxP9emezBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T06:41:09Z:5a7ba9410486d5580de419e2d2d271daab79e2d76bc73fff51115dc423938fc8:LVohvef/qLZKUPiVAVQQkD3Dxa8RkCUNrXjVRtVgUULn3oH7omexBnhZMKqEkcNbbLw+y7if8zYDh/lA/gUyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.3"
 executor_id: "@subprocess"
@@ -58,7 +58,7 @@ external_content:
     mount: codex-path/rg
 
 config:
-  command: "bin:codex/ryeos-structured-session-bridge"
+  command: "bin:core/ryeos-structured-session-bridge"
   args: ["${source.entry}"]
   env:
     PATH: ""

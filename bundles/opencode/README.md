@@ -155,9 +155,9 @@ Approval replies go to `POST /session/{session_id}/permissions/{permission_id}`.
 
 - Bundle population/signing (`populate-bundles`), `test_contract.py` mirror,
   and init-profile registration remain; this tree is authored source only.
-- The bridge binary is referenced as `bin:codex/ryeos-structured-session-bridge`
-  because the generic bridge is currently codex-bundle-owned; it should move
-  to the standard bundle before release qualification.
+- The generic bridge is core-owned (`bin:core/ryeos-structured-session-bridge`)
+  and shared with the Codex worker; this bundle declares the worker-kind
+  dependency on core through its manifest requires list.
 - Worker-node loopback admission: the opencode worker runs a loopback TCP
   listener inside its process scope, which the stdio Codex profile never
   needed; node isolation policy must admit it for this worker family.

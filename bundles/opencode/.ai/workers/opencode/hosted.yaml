@@ -29,7 +29,7 @@ external_content:
     mount: opencode
 
 config:
-  command: "bin:codex/ryeos-structured-session-bridge"
+  command: "bin:core/ryeos-structured-session-bridge"
   args: ["${source.entry}"]
   env:
     PATH: ""

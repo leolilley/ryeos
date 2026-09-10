@@ -262,6 +262,7 @@ staged_payload_records_for_set() {
     core ryeos-session-exec ryeos-session-exec static \
     core ryeos-worker-execution-launch-preparer ryeos-structured-session static \
     core ryeos-worker-execution-runtime ryeos-structured-session static \
+    core ryeos-structured-session-bridge ryeos-structured-session static \
     core ryeos-lillux-isolation-adapter ryeos-lillux-isolation-adapter static
   case "$BUNDLE_SET" in
     full|central-host|standard|hosted-workflow|release-artifacts)
@@ -287,12 +288,6 @@ staged_payload_records_for_set() {
         ryeos-ui ryeos-tui ryeos-client-terminal release \
         ryeos-ui web ryeos-client-web release \
         browser ryeos-browser-tools ryeos-browser-tools release
-      ;;
-  esac
-  case "$BUNDLE_SET" in
-    full|hosted-workflow|release-artifacts)
-      printf '%s\t%s\t%s\t%s\n' \
-        codex ryeos-structured-session-bridge ryeos-structured-session static
       ;;
   esac
 }
