@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "integration.connection.updated"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "integrationID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "integrationID"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

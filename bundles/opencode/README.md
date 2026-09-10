@@ -13,20 +13,55 @@ bridge plus one signed profile. Nothing here is admitted or qualified yet.
 - `OPENCODE_SERVER_PASSWORD` (basic auth, user defaults to `opencode`) is the
   server-side authentication boundary; unset prints a warning and leaves the
   server unsecured. The bridge must set a per-boot random password.
-- OpenAPI 3.1 JSON is served from `GET /doc` with `Accept: application/json`
-  — this is the vendorable schema source, analogous to
-  `bundles/codex/schema/app-server-0.147.0/`.
+- OpenAPI 3.1 JSON is served from `GET /doc` with `Accept: application/json`.
+  The 1.18.30 spec is vendored as 109 self-contained schemas beside this
+  profile source: 15 route request/response schemas plus all 94 event
+  documents, component refs rewritten to local `#/$defs` fragments.
 - `GET /event` is an SSE stream. Each frame is one `data:` line:
   `{"id":"evt_...","type":"server.connected","properties":{}}`; the first
-  event is `server.connected`. The 1.18.30 catalog has 94 event types.
+  event is `server.connected`.
 - Sessions are scoped to the server process cwd (`POST /session` records the
   `directory`); the bridge already pins cwd to the CoW workspace.
 - `GET /session/status` returned `{}` while idle sessions existed — absence
-  from the status map must be treated as idle, presence as busy.
-- State layout under the XDG data dir: `auth.json`, `mcp-auth.json`,
-  `opencode.db*`, `storage/**`, `log/**`, `snapshot/**`, `tool-output/**`,
-  `repos/**`, `bin/`. A probe server loaded the operator's real
-  `~/.config/opencode/*`; XDG redirection into the private home is mandatory.
+  from the status map must be treated as idle, presence as busy. A session
+  survives a server restart unchanged inside its private home, so node-local
+  recovery is `GET /session/{id}` plus the status map.
+- State layout under the redirected XDG roots (probed with all four
+  `XDG_*_HOME` variables set): data dir holds `auth.json`, `mcp-auth.json`,
+  the unified `opencode.db*` (tables: session, message, part, permission,
+  credential, account, todo, event, ...), `log/**`, `repos/**`; the config
+  dir holds the baseline config seed plus a workload-written
+  `node_modules/**`; the state dir holds `locks/**`. An older `storage/**`
+  per-project layout exists on legacy installs but 1.18.30 writes the DB.
+
+## Probe results that shape the profile
+
+- **XDG redirection requires explicit environment variables.** With only
+  `HOME` redirected, opencode still loaded the operator's real
+  `~/.config/opencode/*` (XDG roots resolve through the OS user record) and
+  a `{file:~...}` reference there failed startup against the redirected
+  home. The bridge must set `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+  `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to home-relative paths — the
+  standard POSIX convention, not an opencode-specific spelling.
+- **`OPENCODE_CONFIG_CONTENT` overrides project `opencode.json`** (verified:
+  inline `share=disabled, autoupdate=false` defeated a project file setting
+  both). It is the immutable per-boot authority channel above the admitted
+  workspace's own config.
+- **`--pure` does not suppress project `.opencode/agent/*.md`** — a project
+  workspace agent appeared in `/agent` under `--pure`. Project-authored
+  agents, commands, and instructions are admitted workspace prompt content,
+  not plugins; the profile pins the agent on every turn route and the
+  default agent in the inline config, so they cannot be silently selected.
+- **Session state is not file-portable.** The bound session's rows live in
+  the monolithic `opencode.db` beside the `credential` table. v1 therefore
+  classifies the whole DB as node-private credential state: node-local
+  resume works through the persisted home, and cross-site continuation of
+  the upstream conversation is a documented non-goal (project candidates
+  still hand off through the normal frozen-checkpoint machinery).
+- **Permission asks correlate by `properties.id`** (pattern `per...`) with
+  `sessionID`; the reply body is `{"response":"once"|"always"|"reject"}`.
+  Under the deny-only posture every non-accept decision maps to `reject`
+  and `once`/`always` are refused before upstream contact.
 
 ## Substrate change: profile transport
 
@@ -105,26 +140,23 @@ Approval replies go to `POST /session/{session_id}/permissions/{permission_id}`.
 - XDG redirection into the private home: `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
   `XDG_STATE_HOME`, `XDG_CACHE_HOME` (and `OPENCODE_CONFIG_DIR`).
 
-## portable_state selectors (data dir, initial classes)
+## portable_state selectors (data dir, verified against 1.18.30)
 
-- `auth.json`, `mcp-auth.json` -> node_private_credential_state
-- `log/**`, `snapshot/**`, `tool-output/**`, `repos/**`, `bin/**` ->
-  rebuildable_cache
-- `opencode.db*` -> forbidden_or_unknown (until proven otherwise)
-- `storage/**` -> forbidden_or_unknown except the bound session's portable
-  rows (exact layout pinned against the qualified version)
+- `auth.json`, `mcp-auth.json`, `opencode.db*` -> node_private_credential_state
+  (the unified DB carries the credential table)
+- `log/**`, `repos/**` -> rebuildable_cache
+- config tree: baseline seed -> forbidden_or_unknown (workload may rewrite
+  it; never policy), `.config/opencode/node_modules/**`,
+  `.config/opencode/.gitignore` -> rebuildable_cache
+- `locks/**` under the state root -> rebuildable_cache
+- everything else -> forbidden_or_unknown
 
 ## Open items
 
-- Exact storage layout for a single session (needs a credentialed run
-  against the pinned version) before portable_session_state selectors can
-  be finalized.
-- Whether `--pure` suppresses project `.opencode/` plugin loading (assumed;
-  verify) and whether project config can still widen permissions above
-  `OPENCODE_CONFIG_CONTENT` (docs say no; verify against source).
 - Acquisition recipes: pin the 1.18.30 standalone release artifacts and
   member digests.
-- `EventPermissionV2Asked` payload shape (extract from vendored OpenAPI).
+- Bridge sets the four `XDG_*_HOME` variables to home-relative paths for
+  http_sse profiles (generic POSIX convention; verified necessary).
 - Worker-executions (login/session/bounded-turn), commands, knowledge
   runbook, `test_contract.py` mirror, init-profile registration — all follow
-  the Codex bundle shape after the substrate transport lands.
+  the Codex bundle shape.

@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.shell.ended"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "callID": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "callID",
+        "output"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

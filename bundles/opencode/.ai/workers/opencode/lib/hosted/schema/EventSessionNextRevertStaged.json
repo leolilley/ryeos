@@ -1,0 +1,108 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.revert.staged"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "revert": {
+          "$ref": "#/$defs/RevertState"
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "revert"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RevertState": {
+      "type": "object",
+      "properties": {
+        "messageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "partID": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "diff": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileDiff"
+          }
+        }
+      },
+      "required": [
+        "messageID"
+      ],
+      "additionalProperties": false
+    },
+    "FileDiff": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "modified",
+            "deleted"
+          ]
+        },
+        "additions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "patch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "additions",
+        "deletions",
+        "patch"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

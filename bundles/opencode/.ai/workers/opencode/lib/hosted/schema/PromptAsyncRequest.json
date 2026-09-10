@@ -1,0 +1,465 @@
+{
+  "type": "object",
+  "properties": {
+    "messageID": {
+      "type": "string",
+      "pattern": "^msg"
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "providerID": {
+          "type": "string"
+        },
+        "modelID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerID",
+        "modelID"
+      ],
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "string"
+    },
+    "noReply": {
+      "type": "boolean"
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "format": {
+      "$ref": "#/$defs/OutputFormat"
+    },
+    "system": {
+      "type": "string"
+    },
+    "variant": {
+      "type": "string"
+    },
+    "parts": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TextPartInput"
+          },
+          {
+            "$ref": "#/$defs/FilePartInput"
+          },
+          {
+            "$ref": "#/$defs/AgentPartInput"
+          },
+          {
+            "$ref": "#/$defs/SubtaskPartInput"
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "parts"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "OutputFormat": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OutputFormatText"
+        },
+        {
+          "$ref": "#/$defs/OutputFormatJsonSchema"
+        }
+      ]
+    },
+    "OutputFormatText": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "OutputFormatJsonSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "json_schema"
+          ]
+        },
+        "schema": {
+          "$ref": "#/$defs/JSONSchema"
+        },
+        "retryCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "schema"
+      ],
+      "additionalProperties": false
+    },
+    "JSONSchema": {
+      "type": "object"
+    },
+    "TextPartInput": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^prt"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "ignored": {
+          "type": "boolean"
+        },
+        "time": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "start"
+          ],
+          "additionalProperties": false
+        },
+        "metadata": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "FilePartInput": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^prt"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
+        "mime": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/FilePartSource"
+        }
+      },
+      "required": [
+        "type",
+        "mime",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "FilePartSource": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileSource"
+        },
+        {
+          "$ref": "#/$defs/SymbolSource"
+        },
+        {
+          "$ref": "#/$defs/ResourceSource"
+        }
+      ]
+    },
+    "FileSource": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/FilePartSourceText"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "type",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "FilePartSourceText": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "start": {
+          "type": "number"
+        },
+        "end": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "SymbolSource": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/FilePartSourceText"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "symbol"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/Range"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "text",
+        "type",
+        "path",
+        "range",
+        "name",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Range": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "object",
+          "properties": {
+            "line": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "character": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "line",
+            "character"
+          ],
+          "additionalProperties": false
+        },
+        "end": {
+          "type": "object",
+          "properties": {
+            "line": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "character": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "line",
+            "character"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "ResourceSource": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/FilePartSourceText"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "resource"
+          ]
+        },
+        "clientName": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "type",
+        "clientName",
+        "uri"
+      ],
+      "additionalProperties": false
+    },
+    "AgentPartInput": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^prt"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "start": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "value",
+            "start",
+            "end"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "SubtaskPartInput": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^prt"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "subtask"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "model": {
+          "type": "object",
+          "properties": {
+            "providerID": {
+              "type": "string"
+            },
+            "modelID": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerID",
+            "modelID"
+          ],
+          "additionalProperties": false
+        },
+        "command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "prompt",
+        "description",
+        "agent"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

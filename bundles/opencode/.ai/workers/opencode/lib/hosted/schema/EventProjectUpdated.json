@@ -1,0 +1,116 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "project.updated"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "worktree": {
+          "type": "string"
+        },
+        "vcs": {
+          "$ref": "#/$defs/ProjectVcs"
+        },
+        "name": {
+          "type": "string"
+        },
+        "icon": {
+          "$ref": "#/$defs/ProjectIcon"
+        },
+        "commands": {
+          "$ref": "#/$defs/ProjectCommands"
+        },
+        "time": {
+          "$ref": "#/$defs/ProjectTime"
+        },
+        "sandboxes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "worktree",
+        "time",
+        "sandboxes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ProjectVcs": {
+      "type": "string",
+      "enum": [
+        "git"
+      ]
+    },
+    "ProjectIcon": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "override": {
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProjectCommands": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "Startup script to run when creating a new workspace (worktree)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProjectTime": {
+      "type": "object",
+      "properties": {
+        "created": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "initialized": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "created",
+        "updated"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

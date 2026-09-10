@@ -1,0 +1,48 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.context.updated"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "messageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "messageID",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

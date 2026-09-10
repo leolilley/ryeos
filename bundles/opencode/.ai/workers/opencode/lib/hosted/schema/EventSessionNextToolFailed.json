@@ -1,0 +1,96 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.tool.failed"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "assistantMessageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "callID": {
+          "type": "string"
+        },
+        "error": {
+          "$ref": "#/$defs/SessionErrorUnknown"
+        },
+        "result": {},
+        "provider": {
+          "type": "object",
+          "properties": {
+            "executed": {
+              "type": "boolean"
+            },
+            "metadata": {
+              "$ref": "#/$defs/LLMProviderMetadata"
+            }
+          },
+          "required": [
+            "executed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "assistantMessageID",
+        "callID",
+        "error",
+        "provider"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SessionErrorUnknown": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "unknown"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "LLMProviderMetadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      }
+    }
+  }
+}

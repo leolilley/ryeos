@@ -1,0 +1,269 @@
+{
+  "$ref": "#/$defs/Session",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Session": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "projectID": {
+          "type": "string"
+        },
+        "workspaceID": {
+          "type": "string",
+          "pattern": "^wrk"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "parentID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "additions": {
+              "type": "number"
+            },
+            "deletions": {
+              "type": "number"
+            },
+            "files": {
+              "type": "number"
+            },
+            "diffs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SnapshotFileDiff"
+              }
+            }
+          },
+          "required": [
+            "additions",
+            "deletions",
+            "files"
+          ],
+          "additionalProperties": false
+        },
+        "cost": {
+          "type": "number"
+        },
+        "tokens": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "number"
+            },
+            "output": {
+              "type": "number"
+            },
+            "reasoning": {
+              "type": "number"
+            },
+            "cache": {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "type": "number"
+                },
+                "write": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "read",
+                "write"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "input",
+            "output",
+            "reasoning",
+            "cache"
+          ],
+          "additionalProperties": false
+        },
+        "share": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "model": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "providerID": {
+              "type": "string"
+            },
+            "variant": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "providerID"
+          ],
+          "additionalProperties": false
+        },
+        "version": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "time": {
+          "type": "object",
+          "properties": {
+            "created": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "compacting": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "archived": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "created",
+            "updated"
+          ],
+          "additionalProperties": false
+        },
+        "permission": {
+          "$ref": "#/$defs/PermissionRuleset"
+        },
+        "revert": {
+          "type": "object",
+          "properties": {
+            "messageID": {
+              "type": "string",
+              "pattern": "^msg"
+            },
+            "partID": {
+              "type": "string",
+              "pattern": "^prt"
+            },
+            "snapshot": {
+              "type": "string"
+            },
+            "diff": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "messageID"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "projectID",
+        "directory",
+        "title",
+        "version",
+        "time"
+      ],
+      "additionalProperties": false
+    },
+    "SnapshotFileDiff": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "patch": {
+          "type": "string"
+        },
+        "additions": {
+          "type": "number"
+        },
+        "deletions": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "deleted",
+            "modified"
+          ]
+        }
+      },
+      "required": [
+        "additions",
+        "deletions"
+      ],
+      "additionalProperties": false
+    },
+    "PermissionRuleset": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PermissionRule"
+      }
+    },
+    "PermissionRule": {
+      "type": "object",
+      "properties": {
+        "permission": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/PermissionAction"
+        }
+      },
+      "required": [
+        "permission",
+        "pattern",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "PermissionAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny",
+        "ask"
+      ]
+    }
+  }
+}
