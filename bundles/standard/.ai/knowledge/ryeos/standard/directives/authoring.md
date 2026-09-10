@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-09-10T02:15:39Z:c878fcdb8dd85b10b7ce4d50f2fb01210a416b75d1cdadcbc02931a241900abd:oIDMe2g7c1yq2p46VYddNx6/EJlkKSaFTLMLYyedhzox7b2uvQRKic1dCK7VmfrQnOWrwu3d4os82kCkZv5ZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]

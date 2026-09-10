@@ -1231,6 +1231,19 @@ impl PinnedRegularFile {
         observe_open_regular_file(&self.file)
     }
 
+    /// Return the age of this exact file inode's modification time. This is a
+    /// diagnostic clock observation, never file identity or stale authority.
+    pub fn modification_age(&self) -> Result<Option<crate::time::Duration>> {
+        let metadata = self
+            .file
+            .metadata()
+            .with_context(|| format!("inspect pinned regular file {}", self.path.display()))?;
+        Ok(metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok()))
+    }
+
     /// Read this exact descriptor and prove it still matches a prior
     /// observation. The cloned raw descriptor remains internal to Lillux.
     pub fn read_stable_bounded(

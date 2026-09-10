@@ -236,6 +236,14 @@ struct NodeHostSetupArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
+    /// Persist this node's TCP endpoint before installing supervision.
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+
+    /// Persist this node's local lifecycle endpoint before supervision.
+    #[arg(long)]
+    uds_path: Option<PathBuf>,
+
     /// Required acknowledgement that this installs a root-owned service
     /// association for the current account and node.
     #[arg(long)]
@@ -249,11 +257,14 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
     if !args.confirm {
         anyhow::bail!("host setup requires --confirm");
     }
-    let config = ryeos_node::NodeConfig::load_local(args.app_root)?;
-    ryeos_node::require_initialized(&config.app_root)?;
+    let existing = ryeos_node::NodeConfig::load_local(args.app_root)?;
+    ryeos_node::require_initialized(&existing.app_root)?;
+    let config = ryeos_node::supervision::configure_host_endpoints(
+        &existing.app_root,
+        args.bind,
+        args.uds_path,
+    )?;
     let account = lillux::ControllerAccount::current().map_err(anyhow::Error::msg)?;
-    let home =
-        lillux::current_user_home().context("host setup requires a canonical current-user HOME")?;
     let daemon = std::env::current_exe()
         .context("locate installed ryeos CLI")?
         .parent()
@@ -265,8 +276,6 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
         config.app_root.into_os_string(),
         "--controller-account-json".into(),
         serde_json::to_string(&account)?.into(),
-        "--home".into(),
-        home.into_os_string(),
     ];
     lillux::run_as_administrator(&daemon, &arguments)
         .with_context(|| format!("run administrator host setup through {}", daemon.display()))?;
@@ -332,6 +341,8 @@ fn run_node_policy_generation_reset_command(
     .context("load local node location for policy-generation reset")?;
     let report = ryeos_node::run_init(&ryeos_node::InitOptions {
         app_root: config.app_root,
+        bind: None,
+        uds_path: None,
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: Some(args.node_profile.clone()),
@@ -939,6 +950,14 @@ struct InitArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
+    /// TCP endpoint persisted in this node's bootstrap configuration.
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+
+    /// Local lifecycle endpoint persisted with the TCP endpoint.
+    #[arg(long)]
+    uds_path: Option<PathBuf>,
+
     /// Source directory containing bundle subdirectories.
     /// Each immediate child with a `.ai/` subdirectory is installed as a bundle.
     /// Defaults to `/usr/share/ryeos` (packaged install).
@@ -989,6 +1008,8 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
 
     let opts = ryeos_node::InitOptions {
         app_root,
+        bind: args.bind,
+        uds_path: args.uds_path,
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: args.node_profile,
@@ -1123,11 +1144,19 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
     let Some(args) = parse_or_render_help::<StatusArgs>(argv, console)? else {
         return Ok(());
     };
-    let controller = LifecycleController::from_env(local_env(args.app_root)?);
-    let status = controller
-        .status()
-        .await
-        .context("ryeos node status failed")?;
+    let app_root = LocalLifecycleEnv::selected_app_root(args.app_root)?;
+    let status = match LocalLifecycleEnv::load(Some(app_root.clone())) {
+        Ok(env) => LifecycleController::from_env(env)
+            .status()
+            .await
+            .context("ryeos node status failed")?,
+        Err(config_error) => ryeos_node::status::retained_startup_failure(&app_root)
+            .with_context(|| {
+                format!(
+                    "node bootstrap configuration is invalid and no retained startup failure is available: {config_error:#}"
+                )
+            })?,
+    };
     if args.json {
         crate::tty::write_json(&status)?;
     } else {
@@ -1720,13 +1749,11 @@ struct StartArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
-    /// TCP bind address for ryeosd, e.g. 127.0.0.1:17400.
-    /// Overrides stored config for this start invocation.
+    /// Persist this TCP endpoint if the node is stopped, then start it.
     #[arg(long)]
     bind: Option<SocketAddr>,
 
-    /// Lifecycle/control Unix socket path for ryeosd.
-    /// Useful when running a second local daemon alongside the default node.
+    /// Persist this local lifecycle endpoint if the node is stopped, then start it.
     #[arg(long)]
     uds_path: Option<PathBuf>,
 }
@@ -1735,16 +1762,27 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
     let Some(args) = parse_or_render_help::<StartArgs>(argv, console)? else {
         return Ok(());
     };
-    let env =
-        LocalLifecycleEnv::load_with_overrides(args.app_root, args.bind, args.uds_path, true)?;
+    let env = LocalLifecycleEnv::load(args.app_root)?;
     let controller = LifecycleController::from_env(env);
+    let endpoints = ryeos_node::StartEndpointConfiguration {
+        bind: args.bind,
+        uds_path: args.uds_path,
+    };
     let mut progress = crate::tty::LifecycleProgress::new(
         crate::tty::LifecycleProgressAction::Boot,
         console.capabilities(),
     );
     let report = match progress.as_mut() {
-        Some(progress) => controller.start_with_progress(progress).await,
-        None => controller.start().await,
+        Some(progress) => {
+            controller
+                .start_with_endpoint_configuration(endpoints, Some(progress))
+                .await
+        }
+        None => {
+            controller
+                .start_with_endpoint_configuration(endpoints, None)
+                .await
+        }
     }
     .context("ryeos start failed")?;
     if let Some(progress) = progress {
@@ -1902,7 +1940,6 @@ async fn run_stop_command(argv: &[String], console: &crate::tty::Console) -> Res
     let Some(args) = parse_or_render_help::<StopArgs>(argv, console)? else {
         return Ok(());
     };
-    let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let options = StopOptions {
         force: args.force,
         ..StopOptions::default()
@@ -1911,9 +1948,24 @@ async fn run_stop_command(argv: &[String], console: &crate::tty::Console) -> Res
         crate::tty::LifecycleProgressAction::Shutdown,
         console.capabilities(),
     );
-    let report = match progress.as_mut() {
-        Some(progress) => controller.stop_with_progress(options, progress).await,
-        None => controller.stop(options).await,
+    let app_root = LocalLifecycleEnv::selected_app_root(args.app_root)?;
+    let report = match LocalLifecycleEnv::load(Some(app_root.clone())) {
+        Ok(env) => {
+            let controller = LifecycleController::from_env(env);
+            match progress.as_mut() {
+                Some(progress) => controller.stop_with_progress(options, progress).await,
+                None => controller.stop(options).await,
+            }
+        }
+        Err(config_error) => {
+            ryeos_node::stop::stop_supervised_with_invalid_config(&app_root, options.timeout)
+                .await
+                .with_context(|| {
+                    format!(
+                        "node bootstrap configuration is invalid ({config_error:#}); supervised inhibition failed"
+                    )
+                })
+        }
     }
     .context("ryeos stop failed")?;
     if let Some(progress) = progress {

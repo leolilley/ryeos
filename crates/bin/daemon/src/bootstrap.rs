@@ -87,14 +87,11 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 1. Create directory layout
     create_directory_layout(config)?;
 
-    // 2. Write default config file if missing (or force rewrite)
-    let config_path = config.app_root.join(".ai").join("node").join("config.yaml");
-    if options.force || !config_path.exists() {
-        write_default_config(&config_path, config)?;
-        tracing::info!(path = %config_path.display(), "wrote default config");
-    }
+    // Bootstrap configuration is created by the stopped-node `ryeos init`
+    // transaction. Daemon repair must never become a second configuration
+    // publisher or reinterpret `force` as endpoint mutation.
 
-    // 3. Create auth directory
+    // 2. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
 
     // Discover operator trust directory early — needed for stale-entry cleanup
@@ -176,7 +173,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 6. Write public identity document (node only)
     let identity_path = config
         .app_root
-        .join(".ai")
+        .join(AI_DIR)
         .join("node")
         .join("identity")
         .join("public-identity.json");
@@ -371,29 +368,29 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     // runtime state under .ai/state/.
     let dirs = [
         // Node identity
-        config.app_root.join(".ai").join("node").join("identity"),
+        config.app_root.join(AI_DIR).join("node").join("identity"),
         // Node auth
         config
             .app_root
-            .join(".ai")
+            .join(AI_DIR)
             .join("node")
             .join("auth")
             .join("authorized_keys"),
         // Node vault (sealed secrets)
-        config.app_root.join(".ai").join("node").join("vault"),
+        config.app_root.join(AI_DIR).join("node").join("vault"),
         // Node config (model routing, etc.)
-        config.app_root.join(".ai").join("node").join("config"),
+        config.app_root.join(AI_DIR).join("node").join("config"),
         // Node bundle registrations
-        config.app_root.join(".ai").join("node").join("bundles"),
+        config.app_root.join(AI_DIR).join("node").join("bundles"),
         // Node engine (merged kind schemas cache)
         config
             .app_root
-            .join(".ai")
+            .join(AI_DIR)
             .join("node")
             .join("engine")
             .join("kinds"),
         // Installed bundles
-        config.app_root.join(".ai").join("bundles"),
+        config.app_root.join(AI_DIR).join("bundles"),
         // CAS state
         config.runtime_state_dir().join("objects"),
         config.runtime_state_dir().join("locators"),
@@ -405,21 +402,18 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     }
     let runtime_state = lillux::PinnedDirectory::open_or_create(&config.runtime_state_dir())
         .context("pin initialized runtime-state directory")?;
+    runtime_state
+        .open_or_create_child(
+            std::ffi::OsStr::new(ryeos_engine::roots::DAEMON_STATE_DIR),
+            0o700,
+        )
+        .context("create daemon-state authority")?;
     let recovery = runtime_state
         .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
         .context("create initialized recovery authority")?;
     recovery
         .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
         .context("create initialized thread-projection recovery authority")?;
-    Ok(())
-}
-
-fn write_default_config(path: &Path, config: &Config) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let yaml = serde_yaml::to_string(config).context("failed to serialize default config")?;
-    fs::write(path, yaml.as_bytes())?;
     Ok(())
 }
 
@@ -521,15 +515,17 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     // ── 2. Daemon-local layout (idempotent) ──
     create_directory_layout(config)?;
 
-    // ── 3. Default daemon config file (daemon-local) ──
+    // ── 3. Bootstrap config is operator-init-owned ──
     let config_path = config
         .app_root
         .join(AI_DIR)
         .join("node")
         .join("config.yaml");
     if !config_path.exists() {
-        write_default_config(&config_path, config)?;
-        tracing::info!(path = %config_path.display(), "wrote default daemon config");
+        bail!(
+            "daemon bootstrap config missing at {} — run: ryeos init",
+            config_path.display()
+        );
     }
 
     // ── 4. Public identity (daemon-local; derives from node key) ──
@@ -1100,6 +1096,12 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
         };
+        fs::create_dir_all(app_root.join(AI_DIR).join("node")).unwrap();
+        fs::write(
+            app_root.join(AI_DIR).join("node").join("config.yaml"),
+            serde_yaml::to_string(&config).unwrap(),
+        )
+        .unwrap();
 
         let err = repair_daemon_local(&config).expect_err("should refuse without user key");
         let msg = format!("{err:#}");

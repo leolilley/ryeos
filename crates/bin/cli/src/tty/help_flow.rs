@@ -826,8 +826,8 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
 fn local_detail(tokens: &str, description: &str) -> String {
     let (usage, options) = match tokens {
         "init" => (
-            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME>]",
-            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes",
+            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME>]",
+            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes",
         ),
         "setup" => (
             "ryeos setup [--app-root <DIR>]",
@@ -839,7 +839,7 @@ fn local_detail(tokens: &str, description: &str) -> String {
         ),
         "start" => (
             "ryeos start [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
-            "--app-root <DIR>  application root\n--bind <ADDR>      daemon bind address\n--uds-path <PATH>  Unix-domain socket path",
+            "--app-root <DIR>  application root\n--bind <ADDR>      persist the stopped node's TCP endpoint before launch\n--uds-path <PATH>  persist the stopped node's lifecycle endpoint before launch",
         ),
         "stop" => (
             "ryeos stop [--force] [--app-root <DIR>]",
@@ -850,8 +850,8 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "--json            emit structured status\n--app-root <DIR>  application root",
         ),
         "node host setup" => (
-            "ryeos node host setup --confirm [--app-root <DIR>]",
-            "--confirm         confirm administrator-owned host-service provisioning\n--app-root <DIR>  existing initialized application root",
+            "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
+            "--confirm         confirm administrator-owned host-service provisioning\n--app-root <DIR>  existing initialized application root\n--bind <ADDR>      replace the stopped node's persisted TCP endpoint\n--uds-path <PATH>  replace the stopped node's persisted lifecycle endpoint",
         ),
         "node doctor" => (
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",

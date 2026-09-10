@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T01:21:41Z:133544f6a0868a4b2ba5e576813ae66d7d9e82090660753a07d72817cfd5d7fa:4wLKBw0tZGdecL1uFEcoA0Q3baIFDe+Vqo7k2qwqB7u97OHECugl0BPDEI+spRAgkUAWyXjxR0hsA7HdckVjDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T07:15:52Z:cb6630e6dee13a82fdf7cfa931ea96426b47ed0641d4fa546c98768b80a11b65:7nlu58iRTn2JqMKoNNjEJNsYNs5sW+wjVAwp5Pfsws687d5AsXA+dDhlqQeJPsrGFjBbg4aYRSnPy7olFMb7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -575,7 +575,8 @@ host delegation, the operator performs one explicit local setup after that node
 has been initialized:
 
 ```sh
-ryeos node host setup --confirm [--app-root <existing-node-root>]
+ryeos node host setup --confirm [--app-root <existing-node-root>] \
+  [--bind <addr>] [--uds-path <path>]
 ```
 
 This is an administrator-maintenance transition, not a worker operation. The
@@ -586,6 +587,14 @@ Lillux scope configuration and keeps its generic app-root, node-identity,
 account, desired-lifecycle and upgrade testimony. Neither node policy nor
 worker input can select a privileged executable, service manager, host account
 or scope parent.
+
+The node service receives an empty process environment. Its exact app root is
+the sole launch argument, and the node-account daemon resolves its already
+persisted bootstrap endpoints after credential drop. It never inherits the
+administrator's `HOME`, `PATH`, XDG state or login-session environment. Native
+interpreter, credential-drop and scope-launch failures are retained as bounded
+root-owned attempt testimony in the existing host association; they do not
+become node policy or process-signalling authority.
 
 The configured association is deliberately fail-closed. After setup, ordinary
 `ryeos start`, `ryeos stop`, and `ryeos node status` use the installed native

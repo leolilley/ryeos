@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-09-10T02:15:39Z:7ba03840f38ab2ba3b1330394e2ec62e5a28e2fd52ee72f4a90736b733c55dfd:JuJ/hspftKWwmmHgQPCsXh1/mge0dxbzhpUsuxCC3ok+wKm/uhisv9z3YBcrTKjlq426mKaZ+HR7FExmIYlBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"

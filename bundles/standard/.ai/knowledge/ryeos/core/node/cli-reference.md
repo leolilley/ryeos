@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T01:21:41Z:4dca22fc2ef0c14069ced0e8f4b4e796c335b02877a77bf7510530cc4a9c9d65:Ll3KjE2RhKoR9o8aVPMdmkEFzetLn5Eaz7ruNEgNyY/VXC++V4x+6dNraNpP+9FULGM6ZosNsqpBPcciSYDgCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T07:15:52Z:c2265b320ab69cd12753a92f2ed134b232111917910da71261a45edcdd0021ed:tv5fvTiTatE8cuChBbCt8ulU8a9l1we+Dje7djpeNL11qUsgh3hqtr2gNNntpyzHbgvG+2qHL0YVNlO7Zk4yDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -73,7 +73,7 @@ ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER
 ### `ryeos start`
 
 ```bash
-ryeos start [--app-root <dir>]
+ryeos start [--app-root <dir>] [--bind <addr>] [--uds-path <path>]
 ```
 
 Starts the local daemon. Fails if not initialized, succeeds immediately
@@ -84,6 +84,12 @@ is an error and never falls back to direct spawning. The readiness timeout is
 15 minutes so verified projection recovery can finish. Interactive terminals
 show the daemon's typed startup phases and counters in one redrawn boot line;
 redirected output remains plain and deterministic.
+
+Endpoint arguments are durable stopped-node configuration, not transient
+process overrides. A differing value is published under the same lifecycle and
+state locks as the launch request; a running or starting node must be stopped
+before its endpoints can change. Direct and supervised launches then consume
+the same persisted configuration.
 
 ### `ryeos stop`
 
@@ -103,20 +109,29 @@ then terminates the exact pinned daemon. The daemon disappearing is not worker
 scope-settlement evidence; normal restart recovery retains any remaining worker
 cleanup obligations.
 
+If the node's bootstrap configuration is malformed, stop cannot safely invent
+a direct-daemon endpoint. It may still publish Down through an exact protected
+host-service association; a direct node must have its bootstrap configuration
+repaired before authenticated shutdown can proceed.
+
 ### `ryeos node host setup`
 
 ```bash
-ryeos node host setup --confirm [--app-root <dir>]
+ryeos node host setup --confirm [--app-root <dir>] [--bind <addr>] [--uds-path <path>]
 ```
 
 One-time administrator-maintenance setup for an existing initialized node that
 will host dedicated workers requiring an OS delegation. It records an exact
 account, app-root identity, node identity and installed daemon image in
 administrator-owned host configuration, then leaves the new service down.
+Optional endpoint arguments replace the stopped node's ordinary persisted
+bootstrap configuration before the privileged host association is created.
 Lillux chooses and provisions the supported native service-manager and scope
 delegation; these are not node-policy or project settings. Afterwards the
 ordinary `ryeos start`, `ryeos stop` and `ryeos node status` commands operate
 the configured service without granting any host authority to workers.
+The installed daemon starts with an empty environment and resolves the node's
+persisted bootstrap configuration only after entering the selected account.
 
 Setup intentionally leaves the native service inert across host boot. Running
 the node remains an explicit `ryeos start` decision, rather than an implicit
@@ -133,7 +148,10 @@ ryeos node status [--json] [--app-root <dir>]
 ```
 
 Read-only lifecycle status. Treats `daemon.json` as a hint and trusts
-only a `lifecycle.status` response reporting `status: "running"`.
+only a `lifecycle.status` response reporting `status: "running"`. If complete
+bootstrap configuration cannot be decoded, status may report retained terminal
+startup-failure testimony for the selected app root, but it does not infer a
+TCP or UDS endpoint from defaults or stale process metadata.
 
 ### `ryeos node doctor`
 

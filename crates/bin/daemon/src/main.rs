@@ -31,19 +31,21 @@ const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
 
 struct LifecycleExitGuard {
     state_dir: std::path::PathBuf,
+    started_at: String,
     recorded: bool,
 }
 
 impl LifecycleExitGuard {
-    fn new(state_dir: std::path::PathBuf) -> Self {
+    fn new(state_dir: std::path::PathBuf, started_at: String) -> Self {
         Self {
             state_dir,
+            started_at,
             recorded: false,
         }
     }
 
-    fn record(&mut self, reason: &str) {
-        lifecycle_marker::record_exit(&self.state_dir, reason);
+    fn record(&mut self, reason: &str, error: Option<&str>) {
+        lifecycle_marker::record_exit(&self.state_dir, reason, &self.started_at, error);
         self.recorded = true;
     }
 }
@@ -51,7 +53,12 @@ impl LifecycleExitGuard {
 impl Drop for LifecycleExitGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            lifecycle_marker::record_exit(&self.state_dir, "startup_failed");
+            lifecycle_marker::record_exit(
+                &self.state_dir,
+                "startup_failed",
+                &self.started_at,
+                None,
+            );
         }
     }
 }
@@ -243,14 +250,19 @@ fn main() -> Result<()> {
     if let Some(config::DaemonCommand::HostProvision {
         app_root,
         controller_account_json,
-        home,
     }) = &cli.command
     {
         lillux::require_administrator()?;
         let account: lillux::ControllerAccount = serde_json::from_str(controller_account_json)
             .context("parse explicit host controller account")?;
-        ryeos_node::supervision::provision_host_service(app_root, account, home)?;
-        println!("host service provisioned down; use ryeos start to request the first launch");
+        let desired = ryeos_node::supervision::provision_host_service(app_root, account)?;
+        println!(
+            "host service provisioned {}; use ryeos start/stop for ordinary lifecycle",
+            match desired {
+                ryeos_node::supervision::DesiredState::Up => "up",
+                ryeos_node::supervision::DesiredState::Down => "down",
+            }
+        );
         return Ok(());
     }
     if let Some(config::DaemonCommand::HostInstall {
@@ -431,13 +443,13 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
         return Ok(());
     }
 
-    let mut config = Config::load(&cli.to_sources())?;
+    let config_sources = cli.to_sources();
+    let selected_app_root = Config::selected_app_root(&config_sources)?;
     // This runs as the node account. Host association is not permission to
     // interpret user-owned node configuration while privileged, nor a reason
     // to require administrator-owned ancestors above an ordinary app root.
-    let host_service = ryeos_node::supervision::InstalledService::discover(
-        &ryeos_node::NodeConfig::from_app_config(&config),
-    )?;
+    let host_service =
+        ryeos_node::supervision::InstalledService::discover_app_root(&selected_app_root)?;
     if let Some(service) = &host_service {
         // Refuse a misconfigured root/wrong-account daemon before init checks,
         // state-lock creation, tracing or lifecycle metadata writes.
@@ -448,7 +460,7 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
     // Verify operator-owned node initialization before any local repairs
     // or runtime-state writes. `ryeos init` is authoritative for bundle
     // registrations and operator identity/trust artifacts.
-    ryeos_node::require_initialized(&config.app_root)?;
+    ryeos_node::require_initialized(&selected_app_root)?;
 
     // Handle subcommands BEFORE acquiring the daemon state lock or
     // initializing tracing. Subcommands (e.g. `run-service`) manage
@@ -472,6 +484,7 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
                 service_ref,
                 params,
             } => {
+                let config = Config::load(&config_sources)?;
                 return run_service_standalone(&config, service_ref, params.as_deref()).await;
             }
         }
@@ -482,7 +495,7 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
     // standalone service) from racing in and removing the first
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
-    let state_lock_path = state_lock::default_lock_path(&config.app_root);
+    let state_lock_path = state_lock::default_lock_path(&selected_app_root);
     let state_lock = state_lock::StateLock::acquire_with_timeout(
         &state_lock_path,
         Duration::from_secs(5),
@@ -490,8 +503,40 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
     .context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
-    state_lock.ensure_protects_app_root(&config.app_root)?;
+    state_lock.ensure_protects_app_root(&selected_app_root)?;
     *process_state_lock = Some(state_lock);
+
+    // Mark the attempt before complete config decoding. The explicit app root
+    // is already fenced by StateLock, so a malformed bootstrap document now
+    // becomes bounded node-owned failure testimony instead of an invisible
+    // supervisor restart loop.
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(selected_app_root.clone()).state();
+    lifecycle_marker::report_previous_exit(&state_dir);
+    lifecycle_marker::check_disk_space(&state_dir);
+    let lifecycle_started_at = lifecycle_marker::record_running(&state_dir);
+    let mut lifecycle_exit = LifecycleExitGuard::new(state_dir, lifecycle_started_at);
+
+    let mut config = match Config::load(&config_sources) {
+        Ok(config) => config,
+        Err(error) => {
+            let detail = format!("load node bootstrap configuration: {error:#}");
+            lifecycle_exit.record("startup_failed", Some(&detail));
+            return Err(error).context("load node bootstrap configuration");
+        }
+    };
+    if config.app_root != selected_app_root {
+        let detail = format!(
+            "decoded node bootstrap app root {} differs from locked app root {}",
+            config.app_root.display(),
+            selected_app_root.display()
+        );
+        lifecycle_exit.record("startup_failed", Some(&detail));
+        anyhow::bail!(detail);
+    }
+    process_state_lock
+        .as_ref()
+        .context("daemon state lock is absent")?
+        .ensure_protects_app_root(&config.app_root)?;
 
     // Recheck the signed whole-init fence after acquiring the same lock as
     // initialization. The pre-lock check provides early guidance; this check
@@ -504,14 +549,6 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
         &config.app_root,
     ));
 
-    // Surface how the previous run ended (clean, or an inferred crash from a
-    // stale `running` marker), warn on low disk, then mark this run as running.
-    let state_dir = config.runtime_state_dir();
-    lifecycle_marker::report_previous_exit(&state_dir);
-    lifecycle_marker::check_disk_space(&state_dir);
-    lifecycle_marker::record_running(&state_dir);
-    let mut lifecycle_exit = LifecycleExitGuard::new(state_dir.clone());
-
     // Repair only daemon-local artifacts. Missing operator artifacts
     // (user signing key, trust docs) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
@@ -523,23 +560,35 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
 
     tracing::info!("State lock acquired");
 
-    process::remove_stale_socket(&config.uds_path)?;
-    ensure_runtime_paths(&config)?;
-    let daemon_json_path = config.app_root.join("daemon.json");
-    let _ = std::fs::remove_file(&daemon_json_path);
+    let early_startup = async {
+        process::remove_stale_socket(&config.uds_path)?;
+        ensure_runtime_paths(&config)?;
+        let daemon_json_path = config.app_root.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json_path);
 
-    // Bind and start both stable outer transports before any projection work.
-    // These listeners expose only lifecycle/liveness until the callback-capable
-    // application is release-published by the startup coordinator.
-    let tcp_listener = TcpListener::bind(config.bind)
-        .await
-        .with_context(|| format!("failed to bind {}", config.bind))?;
-    let actual_bind = tcp_listener
-        .local_addr()
-        .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
+        // Bind both stable outer transports before projection work. Catch this
+        // whole pre-control phase so supervised callers receive the actual
+        // terminal failure rather than observing an endless restart spinner.
+        let tcp_listener = TcpListener::bind(config.bind)
+            .await
+            .with_context(|| format!("failed to bind {}", config.bind))?;
+        let actual_bind = tcp_listener
+            .local_addr()
+            .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
+        let uds_listener = UnixListener::bind(&config.uds_path)
+            .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
+        Ok::<_, anyhow::Error>((tcp_listener, uds_listener, daemon_json_path, actual_bind))
+    }
+    .await;
+    let (tcp_listener, uds_listener, daemon_json_path, actual_bind) = match early_startup {
+        Ok(value) => value,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            lifecycle_exit.record("startup_failed", Some(&detail));
+            return Err(error);
+        }
+    };
     config.bind = actual_bind;
-    let uds_listener = UnixListener::bind(&config.uds_path)
-        .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
     let _discovery_cleanup =
         startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
 
@@ -1566,7 +1615,11 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
     } else {
         "runtime_error"
     };
-    lifecycle_exit.record(exit_reason);
+    let exit_detail = daemon_result
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    lifecycle_exit.record(exit_reason, exit_detail.as_deref());
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
         Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
@@ -3115,20 +3168,15 @@ fn ensure_runtime_paths(config: &Config) -> Result<()> {
             .with_context(|| format!("failed to create db parent {}", parent.display()))?;
     }
     if let Some(parent) = config.uds_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create uds parent {}", parent.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
-                || {
-                    format!(
-                        "failed to set runtime dir permissions on {}",
-                        parent.display()
-                    )
-                },
-            )?;
-        }
+        // Init/repair creates the private default `.ai/state/daemon` root.
+        // An explicit socket path may intentionally name another existing
+        // namespace, but it never authorizes ryeosd to create or chmod that
+        // arbitrary parent (notably `/tmp`). The socket inode itself is made
+        // owner-only immediately after binding.
+        lillux::PinnedDirectory::open(parent)?
+            .with_context(|| format!("configured uds parent is absent: {}", parent.display()))?
+            .ensure_path_binding()
+            .with_context(|| format!("configured uds parent changed: {}", parent.display()))?;
     }
     Ok(())
 }

@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 
 use crate::AI_DIR;
 
+pub const DAEMON_STATE_DIR: &str = "daemon";
+pub const DAEMON_CONTROL_SOCKET: &str = "ryeosd.sock";
+
 /// Read-only handle to the installed bundle/config zone.
 ///
 /// Today install and runtime roots share one physical app root. The type split
@@ -67,6 +70,17 @@ impl RuntimeRoot {
 
     pub fn state(&self) -> PathBuf {
         self.ai().join("state")
+    }
+
+    /// Node-private state owned by the daemon process itself rather than an
+    /// execution, scheduler, cache, or durable object-store subsystem.
+    pub fn daemon_state(&self) -> PathBuf {
+        self.state().join(DAEMON_STATE_DIR)
+    }
+
+    /// Stable local control endpoint for this exact app-root node.
+    pub fn daemon_control_socket(&self) -> PathBuf {
+        self.daemon_state().join(DAEMON_CONTROL_SOCKET)
     }
 
     pub fn node(&self) -> PathBuf {
@@ -224,6 +238,15 @@ mod tests {
         // No duplicate /tmp/sys-a.
         let count = r.iter().filter(|p| **p == Path::new("/tmp/sys-a")).count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn daemon_control_socket_is_scoped_below_daemon_state() {
+        let root = RuntimeRoot::new(PathBuf::from("/tmp/ryeos-test-root"));
+        assert_eq!(
+            root.daemon_control_socket(),
+            PathBuf::from("/tmp/ryeos-test-root/.ai/state/daemon/ryeosd.sock")
+        );
     }
 
     #[test]

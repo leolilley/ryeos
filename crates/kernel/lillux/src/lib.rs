@@ -59,6 +59,7 @@ pub use process_control::{
 };
 pub use process_control::{
     ExactProcessIdentity, QuiescedProcessGroup, QuiescedProcesses, capture_exact_process_identity,
+    diagnostic_process_is_live, diagnostic_process_matches_executable_name,
     prepare_process_group_controller, quiesce_exact_process_group,
 };
 

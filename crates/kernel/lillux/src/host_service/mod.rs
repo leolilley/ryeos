@@ -40,8 +40,9 @@ pub trait HostServiceController: Send + Sync {
     fn restore_upgrade_state(&self, state: &serde_json::Value) -> Result<()>;
 }
 
-/// One exact native service association. `state_directory` is root-owned at
-/// publication; clients may create narrowly delegated children beneath it.
+/// One exact native service association. `state_directory` remains root-owned;
+/// the native adapter may grant the selected controller read/traversal access
+/// to public association testimony and a narrowly delegated private child.
 pub struct HostServiceInstallation {
     pub state_directory: PinnedDirectory,
     /// Exact native launch contract recovered from the administrator-owned

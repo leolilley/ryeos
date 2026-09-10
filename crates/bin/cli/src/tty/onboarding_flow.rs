@@ -222,6 +222,8 @@ async fn run_core_initialization(
     let worker_cancelled = Arc::clone(&cancelled);
     let options = InitOptions {
         app_root: options.app_root.clone(),
+        bind: options.bind,
+        uds_path: options.uds_path.clone(),
         source_dir: options.source_dir.clone(),
         trust_files: options.trust_files.clone(),
         node_profile: options.node_profile.clone(),

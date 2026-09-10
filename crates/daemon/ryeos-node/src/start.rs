@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -18,24 +19,42 @@ pub struct StartReport {
     pub already_running: bool,
 }
 
+/// Optional bootstrap endpoint selection attached to one start operation.
+/// A differing value is durably published while the node is stopped before
+/// either direct or supervised launch; it is never a transient child argument.
+#[derive(Debug, Clone, Default)]
+pub struct StartEndpointConfiguration {
+    pub bind: Option<SocketAddr>,
+    pub uds_path: Option<PathBuf>,
+}
+
 pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartReport> {
-    start_with_progress(env, timeout, None).await
+    start_with_endpoint_configuration(env, timeout, StartEndpointConfiguration::default(), None)
+        .await
 }
 
 pub async fn start_with_progress(
     env: &LocalLifecycleEnv,
     timeout: Duration,
+    observer: Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<StartReport> {
+    start_with_endpoint_configuration(
+        env,
+        timeout,
+        StartEndpointConfiguration::default(),
+        observer,
+    )
+    .await
+}
+
+pub async fn start_with_endpoint_configuration(
+    env: &LocalLifecycleEnv,
+    timeout: Duration,
+    endpoints: StartEndpointConfiguration,
     mut observer: Option<&mut dyn LifecycleProgressObserver>,
 ) -> Result<StartReport> {
-    let config = env.config();
-    // A configured host installation is authority even while its daemon is
-    // stopped. Its absence alone selects direct mode; any discovery/control
-    // error propagates and must never become permission to spawn directly.
-    let service = crate::supervision::InstalledService::discover(config)?;
-    if let Some(service) = &service {
-        service.check_start_allowed()?;
-    }
-    crate::init_check::require_initialized(&config.app_root)?;
+    let app_root = env.config().app_root.clone();
+    crate::init_check::require_initialized(&app_root)?;
     let deadline = Instant::now() + timeout;
     let mut start_lock = Some(loop {
         match env.try_acquire_start_lock()? {
@@ -53,11 +72,71 @@ pub async fn start_with_progress(
         }
     });
 
-    let initial = crate::status::status(env).await?;
-    observe(&mut observer, &initial);
-    if let Some(message) = startup_failure_message(&initial) {
-        bail!("{message}");
+    // Configuration may have changed while this caller waited for the
+    // lifecycle lock. Reload it only after winning that lock; this snapshot is
+    // the sole basis for endpoint comparison, status and launch.
+    let locked_env =
+        LocalLifecycleEnv::from_config(crate::NodeConfig::load_local(Some(app_root.clone()))?);
+    let env = &locked_env;
+    let original_config = env.config();
+
+    // Resolve launch ownership only after acquiring the same lifecycle lock
+    // retained by host association publication. Otherwise a start that first
+    // observed no association could wait behind setup and then incorrectly
+    // launch directly after setup completed. Discovery/control errors remain
+    // terminal and never become permission to fall back to direct spawning.
+    let service = crate::supervision::InstalledService::discover(original_config)?;
+    if let Some(service) = &service {
+        service.check_start_allowed()?;
     }
+
+    let mut initial = crate::status::status(env).await?;
+    observe(&mut observer, &initial);
+    let changes_endpoint = endpoints
+        .bind
+        .is_some_and(|bind| bind != original_config.bind)
+        || endpoints
+            .uds_path
+            .as_ref()
+            .is_some_and(|path| path != &original_config.uds_path);
+    let configured_env = if changes_endpoint {
+        if !matches!(
+            initial,
+            LifecycleStatus::Stopped { .. } | LifecycleStatus::Failed { .. }
+        ) {
+            bail!("stop the node before changing its configured endpoints");
+        }
+        if let Some(service) = &service {
+            // Failed supervised starts may still have Up intent or a process
+            // in its bounded diagnostics grace. Establish Down before waiting
+            // for the exact state authority used to publish the replacement.
+            service.request_down()?;
+        }
+        let config = crate::supervision::configure_host_endpoints_while_locked(
+            &app_root,
+            endpoints.bind,
+            endpoints.uds_path,
+            start_lock
+                .as_ref()
+                .expect("endpoint configuration precedes lifecycle-lock release"),
+        )?;
+        let configured = LocalLifecycleEnv::from_config(config);
+        initial = crate::status::status(&configured).await?;
+        observe(&mut observer, &initial);
+        Some(configured)
+    } else {
+        None
+    };
+    let env = configured_env.as_ref().unwrap_or(env);
+    let config = env.config();
+    // Retained failure is diagnostic history, not authority to prevent an
+    // explicit retry. Only a different failure observed after Up belongs to
+    // this start operation.
+    let initial_failure = startup_failure_key(&initial);
+    let initial_host_failure = match &service {
+        Some(service) => read_host_launch_failure_or_inhibit(service)?,
+        None => None,
+    };
     if matches!(
         initial,
         LifecycleStatus::NotInitialized { .. } | LifecycleStatus::Unresponsive { .. }
@@ -91,15 +170,6 @@ pub async fn start_with_progress(
         let child = Command::new(&ryeosd)
             .arg("--app-root")
             .arg(&config.app_root)
-            .arg("--bind")
-            .arg(config.bind.to_string())
-            .arg("--uds-path")
-            .arg(&config.uds_path)
-            // The lifecycle controller has already resolved explicit start
-            // overrides against the stopped node's stored config. Preserve that
-            // same decision in the child; otherwise ryeosd reparses the stored
-            // file without the override authority and rejects the spawn.
-            .arg("--force")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_log))
@@ -121,7 +191,14 @@ pub async fn start_with_progress(
                 already_running,
             });
         }
-        if let Some(message) = startup_failure_message(&status) {
+        if let Some(message) = startup_failure_message(&status)
+            && startup_failure_key(&status) != initial_failure
+        {
+            if let Some(service) = &service {
+                service
+                    .request_down()
+                    .context("inhibit supervisor after terminal startup failure")?;
+            }
             if let Some((_, stderr_log_path, _)) = &direct {
                 bail!(
                     "{message}\nstartup stderr log: {}",
@@ -129,6 +206,19 @@ pub async fn start_with_progress(
                 );
             }
             bail!("{message}");
+        }
+        if let Some(service) = &service
+            && let Some(failure) = read_host_launch_failure_or_inhibit(service)?
+            && Some(&failure) != initial_host_failure.as_ref()
+        {
+            service
+                .request_down()
+                .context("inhibit supervisor after host-service launch failure")?;
+            bail!(
+                "host-service launch failed (pid {}) before node lifecycle control: {}",
+                failure.pid,
+                failure.error
+            );
         }
 
         if let Some((child, stderr_log_path, stderr_log_start)) = &mut direct
@@ -175,6 +265,22 @@ pub async fn start_with_progress(
     }
 }
 
+fn read_host_launch_failure_or_inhibit(
+    service: &crate::supervision::InstalledService,
+) -> Result<Option<crate::supervision::HostLaunchFailure>> {
+    match service.launch_failure() {
+        Ok(failure) => Ok(failure),
+        Err(error) => {
+            if let Err(inhibit) = service.request_down() {
+                bail!(
+                    "host launch testimony is invalid: {error:#}; supervisor inhibition also failed: {inhibit:#}"
+                );
+            }
+            Err(error).context("host launch testimony is invalid; supervisor was inhibited")
+        }
+    }
+}
+
 /// Keep concurrent starters excluded only until process ownership is visible.
 /// Once Starting is authoritative, another starter joins it; retaining the lock
 /// through slow recovery would prevent stop --force from cancelling that boot.
@@ -186,7 +292,6 @@ fn release_launch_lock_after_ownership(
         status,
         LifecycleStatus::Starting { .. }
             | LifecycleStatus::Running { .. }
-            | LifecycleStatus::Failed { .. }
             | LifecycleStatus::Unresponsive { .. }
     ) {
         drop(lock.take());
@@ -214,6 +319,17 @@ fn startup_failure_message(status: &LifecycleStatus) -> Option<String> {
             .error
             .as_deref()
             .unwrap_or("unknown startup failure"),
+    ))
+}
+
+fn startup_failure_key(status: &LifecycleStatus) -> Option<(Option<u32>, String, String)> {
+    let LifecycleStatus::Failed { metadata, startup } = status else {
+        return None;
+    };
+    Some((
+        metadata.pid,
+        startup.started_at.clone(),
+        startup.updated_at.clone(),
     ))
 }
 
@@ -264,6 +380,7 @@ fn read_startup_stderr_since(path: &Path, offset: u64) -> String {
 /// or ordinary contention. Abrupt process exit releases the lease, so a crash
 /// cannot wedge a subsequent lifecycle operation through a sentinel file.
 pub struct LifecycleStartLock {
+    state_directory: lillux::PinnedDirectory,
     _guard: lillux::PinnedDirectoryLock,
 }
 
@@ -279,9 +396,22 @@ impl LifecycleStartLock {
             .context("open lifecycle app root")?
             .open_or_create_child(OsStr::new(ryeos_engine::AI_DIR), 0o700)?
             .open_or_create_child(OsStr::new("state"), 0o700)?;
-        Ok(root
-            .try_lock_exclusive()?
-            .map(|guard| Self { _guard: guard }))
+        let Some(guard) = root.try_lock_exclusive()? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            state_directory: root,
+            _guard: guard,
+        }))
+    }
+
+    pub(crate) fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        self.state_directory.ensure_path_binding()?;
+        let expected = app_root.join(ryeos_engine::AI_DIR).join("state");
+        if self.state_directory.path() != expected {
+            bail!("lifecycle lock belongs to another app root");
+        }
+        Ok(())
     }
 }
 
@@ -320,6 +450,30 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "pre-marker launch must remain serialized"
+        );
+        let retained_failure = LifecycleStatus::Failed {
+            metadata: crate::DaemonMetadata {
+                pid: Some(41),
+                bind: None,
+                uds_path: None,
+                started_at: None,
+                version: None,
+                revision: None,
+                build_date: None,
+                app_root: root.path().to_owned(),
+            },
+            startup: crate::StartupSnapshot::failed_before_control(
+                "2026-09-10T00:00:00Z",
+                "2026-09-10T00:00:01Z",
+                "old failure",
+            ),
+        };
+        release_launch_lock_after_ownership(&mut lock, &retained_failure);
+        assert!(
+            LifecycleStartLock::try_acquire(root.path())
+                .unwrap()
+                .is_none(),
+            "retained failure must not release a new start operation's gate"
         );
         let starting = LifecycleStatus::Starting {
             metadata: crate::DaemonMetadata {

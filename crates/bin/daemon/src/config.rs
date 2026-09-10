@@ -20,7 +20,7 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Override the app rootectory (default: XDG data dir / ryeos)
+    /// Override the app root (default: XDG data dir / ryeos)
     #[arg(long)]
     pub app_root: Option<PathBuf>,
 
@@ -72,8 +72,6 @@ pub enum DaemonCommand {
         app_root: PathBuf,
         #[arg(long)]
         controller_account_json: String,
-        #[arg(long)]
-        home: PathBuf,
     },
     /// Root-only installer transaction bridge. It owns the shared package
     /// namespace lock; it is neither node configuration nor worker authority.

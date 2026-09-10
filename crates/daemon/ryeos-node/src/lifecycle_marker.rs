@@ -11,12 +11,13 @@
 //!   alive is reported as an unclean exit (inferred crash). This turns "the
 //!   daemon silently died" into a visible signal on the next `start`.
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 const MARKER_FILE: &str = "lifecycle.json";
+const MAX_MARKER_BYTES: u64 = 64 * 1024;
 
 /// Warn when the state filesystem has less free space than this (bytes).
 const LOW_DISK_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
@@ -31,17 +32,22 @@ pub enum LifecycleMarker {
     Exited {
         reason: String,
         pid: u32,
+        started_at: String,
         exited_at: String,
+        error: Option<String>,
     },
 }
 
-fn marker_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(MARKER_FILE)
-}
-
 pub fn read(state_dir: &Path) -> Option<LifecycleMarker> {
-    let raw = std::fs::read_to_string(marker_path(state_dir)).ok()?;
-    serde_json::from_str(&raw).ok()
+    let directory = lillux::PinnedDirectory::open(state_dir).ok()??;
+    let marker = directory
+        .open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)
+        .ok()??;
+    let observation = marker.observation().ok()?;
+    let raw = marker
+        .read_stable_bounded(&observation, MAX_MARKER_BYTES)
+        .ok()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 /// Wall-clock age of the current marker file. The running marker is written
@@ -49,43 +55,65 @@ pub fn read(state_dir: &Path) -> Option<LifecycleMarker> {
 /// live marker may reasonably be treated as the narrow pre-control bootstrap
 /// window. A backwards clock jump yields no age rather than a false timeout.
 pub fn age(state_dir: &Path) -> Option<Duration> {
-    let modified = std::fs::metadata(marker_path(state_dir))
-        .ok()?
-        .modified()
-        .ok()?;
-    SystemTime::now().duration_since(modified).ok()
+    let directory = lillux::PinnedDirectory::open(state_dir).ok()??;
+    let marker = directory
+        .open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)
+        .ok()??;
+    marker.modification_age().ok()?
 }
 
 fn write(state_dir: &Path, marker: &LifecycleMarker) {
-    let result = std::fs::create_dir_all(state_dir).and_then(|_| {
-        let body = serde_json::to_string(marker).unwrap_or_default();
-        std::fs::write(marker_path(state_dir), body)
-    });
+    let result = (|| -> anyhow::Result<()> {
+        let directory = lillux::PinnedDirectory::open(state_dir)?
+            .ok_or_else(|| anyhow::anyhow!("lifecycle state directory is absent"))?;
+        let existing = directory.open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)?;
+        let body = serde_json::to_vec(marker)?;
+        directory.atomic_write_pinned_if_same(
+            std::ffi::OsStr::new(MARKER_FILE),
+            existing.as_ref(),
+            &body,
+            0o600,
+        )?;
+        Ok(())
+    })();
     if let Err(e) = result {
         tracing::warn!(error = %e, "failed to write daemon lifecycle marker");
     }
 }
 
-/// Record that this process is now serving. Call once at startup, AFTER
-/// [`report_previous_exit`] has inspected the prior run's marker.
-pub fn record_running(state_dir: &Path) {
+/// Record this exact daemon startup attempt. Call after the state lock is held
+/// and after [`report_previous_exit`] has inspected the prior run's marker;
+/// readiness remains the lifecycle protocol's separate authority.
+pub fn record_running(state_dir: &Path) -> String {
+    let started_at = lillux::time::iso8601_now();
     write(
         state_dir,
         &LifecycleMarker::Running {
             pid: std::process::id(),
-            started_at: lillux::time::iso8601_now(),
+            started_at: started_at.clone(),
         },
     );
+    started_at
 }
 
 /// Record a clean/handled shutdown with its `reason` (e.g. `"signal"`).
-pub fn record_exit(state_dir: &Path, reason: &str) {
+pub fn record_exit(state_dir: &Path, reason: &str, started_at: &str, error: Option<&str>) {
+    const MAX_ERROR_BYTES: usize = 8 * 1024;
+    let error = error.map(|value| {
+        let mut end = value.len().min(MAX_ERROR_BYTES);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value[..end].trim().to_owned()
+    });
     write(
         state_dir,
         &LifecycleMarker::Exited {
             reason: reason.to_string(),
             pid: std::process::id(),
+            started_at: started_at.to_owned(),
             exited_at: lillux::time::iso8601_now(),
+            error,
         },
     );
 }
@@ -133,15 +161,8 @@ pub fn check_disk_space(state_dir: &Path) {
     }
 }
 
-#[cfg(unix)]
 pub fn process_alive(pid: u32) -> bool {
-    // signal 0 performs error checking without sending a signal: 0 ⇒ the
-    // process exists and we may signal it.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-#[cfg(not(unix))]
-pub fn process_alive(_pid: u32) -> bool {
-    false
+    lillux::diagnostic_process_is_live(pid)
 }
 
 /// Whether the marker's pid is alive AND still a `ryeosd`. A crash leaves a
@@ -151,33 +172,15 @@ pub fn process_alive(_pid: u32) -> bool {
 /// liveness alone decides. (`stop` has its own fail-closed variant of this
 /// check with per-reason errors; this one only classifies.)
 pub fn process_alive_as_ryeosd(pid: u32) -> bool {
-    if !process_alive(pid) {
-        return false;
-    }
-    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        Ok(comm) => comm.trim() == "ryeosd",
-        Err(_) => true,
-    }
+    lillux::diagnostic_process_matches_executable_name(pid, std::ffi::OsStr::new("ryeosd"))
 }
 
-#[cfg(unix)]
 fn available_bytes(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    // SAFETY: `statvfs` writes into a zeroed struct; we only read fields after
-    // a success return.
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
-    if rc != 0 {
-        return None;
-    }
-    // Free space available to a non-root caller.
-    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
-}
-#[cfg(not(unix))]
-fn available_bytes(_path: &Path) -> Option<u64> {
-    None
+    lillux::PinnedDirectory::open(path)
+        .ok()??
+        .filesystem_capacity()
+        .ok()
+        .map(|capacity| capacity.available_bytes)
 }
 
 #[cfg(test)]
@@ -187,16 +190,44 @@ mod tests {
     #[test]
     fn clean_exit_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
-        record_running(tmp.path());
+        let started_at = record_running(tmp.path());
         assert!(matches!(
             read(tmp.path()),
             Some(LifecycleMarker::Running { .. })
         ));
-        record_exit(tmp.path(), "signal");
+        record_exit(
+            tmp.path(),
+            "startup_failed",
+            &started_at,
+            Some("failed to bind 127.0.0.1:7400"),
+        );
         match read(tmp.path()) {
-            Some(LifecycleMarker::Exited { reason, .. }) => assert_eq!(reason, "signal"),
+            Some(LifecycleMarker::Exited {
+                reason,
+                started_at: retained_start,
+                error,
+                ..
+            }) => {
+                assert_eq!(reason, "startup_failed");
+                assert_eq!(retained_start, started_at);
+                assert_eq!(error.as_deref(), Some("failed to bind 127.0.0.1:7400"));
+            }
             other => panic!("expected exited marker, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_marker_never_follows_a_replaced_entry() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"retained").unwrap();
+        symlink(&victim, tmp.path().join(MARKER_FILE)).unwrap();
+        let _ = record_running(tmp.path());
+        assert_eq!(std::fs::read(victim).unwrap(), b"retained");
+        assert!(read(tmp.path()).is_none());
     }
 
     #[test]

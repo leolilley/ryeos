@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 const SCOPE_CONFIGURATION_VERSION: u32 = 3;
 const SCOPE_RECOVERY_VERSION: u32 = 4;
 const SCOPE_ALLOCATION_VERSION: u32 = 2;
+/// Root owns native supervisor control directories. The selected controller's
+/// primary group gets traversal only, so it can reach its exact `0600` FIFO
+/// without listing or changing the supervisor namespace.
+const DELEGATED_CONTROL_DIRECTORY_MODE: libc::mode_t = 0o710;
+/// Root-owned host testimony may be read by its selected controller, but only
+/// the administrator may alter the namespace or its records.
+const DELEGATED_READONLY_DIRECTORY_MODE: libc::mode_t = 0o750;
 
 /// Administrator-selected host account for a controller, not a RyeOS signing
 /// identity. Native account coordinates and credential-drop interpretation
@@ -41,6 +48,7 @@ impl ControllerAccount {
         #[cfg(not(unix))]
         Err("current controller account is unavailable on this OS".to_owned())
     }
+
     /// Apply the selected identity only in the child, before user code. Reuse
     /// this for maintenance observations as well as scope-controller launch;
     /// the privileged parent must never temporarily change its own credentials.
@@ -106,6 +114,52 @@ impl ControllerAccount {
         anyhow::bail!("host file grants are unavailable on this OS")
     }
 
+    /// Give the selected account read/traversal access to an exact
+    /// administrator-owned host-state directory without granting mutation.
+    ///
+    /// This is for public association and recovery testimony that the account
+    /// must corroborate during an ordinary lifecycle operation. It is not a
+    /// place for credentials or private operator data: root retains ownership
+    /// and writes, while the selected primary group gets `r-x` only.
+    pub fn grant_readonly_host_directory(
+        &self,
+        directory: &crate::PinnedDirectory,
+    ) -> anyhow::Result<()> {
+        self.validate().map_err(anyhow::Error::msg)?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            use std::os::unix::fs::MetadataExt as _;
+
+            directory.require_owner(0)?;
+            let descriptor = directory.try_clone_descriptor()?;
+            let metadata = descriptor.metadata()?;
+            let AccountBackend::Unix { gid, .. } = self.0;
+            if unsafe { libc::geteuid() } != 0
+                || metadata.mode() & libc::S_IFMT != libc::S_IFDIR
+                || metadata.mode() & 0o022 != 0
+                || (metadata.gid() != 0 && metadata.gid() != gid)
+            {
+                anyhow::bail!(
+                    "read-only host directory grant requires administrator authority and a safe root directory"
+                );
+            }
+            if unsafe { libc::fchown(descriptor.as_raw_fd(), 0, gid) } != 0
+                || unsafe {
+                    libc::fchmod(descriptor.as_raw_fd(), DELEGATED_READONLY_DIRECTORY_MODE)
+                } != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = directory;
+            anyhow::bail!("read-only host directory grants are unavailable on this OS")
+        }
+    }
+
     #[cfg(unix)]
     fn grant_private_descriptor(
         &self,
@@ -137,8 +191,15 @@ impl ControllerAccount {
     }
 
     /// Give the selected account access to one existing native control FIFO.
-    /// Its containing directory stays administrator-owned. Never open a FIFO
-    /// blocking, follow a symlink, or grant write access to the namespace.
+    ///
+    /// The containing directory remains administrator-owned, but gets only
+    /// group traversal (`0710 root:<controller-gid>`). Native supervisors
+    /// commonly create their control FIFO beneath a root-only directory; a
+    /// `0600` FIFO alone is unreachable through that directory. Traversal
+    /// exposes neither directory listing nor namespace mutation, while the
+    /// FIFO itself remains owned and readable/writable only by the exact
+    /// selected account. Never open a FIFO blocking, follow a symlink, or
+    /// grant write access to the namespace.
     pub fn grant_private_control_fifo(
         &self,
         directory: &crate::PinnedDirectory,
@@ -156,6 +217,27 @@ impl ControllerAccount {
             }
             let name = std::ffi::CString::new(bytes)?;
             let parent = directory.try_clone_descriptor()?;
+            let parent_metadata = parent.metadata()?;
+            let AccountBackend::Unix { uid, gid } = self.0;
+            if parent_metadata.uid() != 0
+                || parent_metadata.mode() & libc::S_IFMT != libc::S_IFDIR
+                || parent_metadata.mode() & 0o022 != 0
+                || (parent_metadata.gid() != 0 && parent_metadata.gid() != gid)
+            {
+                anyhow::bail!(
+                    "host control grant requires a safe administrator-owned control directory"
+                );
+            }
+            // A named FIFO must be traversable by its one selected controller,
+            // but the controller must never list or mutate the supervisor's
+            // namespace. This native access-control translation belongs in
+            // Lillux; callers only supply an already admitted account.
+            if unsafe { libc::fchown(parent.as_raw_fd(), 0, gid) } != 0
+                || unsafe { libc::fchmod(parent.as_raw_fd(), DELEGATED_CONTROL_DIRECTORY_MODE) }
+                    != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
             let fd = unsafe {
                 libc::openat(
                     parent.as_raw_fd(),
@@ -168,7 +250,6 @@ impl ControllerAccount {
             }
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
             let before = file.metadata()?;
-            let AccountBackend::Unix { uid, gid } = self.0;
             if unsafe { libc::geteuid() } != 0
                 || before.mode() & libc::S_IFMT != libc::S_IFIFO
                 || before.nlink() != 1
@@ -1457,6 +1538,20 @@ mod tests {
                 .require_current_process()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn delegated_native_control_directory_is_traversable_but_not_mutable_or_listable() {
+        assert_eq!(DELEGATED_CONTROL_DIRECTORY_MODE & 0o700, 0o700);
+        assert_eq!(DELEGATED_CONTROL_DIRECTORY_MODE & 0o070, 0o010);
+        assert_eq!(DELEGATED_CONTROL_DIRECTORY_MODE & 0o007, 0);
+    }
+
+    #[test]
+    fn delegated_host_state_directory_is_readable_but_not_mutable() {
+        assert_eq!(DELEGATED_READONLY_DIRECTORY_MODE & 0o700, 0o700);
+        assert_eq!(DELEGATED_READONLY_DIRECTORY_MODE & 0o070, 0o050);
+        assert_eq!(DELEGATED_READONLY_DIRECTORY_MODE & 0o007, 0);
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub use metadata::DaemonMetadata;
 pub use model_setup::{
     PersistModelRouteOptions, PersistModelRouteReport, persist_default_model_route,
 };
-pub use start::{LifecycleStartLock, StartReport};
+pub use start::{LifecycleStartLock, StartEndpointConfiguration, StartReport};
 pub use status::{LifecycleStatus, StaleDiagnostics, is_ready};
 pub use stop::{StopOptions, StopReport};
 
@@ -63,36 +63,13 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     pub fn default_local() -> Result<Self> {
-        let bind: SocketAddr = "127.0.0.1:7400".parse().expect("compiled bind parses");
-        let app_root = std::env::var_os("RYEOS_APP_ROOT")
-            .map(PathBuf::from)
-            .or_else(|| dirs::data_dir().map(|d| d.join("ryeos")))
-            .ok_or_else(|| anyhow::anyhow!("could not determine XDG data directory"))?;
-        let runtime_root = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("ryeosd-{}", current_uid())));
-        Ok(Self {
-            app_root,
-            bind,
-            uds_path: runtime_root.join("ryeosd.sock"),
-        })
+        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources::default())?;
+        Ok(Self::from_app_config(&config))
     }
 
     pub fn load_local(app_root: Option<PathBuf>) -> Result<Self> {
-        Self::load_local_with_overrides(app_root, None, None, false)
-    }
-
-    pub fn load_local_with_overrides(
-        app_root: Option<PathBuf>,
-        bind: Option<SocketAddr>,
-        uds_path: Option<PathBuf>,
-        force: bool,
-    ) -> Result<Self> {
         let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
             app_root,
-            bind,
-            uds_path,
-            force,
             ..Default::default()
         })?;
         Ok(Self::from_app_config(&config))
@@ -105,16 +82,6 @@ impl NodeConfig {
             uds_path: config.uds_path.clone(),
         }
     }
-}
-
-#[cfg(unix)]
-fn current_uid() -> u32 {
-    unsafe { libc::geteuid() }
-}
-
-#[cfg(not(unix))]
-fn current_uid() -> u32 {
-    0
 }
 
 /// Lightweight local-node lifecycle environment.
@@ -145,14 +112,14 @@ impl LocalLifecycleEnv {
         })
     }
 
-    pub fn load_with_overrides(
-        app_root: Option<PathBuf>,
-        bind: Option<SocketAddr>,
-        uds_path: Option<PathBuf>,
-        force: bool,
-    ) -> Result<Self> {
-        Ok(Self {
-            config: NodeConfig::load_local_with_overrides(app_root, bind, uds_path, force)?,
+    /// Resolve only the selected node root, without requiring the complete
+    /// bootstrap document to decode. This supports bounded diagnostics and
+    /// supervised Down intent after a configuration failure; it never supplies
+    /// substitute endpoints or direct-launch authority.
+    pub fn selected_app_root(app_root: Option<PathBuf>) -> Result<PathBuf> {
+        ryeos_app::config::Config::selected_app_root(&ryeos_app::config::ConfigSources {
+            app_root,
+            ..Default::default()
         })
     }
 
@@ -258,10 +225,19 @@ impl LifecycleController {
         // One native-manager check per explicit status operation, not on every
         // daemon-readiness poll. A configured but missing supervisor is never
         // reported as an ordinary stopped/direct node.
-        if let Some(service) = supervision::InstalledService::discover(self.config())? {
+        let service = supervision::InstalledService::discover(self.config())?;
+        if let Some(service) = &service {
             service.check_supervisor()?;
         }
-        status::status(&self.env).await
+        let status = status::status(&self.env).await?;
+        if matches!(status, LifecycleStatus::Stopped { .. })
+            && let Some(service) = &service
+            && service.desired_state()? == supervision::DesiredState::Up
+            && let Some(failed) = service.launch_failure_status(self.config())?
+        {
+            return Ok(failed);
+        }
+        Ok(status)
     }
 
     pub async fn start(&self) -> Result<StartReport> {
@@ -278,6 +254,23 @@ impl LifecycleController {
         observer: &mut dyn LifecycleProgressObserver,
     ) -> Result<StartReport> {
         start::start_with_progress(&self.env, Duration::from_secs(900), Some(observer)).await
+    }
+
+    /// Start with optional persisted endpoint selection. Differing values are
+    /// accepted only for a stopped node and are committed under the same
+    /// lifecycle operation that requests launch.
+    pub async fn start_with_endpoint_configuration(
+        &self,
+        endpoints: StartEndpointConfiguration,
+        observer: Option<&mut dyn LifecycleProgressObserver>,
+    ) -> Result<StartReport> {
+        start::start_with_endpoint_configuration(
+            &self.env,
+            Duration::from_secs(900),
+            endpoints,
+            observer,
+        )
+        .await
     }
 
     pub async fn stop(&self, opts: StopOptions) -> Result<StopReport> {

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-09-10T02:15:38Z:47f8f67be1961a7376cc21d2fe12d7c16eb34595ca95e4d35bdd4d8e5ca9ebe6:o/w97ideYgYcn9Gcwj81qOtOGuUrgmKou3Ppfm8Jtx3q2D/ceYqr9ZRDOyC8eFXDUyH6yIYTH+tF+LAGh5u6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, identity, rationale]

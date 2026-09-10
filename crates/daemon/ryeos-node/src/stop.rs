@@ -31,6 +31,38 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
     stop_with_progress(env, opts, None).await
 }
 
+/// Inhibit an already configured native service when complete bootstrap
+/// configuration is unreadable. Without endpoints, only the protected host
+/// association owns a safe process transition; a direct node must be repaired
+/// before it can be authenticated and stopped.
+pub async fn stop_supervised_with_invalid_config(
+    app_root: &std::path::Path,
+    timeout: Duration,
+) -> Result<StopReport> {
+    crate::init_check::require_initialized(app_root)?;
+    let deadline = Instant::now() + timeout;
+    let _lifecycle_lock = loop {
+        match crate::LifecycleStartLock::try_acquire(app_root)? {
+            Some(lock) => break lock,
+            None if Instant::now() >= deadline => {
+                bail!("timed out waiting for the active node lifecycle operation")
+            }
+            None => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    };
+    let service = crate::supervision::InstalledService::discover_app_root(app_root)?.context(
+        "node configuration is invalid and no protected host association exists; refusing to guess a direct daemon endpoint",
+    )?;
+    service.check_supervisor()?;
+    service.request_down()?;
+    Ok(StopReport {
+        status: LifecycleStatus::Stopped {
+            app_root: app_root.to_path_buf(),
+        },
+        already_stopped: false,
+    })
+}
+
 pub async fn stop_with_progress(
     env: &LocalLifecycleEnv,
     opts: StopOptions,
@@ -58,6 +90,27 @@ pub async fn stop_with_progress(
     }
     let initial = crate::status::status(env).await?;
     observe(&mut observer, &initial);
+    let pre_pinned_target = if matches!(initial, LifecycleStatus::Failed { .. }) {
+        if let Some(service) = &service {
+            service.request_down()?;
+        }
+        // A pre-control failure has already exited and therefore has no peer
+        // to pin. Down intent is sufficient to inhibit another supervisor
+        // attempt; retained failure testimony remains available for diagnosis.
+        match pin_live_daemon(env).await {
+            Ok(target) => Some(target),
+            Err(_) => {
+                return Ok(StopReport {
+                    status: LifecycleStatus::Stopped {
+                        app_root: env.config().app_root.clone(),
+                    },
+                    already_stopped: false,
+                });
+            }
+        }
+    } else {
+        None
+    };
     match initial {
         LifecycleStatus::NotInitialized { .. } => {
             bail!("RyeOS is not initialized. Run: ryeos init")
@@ -85,13 +138,27 @@ pub async fn stop_with_progress(
         }
         | LifecycleStatus::Failed { .. } => {}
         LifecycleStatus::Starting { ref metadata, .. } => {
-            // No authenticated daemon socket exists yet, so the signal path
-            // cannot pin and verify the live peer. Booting clears on its own.
-            bail!(
-                "a daemon (pid {}) is starting but its control socket is not available yet; \
-                 wait briefly, then retry stop",
-                metadata.pid.unwrap_or_default(),
-            )
+            let Some(service) = &service else {
+                // A directly launched pre-control daemon has no authenticated
+                // peer and no native supervisor authority. Its diagnostic PID
+                // must never be promoted into signal authority.
+                bail!(
+                    "a directly launched daemon (pid {}) is starting but its control socket is not available yet; wait briefly, then retry stop",
+                    metadata.pid.unwrap_or_default(),
+                )
+            };
+            // The configured native controller owns this exact service
+            // process and its restart disposition. Its successful Down
+            // transition is sufficient to cancel pre-control startup without
+            // trusting a marker PID. Worker-tree settlement remains a
+            // separate retained scope-recovery obligation.
+            service.request_down()?;
+            return Ok(StopReport {
+                status: LifecycleStatus::Stopped {
+                    app_root: env.config().app_root.clone(),
+                },
+                already_stopped: false,
+            });
         }
     }
 
@@ -99,7 +166,10 @@ pub async fn stop_with_progress(
     // control must never be routed over that socket. Signal the positively
     // identified local daemon instead; SIGTERM enters the same graceful
     // shutdown coordinator as Ctrl-C.
-    let target = pin_live_daemon(env).await?;
+    let target = match pre_pinned_target {
+        Some(target) => target,
+        None => pin_live_daemon(env).await?,
+    };
     if let Some(service) = &service {
         // Pin first: native down may make the authenticated socket disappear.
         // Its durable intent prevents a later service restart from launching.

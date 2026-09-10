@@ -7,7 +7,7 @@
 //! Control files are kernel interfaces: never use atomic replacement, truncate,
 //! fsync, recursive filesystem removal, or ordinary state-file fallbacks here.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -47,9 +47,7 @@ pub(crate) fn provision_host_delegation(service_label: &str) -> Result<std::path
         .ok_or("cgroup-v2 root is absent")?;
     let root_fd = root.try_clone_descriptor().map_err(display)?;
     require_cgroup2(&root_fd)?;
-    let parent = root
-        .open_or_create_child(HOST_SERVICE_DELEGATIONS.as_ref(), 0o755)
-        .map_err(display)?;
+    let parent = open_or_create_host_delegation_parent(&root)?;
     parent.require_owner(0).map_err(display)?;
     let metadata = parent
         .try_clone_descriptor()
@@ -62,6 +60,34 @@ pub(crate) fn provision_host_delegation(service_label: &str) -> Result<std::path
     let parent_fd = parent.try_clone_descriptor().map_err(display)?;
     require_cgroup2(&parent_fd)?;
     Ok(parent.path().join(service_label))
+}
+
+/// Create or recover the one Lillux-owned cgroup namespace below the exact
+/// cgroup-v2 root descriptor. cgroup is a synchronous kernel control
+/// filesystem, not durable storage: `fsync(2)` is invalid there. In
+/// particular, do not use `PinnedDirectory::open_or_create_child`, whose
+/// durability sync is deliberately required for ordinary state directories.
+///
+/// This remains descriptor-rooted and no-follow. The selected name is a
+/// Lillux constant, never an application or workload path.
+fn open_or_create_host_delegation_parent(
+    root: &PinnedDirectory,
+) -> Result<PinnedDirectory, String> {
+    let name = OsStr::new(HOST_SERVICE_DELEGATIONS);
+    if let Some(existing) = root.open_child_directory(name).map_err(display)? {
+        return Ok(existing);
+    }
+    let root_fd = root.try_clone_descriptor().map_err(display)?;
+    let name_c = child_name(HOST_SERVICE_DELEGATIONS)?;
+    if unsafe { libc::mkdirat(root_fd.as_raw_fd(), name_c.as_ptr(), 0o755) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EEXIST) {
+            return Err(format!("create Lillux host delegation namespace: {error}"));
+        }
+    }
+    root.open_child_directory(name)
+        .map_err(display)?
+        .ok_or_else(|| "Lillux host delegation namespace disappeared after creation".to_owned())
 }
 
 /// Read-only host-maintenance barrier. The host launch gate must exclude new

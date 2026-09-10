@@ -19,6 +19,10 @@ const STATE_DIRECTORY: &str = "state";
 const RUN_PROGRAM: &str = "run";
 const DOWN_MARKER: &str = "down";
 const CONTROL: &str = "control";
+const NATIVE_SCRIPT_INTERPRETER: &str = "/bin/sh";
+// `sv` probes `ok` before submitting its request through `control`. Both are
+// native runit IPC endpoints, deliberately contained in this adapter.
+const OPERATOR_SUPERVISOR_FIFOS: [&str; 2] = ["ok", CONTROL];
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,13 +105,13 @@ impl RunitService {
 
     fn control(&self, operation: &str) -> Result<()> {
         self.directory.ensure_path_binding()?;
-        let supervise = self
-            .directory
-            .open_child_directory(OsStr::new("supervise"))?
-            .context(
-                "configured runit supervisor is missing; refusing direct lifecycle fallback",
-            )?;
-        supervise.require_owner(0)?;
+        // The selected account receives traversal, not read/list access, to
+        // runit's root-owned `supervise` directory. Do not reopen it through
+        // `PinnedDirectory`: its read-only descriptor contract correctly
+        // requires directory read permission and would force us to widen the
+        // native delegation. The fixed root-owned `sv` executable below is
+        // the native live-supervisor operation; its failure is propagated and
+        // never selects a direct-process fallback.
         let executable = self.executable.inherited_descriptor_authority()?;
         let directory = self.directory.inherited_descriptor_authority()?;
         let result = crate::run(SubprocessRequest {
@@ -181,6 +185,7 @@ fn canonical_launch(launch: &HostServiceLaunch) -> Result<Vec<u8>> {
     }
     launch.account.validate().map_err(anyhow::Error::msg)?;
     validate_launch_program(launch)?;
+    validate_root_executable(Path::new(NATIVE_SCRIPT_INTERPRETER), "service interpreter")?;
     // Validate the native rendering at admission/discovery too. Otherwise a
     // malformed administrator record could be accepted as data and fail only
     // when runit later invokes its shell.
@@ -214,6 +219,38 @@ fn validate_launch_program(launch: &HostServiceLaunch) -> Result<()> {
     Ok(())
 }
 
+fn validate_root_executable(path: &Path, label: &str) -> Result<()> {
+    // Native interpreter names conventionally traverse administrator-owned
+    // compatibility symlinks (`/bin/sh`, and often `/bin` itself). Resolve
+    // that fixed host pathname inside Lillux, then pin and validate the exact
+    // resulting regular file. Re-resolving after the descriptor checks
+    // detects replacement during admission; an administrator racing its own
+    // root namespace remains outside the unprivileged threat boundary.
+    let resolved =
+        crate::canonicalize_existing_path(path).with_context(|| format!("resolve {label}"))?;
+    let parent = PinnedDirectory::open_owned_hierarchy(
+        resolved
+            .parent()
+            .with_context(|| format!("{label} has no parent"))?,
+        0,
+    )?
+    .with_context(|| format!("{label} directory is absent"))?;
+    let executable = parent
+        .open_pinned_regular(
+            resolved
+                .file_name()
+                .with_context(|| format!("{label} has no filename"))?,
+            false,
+        )?
+        .with_context(|| format!("{label} is absent"))?;
+    executable.require_owner(0)?;
+    executable.require_executable()?;
+    if crate::canonicalize_existing_path(path)? != resolved {
+        bail!("{label} changed during admission");
+    }
+    Ok(())
+}
+
 fn manager_bytes() -> Result<Vec<u8>> {
     Ok(
         crate::canonical_json(&serde_json::to_value(RunitConfiguration {
@@ -240,7 +277,7 @@ fn run_program(launch: &HostServiceLaunch) -> Result<Vec<u8>> {
         .executable
         .to_str()
         .context("host executable is not UTF-8")?;
-    let mut body = String::from("#!/bin/sh\n");
+    let mut body = format!("#!{NATIVE_SCRIPT_INTERPRETER}\n");
     for (name, value) in &launch.environment {
         if name.is_empty()
             || !name.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
@@ -318,10 +355,11 @@ fn require_published_service(
     if let Some(marker) = directory.open_pinned_regular(OsStr::new(DOWN_MARKER), false)? {
         marker.require_owner(0)?;
     }
-    records
+    let state = records
         .open_child_directory(OsStr::new(STATE_DIRECTORY))?
-        .context("configured host service has no client state directory")?
-        .require_owner(0)?;
+        .context("configured host service has no client state directory")?;
+    state.require_owner(0)?;
+    launch.account.grant_readonly_host_directory(&state)?;
     Ok(())
 }
 
@@ -338,9 +376,9 @@ fn build_staged_service(directory: &PinnedDirectory, launch: &HostServiceLaunch)
     // marker. The client-owned desired record remains the authority for
     // ordinary start/stop and upgrade restoration.
     ensure_root_regular(directory, DOWN_MARKER, b"", 0o644)?;
-    records
-        .open_or_create_child(OsStr::new(STATE_DIRECTORY), 0o700)?
-        .require_owner(0)?;
+    let state = records.open_or_create_child(OsStr::new(STATE_DIRECTORY), 0o700)?;
+    state.require_owner(0)?;
+    launch.account.grant_readonly_host_directory(&state)?;
     Ok(())
 }
 
@@ -369,7 +407,7 @@ fn require_activation_link(name: &str, service_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn await_and_grant_control(
+fn await_and_grant_operator_fifos(
     service: &PinnedDirectory,
     account: &crate::ControllerAccount,
 ) -> Result<()> {
@@ -377,16 +415,23 @@ fn await_and_grant_control(
     loop {
         if let Some(supervise) = service.open_child_directory(OsStr::new("supervise"))? {
             supervise.require_owner(0)?;
-            match supervise.entry_no_follow(OsStr::new(CONTROL))? {
-                Some(entry) if entry.entry_type == PinnedEntryType::Fifo => {
-                    return account.grant_private_control_fifo(&supervise, OsStr::new(CONTROL));
+            let mut ready = true;
+            for name in OPERATOR_SUPERVISOR_FIFOS {
+                match supervise.entry_no_follow(OsStr::new(name))? {
+                    Some(entry) if entry.entry_type == PinnedEntryType::Fifo => {}
+                    Some(_) => bail!("runit supervisor {name} endpoint is not a FIFO"),
+                    None => ready = false,
                 }
-                Some(_) => bail!("runit supervisor control is not a FIFO"),
-                None => {}
+            }
+            if ready {
+                for name in OPERATOR_SUPERVISOR_FIFOS {
+                    account.grant_private_control_fifo(&supervise, OsStr::new(name))?;
+                }
+                return Ok(());
             }
         }
         if deadline.has_elapsed() {
-            bail!("runit did not create the configured service control FIFO");
+            bail!("runit did not create the configured service IPC endpoints");
         }
         crate::time::sleep(crate::time::Duration::from_millis(25));
     }
@@ -415,7 +460,7 @@ pub(super) fn provision(name: &str, launch: &HostServiceLaunch) -> Result<()> {
         }
     };
     publish_activation_link(name, service.path())?;
-    await_and_grant_control(&service, &launch.account)
+    await_and_grant_operator_fifos(&service, &launch.account)
 }
 
 pub(super) fn discover(name: &str) -> Result<Option<HostServiceInstallation>> {
@@ -502,5 +547,10 @@ mod tests {
     fn run_program_rejects_invalid_environment_syntax_and_control_values() {
         assert!(run_program(&launch(serde_json::json!({"BAD-NAME": "value"}))).is_err());
         assert!(run_program(&launch(serde_json::json!({"HOME": "line\nbreak"}))).is_err());
+    }
+
+    #[test]
+    fn operator_delegation_covers_runit_probe_before_control() {
+        assert_eq!(OPERATOR_SUPERVISOR_FIFOS, ["ok", "control"]);
     }
 }

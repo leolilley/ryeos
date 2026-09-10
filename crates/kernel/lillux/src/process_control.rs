@@ -5,6 +5,7 @@
 //! bounded settle waits are kernel mechanics.  Keeping them here prevents an
 //! application service from growing a second, numeric-PID process authority.
 
+use std::ffi::OsStr;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -32,6 +33,54 @@ pub struct ExactProcessIdentity {
     pub target_start_time_ticks: u64,
     pub group_leader_pid: u32,
     pub group_leader_start_time_ticks: u64,
+}
+
+/// Best-effort liveness classification for diagnostic metadata. This never
+/// returns signal authority and must not be used to authorize a lifecycle
+/// mutation; callers that need that use an authenticated/pinned process.
+pub fn diagnostic_process_is_live(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(pidfd) = linux::open_pidfd(pid) else {
+            return false;
+        };
+        linux::pidfd_signal(pidfd.as_raw_fd(), 0, 0).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Best-effort executable-name classification fenced by one live pidfd.
+/// The result remains diagnostics only: the retained descriptor does not
+/// escape Lillux and cannot be promoted into termination authority.
+pub fn diagnostic_process_matches_executable_name(pid: u32, expected: &OsStr) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let Ok(pidfd) = linux::open_pidfd(pid) else {
+            return false;
+        };
+        if linux::pidfd_signal(pidfd.as_raw_fd(), 0, 0).is_err() {
+            return false;
+        }
+        let Ok(executable) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+            return false;
+        };
+        let Some(name) = executable.file_name() else {
+            return false;
+        };
+        let bytes = name.as_bytes();
+        let bytes = bytes.strip_suffix(b" (deleted)").unwrap_or(bytes);
+        bytes == expected.as_bytes() && linux::pidfd_signal(pidfd.as_raw_fd(), 0, 0).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, expected);
+        false
+    }
 }
 
 /// Capture an exact birth/group coordinate using a freshly opened kernel
@@ -741,6 +790,22 @@ mod tests {
             group_leader_start_time_ticks: 0,
         };
         assert!(quiesce_exact_process_group(&identity, Duration::ZERO).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn diagnostic_process_observation_stays_name_bounded() {
+        let pid = std::process::id();
+        assert!(diagnostic_process_is_live(pid));
+        let executable = std::env::current_exe().unwrap();
+        assert!(diagnostic_process_matches_executable_name(
+            pid,
+            executable.file_name().unwrap()
+        ));
+        assert!(!diagnostic_process_matches_executable_name(
+            pid,
+            OsStr::new("definitely-not-this-process")
+        ));
     }
 
     #[cfg(target_os = "linux")]

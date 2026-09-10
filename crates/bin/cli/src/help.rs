@@ -887,7 +887,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "init" => (
             "ryeos init",
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
-            "ryeos init [--non-interactive | --json] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
+            "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
         ),
         "setup" => (
             "ryeos setup",
@@ -902,7 +902,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "node host setup" => (
             "ryeos node host setup",
             "Provision one administrator-owned local hosted-worker service",
-            "ryeos node host setup --confirm [--app-root <DIR>]",
+            "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
         ),
         "node doctor" => (
             "ryeos node doctor",

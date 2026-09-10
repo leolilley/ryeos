@@ -9,8 +9,8 @@
 //! immutable against its owner. Containing untrusted workers belongs to their
 //! admitted filesystem/process/client authorities, not root-owning user homes.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -23,7 +23,11 @@ const DESCRIPTION: &str = "host.json";
 const CONTROL: &str = "operator-intent";
 const DESIRED: &str = "desired.json";
 const UPGRADE: &str = "upgrade.json";
+const LAUNCH_FAILURE: &str = "launch-failure.json";
 const MAX_HOST_DOCUMENT_BYTES: u64 = 64 * 1024;
+const MAX_HOST_LAUNCH_ERROR_BYTES: usize = 8 * 1024;
+const HOST_SERVICE_BINDING_SCHEMA_VERSION: u32 = 2;
+const HOST_LAUNCH_FAILURE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,7 +39,6 @@ pub struct HostServiceBinding {
     pub account: lillux::ControllerAccount,
     pub daemon_executable: PathBuf,
     pub process_scopes: lillux::ProcessScopeConfiguration,
-    pub environment: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +67,43 @@ pub struct UpgradeIntent {
     pub expected_daemon_sha256: String,
     /// Only the native host integration decodes its captured boot disposition.
     pub native_state: serde_json::Value,
+}
+
+/// Root-owned testimony for a host-service attempt that failed before the
+/// selected node account could exec the daemon. It is diagnostic and
+/// correlational only; it grants no process, lifecycle, or recovery authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLaunchFailure {
+    pub schema_version: u32,
+    pub binding_digest: String,
+    pub pid: u32,
+    pub started_at: String,
+    pub failed_at: String,
+    pub error: String,
+}
+
+fn launch_failure_status(
+    config: &NodeConfig,
+    failure: HostLaunchFailure,
+) -> crate::LifecycleStatus {
+    crate::LifecycleStatus::Failed {
+        metadata: crate::DaemonMetadata {
+            pid: Some(failure.pid),
+            bind: Some(config.bind.to_string()),
+            uds_path: Some(config.uds_path.clone()),
+            started_at: Some(failure.started_at.clone()),
+            version: None,
+            revision: None,
+            build_date: None,
+            app_root: config.app_root.clone(),
+        },
+        startup: crate::StartupSnapshot::failed_before_control(
+            failure.started_at,
+            failure.failed_at,
+            failure.error,
+        ),
+    }
 }
 
 impl UpgradeIntent {
@@ -111,6 +151,54 @@ fn service_name(app_root: &Path) -> Result<String> {
     ))
 }
 
+/// Replace ordinary endpoint configuration while the exact node is stopped.
+/// This is the unprivileged half of host setup: native service provisioning
+/// remains a separate administrator operation and never parses this file.
+pub fn configure_host_endpoints(
+    app_root: &Path,
+    bind: Option<SocketAddr>,
+    uds_path: Option<PathBuf>,
+) -> Result<NodeConfig> {
+    if bind.is_none() && uds_path.is_none() {
+        return NodeConfig::load_local(Some(app_root.to_path_buf()));
+    }
+    let _lifecycle = crate::LifecycleStartLock::try_acquire(app_root)?
+        .context("another node lifecycle operation is active")?;
+    if let Some(service) = InstalledService::discover_app_root(app_root)?
+        && service.desired_state()? != DesiredState::Down
+    {
+        bail!("stop the supervised node before changing its configured endpoints");
+    }
+    configure_host_endpoints_while_locked(app_root, bind, uds_path, &_lifecycle)
+}
+
+/// Publish endpoint configuration while the caller retains the exact shared
+/// lifecycle operation. The second state lock excludes both the daemon and
+/// standalone state owners; neither lock substitutes for the other.
+pub(crate) fn configure_host_endpoints_while_locked(
+    app_root: &Path,
+    bind: Option<SocketAddr>,
+    uds_path: Option<PathBuf>,
+    lifecycle: &crate::LifecycleStartLock,
+) -> Result<NodeConfig> {
+    lifecycle.ensure_protects_app_root(app_root)?;
+    let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
+        &ryeos_app::state_lock::default_lock_path(app_root),
+        lillux::time::Duration::from_secs(30),
+    )
+    .context("endpoint configuration requires a stopped node")?;
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        bind,
+        uds_path,
+        force: true,
+        ..Default::default()
+    })
+    .context("resolve replacement node endpoints")?;
+    ryeos_app::config::replace_bootstrap_config(&config, &state_lock)?;
+    Ok(NodeConfig::from_app_config(&config))
+}
+
 /// Administrator-only one-time host association. This consumes only explicit
 /// host-maintenance inputs plus the public node identity; it intentionally
 /// never loads account-owned node config or policy while privileged. The
@@ -118,15 +206,26 @@ fn service_name(app_root: &Path) -> Result<String> {
 pub fn provision_host_service(
     app_root: &Path,
     account: lillux::ControllerAccount,
-    home: &Path,
-) -> Result<()> {
+) -> Result<DesiredState> {
     lillux::require_administrator()?;
+    // The administrator boundary receives only the explicit app root. Retain
+    // the same two locks as ordinary lifecycle/config mutation so a concurrent
+    // start cannot select direct mode immediately before this association is
+    // published. Root ownership is not a substitute for either node lock.
+    let lifecycle = crate::LifecycleStartLock::try_acquire(app_root)?.context(
+        "another node lifecycle operation is active; host setup requires a stopped node",
+    )?;
+    lifecycle.ensure_protects_app_root(app_root)?;
+    let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
+        &ryeos_app::state_lock::default_lock_path(app_root),
+        lillux::time::Duration::from_secs(5),
+    )
+    .context("host setup requires the selected node to be stopped")?;
+    state_lock.ensure_protects_app_root(app_root)?;
     let association_name = service_name(app_root)?;
     account.validate().map_err(anyhow::Error::msg)?;
     let app_root = PinnedDirectory::open(app_root)?.context("host setup app root is absent")?;
     account.require_directory_owner(&app_root)?;
-    let home = PinnedDirectory::open(home)?.context("host setup account home is absent")?;
-    account.require_directory_owner(&home)?;
     let identity_path = Path::new(ryeos_engine::AI_DIR).join("node/identity/public-identity.json");
     let identity_file = app_root
         .open_pinned_regular_descendant(&identity_path, false)?
@@ -160,26 +259,20 @@ pub fn provision_host_service(
         lillux::ProcessScopeConfiguration::provision_host_delegation(&association_name)
             .map_err(anyhow::Error::msg)?;
     let binding = HostServiceBinding {
-        schema_version: 1,
+        schema_version: HOST_SERVICE_BINDING_SCHEMA_VERSION,
         app_root: app_root.path().to_path_buf(),
         app_root_identity: app_root.identity()?,
         node_fingerprint,
         account,
         daemon_executable: daemon.path().to_path_buf(),
         process_scopes,
-        environment: BTreeMap::from([
-            (
-                "HOME".to_owned(),
-                home.path().to_string_lossy().into_owned(),
-            ),
-            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
-        ]),
     };
     let launch = expected_native_launch(&binding);
     lillux::provision_host_service(&association_name, &launch)?;
     let installation = lillux::discover_host_service(&association_name)?
         .context("published host service disappeared")?;
-    publish_service_state(&installation.state_directory, &binding)
+    publish_service_state(&installation.state_directory, &binding)?;
+    InstalledService::from_installation(installation, app_root.path())?.desired_state()
 }
 
 /// Publish RyeOS's generic lifecycle state into the opaque state directory
@@ -239,7 +332,11 @@ fn expected_native_launch(binding: &HostServiceBinding) -> lillux::HostServiceLa
             "--app-root".to_owned(),
             binding.app_root.to_string_lossy().into_owned(),
         ],
-        environment: binding.environment.clone(),
+        // RyeOS bootstrap configuration is complete before host setup. The
+        // node service therefore has no ambient HOME, PATH, XDG, or login-
+        // session dependency. This remains explicit launch data at Lillux's
+        // generic native-service boundary.
+        environment: Default::default(),
         account: binding.account.clone(),
     }
 }
@@ -265,43 +362,126 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
     let installation = lillux::discover_host_service(&name)?
         .context("host service association is absent; refusing direct startup")?;
     let service = InstalledService::from_installation(installation, app_root)?;
+    let started_at = lillux::time::iso8601_now();
     let _gate = service.gate()?;
-    service.check_binding()?;
-    let upgrade = service.upgrade_intent()?;
-    require_launch_allowed(service.desired_state()?, upgrade.as_ref())?;
-    let executable = service.installed_daemon()?;
-    if let Some(intent) = upgrade {
-        if executable.digest_stable_exact(&executable.observation()?)?
-            != intent.expected_daemon_sha256
-        {
-            bail!("service launch image differs from the restoring installation generation");
+    service.clear_launch_failure()?;
+    let result = (|| {
+        service.check_binding()?;
+        let upgrade = service.upgrade_intent()?;
+        require_launch_allowed(service.desired_state()?, upgrade.as_ref())?;
+        let executable = service.installed_daemon()?;
+        if let Some(intent) = upgrade {
+            if executable.digest_stable_exact(&executable.observation()?)?
+                != intent.expected_daemon_sha256
+            {
+                bail!("service launch image differs from the restoring installation generation");
+            }
+        }
+        let root = service
+            .binding
+            .app_root
+            .to_str()
+            .context("host app root cannot be represented in daemon arguments")?;
+        service
+            .binding
+            .process_scopes
+            .exec_controller(
+                &service.binding.account,
+                &executable,
+                &["--app-root".to_owned(), root.to_owned()],
+                &service.app_root,
+                &[],
+            )
+            .map_err(anyhow::Error::msg)
+    })();
+    match result {
+        Ok(never) => match never {},
+        Err(error) => {
+            service
+                .record_launch_failure(&started_at, &format!("{error:#}"))
+                .context("record failed host-service launch")?;
+            Err(error)
         }
     }
-    let root = service
-        .binding
-        .app_root
-        .to_str()
-        .context("host app root cannot be represented in daemon arguments")?;
-    let environment: Vec<_> = service
-        .binding
-        .environment
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-    service
-        .binding
-        .process_scopes
-        .exec_controller(
-            &service.binding.account,
-            &executable,
-            &["--app-root".to_owned(), root.to_owned()],
-            &service.app_root,
-            &environment,
-        )
-        .map_err(anyhow::Error::msg)
 }
 
 impl InstalledService {
+    fn clear_launch_failure(&self) -> Result<()> {
+        lillux::require_administrator()?;
+        self.check_binding()?;
+        if let Some(existing) = self
+            .directory
+            .open_pinned_regular(OsStr::new(LAUNCH_FAILURE), false)?
+        {
+            existing.require_owner(0)?;
+            self.directory.remove_pinned_regular_if_same(&existing)?;
+        }
+        Ok(())
+    }
+
+    fn record_launch_failure(&self, started_at: &str, error: &str) -> Result<()> {
+        lillux::require_administrator()?;
+        self.check_binding()?;
+        let mut end = error.len().min(MAX_HOST_LAUNCH_ERROR_BYTES);
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        let failure = HostLaunchFailure {
+            schema_version: HOST_LAUNCH_FAILURE_SCHEMA_VERSION,
+            binding_digest: self.binding_digest.clone(),
+            pid: std::process::id(),
+            started_at: started_at.to_owned(),
+            failed_at: lillux::time::iso8601_now(),
+            error: error[..end].trim().to_owned(),
+        };
+        let existing = self
+            .directory
+            .open_pinned_regular(OsStr::new(LAUNCH_FAILURE), false)?;
+        if let Some(file) = &existing {
+            file.require_owner(0)?;
+        }
+        self.directory.atomic_write_pinned_if_same(
+            OsStr::new(LAUNCH_FAILURE),
+            existing.as_ref(),
+            &serde_json::to_vec(&failure)?,
+            0o644,
+        )
+    }
+
+    pub fn launch_failure(&self) -> Result<Option<HostLaunchFailure>> {
+        let Some(file) = self
+            .directory
+            .open_pinned_regular(OsStr::new(LAUNCH_FAILURE), false)?
+        else {
+            return Ok(None);
+        };
+        file.require_owner(0)?;
+        let failure: HostLaunchFailure = serde_json::from_slice(
+            &file.read_stable_bounded(&file.observation()?, MAX_HOST_DOCUMENT_BYTES)?,
+        )?;
+        if failure.schema_version != HOST_LAUNCH_FAILURE_SCHEMA_VERSION
+            || failure.binding_digest != self.binding_digest
+            || failure.pid <= 1
+            || failure.started_at.trim().is_empty()
+            || failure.failed_at.trim().is_empty()
+            || failure.error.trim().is_empty()
+            || failure.error.len() > MAX_HOST_LAUNCH_ERROR_BYTES
+        {
+            bail!("host launch failure belongs to another association or contract epoch");
+        }
+        Ok(Some(failure))
+    }
+
+    pub fn launch_failure_status(
+        &self,
+        config: &NodeConfig,
+    ) -> Result<Option<crate::LifecycleStatus>> {
+        let Some(failure) = self.launch_failure()? else {
+            return Ok(None);
+        };
+        Ok(Some(launch_failure_status(config, failure)))
+    }
+
     /// Unprivileged startup corroboration using the identity actually loaded
     /// by the daemon, not merely its public envelope inspected by the launcher.
     /// Call before recovery or readiness; the caller separately proves its
@@ -348,7 +528,9 @@ impl InstalledService {
         let observation = description.observation()?;
         let raw = description.read_stable_bounded(&observation, MAX_HOST_DOCUMENT_BYTES)?;
         let binding: HostServiceBinding = serde_json::from_slice(&raw)?;
-        if binding.schema_version != 1 || binding.app_root != expected_root {
+        if binding.schema_version != HOST_SERVICE_BINDING_SCHEMA_VERSION
+            || binding.app_root != expected_root
+        {
             bail!("host service has a wrong epoch or app root");
         }
         binding.account.validate().map_err(anyhow::Error::msg)?;
@@ -621,12 +803,7 @@ impl InstalledService {
                     "observe".to_owned(),
                 ],
                 cwd: None,
-                envs: self
-                    .binding
-                    .environment
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
+                envs: vec![],
                 stdin_data: None,
                 timeout: 15.0,
                 limits: Some(lillux::SubprocessLimits {
@@ -756,6 +933,98 @@ fn require_launch_allowed(desired: DesiredState, upgrade: Option<&UpgradeIntent>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_launch_failure_maps_to_bounded_pre_control_status() {
+        let config = NodeConfig {
+            app_root: PathBuf::from("/node"),
+            bind: "127.0.0.1:7400".parse().unwrap(),
+            uds_path: PathBuf::from("/runtime/node.sock"),
+        };
+        let status = launch_failure_status(
+            &config,
+            HostLaunchFailure {
+                schema_version: HOST_LAUNCH_FAILURE_SCHEMA_VERSION,
+                binding_digest: "a".repeat(64),
+                pid: 42,
+                started_at: "2026-09-10T00:00:00Z".to_owned(),
+                failed_at: "2026-09-10T00:00:01Z".to_owned(),
+                error: "credential drop failed".to_owned(),
+            },
+        );
+        let crate::LifecycleStatus::Failed { metadata, startup } = status else {
+            panic!("expected failed host launch status")
+        };
+        assert_eq!(metadata.pid, Some(42));
+        assert_eq!(metadata.app_root, config.app_root);
+        assert_eq!(startup.error.as_deref(), Some("credential drop failed"));
+    }
+
+    #[test]
+    fn endpoint_replacement_uses_the_exact_stopped_node_state_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("node");
+        std::fs::create_dir_all(app_root.join(".ai/node")).unwrap();
+        std::fs::create_dir_all(app_root.join(".ai/state")).unwrap();
+        let lock = ryeos_app::state_lock::StateLock::acquire(
+            &ryeos_app::state_lock::default_lock_path(&app_root),
+        )
+        .unwrap();
+        let initial = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+            app_root: Some(app_root.clone()),
+            uds_path: Some(tmp.path().join("first.sock")),
+            ..Default::default()
+        })
+        .unwrap();
+        ryeos_app::config::seed_bootstrap_config(&initial, &lock).unwrap();
+        drop(lock);
+
+        let lifecycle = crate::LifecycleStartLock::try_acquire(&app_root)
+            .unwrap()
+            .unwrap();
+        let replacement_uds = tmp.path().join("second.sock");
+        let replaced = configure_host_endpoints_while_locked(
+            &app_root,
+            Some("127.0.0.1:17400".parse().unwrap()),
+            Some(replacement_uds),
+            &lifecycle,
+        )
+        .unwrap();
+
+        let persisted = NodeConfig::load_local(Some(app_root)).unwrap();
+        assert_eq!(persisted.app_root, replaced.app_root);
+        assert_eq!(persisted.bind, replaced.bind);
+        assert_eq!(persisted.uds_path, replaced.uds_path);
+    }
+
+    #[test]
+    fn endpoint_replacement_rejects_another_nodes_lifecycle_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().join("selected");
+        let other = tmp.path().join("other");
+        for root in [&selected, &other] {
+            std::fs::create_dir_all(root.join(ryeos_engine::AI_DIR).join("node")).unwrap();
+            std::fs::create_dir_all(root.join(ryeos_engine::AI_DIR).join("state")).unwrap();
+        }
+        let other_lock = crate::LifecycleStartLock::try_acquire(&other)
+            .unwrap()
+            .unwrap();
+        let error = configure_host_endpoints_while_locked(
+            &selected,
+            Some("127.0.0.1:17400".parse().unwrap()),
+            Some(tmp.path().join("selected.sock")),
+            &other_lock,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("another app root"));
+        assert!(
+            !selected
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("config.yaml")
+                .exists()
+        );
+    }
 
     #[test]
     fn upgrade_retry_cannot_substitute_package_or_association() {

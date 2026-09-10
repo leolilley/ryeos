@@ -19,6 +19,8 @@ fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::Pa
     let root = workspace_root();
     ryeos_node::run_init(&ryeos_node::InitOptions {
         app_root: state_dir.clone(),
+        bind: None,
+        uds_path: None,
         source_dir: root.join("bundles"),
         trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
         node_profile: None,
