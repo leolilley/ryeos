@@ -1,5 +1,0 @@
-{
-  "type": "boolean",
-  "description": "Successfully set authentication credentials",
-  "$schema": "https://json-schema.org/draft/2020-12/schema"
-}

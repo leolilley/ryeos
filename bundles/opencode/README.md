@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T10:35:03Z:71f738e406372fb7ed96a57bc19eba26a0b1aa3627e88a40b36e54bea4a2956b:pUzmJvSTcfAy+i7kxFGtXRMQrsMDkwMXBQg7DMGhTOT+mwum52qNWshjAhvJ4Go0bUjn2yhZL4w8Wl1uKAfhBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T10:42:57Z:a3ff07e1b8e25e020a8e53e20868fde92b1b078d46cd248085805d2e11ca284a:EFF+nvGhObCQsUviFdZQRdE2uSJbZyOUNCKDK9skRM0bu5MFyrIYo0CAHUnNKqcOeG0MSphgP4E7Y5s3k6KvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS OpenCode
 
 Provider data for hosting a pinned OpenCode server through RyeOS's generic
@@ -20,9 +20,10 @@ RyeOS never imports an ambient OpenCode credential.
   server-side authentication boundary; unset prints a warning and leaves the
   server unsecured. The bridge must set a per-boot random password.
 - OpenAPI 3.1 JSON is served from `GET /doc` with `Accept: application/json`.
-  The 1.18.30 spec is vendored as 109 self-contained schemas beside this
-  profile source: 15 route request/response schemas plus all 94 event
-  documents, component refs rewritten to local `#/$defs` fragments.
+  The bundle vendors only the exact self-contained schema closure referenced
+  by the signed profile; unused union/event and retired raw-auth schemas are
+  intentionally absent. Component refs are rewritten to local `#/$defs`
+  fragments.
 - `GET /event` is an SSE stream. Each frame is one `data:` line:
   `{"id":"evt_...","type":"server.connected","properties":{}}`; the first
   event is `server.connected`.
