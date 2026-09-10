@@ -101,13 +101,28 @@ pub fn compile(
             let credentials = credentials.as_object().ok_or_else(|| {
                 anyhow!("structured-session HTTP credential environment block is invalid")
             })?;
-            require_keys(credentials, &["username_env", "password_env"], &[])?;
+            require_keys(
+                credentials,
+                &["username_env", "password_env"],
+                &["seed_path_env"],
+            )?;
             for key in ["username_env", "password_env"] {
                 let name = value_string(credentials, key)?;
                 crate::protocol_vocabulary::validate_env_name(name)
                     .map_err(|error| anyhow!(error))?;
                 if http_credentials.contains(&name) {
                     bail!("structured-session HTTP credential environments are duplicated");
+                }
+                http_credentials.push(name);
+            }
+            if let Some(seed) = credentials.get("seed_path_env").filter(|value| !value.is_null()) {
+                let name = seed
+                    .as_str()
+                    .ok_or_else(|| anyhow!("structured-session seed path environment must be text"))?;
+                crate::protocol_vocabulary::validate_env_name(name)
+                    .map_err(|error| anyhow!(error))?;
+                if http_credentials.contains(&name) {
+                    bail!("structured-session HTTP environment names are duplicated");
                 }
                 http_credentials.push(name);
             }

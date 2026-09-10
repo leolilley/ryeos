@@ -201,6 +201,8 @@ enum ProfileTransport {
 struct HttpSseCredentials {
     username_env: String,
     password_env: String,
+    #[serde(default)]
+    seed_path_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1804,14 +1806,38 @@ impl StructuredWorkload {
             (ProfileTransport::HttpSse, Some(credentials)) => {
                 let username = hex_encode(&lillux::crypto::generate_random_bytes::<16>());
                 let password = hex_encode(&lillux::crypto::generate_random_bytes::<32>());
-                if session_process_environment.contains_key(&credentials.username_env)
-                    || session_process_environment.contains_key(&credentials.password_env)
-                {
-                    bail!("HTTP credential environment collides with admitted session inputs");
+                let mut generated = vec![
+                    (credentials.username_env.clone(), username),
+                    (credentials.password_env.clone(), password),
+                ];
+                // The HTTP transport homes the workload's XDG state inside
+                // the private home. XDG roots resolve through the OS user
+                // record rather than HOME, so redirection must be explicit.
+                for (name, value) in [
+                    ("XDG_CONFIG_HOME", format!("{workload_home}/.config")),
+                    ("XDG_DATA_HOME", format!("{workload_home}/.local/share")),
+                    ("XDG_STATE_HOME", format!("{workload_home}/.local/state")),
+                    ("XDG_CACHE_HOME", format!("{workload_home}/.cache")),
+                ] {
+                    if session_process_environment.contains_key(name) {
+                        bail!("admitted session inputs collide with the workload XDG home");
+                    }
+                    command.env(name, value);
                 }
-                command.env(&credentials.username_env, &username);
-                command.env(&credentials.password_env, &password);
-                let authorization = base64_standard(format!("{username}:{password}"));
+                if let Some(seed_env) = &credentials.seed_path_env {
+                    generated.push((
+                        seed_env.clone(),
+                        format!("{workload_home}/{}", profile.baseline_destination),
+                    ));
+                }
+                for (name, value) in &generated {
+                    if session_process_environment.contains_key(name) {
+                        bail!("HTTP credential environment collides with admitted session inputs");
+                    }
+                    command.env(name, value);
+                }
+                let authorization =
+                    base64_standard(format!("{}:{}", generated[0].1, generated[1].1));
                 Some(format!("Basic {authorization}"))
             }
             (ProfileTransport::StdioJsonRpc, None) => None,
@@ -4403,6 +4429,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 expected = "Basic " + base64.b64encode(
     ("%s:%s" % (os.environ["FX_HTTP_USER"], os.environ["FX_HTTP_PASSWORD"])).encode()
 ).decode()
+
+for xdg in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+    if not os.environ.get(xdg, "").strip():
+        raise SystemExit("workload XDG home was not supplied: " + xdg)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
