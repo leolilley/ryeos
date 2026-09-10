@@ -35,6 +35,11 @@ flow of the Codex bundle README; only the opencode-specific facts live here.
 - Permission asks arrive as `permission.v2.asked` and are deny-only:
   decisions map to `reject`, and `once`/`always` are refused before any
   upstream contact.
+- Network posture: the worker kind's network ceiling omission result is
+  `node_policy`, so the loopback transport runs under the node's host
+  networking. An `isolated` ceiling leaves the namespace loopback down and
+  refuses the worker at launch. Bash command egress follows the node
+  ceiling; only `webfetch` is forced through the deny-only ask path.
 
 ## Credential and session posture
 

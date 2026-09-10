@@ -151,6 +151,24 @@ Approval replies go to `POST /session/{session_id}/permissions/{permission_id}`.
 - `locks/**` under the state root -> rebuildable_cache
 - everything else -> forbidden_or_unknown
 
+## Network admission (verified against the substrate)
+
+The per-execution network ceiling is `node_policy` or `isolated`, frozen
+into the execution plan. The worker kind declares no network projection,
+so its omission result is `node_policy`: under the default ceiling the
+worker shares the node's host networking and the loopback transport works.
+
+- An `isolated` ceiling creates a network namespace whose loopback
+  interface is never raised, so an http_sse worker's listener discovery
+  fails at launch. That is fail-closed: hardened nodes refuse this worker
+  family rather than silently widening network authority. A future
+  loopback-only ceiling could admit it explicitly.
+- Unlike the Codex profile's workload-level sandbox network denial, an
+  opencode worker's bash commands inherit the node network ceiling. The
+  inline config keeps `webfetch` at ask (deny-only in v1), but bash egress
+  is bounded only by node policy; a worker-kind network projection would
+  be the mechanical fix if that gap must close.
+
 ## Open items
 
 - Bundle population/signing (`populate-bundles`), `test_contract.py` mirror,
@@ -158,9 +176,6 @@ Approval replies go to `POST /session/{session_id}/permissions/{permission_id}`.
 - The generic bridge is core-owned (`bin:core/ryeos-structured-session-bridge`)
   and shared with the Codex worker; this bundle declares the worker-kind
   dependency on core through its manifest requires list.
-- Worker-node loopback admission: the opencode worker runs a loopback TCP
-  listener inside its process scope, which the stdio Codex profile never
-  needed; node isolation policy must admit it for this worker family.
 - The environment config's `portable_state_contract: null` and omitted
   subject projection need install-time validation against the signed
   worker-environment schema.
