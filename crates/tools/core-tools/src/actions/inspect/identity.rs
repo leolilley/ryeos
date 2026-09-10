@@ -8,13 +8,16 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct IdentityParams {
     #[serde(default)]
-    pub app_root: Option<String>,
+    /// Node system space selected by the signed Tool contract.  Keep this
+    /// distinct from a CLI implementation flag: Tool payloads are portable
+    /// data and must name the same field the descriptor admits.
+    pub system_space_dir: Option<String>,
     #[serde(default)]
     pub project_path: Option<String>,
 }
 
 pub fn run_identity(params: IdentityParams) -> Result<Value> {
-    let app_root = match params.app_root {
+    let app_root = match params.system_space_dir {
         Some(ref p) => std::path::PathBuf::from(p),
         None => {
             // 1. RYEOS_APP_ROOT (set by the daemon for subprocess tools)
@@ -24,7 +27,7 @@ pub fn run_identity(params: IdentityParams) -> Result<Value> {
             } else {
                 dirs::data_dir()
                     .map(|d| d.join("ryeos"))
-                    .ok_or_else(|| anyhow!("could not determine app rootectory (no app_root param, no RYEOS_APP_ROOT env, no XDG data dir)"))?
+                    .ok_or_else(|| anyhow!("could not determine app root directory (no system_space_dir param, no RYEOS_APP_ROOT env, no XDG data dir)"))?
             }
         }
     };
@@ -44,4 +47,25 @@ pub fn run_identity(params: IdentityParams) -> Result<Value> {
     let doc: Value =
         serde_json::from_slice(&data).context("failed to parse public identity document")?;
     Ok(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IdentityParams;
+
+    #[test]
+    fn signed_tool_contract_uses_system_space_dir() {
+        let params: IdentityParams = serde_json::from_value(serde_json::json!({
+            "system_space_dir": "/node",
+            "project_path": "/project"
+        }))
+        .expect("declared Tool payload must decode");
+        assert_eq!(params.system_space_dir.as_deref(), Some("/node"));
+
+        let err = serde_json::from_value::<IdentityParams>(serde_json::json!({
+            "app_root": "/node"
+        }))
+        .expect_err("retired undeclared Tool field must not decode");
+        assert!(err.to_string().contains("app_root"));
+    }
 }

@@ -591,7 +591,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 let mut obj = serde_json::json!({});
                 if let Some(s) = app_root {
-                    obj["app_root"] = serde_json::json!(s);
+                    obj["system_space_dir"] = serde_json::json!(s);
                 }
                 obj
             };
@@ -1814,7 +1814,7 @@ fn run_admission_token(
 
     let (app_root, scopes, label, ttl_secs) = if stdin_json {
         let val = read_stdin_json()?;
-        let ssd = val["app_root"].as_str().map(String::from);
+        let ssd = val["system_space_dir"].as_str().map(String::from);
         let scopes = val["scopes"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
@@ -1872,7 +1872,7 @@ fn run_remote_descriptor(
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         ExportRemoteDescriptorParams {
-            app_root,
+            system_space_dir: app_root,
             name,
             url,
             capabilities,

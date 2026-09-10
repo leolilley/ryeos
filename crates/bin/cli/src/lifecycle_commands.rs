@@ -912,7 +912,7 @@ fn run_identity_command(argv: &[String], console: &crate::tty::Console) -> Resul
     };
     let report = ryeos_core_tools::actions::inspect::identity::run_identity(
         ryeos_core_tools::actions::inspect::identity::IdentityParams {
-            app_root: args.app_root.map(|p| p.to_string_lossy().into_owned()),
+            system_space_dir: args.app_root.map(|p| p.to_string_lossy().into_owned()),
             project_path: None,
         },
     )
