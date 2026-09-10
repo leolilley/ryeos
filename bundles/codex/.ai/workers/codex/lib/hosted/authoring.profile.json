@@ -1,6 +1,7 @@
 {
   "schema_version": 4,
   "transport": "stdio_jsonrpc",
+  "http_sse": null,
   "configuration_authority": "immutable_argv",
   "workload_realization_id": "codex",
   "workload_executable": "codex",

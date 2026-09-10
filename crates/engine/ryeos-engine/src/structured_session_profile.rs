@@ -94,8 +94,53 @@ pub fn compile(
         Some("stdio_jsonrpc") => false,
         _ => bail!("structured-session transport is not admitted"),
     };
+    required.push("http_sse");
+    let mut http_credentials: Vec<&str> = Vec::new();
+    match (http_transport, object.get("http_sse")) {
+        (true, Some(credentials)) => {
+            let credentials = credentials.as_object().ok_or_else(|| {
+                anyhow!("structured-session HTTP credential environment block is invalid")
+            })?;
+            require_keys(credentials, &["username_env", "password_env"], &[])?;
+            for key in ["username_env", "password_env"] {
+                let name = value_string(credentials, key)?;
+                crate::protocol_vocabulary::validate_env_name(name)
+                    .map_err(|error| anyhow!(error))?;
+                if http_credentials.contains(&name) {
+                    bail!("structured-session HTTP credential environments are duplicated");
+                }
+                http_credentials.push(name);
+            }
+        }
+        (true, None) => {
+            bail!("structured-session HTTP transport lacks its credential environment block")
+        }
+        (false, Some(Value::Null)) => {}
+        (false, Some(_)) => {
+            bail!("structured-session HTTP credential block requires the HTTP transport");
+        }
+        (false, None) => {
+            bail!("structured-session HTTP credential block must be present and nullable");
+        }
+    }
     if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
         bail!("structured-session profile has an unknown or missing top-level field");
+    }
+    let home_env = value_string(object, "workload_home_env")?;
+    let mut admitted_environment: Vec<&str> = vec![home_env, "LANG", "LC_ALL", "HOME", "PATH"];
+    for name in bounded_array(object, "required_process_environment", 0, 64)? {
+        let name = name
+            .as_str()
+            .ok_or_else(|| anyhow!("required process environment name is not text"))?;
+        admitted_environment.push(name);
+    }
+    for name in &http_credentials {
+        if admitted_environment.contains(name) {
+            bail!("structured-session HTTP credential environment collides with admitted environment");
+        }
+    }
+    if http_transport && !object.get("initialization").and_then(Value::as_array).is_some_and(|steps| steps.is_empty()) {
+        bail!("structured-session HTTP transport admits no initialization handshake");
     }
     if object
         .get("configuration_authority")
@@ -530,7 +575,7 @@ pub fn compile(
         }
     }
 
-    for step in bounded_array(object, "initialization", 1, 8)? {
+    for step in bounded_array(object, "initialization", usize::from(!http_transport), 8)? {
         let step = step
             .as_object()
             .ok_or_else(|| anyhow!("structured-session initialization step must be an object"))?;
@@ -1719,6 +1764,7 @@ mod tests {
         serde_json::to_vec(&json!({
             "schema_version":STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
             "transport":"stdio_jsonrpc",
+            "http_sse":null,
             "workload_realization_id":"fixture-runtime",
             "workload_executable":"fixture-worker",
             "required_process_environment":[],
@@ -2093,8 +2139,32 @@ mod tests {
 
         let mut http = profile.clone();
         http["transport"] = json!("http_sse");
+        http["http_sse"] = json!({
+            "username_env":"FIXTURE_HTTP_USER",
+            "password_env":"FIXTURE_HTTP_PASSWORD"
+        });
+        http["initialization"] = json!([]);
         compile(&serde_json::to_vec(&http).unwrap(), &schemas())
             .expect("complete HTTP addressing must be admitted");
+
+        let mut missing_credentials = http.clone();
+        missing_credentials["http_sse"] = Value::Null;
+        assert!(compile(&serde_json::to_vec(&missing_credentials).unwrap(), &schemas()).is_err());
+
+        let mut stdio_credentials = http.clone();
+        stdio_credentials["transport"] = json!("stdio_jsonrpc");
+        assert!(compile(&serde_json::to_vec(&stdio_credentials).unwrap(), &schemas()).is_err());
+
+        let mut colliding = http.clone();
+        colliding["http_sse"]["password_env"] = json!("FIXTURE_HOME");
+        assert!(compile(&serde_json::to_vec(&colliding).unwrap(), &schemas()).is_err());
+
+        let mut handshake = http.clone();
+        handshake["initialization"] = json!([{
+            "method":"initialize","effect_class":"pure_read","params":{},
+            "response_schema":"schema/response.json","notification":null
+        }]);
+        assert!(compile(&serde_json::to_vec(&handshake).unwrap(), &schemas()).is_err());
 
         let mut missing_path = http.clone();
         missing_path["routes"][0]
@@ -2139,6 +2209,11 @@ mod tests {
         let mut profile: Value =
             serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
         profile["transport"] = json!("http_sse");
+        profile["http_sse"] = json!({
+            "username_env":"FIXTURE_HTTP_USER",
+            "password_env":"FIXTURE_HTTP_PASSWORD"
+        });
+        profile["initialization"] = json!([]);
         profile["routes"][0]["http_method"] = json!("POST");
         profile["routes"][0]["http_path"] = json!("/session");
         profile["server_requests"] = json!([{
