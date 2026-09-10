@@ -46,10 +46,14 @@ re-signed in the same change):
   `/message/params/` observation pointers stay unchanged.
 
 Current state: the admission compiler validates the complete v4 vocabulary
-(engine tests cover gating and path-template closure), the bridge parses and
-fail-closes `http_sse` profiles as not yet implemented, and the HTTP
-transport itself (blocking `reqwest` from the existing workspace entry, SSE
-via `BufRead` line reading) is the next substrate increment.
+including the `http_sse` credential block, and the bridge implements the
+transport: loopback listener discovery from the workload's stdout listening
+line, per-boot basic-auth credentials supplied through profile-named
+environments, request dispatch on the route's `http_method`/`http_path` with
+bounded response bodies, server-sent events normalized into the stdio
+notification/server-request envelopes, and approval replies POSTed to the
+admitted `reply_http_path`. An integration test drives a fixture HTTP
+server through binding, event streaming, and session-path substitution.
 
 Loopback TCP inside the worker process scope is a new admission surface the
 Codex stdio profile never needed; node policy must admit it explicitly for
