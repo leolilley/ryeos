@@ -18,6 +18,7 @@ use crate::AI_DIR;
 
 pub const DAEMON_STATE_DIR: &str = "daemon";
 pub const DAEMON_CONTROL_SOCKET: &str = "ryeosd.sock";
+pub const DAEMON_LIFECYCLE_DIR: &str = "lifecycle";
 
 /// Read-only handle to the installed bundle/config zone.
 ///
@@ -81,6 +82,13 @@ impl RuntimeRoot {
     /// Stable local control endpoint for this exact app-root node.
     pub fn daemon_control_socket(&self) -> PathBuf {
         self.daemon_state().join(DAEMON_CONTROL_SOCKET)
+    }
+
+    /// Directory whose inode carries the short-lived local lifecycle-operation
+    /// lock. This is deliberately distinct from `.ai/state`, whose inode is
+    /// retained by the live StateStore for the daemon's complete lifetime.
+    pub fn daemon_lifecycle(&self) -> PathBuf {
+        self.daemon_state().join(DAEMON_LIFECYCLE_DIR)
     }
 
     pub fn node(&self) -> PathBuf {
@@ -246,6 +254,10 @@ mod tests {
         assert_eq!(
             root.daemon_control_socket(),
             PathBuf::from("/tmp/ryeos-test-root/.ai/state/daemon/ryeosd.sock")
+        );
+        assert_eq!(
+            root.daemon_lifecycle(),
+            PathBuf::from("/tmp/ryeos-test-root/.ai/state/daemon/lifecycle")
         );
     }
 

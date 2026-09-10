@@ -392,10 +392,13 @@ impl std::fmt::Debug for LifecycleStartLock {
 
 impl LifecycleStartLock {
     pub fn try_acquire(app_root: &Path) -> Result<Option<Self>> {
-        let root = lillux::PinnedDirectory::open(app_root)?
+        let daemon_state = lillux::PinnedDirectory::open(app_root)?
             .context("open lifecycle app root")?
             .open_or_create_child(OsStr::new(ryeos_engine::AI_DIR), 0o700)?
-            .open_or_create_child(OsStr::new("state"), 0o700)?;
+            .open_or_create_child(OsStr::new("state"), 0o700)?
+            .open_or_create_child(OsStr::new(ryeos_engine::roots::DAEMON_STATE_DIR), 0o700)?;
+        let root = daemon_state
+            .open_or_create_child(OsStr::new(ryeos_engine::roots::DAEMON_LIFECYCLE_DIR), 0o700)?;
         let Some(guard) = root.try_lock_exclusive()? else {
             return Ok(None);
         };
@@ -407,7 +410,8 @@ impl LifecycleStartLock {
 
     pub(crate) fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
         self.state_directory.ensure_path_binding()?;
-        let expected = app_root.join(ryeos_engine::AI_DIR).join("state");
+        let expected =
+            ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).daemon_lifecycle();
         if self.state_directory.path() != expected {
             bail!("lifecycle lock belongs to another app root");
         }
@@ -513,5 +517,18 @@ mod tests {
         let _again = LifecycleStartLock::try_acquire(tmp.path())
             .unwrap()
             .expect("released lifecycle lock is available");
+    }
+
+    #[test]
+    fn live_runtime_state_lock_does_not_block_lifecycle_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(
+            &ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf()).state(),
+        )
+        .unwrap();
+        let _runtime_lock = state.lock_exclusive().unwrap();
+        let _lifecycle = LifecycleStartLock::try_acquire(root.path())
+            .unwrap()
+            .expect("live runtime authority must not own the lifecycle-operation lock");
     }
 }

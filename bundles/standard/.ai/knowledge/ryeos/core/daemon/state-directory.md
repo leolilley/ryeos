@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T07:15:52Z:6928d4c842333d9f24ffa7811b0014d006cf1d6385774ddd5f17df4f776e0493:KvWtMboKi++2RLEvpJhqdXlsZ2x3x2Q0My3Ga31nIgxfjQH4WWDB42CQ7mmGMwOGtaZTPLrIvTP8gc06F64UDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T07:48:42Z:e7e34890a3dc2db447ffe35e0c0047480d935417c780b821325f89caae5314ae:TJyVIoXXfI4bHP2GcXn5VbQPyWos0XxA3gx511I08yPkLeKfq8aykHifwKzlg3JtzGApOF2FQoeyfE6p3zQWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -65,7 +65,9 @@ The daemon must not write user trust docs or regenerate the node key.
 - `.ai/state/audit/` — append-only audit trail.
 - `.ai/state/schedules/` — scheduler state.
 - `.ai/state/daemon/` — daemon-process-local state, including the default
-  app-root-scoped `ryeosd.sock` control endpoint.
+  app-root-scoped `ryeosd.sock` control endpoint and the distinct `lifecycle/`
+  operation-lock inode. The live StateStore retains `.ai/state` itself, so the
+  lifecycle controller must never reuse that parent lock.
 
 ## Locks and metadata
 
