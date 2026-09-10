@@ -1,7 +1,7 @@
 //! `ryeos-core-tools` — unified core tools binary.
 //!
 //! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client,
-//! admission-token, remote-descriptor.
+//! remote-descriptor.
 //!
 //! Multi-tool binary for signing and inspecting RyeOS items.
 //! Invoked by tool YAMLs via `bin:ryeos-core-tools <subcommand>`.
@@ -262,25 +262,6 @@ enum Cmd {
         /// to change. Use only while the daemon is stopped.
         #[arg(long)]
         allow_semantic_conversion: bool,
-    },
-
-    /// Mint a one-time node-local admission token for remote bootstrap.
-    AdmissionToken {
-        /// App root directory for the target node.
-        #[arg(long)]
-        app_root: Option<String>,
-
-        /// Comma-separated scopes this token may grant.
-        #[arg(long)]
-        scopes: Option<String>,
-
-        /// Optional default label for the authorized key created by claim.
-        #[arg(long)]
-        label: Option<String>,
-
-        /// Token lifetime in seconds.
-        #[arg(long, default_value_t = 600)]
-        ttl_secs: u64,
     },
 
     /// Export a remote descriptor trust pin for this node.
@@ -619,12 +600,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             allow_semantic_conversion,
             cli.stdin_json,
         ),
-        Cmd::AdmissionToken {
-            app_root,
-            scopes,
-            label,
-            ttl_secs,
-        } => run_admission_token(app_root, scopes, label, ttl_secs, cli.stdin_json),
         Cmd::RemoteDescriptor {
             app_root,
             name,
@@ -1798,50 +1773,6 @@ fn run_authorize_client(
         }))?
     );
 
-    Ok(())
-}
-
-fn run_admission_token(
-    app_root: Option<String>,
-    scopes: Option<String>,
-    label: Option<String>,
-    ttl_secs: u64,
-    stdin_json: bool,
-) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::authorize::{
-        MintAdmissionTokenParams, run_mint_admission_token,
-    };
-
-    let (app_root, scopes, label, ttl_secs) = if stdin_json {
-        let val = read_stdin_json()?;
-        let ssd = val["system_space_dir"].as_str().map(String::from);
-        let scopes = val["scopes"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
-            .to_string();
-        let label = val["label"].as_str().map(String::from);
-        let ttl_secs = val["ttl_secs"].as_u64().unwrap_or(600);
-        (ssd, scopes, label, ttl_secs)
-    } else {
-        let scopes = scopes.ok_or_else(|| anyhow::anyhow!("--scopes required"))?;
-        (app_root, scopes, label, ttl_secs)
-    };
-
-    let app_root = resolve_app_root(app_root)?;
-    let scopes: Vec<String> = scopes
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let report = run_mint_admission_token(MintAdmissionTokenParams {
-        app_root,
-        scopes,
-        label,
-        ttl_secs,
-    })?;
-
-    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

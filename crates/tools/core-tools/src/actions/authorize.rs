@@ -19,6 +19,8 @@ use rand::RngCore;
 
 use crate::actions::hosted_policy::load_hosted_policy;
 
+const DEFAULT_ADMISSION_TOKEN_TTL_SECS: u64 = 600;
+
 /// Shared input for node-owned grant reconciliation. The target app root and
 /// signing authority come from the host entrypoint, never from this payload.
 #[derive(Debug, serde::Deserialize)]
@@ -174,6 +176,42 @@ pub struct MintAdmissionTokenParams {
     pub ttl_secs: u64,
 }
 
+/// Signed-service input for minting one target-local admission token.
+///
+/// The service composition root supplies the selected node root and its
+/// already-compiled hosted policy. A caller never supplies either authority.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MintAdmissionTokenRequest {
+    pub scopes: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default = "default_admission_token_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+fn default_admission_token_ttl_secs() -> u64 {
+    DEFAULT_ADMISSION_TOKEN_TTL_SECS
+}
+
+impl MintAdmissionTokenRequest {
+    pub fn into_params(self, app_root: PathBuf) -> Result<MintAdmissionTokenParams> {
+        let scopes = self
+            .scopes
+            .split(',')
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Ok(MintAdmissionTokenParams {
+            app_root,
+            scopes,
+            label: self.label,
+            ttl_secs: self.ttl_secs,
+        })
+    }
+}
+
 #[derive(serde::Serialize, Debug)]
 pub struct MintAdmissionTokenResult {
     /// One-time bearer token. Show once to the local node being admitted.
@@ -323,10 +361,24 @@ pub fn run_mint_admission_token(
         bail!("ttl_secs must be greater than zero");
     }
     let policy = load_hosted_policy(&params.app_root)?;
+    mint_admission_token_with_policy(params, &policy.policy, &policy.source_file)
+}
+
+/// Mint through the daemon-owned service using its already-loaded, exact
+/// policy generation. This deliberately avoids reopening node-private policy
+/// state from a confined subprocess Tool.
+pub fn mint_admission_token_with_policy(
+    params: MintAdmissionTokenParams,
+    policy: &ryeos_app::node_policy::sections::hosted::HostedNodePolicy,
+    policy_source: &std::path::Path,
+) -> Result<MintAdmissionTokenResult> {
+    if params.ttl_secs == 0 {
+        bail!("ttl_secs must be greater than zero");
+    }
     if !policy.admission_enabled {
         bail!(
             "hosted-node admission is disabled by policy from {}",
-            policy.source_file.display()
+            policy_source.display()
         );
     }
     let maximum_token_ttl_secs = policy
@@ -337,7 +389,7 @@ pub fn run_mint_admission_token(
             "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
             params.ttl_secs,
             maximum_token_ttl_secs,
-            policy.source_file.display()
+            policy_source.display()
         );
     }
 
@@ -532,6 +584,28 @@ admission_enabled: {admission_enabled}
         let (final_scopes, dropped) = reconcile_scopes(&[], &["x".to_string()], false);
         assert_eq!(final_scopes, vec!["x".to_string()]);
         assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn admission_token_request_has_no_node_root_input() {
+        let request: MintAdmissionTokenRequest = serde_json::from_value(serde_json::json!({
+            "scopes": "ryeos.attest.request.forwarded-operator"
+        }))
+        .expect("signed service input must decode");
+        let params = request.into_params(PathBuf::from("/node")).unwrap();
+        assert_eq!(params.app_root, PathBuf::from("/node"));
+        assert_eq!(params.ttl_secs, DEFAULT_ADMISSION_TOKEN_TTL_SECS);
+        assert_eq!(
+            params.scopes,
+            vec!["ryeos.attest.request.forwarded-operator"]
+        );
+
+        let err = serde_json::from_value::<MintAdmissionTokenRequest>(serde_json::json!({
+            "scopes": "ryeos.attest.request.forwarded-operator",
+            "system_space_dir": "/attacker-selected-node"
+        }))
+        .expect_err("service input must not select a node root");
+        assert!(err.to_string().contains("system_space_dir"));
     }
 
     #[test]

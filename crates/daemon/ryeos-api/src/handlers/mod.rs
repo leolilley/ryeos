@@ -17,6 +17,7 @@ pub mod admission_attestations_for_subject;
 pub mod admission_claim;
 pub mod admission_status;
 pub mod admission_submit;
+pub mod admission_token;
 pub mod authorize_client;
 pub mod authorize_key;
 pub mod bundle_export;
@@ -127,6 +128,7 @@ pub(crate) fn default_replay_limit() -> usize {
 
 pub const ALL: &[ServiceDescriptor] = &[
     admission_claim::DESCRIPTOR,
+    admission_token::DESCRIPTOR,
     admission_submit::DESCRIPTOR,
     admission_status::DESCRIPTOR,
     admission_attestations_for_subject::DESCRIPTOR,
