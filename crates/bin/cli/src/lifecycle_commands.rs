@@ -1150,12 +1150,31 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
             .status()
             .await
             .context("ryeos node status failed")?,
-        Err(config_error) => ryeos_node::status::retained_startup_failure(&app_root)
-            .with_context(|| {
-                format!(
-                    "node bootstrap configuration is invalid and no retained startup failure is available: {config_error:#}"
-                )
-            })?,
+        Err(config_error) => {
+            // Bootstrap configuration cannot provide a trustworthy endpoint,
+            // but a configured supervisor has independent root-owned failure
+            // testimony. Read it only through the exact protected association;
+            // never invent a direct-node endpoint or launch fallback here.
+            let supervised_failure =
+                match ryeos_node::supervision::InstalledService::discover_app_root(&app_root)? {
+                    Some(service) => {
+                        service.check_supervisor()?;
+                        if service.desired_state()? == ryeos_node::supervision::DesiredState::Up {
+                            service.launch_failure_status_without_config(&app_root)?
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                };
+            supervised_failure
+                .or_else(|| ryeos_node::status::retained_startup_failure(&app_root))
+                .with_context(|| {
+                    format!(
+                        "node bootstrap configuration is invalid and no retained startup failure is available: {config_error:#}"
+                    )
+                })?
+        }
     };
     if args.json {
         crate::tty::write_json(&status)?;

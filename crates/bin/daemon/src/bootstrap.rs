@@ -697,11 +697,12 @@ fn load_node_config_two_phase_with_socket(
         &policy_table,
     )
     .context("Phase 1: load exact node policy generation")?;
+    let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
     let node_policy = Arc::new(ryeos_app::node_policy::compile_generation(
         app_root,
         &policy_table,
         &policy_generation,
-        NodeIdentity::load(&config.node_signing_key_path)?.fingerprint(),
+        node_identity.fingerprint(),
     )?);
     let command_registration = node_policy.require::<
         ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
@@ -730,6 +731,31 @@ fn load_node_config_two_phase_with_socket(
             )
         })
         .context("Phase 1: resolve selected isolation backend")?;
+    // A stopped-node snapshot validates the signed contract only. It must not
+    // open a native controller or inspect host delegation. The running daemon
+    // alone receives the opaque provider after the association has bound both
+    // the exact app root and loaded node identity.
+    let process_scope_provider = if daemon_socket.is_some()
+        && matches!(
+            node_policy
+                .require::<ryeos_engine::isolation::IsolationPolicy>()?
+                .process_scopes,
+            ryeos_engine::isolation::IsolationProcessScopePolicy::Required { .. }
+        ) {
+        match ryeos_node::supervision::InstalledService::discover_app_root(app_root)? {
+            Some(service) => {
+                service.verify_loaded_node_identity(&node_identity)?;
+                Some(service.open_process_scope_provider()?)
+            }
+            // Direct nodes remain valid for non-scope-backed work. The
+            // isolation runtime records no capability, and dedicated workers
+            // fail admission rather than selecting a weaker host process
+            // boundary.
+            None => None,
+        }
+    } else {
+        None
+    };
     let isolation = match daemon_socket {
         Some(daemon_socket) => {
             ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
@@ -742,6 +768,7 @@ fn load_node_config_two_phase_with_socket(
                     .join("isolation.yaml"),
                 format!("sha256:{}", node_policy.generation_digest()),
                 isolation_backend,
+                process_scope_provider,
             )
         }
         // A stopped-node service owns its state operation, not the supervised

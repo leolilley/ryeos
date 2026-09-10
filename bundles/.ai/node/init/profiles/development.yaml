@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T11:08:46Z:7f5875fed52d603ec07d65a1bd2623572a6779e40d8370a84f382f9b155123ee:ZCMHxWKmWG1V2IBPmEH0dlSt/sFYijo5gQV+0YIVh+wUBWC+SSgTqbfH8g+cr95/Hzen4Qx8xMZUbH+uPIKADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T12:59:28Z:abc1f21ac6d4fd166d2849de237271e1802f235ce09f03f7d2af68ec42b3e75e:MvnJrD9XUWOwIiG+cF3p8/iQwDrvWP1pBbTQCk90qceH3PbaEsC5mvLezjW8Z487vb8uw54C/HzdD+NLnwciBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -184,9 +184,13 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 5
+      version: 6
       process_scopes:
-        mode: unconfigured
+        # Semantic requirement only. Lillux supplies the opaque native scope
+        # provider from an administrator-owned host association at daemon boot.
+        mode: required
+        control_timeout_ms: 5000
+        nested_sandbox: false
       mode: enforce
       backend:
         bundle: core

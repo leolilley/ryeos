@@ -482,6 +482,37 @@ impl InstalledService {
         Ok(Some(launch_failure_status(config, failure)))
     }
 
+    /// Read bounded supervisor-owned pre-control failure testimony when the
+    /// account-owned bootstrap config itself is unreadable. This supplies no
+    /// endpoint, signal target, or direct-start fallback; it only lets status
+    /// distinguish a recorded supervised launch failure from an unknown
+    /// configuration failure.
+    pub fn launch_failure_status_without_config(
+        &self,
+        app_root: &Path,
+    ) -> Result<Option<crate::LifecycleStatus>> {
+        let Some(failure) = self.launch_failure()? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::LifecycleStatus::Failed {
+            metadata: crate::DaemonMetadata {
+                pid: Some(failure.pid),
+                bind: None,
+                uds_path: None,
+                started_at: Some(failure.started_at.clone()),
+                version: None,
+                revision: None,
+                build_date: None,
+                app_root: app_root.to_path_buf(),
+            },
+            startup: crate::StartupSnapshot::failed_before_control(
+                failure.started_at,
+                failure.failed_at,
+                failure.error,
+            ),
+        }))
+    }
+
     /// Unprivileged startup corroboration using the identity actually loaded
     /// by the daemon, not merely its public envelope inspected by the launcher.
     /// Call before recovery or readiness; the caller separately proves its
@@ -496,6 +527,18 @@ impl InstalledService {
             bail!("loaded node signing identity differs from the host service association");
         }
         Ok(())
+    }
+
+    /// Open the opaque Lillux scope provider retained by this exact protected
+    /// host association. The node policy supplies only semantic requirements;
+    /// it never contains a native backend name or delegation path.
+    pub fn open_process_scope_provider(
+        &self,
+    ) -> Result<std::sync::Arc<lillux::ProcessScopeProvider>> {
+        self.check_binding()?;
+        lillux::ProcessScopeProvider::open(&self.binding.process_scopes)
+            .map(std::sync::Arc::new)
+            .map_err(anyhow::Error::msg)
     }
 
     pub fn discover(config: &NodeConfig) -> Result<Option<Self>> {

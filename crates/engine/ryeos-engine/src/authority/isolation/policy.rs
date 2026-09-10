@@ -1,7 +1,7 @@
 use ryeos_isolation_protocol::{FixedParentViewLimits, IsolationBackendSelection};
 use serde::{Deserialize, Serialize};
 
-pub const ISOLATION_POLICY_VERSION: u32 = 5;
+pub const ISOLATION_POLICY_VERSION: u32 = 6;
 #[cfg(any(test, feature = "test-support"))]
 pub const TEST_ISOLATION_POLICY_RELATIVE_PATH: &str = "test-fixtures/isolation-policy.yaml";
 
@@ -66,18 +66,19 @@ impl IsolationPolicy {
     }
 }
 
-/// Node authority for the optional host facility, not permission to downgrade
-/// an execution which requires it. Unconfigured nodes must refuse scope-backed
-/// launch; ordinary shared-group launches retain their no-group-escape contract.
-/// Backend-specific paths/identities are compiled and opened only by Lillux.
+/// Node semantic authority for the optional host facility, not permission to
+/// downgrade an execution which requires it. Unconfigured nodes must refuse
+/// scope-backed launch; ordinary shared-group launches retain their
+/// no-group-escape contract. Native provider selection, delegation paths, and
+/// scope configuration are deliberately absent: Lillux retains and opens those
+/// only from the protected host association at daemon boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IsolationProcessScopePolicy {
     // Keep this an empty struct variant: serde's internally-tagged unit
     // variant accepts unknown fields even with deny_unknown_fields.
     Unconfigured {},
-    Configured {
-        configuration: lillux::ProcessScopeConfiguration,
+    Required {
         control_timeout_ms: u64,
         /// Node permission, not evidence that a particular launch has a scope.
         /// Requires the explicit pid_namespace_nested proc ceiling and a

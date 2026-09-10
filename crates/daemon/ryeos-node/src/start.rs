@@ -77,6 +77,20 @@ pub async fn start_with_endpoint_configuration(
     // the sole basis for endpoint comparison, status and launch.
     let locked_env =
         LocalLifecycleEnv::from_config(crate::NodeConfig::load_local(Some(app_root.clone()))?);
+    // The caller's exact root selected both initialization and the lifecycle
+    // lease. A bootstrap document must never redirect this operation to a
+    // different root after that lease was acquired.
+    if locked_env.config().app_root != app_root {
+        bail!(
+            "node bootstrap configuration redirected lifecycle start from {} to {}",
+            app_root.display(),
+            locked_env.config().app_root.display()
+        );
+    }
+    start_lock
+        .as_ref()
+        .expect("lifecycle lock is retained until ownership is visible")
+        .ensure_protects_app_root(&locked_env.config().app_root)?;
     let env = &locked_env;
     let original_config = env.config();
 

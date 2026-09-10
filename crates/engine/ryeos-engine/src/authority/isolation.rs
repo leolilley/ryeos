@@ -602,6 +602,10 @@ struct IsolationRuntimeResolution {
     app_root_destination: Option<PathBuf>,
     daemon_socket: Option<PinnedDaemonSocket>,
     backend: Option<Arc<ResolvedIsolationBackend>>,
+    /// An already-open, host-associated Lillux provider. Signed node policy
+    /// selects only semantic scope requirements; it never transports native
+    /// delegation configuration into the engine.
+    process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
     scope_admission: ProcessScopeAdmission,
 }
 
@@ -1294,7 +1298,7 @@ impl IsolationRuntime {
             == ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested
             && !matches!(
                 policy.process_scopes,
-                IsolationProcessScopePolicy::Configured {
+                IsolationProcessScopePolicy::Required {
                     nested_sandbox: true,
                     ..
                 }
@@ -1304,16 +1308,14 @@ impl IsolationRuntime {
                 "nested proc requires explicit scoped nested-sandbox policy".to_owned(),
             ));
         }
-        if let IsolationProcessScopePolicy::Configured {
-            configuration,
+        if let IsolationProcessScopePolicy::Required {
             control_timeout_ms,
             nested_sandbox,
         } = &policy.process_scopes
         {
             if policy.mode != IsolationMode::Enforce || *control_timeout_ms == 0 {
-                return Err(refused("configured process scopes require enforced isolation and a positive control deadline".to_owned()));
+                return Err(refused("required process scopes require enforced isolation and a positive control deadline".to_owned()));
             }
-            configuration.validate().map_err(refused)?;
             if *nested_sandbox
                 && policy.filesystem.proc_filesystem
                     != ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested
@@ -1406,6 +1408,7 @@ impl IsolationRuntime {
             digest,
             None,
             backend,
+            None,
             ProcessScopeAdmission::Execution,
         )
     }
@@ -1429,6 +1432,7 @@ impl IsolationRuntime {
             digest,
             None,
             backend,
+            None,
             ProcessScopeAdmission::DefinitionValidation,
         )
     }
@@ -1442,6 +1446,7 @@ impl IsolationRuntime {
         source: PathBuf,
         digest: String,
         backend: Option<Arc<ResolvedIsolationBackend>>,
+        process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
     ) -> Result<Self, EngineError> {
         validate_namespace_destination("daemon socket", daemon_socket)?;
         let socket_parent = daemon_socket.parent().ok_or_else(|| {
@@ -1490,6 +1495,7 @@ impl IsolationRuntime {
             digest,
             Some(socket),
             backend,
+            process_scope_provider,
             ProcessScopeAdmission::Execution,
         )
     }
@@ -1501,6 +1507,7 @@ impl IsolationRuntime {
         digest: String,
         daemon_socket: Option<PinnedDaemonSocket>,
         backend: Option<Arc<ResolvedIsolationBackend>>,
+        process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
         scope_admission: ProcessScopeAdmission,
     ) -> Result<Self, EngineError> {
         Self::validate_policy(&policy)?;
@@ -1518,6 +1525,7 @@ impl IsolationRuntime {
             app_root_destination: Some(app_root.to_path_buf()),
             daemon_socket,
             backend,
+            process_scope_provider,
             scope_admission,
         })
     }
@@ -1538,6 +1546,7 @@ impl IsolationRuntime {
             app_root_destination: Some(app_root.to_path_buf()),
             daemon_socket,
             backend,
+            process_scope_provider: None,
             scope_admission: ProcessScopeAdmission::Execution,
         })
     }
@@ -1581,7 +1590,7 @@ impl IsolationRuntime {
             }
         }
         match &self.inspection.process_scopes {
-            IsolationProcessScopePolicy::Configured {
+            IsolationProcessScopePolicy::Required {
                 control_timeout_ms, ..
             } => Ok(lillux::time::Duration::from_millis(*control_timeout_ms)),
             IsolationProcessScopePolicy::Unconfigured {} => Err(refused(
@@ -4076,7 +4085,7 @@ impl IsolationRuntime {
             nested_sandbox: process_scope.is_some()
                 && matches!(
                     self.inspection.process_scopes,
-                    IsolationProcessScopePolicy::Configured {
+                    IsolationProcessScopePolicy::Required {
                         nested_sandbox: true,
                         ..
                     }
@@ -4212,6 +4221,7 @@ impl IsolationRuntime {
             app_root_destination,
             daemon_socket,
             backend,
+            process_scope_provider,
             scope_admission,
         } = resolution;
         if policy.version != ISOLATION_POLICY_VERSION {
@@ -4302,7 +4312,7 @@ impl IsolationRuntime {
             .unwrap_or_default();
         if matches!(
             policy.process_scopes,
-            IsolationProcessScopePolicy::Configured {
+            IsolationProcessScopePolicy::Required {
                 nested_sandbox: true,
                 ..
             }
@@ -4329,19 +4339,18 @@ impl IsolationRuntime {
                     ProcessScopeAdmission::Execution,
                 ) => (None, BTreeSet::new()),
                 (
-                    IsolationProcessScopePolicy::Configured {
-                        configuration,
-                        control_timeout_ms,
-                        ..
+                    IsolationProcessScopePolicy::Required {
+                        control_timeout_ms, ..
                     },
                     ProcessScopeAdmission::Execution,
-                ) => {
-                    let provider =
-                        lillux::ProcessScopeProvider::open(configuration).map_err(refused)?;
-                    let timeout = lillux::time::Duration::from_millis(*control_timeout_ms);
-                    let capabilities = provider.qualify(timeout).map_err(refused)?;
-                    (Some(Arc::new(provider)), capabilities)
-                }
+                ) => match process_scope_provider {
+                    Some(provider) => {
+                        let timeout = lillux::time::Duration::from_millis(*control_timeout_ms);
+                        let capabilities = provider.qualify(timeout).map_err(refused)?;
+                        (Some(provider), capabilities)
+                    }
+                    None => (None, BTreeSet::new()),
+                },
             };
         Ok(Self {
             inspection: IsolationInspection {
@@ -4857,6 +4866,7 @@ impl IsolationRuntime {
             app_root_destination: None,
             daemon_socket: None,
             backend: None,
+            process_scope_provider: None,
             scope_admission: ProcessScopeAdmission::DefinitionValidation,
         })
         .expect("compiled disabled isolation fixture policy is valid")
@@ -8729,12 +8739,8 @@ mod tests {
         policy.mode = IsolationMode::Enforce;
         policy.backend = Some(backend.selection.clone());
         policy.process_scopes = serde_json::from_value(serde_json::json!({
-            "mode": "configured", "control_timeout_ms": 1000,
+            "mode": "required", "control_timeout_ms": 1000,
             "nested_sandbox": false,
-            "configuration": {"version": 3, "backend": {
-                "implementation": "linux_cgroup_v2",
-                "parent": app_root.path().join("absent-host-delegation"),
-            }},
         }))
         .unwrap();
         let source = app_root.path().join("isolation.yaml");
@@ -8769,20 +8775,20 @@ mod tests {
         assert!(prospective.plan_process_scope("not-a-controller").is_err());
         assert!(!app_root.path().join("absent-host-delegation").exists());
 
-        // Ordinary execution still requires the real facility, not a retry
-        // through prospective validation when host admission fails.
-        let error = IsolationRuntime::resolve_compiled_policy(
+        // Ordinary execution preserves the signed semantic requirement but
+        // cannot advertise scope capability without a host-injected provider.
+        let runtime = IsolationRuntime::resolve_compiled_policy(
             app_root.path(),
             policy.clone(),
             source.clone(),
             digest.clone(),
             Some(Arc::clone(&backend)),
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("delegation is absent"));
+        .unwrap();
+        assert!(runtime.process_scope_control_timeout().is_err());
 
         // Prospective validation does not waive signed backend capabilities.
-        if let IsolationProcessScopePolicy::Configured { nested_sandbox, .. } =
+        if let IsolationProcessScopePolicy::Required { nested_sandbox, .. } =
             &mut policy.process_scopes
         {
             *nested_sandbox = true;
@@ -8828,15 +8834,28 @@ mod tests {
         value["mode"] = "enforce".into();
         value["backend"] = serde_json::to_value(resolved_backend().selection).unwrap();
         value["process_scopes"] = serde_json::json!({
-            "mode":"configured", "control_timeout_ms":1000,
-            "configuration":{"version":3,"backend":{"implementation":"linux_cgroup_v2",
-                "parent":"/fixture/explicit-delegation"}}
+            "mode":"required", "control_timeout_ms":1000
         });
         assert!(
             serde_json::from_value::<IsolationPolicy>(value.clone()).is_err(),
             "nested authority must be explicit, not defaulted"
         );
         value["process_scopes"]["nested_sandbox"] = true.into();
+        value["process_scopes"]["configuration"] = serde_json::json!({
+            "version": 3,
+            "backend": {
+                "implementation": "linux_cgroup_v2",
+                "parent": "/must-not-enter-signed-policy"
+            }
+        });
+        assert!(
+            serde_json::from_value::<IsolationPolicy>(value.clone()).is_err(),
+            "native Lillux configuration must not be accepted in signed RyeOS policy"
+        );
+        value["process_scopes"]
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration");
         let parsed: IsolationPolicy = serde_json::from_value(value.clone()).unwrap();
         assert!(
             IsolationRuntime::validate_policy(&parsed)

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T07:15:52Z:cb6630e6dee13a82fdf7cfa931ea96426b47ed0641d4fa546c98768b80a11b65:7nlu58iRTn2JqMKoNNjEJNsYNs5sW+wjVAwp5Pfsws687d5AsXA+dDhlqQeJPsrGFjBbg4aYRSnPy7olFMb7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T12:59:28Z:07d418f4f080a13067bfd8df2972db1702ab8417b3ebd34f2dd0bf7b50f13932:eQkFKCfSAMEZ6Kl3g1awTGhKZ4UHjTNiiU2emjMm6Z6+CedUFDd7vgFiUkZPaD+P9AMVSOqg2024ZyWSIgvxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -206,7 +206,7 @@ The policy has two modes:
 ```yaml
 schema: 1
 policy:
-  version: 5
+  version: 6
   mode: disabled
   backend: null
   process_scopes:
@@ -582,11 +582,12 @@ ryeos node host setup --confirm [--app-root <existing-node-root>] \
 This is an administrator-maintenance transition, not a worker operation. The
 CLI selects the already initialized app root and its current account; Lillux
 performs the host-specific elevation, native service provisioning, executable
-pinning and selected process-scope delegation. RyeOS receives only the opaque
-Lillux scope configuration and keeps its generic app-root, node-identity,
-account, desired-lifecycle and upgrade testimony. Neither node policy nor
-worker input can select a privileged executable, service manager, host account
-or scope parent.
+pinning and selected process-scope delegation. RyeOS receives only an
+already-open opaque Lillux scope provider after rechecking the exact app-root,
+node-identity and account association. RyeOS keeps generic app-root,
+node-identity, account, desired-lifecycle and upgrade testimony. Neither node
+policy nor worker input can select a privileged executable, service manager,
+host account, backend or scope parent.
 
 The node service receives an empty process environment. Its exact app root is
 the sole launch argument, and the node-account daemon resolves its already
