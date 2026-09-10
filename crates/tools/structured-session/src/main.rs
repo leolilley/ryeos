@@ -2518,14 +2518,43 @@ impl StructuredWorkload {
                 .ok_or_else(|| anyhow!("structured-session HTTP route is not session bound"))?;
             substitutions.push(("session_id", session));
         }
-        let path = substitute_http_path(&http_path, &substitutions)?;
+        let mut substitutions: Vec<(String, String)> = Vec::new();
+        if http_path.contains("{session_id}") {
+            let session = self
+                .bound_session_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("structured-session HTTP route is not session bound"))?;
+            substitutions.push(("session_id".to_owned(), session.to_owned()));
+        }
         let mut params = params;
+        if let Some(object) = params.as_object() {
+            for key in object.keys() {
+                let placeholder = format!("field:{key}");
+                if http_path.contains(&placeholder)
+                    && !substitutions.iter().any(|(name, _)| *name == placeholder)
+                {
+                    let value = object.get(key).and_then(Value::as_str).ok_or_else(|| {
+                        anyhow!("structured-session HTTP path field `{key}` is not text")
+                    })?;
+                    substitutions.push((placeholder, value.to_owned()));
+                }
+            }
+        }
+        let substituted_fields: Vec<String> = substitutions
+            .iter()
+            .filter(|(name, _)| name.starts_with("field:"))
+            .map(|(name, _)| name.trim_start_matches("field:").to_owned())
+            .collect();
+        let path = substitute_http_path(&http_path, &substitutions)?;
         if matches!(http_method.as_str(), "GET" | "DELETE") {
             // Path placeholders already carry their values; a bodyless route
             // must not also duplicate bound keys as query entries.
             if let Some(object) = params.as_object_mut() {
                 if http_path.contains("{session_id}") {
                     object.remove("session_id");
+                }
+                for field in &substituted_fields {
+                    object.remove(field);
                 }
             }
         }
@@ -2571,8 +2600,10 @@ impl StructuredWorkload {
             .as_deref()
             .ok_or_else(|| anyhow!("structured-session HTTP server request lacks its reply path"))?;
         let correlation = canonical_id(request_id)?;
-        let path =
-            substitute_http_path(reply_path, &[("request_id", correlation.as_str())])?;
+        let path = substitute_http_path(
+            reply_path,
+            &[("request_id".to_owned(), correlation.clone())],
+        )?;
         let url = format!("{}{}", http.base_url, path);
         perform_http_request(&http.client, &url, "POST", &http.authorization, response)?;
         Ok(())
@@ -3523,7 +3554,7 @@ fn encode_path_segment(value: &str) -> String {
     encoded
 }
 
-fn substitute_http_path(path: &str, substitutions: &[(&str, &str)]) -> Result<String> {
+fn substitute_http_path(path: &str, substitutions: &[(String, String)]) -> Result<String> {
     let mut resolved = String::new();
     let mut remainder = path;
     while let Some(start) = remainder.find('{') {
@@ -3534,8 +3565,8 @@ fn substitute_http_path(path: &str, substitutions: &[(&str, &str)]) -> Result<St
         let name = &remainder[start + 1..start + end];
         let value = substitutions
             .iter()
-            .find(|&&(placeholder, _)| placeholder == name)
-            .map(|&(_, value)| value)
+            .find(|(placeholder, _)| placeholder == name)
+            .map(|(_, value)| value.as_str())
             .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unbound"))?;
         resolved.push_str(&encode_path_segment(value));
         remainder = &remainder[start + end + 1..];

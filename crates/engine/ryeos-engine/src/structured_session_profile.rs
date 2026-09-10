@@ -283,7 +283,6 @@ pub fn compile(
             .and_then(Value::as_object)
             .and_then(|binding| binding.get("action"))
             .and_then(Value::as_str);
-        validate_route_transport_addressing(route, http_transport, binding_action)?;
         if !allowed_effects.contains(&value_string(route, "effect_class")?) {
             bail!("structured-session route has an unknown effect class");
         }
@@ -418,6 +417,7 @@ pub fn compile(
         if binding_request_field.is_some_and(|field| controlled_fields.contains(field)) {
             bail!("structured-session binding field overlaps another route field policy");
         }
+        validate_route_transport_addressing(route, http_transport, binding_action, &controlled_fields)?;
         validate_predicates(route.get("response_predicates"), 32)?;
         validate_observations(route.get("observations"), 16)?;
         if !matches!(
@@ -782,10 +782,11 @@ pub fn compile(
         )?;
         match (http_transport, item.get("reply_http_path")) {
             (true, Some(reply)) => validate_http_path(
-                reply.as_str().ok_or_else(|| {
-                    anyhow!("structured-session reply HTTP path must be a string")
-                })?,
+                reply
+                    .as_str()
+                    .ok_or_else(|| anyhow!("structured-session reply HTTP path must be a string"))?,
                 &["request_id"],
+                false,
             )?,
             (true, None) => {
                 bail!("structured-session HTTP server request lacks its reply path")
@@ -1439,6 +1440,7 @@ fn validate_route_transport_addressing(
     route: &serde_json::Map<String, Value>,
     http_transport: bool,
     binding_action: Option<&str>,
+    controlled_fields: &BTreeSet<&str>,
 ) -> Result<()> {
     match (http_transport, route.get("http_method"), route.get("http_path")) {
         (true, Some(method), Some(path)) => {
@@ -1451,11 +1453,22 @@ fn validate_route_transport_addressing(
             let path = path
                 .as_str()
                 .ok_or_else(|| anyhow!("structured-session route HTTP path must be a string"))?;
-            validate_http_path(path, &["session_id"])?;
+            validate_http_path(path, &["session_id"], true)?;
             if path.contains("{session_id}")
                 && !matches!(binding_action, Some("require") | Some("bind_expected"))
             {
                 bail!("structured-session HTTP session placeholder requires a bound session");
+            }
+            for segment in path.split('{').skip(1) {
+                if let Some((name, _)) = segment.split_once('}') {
+                    if let Some(field) = name.strip_prefix("field:")
+                        && !controlled_fields.contains(field)
+                    {
+                        bail!(
+                            "structured-session HTTP path field `{field}` is not suppliable by its route"
+                        );
+                    }
+                }
             }
         }
         (true, _, _) => {
@@ -1470,8 +1483,10 @@ fn validate_route_transport_addressing(
 }
 
 /// An HTTP path template is bounded, absolute, carries no query or fragment,
-/// and its only parameterization is the named closed placeholder set.
-fn validate_http_path(value: &str, placeholders: &[&str]) -> Result<()> {
+/// and its only parameterization is the named closed placeholder set. Route
+/// paths may additionally name payload fields, which must be suppliable
+/// through the route's own admitted parameter vocabulary.
+fn validate_http_path(value: &str, placeholders: &[&str], allow_fields: bool) -> Result<()> {
     if value.len() > 512
         || !value.starts_with('/')
         || value.chars().any(char::is_control)
@@ -1487,7 +1502,11 @@ fn validate_http_path(value: &str, placeholders: &[&str]) -> Result<()> {
             .find('}')
             .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unterminated"))?;
         let name = &remainder[start + 1..start + end];
-        if !placeholders.contains(&name) {
+        let admitted_field = allow_fields
+            && name
+                .strip_prefix("field:")
+                .is_some_and(|field| validate_field_name(field).is_ok());
+        if !placeholders.contains(&name) && !admitted_field {
             bail!("structured-session HTTP path placeholder is not admitted");
         }
         remainder = &remainder[start + end + 1..];
@@ -1504,7 +1523,7 @@ fn validate_http_path(value: &str, placeholders: &[&str]) -> Result<()> {
                 .trim_start_matches('{')
                 .trim_end_matches('}')
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
         {
             bail!("structured-session HTTP path placeholder segment is not canonical");
         }
@@ -2217,6 +2236,18 @@ mod tests {
             json!({"action":"require","request_field":"sessionID","response_pointer":null});
         compile(&serde_json::to_vec(&bound).unwrap(), &schemas())
             .expect("a bound session placeholder must be admitted");
+
+        let mut fielded = http.clone();
+        fielded["routes"][0]["http_path"] = json!("/auth/{field:provider}");
+        assert!(compile(&serde_json::to_vec(&fielded).unwrap(), &schemas()).is_err());
+
+        fielded["routes"][0]["fixed_params"] = json!({"provider":"opencode"});
+        compile(&serde_json::to_vec(&fielded).unwrap(), &schemas())
+            .expect("an admitted route field must be substitutable into its path");
+
+        let mut unadmitted = fielded.clone();
+        unadmitted["routes"][0]["http_path"] = json!("/auth/{field:absent}");
+        assert!(compile(&serde_json::to_vec(&unadmitted).unwrap(), &schemas()).is_err());
     }
 
     #[test]
