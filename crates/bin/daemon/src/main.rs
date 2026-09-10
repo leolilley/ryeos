@@ -247,6 +247,14 @@ const INSTALL_PREPARED_ENV: &str = "RYEOS_INSTALL_PREPARED";
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(config::DaemonCommand::InitPolicyPreflight {
+        app_root,
+        schema_cut,
+    }) = &cli.command
+    {
+        ryeos_node::preflight_existing_policy_generation(app_root, *schema_cut)?;
+        return Ok(());
+    }
     if let Some(config::DaemonCommand::HostProvision {
         app_root,
         controller_account_json,
@@ -470,7 +478,8 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
             config::DaemonCommand::HostProvision { .. } => {
                 unreachable!("handled before node startup")
             }
-            config::DaemonCommand::HostInstall { .. } => {
+            config::DaemonCommand::InitPolicyPreflight { .. }
+            | config::DaemonCommand::HostInstall { .. } => {
                 unreachable!("handled before node startup")
             }
             config::DaemonCommand::HostUpgrade { .. } => {

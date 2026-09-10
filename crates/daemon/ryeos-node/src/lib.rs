@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 pub use init::{
     InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase,
-    InitProgress, InitReport, load_trusted_init_node_profile, run_init,
-    run_init_with_operator_ceremony, run_init_with_progress,
+    InitProgress, InitReport, load_trusted_init_node_profile, preflight_existing_policy_generation,
+    run_init, run_init_with_operator_ceremony, run_init_with_progress,
     seal_init_completion_after_policy_update, verify_init_completion,
 };
 pub use init_check::{InitDiagnostics, InitState, require_initialized};

@@ -242,6 +242,29 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     run_init_with_progress(opts, |_| Ok(()))
 }
 
+/// Read-only compatibility gate used before an installer changes lifecycle or
+/// package state. Strict mode compiles the exact current generation through
+/// the registered policy table. An explicitly selected schema cut instead
+/// proves only the complete node-signed predecessor occupant, because decoding
+/// retired section schemas is precisely what the cut must not require.
+pub fn preflight_existing_policy_generation(app_root: &Path, schema_cut: bool) -> Result<()> {
+    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
+    let trust = TrustStore::load(None, &operator_config_root)
+        .context("load node trust for policy-generation preflight")?;
+    if schema_cut {
+        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
+            .context("prove complete signed predecessor policy generation")
+    } else {
+        ryeos_app::node_policy::generation::load_policy_generation(
+            app_root,
+            &trust,
+            &ryeos_app::node_policy::NodePolicyTable::new(),
+        )
+        .context("compile current signed node policy generation")
+        .map(|_| ())
+    }
+}
+
 pub fn run_init_with_progress(
     opts: &InitOptions,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,

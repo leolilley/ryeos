@@ -203,6 +203,37 @@ build_install_init_profile_args() {
     fi
 }
 
+# Compile the existing signed policy generation with the candidate daemon
+# before acquiring administrator authority, stopping a live node, or changing
+# the shared package namespace. A clean schema cut is never inferred: only the
+# explicit reset flag changes this probe to meaning-blind predecessor
+# verification. This keeps policy-kind/version knowledge in the registered
+# Rust compilers rather than duplicating it in the installer.
+preflight_existing_node_policy() {
+    local policy_generation_path="$1"
+    local reset_generation="$2"
+    local -a command=(
+        "$target_dir/ryeosd"
+        init-policy-preflight
+        --app-root "$state_root"
+    )
+    if [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
+        return 0
+    fi
+    [[ -e "$policy_generation_path" && ! -L "$policy_generation_path" ]] || {
+        ryeos_term_fail "existing node policy generation path is unsafe: $policy_generation_path"
+        return 1
+    }
+    if [[ "$reset_generation" == "1" ]]; then
+        command+=(--schema-cut)
+    fi
+    if [[ "$invoking_user" != "$(id -un)" ]]; then
+        sudo -H -u "$invoking_user" "${command[@]}"
+    else
+        "${command[@]}"
+    fi
+}
+
 # Refuse a non-official key in a source publisher document before stopping the
 # daemon or changing the installed layout unless the operator acknowledged it.
 # The document is only a publisher pointer; it is never authority by location.
@@ -762,6 +793,13 @@ if [[ $run_init -eq 1 ]]; then
     build_install_init_profile_args \
         "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" || \
         die "could not resolve init-profile arguments"
+    if ! preflight_existing_node_policy \
+        "$policy_generation_path" "$reset_node_policy_generation"; then
+        if [[ $reset_node_policy_generation -eq 1 ]]; then
+            die "existing node policy generation is not a complete signed schema-cut occupant; node lifecycle was not changed"
+        fi
+        die "existing node policy generation is incompatible with this RyeOS build; rerun with --reset-node-policy-generation to explicitly replace it before lifecycle shutdown"
+    fi
 fi
 
 preflight_host_install "$target_dir" "${required_bins[@]}" || \

@@ -64,6 +64,18 @@ impl Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum DaemonCommand {
+    /// Read-only package preflight for an existing signed node-policy
+    /// generation. This is hidden because ordinary operators use `ryeos
+    /// node doctor` or the explicit policy-generation reset command.
+    #[command(hide = true)]
+    InitPolicyPreflight {
+        #[arg(long)]
+        app_root: PathBuf,
+        /// Verify only the complete node-signed predecessor occupant when an
+        /// explicit clean schema cut has already been selected.
+        #[arg(long)]
+        schema_cut: bool,
+    },
     /// Root-only one-time native host setup. The caller supplies explicit host
     /// selections; no user-writable node policy is consulted here.
     #[command(hide = true)]
@@ -231,6 +243,25 @@ mod tests {
                 action: HostInstallAction::Acquire { prepared: true, args, .. },
             }) if package_root == PathBuf::from("/usr/share/ryeos")
                 && args == vec![OsString::from("--populate"), OsString::from("--all")]
+        ));
+    }
+
+    #[test]
+    fn init_policy_preflight_preserves_explicit_schema_cut_selection() {
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "init-policy-preflight",
+            "--app-root",
+            "/home/example/.local/share/ryeos",
+            "--schema-cut",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::InitPolicyPreflight {
+                app_root,
+                schema_cut: true,
+            }) if app_root == PathBuf::from("/home/example/.local/share/ryeos")
         ));
     }
 }
