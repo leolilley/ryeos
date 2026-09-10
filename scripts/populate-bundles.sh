@@ -14,13 +14,13 @@
 #
 # Bundle sets:
 #   full            core + central-auth + standard + web + browser + ryeos-ui +
-#                   hosted-node + codex + local-inference (default)
+#                   hosted-node + codex + opencode + local-inference (default)
 #   central-host    core + central-auth + standard + web + tv-tracker-authoring —
 #                   standard node plus the rye/web/search tool and app authoring
 #   standard        core + central-auth + standard — scheduler/graph/directive node
 #   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
-#   hosted-workflow core + central-auth + standard + hosted-node + codex — hosted
-#                   node that also runs scheduler/graph/directive and Codex workloads
+#   hosted-workflow core + central-auth + standard + hosted-node + codex + opencode — hosted
+#                   node that also runs scheduler/graph/directive and hosted workloads
 #   release-artifacts internal non-installable union used to compile and publish
 #                   the native archive and every release image in one build
 #

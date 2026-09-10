@@ -1,11 +1,11 @@
-# ryeos:signed:2026-09-10T10:35:03Z:02d322a892b634cb9620333839c93791adaa0ee62e4b01994dafe5b943756433:5kqIgKyovELhE4s5n21f288J8gdIIcRyQ0UXOhRCvGjmBSzRk+2w4IsTBj8qplwkjG7ER1rvIFRo6LjdRacUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T11:08:47Z:343dbcc68c6ba43c953d644dbf5982842755a416a77783003a49eb2ab52b43f6:KFmo2V9yJrIjr/BqdU2FvM40GrAO2g47G5ObMT/MI7/r9kpR3dB4MU/3yMnSATH1bek+eUkpP6ZZHWyn3b2uCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
   - codex
-  - opencode
   - core
   - hosted-node
+  - opencode
   - standard
 policies:
   accounting:

@@ -1,13 +1,13 @@
-# ryeos:signed:2026-09-10T10:35:03Z:30b2a9d1e8ae267580b84d4b1dec736938c79e0f7626ac27500ee10e1e334c92:fz9zNPyfd09a4ntCpwgdKUB9vsabES+WsNZmfkRpkW9AHalbAzoOssPpN5EfImlXvclM0btaCdotY3F1BuVoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T11:08:47Z:2505ee874aa30b4541c2de88ffcee89d76fe46a8874b922c5c5915e7471b5991:IRijB4M8jWguA6IZbTyAMCsakPnb38KBFvcWoJiDUyg7UtlDjxw1QbDfndVbngO7UpEo6fvEgBB2v9OvtfB7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
   - central-auth
   - codex
-  - opencode
   - core
   - hosted-node
   - local-inference
+  - opencode
   - ryeos-ui
   - standard
   - web
