@@ -1,10 +1,17 @@
 {
-  "schema_version": 4,
+  "schema_version": 6,
   "transport": "http_sse",
   "http_sse": {
     "username_env": "OPENCODE_SERVER_USERNAME",
     "password_env": "OPENCODE_SERVER_PASSWORD",
-    "seed_path_env": "OPENCODE_CONFIG"
+    "seed_path_env": "OPENCODE_CONFIG",
+    "listener_stdout_prefix": "opencode server listening on http://127.0.0.1:",
+    "readiness_path": "/global/health",
+    "readiness_schema": "schema/EmptyRequest.json",
+    "event_path": "/event",
+    "event_type_pointer": "/type",
+    "event_properties_pointer": "/properties",
+    "ignored_notification_projection": "envelope"
   },
   "configuration_authority": "immutable_argv",
   "workload_realization_id": "opencode",
@@ -37,7 +44,6 @@
   "route_sets": {
     "enrollment": [
       "credential.auth.remove",
-      "credential.auth.set",
       "credential.providers.read"
     ],
     "session": [
@@ -52,32 +58,16 @@
   },
   "routes": [
     {
-      "id": "credential.auth.set",
-      "method": "credential.auth.set",
-      "effect_class": "credential_write",
-      "http_method": "PUT",
-      "http_path": "/auth/{field:provider}",
-      "request_schema": "schema/AuthSetRequest.json",
-      "response_schema": "schema/AuthSetResponse.json",
-      "fixed_params": {},
-      "workspace_fields": [],
-      "forbidden_non_null_fields": [],
-      "response_predicates": [],
-      "observations": [],
-      "result_retention": "ephemeral",
-      "ceremony": null,
-      "forbidden_fields": [],
-      "post_success_routes": [],
-      "progress_notifications": [],
-      "audience": "public"
-    },
-    {
       "id": "credential.auth.remove",
       "method": "credential.auth.remove",
       "effect_class": "credential_delete",
       "http_method": "DELETE",
-      "http_path": "/auth/{field:provider}",
-      "request_schema": "schema/EmptyRequest.json",
+      "http_path": "/auth/{provider}",
+      "http_body_schema": "schema/EmptyRequest.json",
+      "http_path_parameters": {
+        "provider": {"source": "input", "field": "provider"}
+      },
+      "request_schema": "schema/ProviderInput.json",
       "response_schema": "schema/AuthRemoveResponse.json",
       "fixed_params": {},
       "workspace_fields": [],
@@ -97,6 +87,8 @@
       "effect_class": "credential_read",
       "http_method": "GET",
       "http_path": "/provider",
+      "http_body_schema": "schema/EmptyRequest.json",
+      "http_path_parameters": {},
       "request_schema": "schema/EmptyRequest.json",
       "response_schema": "schema/ProviderListResponse.json",
       "fixed_params": {},
@@ -117,6 +109,8 @@
       "effect_class": "external_effect",
       "http_method": "POST",
       "http_path": "/session",
+      "http_body_schema": "schema/SessionCreateRequest.json",
+      "http_path_parameters": {},
       "request_schema": "schema/SessionCreateRequest.json",
       "response_schema": "schema/SessionCreateResponse.json",
       "fixed_params": {},
@@ -126,7 +120,10 @@
       "forbidden_non_null_fields": [
         "parentID"
       ],
-      "forbidden_fields": [],
+      "forbidden_fields": [
+        "agent",
+        "model"
+      ],
       "response_predicates": [],
       "observations": [
         {
@@ -167,7 +164,11 @@
       "effect_class": "session_mutation",
       "http_method": "PATCH",
       "http_path": "/session/{session_id}",
-      "request_schema": "schema/SessionUpdateRequest.json",
+      "http_body_schema": "schema/SessionUpdateRequest.json",
+      "http_path_parameters": {
+        "session_id": {"source": "bound_session"}
+      },
+      "request_schema": "schema/EmptyRequest.json",
       "response_schema": "schema/SessionUpdateResponse.json",
       "fixed_params": {
         "title": "RyeOS hosted session"
@@ -194,6 +195,10 @@
       "effect_class": "pure_read",
       "http_method": "GET",
       "http_path": "/session/{session_id}",
+      "http_body_schema": "schema/EmptyRequest.json",
+      "http_path_parameters": {
+        "session_id": {"source": "bound_session"}
+      },
       "request_schema": "schema/EmptyRequest.json",
       "response_schema": "schema/SessionGetResponse.json",
       "fixed_params": {},
@@ -219,7 +224,11 @@
       "effect_class": "session_mutation",
       "http_method": "GET",
       "http_path": "/session/{session_id}",
-      "request_schema": "schema/SessionGetResponse.json",
+      "http_body_schema": "schema/EmptyRequest.json",
+      "http_path_parameters": {
+        "session_id": {"source": "input", "field": "sessionID"}
+      },
+      "request_schema": "schema/SessionIdInput.json",
       "response_schema": "schema/SessionGetResponse.json",
       "fixed_params": {},
       "workspace_fields": [],
@@ -261,18 +270,24 @@
       "effect_class": "external_effect",
       "http_method": "POST",
       "http_path": "/session/{session_id}/prompt_async",
+      "http_body_schema": "schema/PromptAsyncRequest.json",
+      "http_path_parameters": {
+        "session_id": {"source": "bound_session"}
+      },
       "request_schema": "schema/PromptAsyncRequest.json",
       "response_schema": "schema/SessionGetResponse.json",
       "fixed_params": {
         "agent": "build"
       },
       "workspace_fields": [],
-      "forbidden_non_null_fields": [
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [
+        "command",
+        "model",
         "system",
         "tools",
-        "command"
+        "variant"
       ],
-      "forbidden_fields": [],
       "response_predicates": [],
       "observations": [],
       "result_retention": "ephemeral",
@@ -292,6 +307,10 @@
       "effect_class": "external_effect",
       "http_method": "POST",
       "http_path": "/session/{session_id}/abort",
+      "http_body_schema": "schema/EmptyRequest.json",
+      "http_path_parameters": {
+        "session_id": {"source": "bound_session"}
+      },
       "request_schema": "schema/EmptyRequest.json",
       "response_schema": "schema/SessionAbortResponse.json",
       "fixed_params": {},

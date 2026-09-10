@@ -1,8 +1,14 @@
-# RyeOS OpenCode (design in progress)
+<!-- ryeos:signed:2026-09-10T10:35:03Z:71f738e406372fb7ed96a57bc19eba26a0b1aa3627e88a40b36e54bea4a2956b:pUzmJvSTcfAy+i7kxFGtXRMQrsMDkwMXBQg7DMGhTOT+mwum52qNWshjAhvJ4Go0bUjn2yhZL4w8Wl1uKAfhBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# RyeOS OpenCode
 
-First-class signed integration for hosting a pinned opencode server on a
-RyeOS node, mirroring the Codex bundle: the generic structured-session
-bridge plus one signed profile. Nothing here is admitted or qualified yet.
+Provider data for hosting a pinned OpenCode server through RyeOS's generic
+structured-session bridge.  The bridge is Core-owned; this bundle contains
+only OpenCode's exact executable, protocol schemas and signed profile.
+
+This provider is not a substitute for the ChatGPT-subscription Codex product
+path.  It proves the substrate is provider-neutral.  Live OpenCode acceptance
+remains contingent on an explicitly provisioned low-cost provider credential;
+RyeOS never imports an ambient OpenCode credential.
 
 ## Verified protocol facts (opencode 1.18.30, probed 2026-09-10)
 
@@ -65,30 +71,24 @@ bridge plus one signed profile. Nothing here is admitted or qualified yet.
 
 ## Substrate change: profile transport
 
-The bridge previously hardcoded stdio line-delimited JSON-RPC to the workload.
-Profiles now require an explicit top-level `transport` (schema_version
-3 -> 4, clean cut, no default; the Codex profiles were regenerated and
-re-signed in the same change):
+The bridge accepts only an explicit signed top-level `transport`.  Profile
+schema 6 is a clean cut: it separates logical command input, signed path/query
+projection, and upstream request body.  A path field is never injected into a
+vendor body just because it is needed for addressing.
 
 - `"stdio_jsonrpc"` — current behavior.
-- `"http_sse"` — bridge spawns the workload, parses the listening line for
-  the bound port, waits for `GET /global/health`, then speaks HTTP with
-  per-boot basic auth. Requests map route rules to `http_method` +
-  `http_path` templates (`{session_id}` placeholder, bound-session routes
-  only); server-request replies map to `reply_http_path` (`{request_id}`
-  placeholder). The SSE reader wraps each event as
-  `{"method": <type>, "params": <properties>}` so notification rules and
-  `/message/params/` observation pointers stay unchanged.
+- `"http_sse"` — bridge uses the provider profile's bounded loopback-listener
+  announcement, verifies a signed readiness endpoint, then speaks HTTP with
+  per-boot basic auth. Route rules declare an exact body schema and every
+  path segment's source (`input` or `bound_session`). SSE validates the signed
+  event envelope projection before routing its properties; stream media type,
+  partial events and aggregate frame size are bounded.
 
-Current state: the admission compiler validates the complete v4 vocabulary
-including the `http_sse` credential block, and the bridge implements the
-transport: loopback listener discovery from the workload's stdout listening
-line, per-boot basic-auth credentials supplied through profile-named
-environments, request dispatch on the route's `http_method`/`http_path` with
-bounded response bodies, server-sent events normalized into the stdio
-notification/server-request envelopes, and approval replies POSTed to the
-admitted `reply_http_path`. An integration test drives a fixture HTTP
-server through binding, event streaming, and session-path substitution.
+The compiler validates the closed HTTP/SSE vocabulary including listener,
+readiness, event-envelope, path and body contracts.  A disposable-node test
+must still execute the real loopback server: the Codex development sandbox
+cannot create loopback sockets, so its unit fixture is intentionally not
+claimed as installed-host or provider-contact evidence.
 
 Loopback TCP inside the worker process scope is a new admission surface the
 Codex stdio profile never needed; node policy must admit it explicitly for
@@ -98,7 +98,6 @@ this worker family rather than globally.
 
 | Route id | HTTP | Effect class |
 |---|---|---|
-| `credential.auth.set` | `PUT /auth/{provider}` | credential_write |
 | `credential.providers.read` | `GET /provider` | credential_read |
 | `credential.auth.remove` | `DELETE /auth/{provider}` | credential_delete |
 | `session.start` | `POST /session` | external_effect |
@@ -169,15 +168,17 @@ worker shares the node's host networking and the loopback transport works.
   is bounded only by node policy; a worker-kind network projection would
   be the mechanical fix if that gap must close.
 
-## Open items
+## Current limits
 
-- Bundle population/signing (`populate-bundles`), `test_contract.py` mirror,
-  and init-profile registration remain; this tree is authored source only.
-- The generic bridge is core-owned (`bin:core/ryeos-structured-session-bridge`)
-  and shared with the Codex worker; this bundle declares the worker-kind
-  dependency on core through its manifest requires list.
-- The environment config's `portable_state_contract: null` and omitted
-  subject projection need install-time validation against the signed
+- Credential write is deliberately absent.  A raw API key, OAuth access token
+  or refresh token would be retained in durable command testimony.  Live use
+  must wait for the generic vault-backed late secret-input contract; no caller
+  may place provider secrets in a hosted command.
+- OpenCode's unified database is node-local credential state.  It can resume
+  locally but cannot claim portable upstream-conversation handoff without a
+  portable subject projection.
+- The default environment has no workload client and grants no Tool wildcard.
+  A qualified authoring environment supplies a finite exact Tool set.
   worker-environment schema.
 - Live qualification against an activated node (credential enrollment,
   a credentialed session turn, restart recovery) is unrecorded.

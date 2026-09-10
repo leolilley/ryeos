@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-10T10:35:03Z:4112aa0bd2074532c7186492499048e45e236d2766a19572c6f671cf64957f08:J0pqCj86BjbUJ9ZQ7M/W2WVGr0owYxuc+a6N1lwLcBR7doTI/uYzMhh8nY84ydXaN4NrU3lWm8GK2wn0Tta4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -261,7 +262,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 4)
+        self.assertEqual(self.profile["schema_version"], 6)
         self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["workload_client"])
         immutable_args = "\n".join(self.profile["workload_args"])

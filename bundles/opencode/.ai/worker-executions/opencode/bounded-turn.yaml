@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-10T10:35:03Z:169a2ccf44f92076ac6ac9e29a09426d86a488ecf27c4c947b9ab40840b384ae:+JJOQesKkm8asHsYwwEvg+j6vnW7B1Ka9J0o14KODvH8zOHF4Ko/d6B6+2S1b0BGUUV8wXg81bmgkGHP3kqSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: opencode
 description: Run one completion-fenced opencode turn and retain its private candidate for owner review.
@@ -23,8 +24,8 @@ config:
     turn_start_route: turn.start
     max_uncontacted_attempts: 3
   candidate_disposition: retained_for_review
-  workload_client_delegation_caps:
-    - ryeos.execute.tool.*
+  # Development environments add their finite Tool set explicitly.
+  workload_client_delegation_caps: []
 limits:
   turns: 1
   duration_seconds: 15000

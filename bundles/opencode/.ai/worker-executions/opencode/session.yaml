@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-10T10:35:03Z:ddac4fcff4ec98ebcea3ce6b4bcf4d7909ea15fa9dc8c45e8310bd6bdb5b2b0b:kTNyYV2yGgXUM2pQxJEj3XzJjIQjUVy/sH9m4ZDdr12wlolB7rXcawXIm8IdcV+t1+TlNEXTwz8JNl6wpUJhAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: opencode
 description: Open one RyeOS-owned opencode session against an immutable project generation.
@@ -20,8 +21,9 @@ config:
   mode:
     kind: session
   candidate_disposition: owner_decision
-  workload_client_delegation_caps:
-    - ryeos.execute.tool.*
+  # This provider environment has no admitted workload client yet.  Do not
+  # grant a wildcard now and rely on a later environment to narrow it.
+  workload_client_delegation_caps: []
 limits:
   duration_seconds: 604200
 requires:

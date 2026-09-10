@@ -1,8 +1,9 @@
-# ryeos:signed:2026-09-08T22:52:46Z:2b050d5c1ad1683dc6c2a1b81d1872ebe65f903959751492cebf6b1b301b8da2:PwFANr6LfLErorub4H6dqA9uktKEUcArSMGufWx2vqBV564xTaOWrHChb/uJd41SCqR5dL+yNCa70yQZQlvoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T10:35:03Z:02d322a892b634cb9620333839c93791adaa0ee62e4b01994dafe5b943756433:5kqIgKyovELhE4s5n21f288J8gdIIcRyQ0UXOhRCvGjmBSzRk+2w4IsTBj8qplwkjG7ER1rvIFRo6LjdRacUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
   - codex
+  - opencode
   - core
   - hosted-node
   - standard
@@ -83,6 +84,7 @@ policies:
       central-auth: []
       codex:
         - ryeos.register.command.root.codex
+      opencode: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
