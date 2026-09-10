@@ -305,7 +305,13 @@ pub enum AuthorizedKeyCreateError {
     AlreadyExists,
 }
 
-enum AuthorizedKeySubject<'a> {
+/// Exact semantic subject of a node-signed authorized-key grant.
+///
+/// Scope reconciliation must carry this explicitly. Inferring it from the
+/// presence of one optional origin field previously made an admitted
+/// `remote_node` grant impossible to maintain without reclassifying it.
+#[derive(Debug, Clone, Copy)]
+pub enum AuthorizedKeySubject<'a> {
     LocalClient,
     RemoteNode {
         origin_site_id: &'a str,
@@ -788,16 +794,14 @@ fn publish_authorized_key_bytes(
     }
 }
 
-/// Reconcile and publish one client grant under a single pinned directory
-/// lock. When `remote_operator_origin_site_id` is present, the exact operator
-/// key remains the principal while the node-signed grant constrains its
-/// allowed forwarding site. Actual transit requires a separately admitted
-/// source-node co-signature. Remote-operator grants never accept wildcard
-/// scopes. The verified incumbent is the exact
+/// Reconcile and publish one client or node grant under a single pinned
+/// directory lock. The requested subject is explicit so scope maintenance can
+/// never accidentally convert a remote node into an operator (or vice versa).
+/// Remote grants never accept wildcard scopes. The verified incumbent is the exact
 /// compare-and-swap input, so concurrent merge operations cannot silently
 /// lose scopes.
 #[allow(clippy::too_many_arguments)]
-pub fn reconcile_authorized_key_toml_scopes(
+pub fn reconcile_authorized_key_toml_scopes_for_subject(
     auth_dir: &Path,
     fingerprint: &str,
     public_key_b64: &str,
@@ -808,14 +812,19 @@ pub fn reconcile_authorized_key_toml_scopes(
     node_identity: &NodeIdentity,
     wildcard: WildcardPolicy,
     merge: bool,
-    remote_operator_origin_site_id: Option<&str>,
+    subject: AuthorizedKeySubject<'_>,
     allow_semantic_conversion: bool,
 ) -> Result<(std::path::PathBuf, Vec<String>, AuthorizedKeyTransition)> {
-    if let Some(origin_site_id) = remote_operator_origin_site_id {
+    let requested_origin_site_id = match subject {
+        AuthorizedKeySubject::LocalClient => None,
+        AuthorizedKeySubject::RemoteNode { origin_site_id } => Some(origin_site_id),
+        AuthorizedKeySubject::RemoteOperator { origin_site_id } => Some(origin_site_id),
+    };
+    if let Some(origin_site_id) = requested_origin_site_id {
         validate_canonical_site_id(origin_site_id)
-            .context("remote-operator origin_site_id is not canonical")?;
+            .context("remote authorized-key origin_site_id is not canonical")?;
         if wildcard != WildcardPolicy::Reject {
-            bail!("remote-operator grants require exact, non-wildcard scopes");
+            bail!("remote grants require exact, non-wildcard scopes");
         }
     }
     let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
@@ -823,15 +832,15 @@ pub fn reconcile_authorized_key_toml_scopes(
     directory.ensure_path_binding()?;
     let existing =
         load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)?;
-    let requested_class = if remote_operator_origin_site_id.is_some() {
-        AuthorizedKeyPrincipalClass::RemoteOperator
-    } else {
-        AuthorizedKeyPrincipalClass::LocalClient
+    let requested_class = match subject {
+        AuthorizedKeySubject::LocalClient => AuthorizedKeyPrincipalClass::LocalClient,
+        AuthorizedKeySubject::RemoteNode { .. } => AuthorizedKeyPrincipalClass::RemoteNode,
+        AuthorizedKeySubject::RemoteOperator { .. } => AuthorizedKeyPrincipalClass::RemoteOperator,
     };
     if merge
         && let Some(existing) = existing.as_ref()
         && (existing.principal_class != requested_class
-            || existing.configured_origin_site_id.as_deref() != remote_operator_origin_site_id)
+            || existing.configured_origin_site_id.as_deref() != requested_origin_site_id)
     {
         bail!(
             "cannot merge scopes while changing authorized-key principal class or origin site; rerun without --merge-scopes as an explicit stopped-daemon conversion"
@@ -839,7 +848,7 @@ pub fn reconcile_authorized_key_toml_scopes(
     }
     if let Some(existing) = existing.as_ref()
         && (existing.principal_class != requested_class
-            || existing.configured_origin_site_id.as_deref() != remote_operator_origin_site_id)
+            || existing.configured_origin_site_id.as_deref() != requested_origin_site_id)
         && !allow_semantic_conversion
     {
         bail!(
@@ -873,11 +882,7 @@ pub fn reconcile_authorized_key_toml_scopes(
             .as_ref()
             .and_then(|grant| grant.configured_origin_site_id.clone()),
         principal_class: requested_class,
-        origin_site_id: remote_operator_origin_site_id.map(str::to_owned),
-    };
-    let subject = match remote_operator_origin_site_id {
-        Some(origin_site_id) => AuthorizedKeySubject::RemoteOperator { origin_site_id },
-        None => AuthorizedKeySubject::LocalClient,
+        origin_site_id: requested_origin_site_id.map(str::to_owned),
     };
     let signed = render_authorized_key_toml_for_subject(
         fingerprint,
@@ -905,6 +910,44 @@ pub fn reconcile_authorized_key_toml_scopes(
         dropped,
         transition,
     ))
+}
+
+/// Convenience for callers whose contract selects only a local client or a
+/// remote operator. Callers that can maintain a `remote_node` subject use
+/// [`reconcile_authorized_key_toml_scopes_for_subject`] explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn reconcile_authorized_key_toml_scopes(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    requested_scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    node_identity: &NodeIdentity,
+    wildcard: WildcardPolicy,
+    merge: bool,
+    remote_operator_origin_site_id: Option<&str>,
+    allow_semantic_conversion: bool,
+) -> Result<(std::path::PathBuf, Vec<String>, AuthorizedKeyTransition)> {
+    let subject = match remote_operator_origin_site_id {
+        Some(origin_site_id) => AuthorizedKeySubject::RemoteOperator { origin_site_id },
+        None => AuthorizedKeySubject::LocalClient,
+    };
+    reconcile_authorized_key_toml_scopes_for_subject(
+        auth_dir,
+        fingerprint,
+        public_key_b64,
+        requested_scopes,
+        label,
+        granted_by,
+        created_at,
+        node_identity,
+        wildcard,
+        merge,
+        subject,
+        allow_semantic_conversion,
+    )
 }
 
 #[cfg(test)]

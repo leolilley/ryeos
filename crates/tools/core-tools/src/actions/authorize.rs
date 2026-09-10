@@ -34,6 +34,11 @@ pub struct AuthorizeClientRequest {
     pub merge_scopes: bool,
     #[serde(default)]
     pub origin_site_id: Option<String>,
+    /// Bind this key as the authenticated identity of a remote RyeOS node.
+    /// Mutually exclusive with `origin_site_id`, which selects a forwarded
+    /// remote operator.
+    #[serde(default)]
+    pub remote_node_origin_site_id: Option<String>,
     #[serde(default)]
     pub allow_semantic_conversion: bool,
 }
@@ -44,6 +49,9 @@ fn default_authorize_client_label() -> String {
 
 impl AuthorizeClientRequest {
     pub fn into_params(self, app_root: PathBuf) -> Result<AuthorizeClientParams> {
+        if self.origin_site_id.is_some() && self.remote_node_origin_site_id.is_some() {
+            bail!("origin_site_id and remote_node_origin_site_id are mutually exclusive");
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.public_key)
             .context("invalid base64 public key")?;
@@ -68,6 +76,14 @@ impl AuthorizeClientRequest {
             ryeos_runtime::authorizer::validate_scope_pattern(scope)
                 .map_err(|error| anyhow::anyhow!("invalid scope: {error}"))?;
         }
+        let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
+            (Some(origin_site_id), None) => {
+                AuthorizeClientSubject::RemoteOperator { origin_site_id }
+            }
+            (None, Some(origin_site_id)) => AuthorizeClientSubject::RemoteNode { origin_site_id },
+            (None, None) => AuthorizeClientSubject::LocalClient,
+            (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
+        };
         Ok(AuthorizeClientParams {
             app_root,
             public_key,
@@ -75,10 +91,17 @@ impl AuthorizeClientRequest {
             label: self.label,
             allow_wildcard: false,
             merge: self.merge_scopes,
-            origin_site_id: self.origin_site_id,
+            subject,
             allow_semantic_conversion: self.allow_semantic_conversion,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizeClientSubject {
+    LocalClient,
+    RemoteNode { origin_site_id: String },
+    RemoteOperator { origin_site_id: String },
 }
 
 /// Parameters for the authorize-client action.
@@ -101,10 +124,8 @@ pub struct AuthorizeClientParams {
     /// the write replaces the scope set (and any dropped scope is reported
     /// in `AuthorizeClientResult::dropped_scopes`).
     pub merge: bool,
-    /// Bind this operator-owned key to an authenticated forwarding site.
-    /// Presence emits a `remote_operator` grant and requires exact,
-    /// non-wildcard scopes.
-    pub origin_site_id: Option<String>,
+    /// Exact semantic class and site binding for the grant.
+    pub subject: AuthorizeClientSubject,
     /// Explicitly authorize changing an incumbent grant's principal class or
     /// origin constraint. Operationally this is valid only with the daemon
     /// stopped; ordinary scope updates leave it false.
@@ -125,7 +146,7 @@ pub struct AuthorizeClientResult {
     pub dropped_scopes: Vec<String>,
     /// Whether existing scopes were merged into the written set.
     pub merged: bool,
-    /// Allowed forwarding site constraint for a `remote_operator` grant.
+    /// Origin site constraint for a remote grant.
     pub origin_site_id: Option<String>,
     /// Exact incumbent semantic class observed under the publication lock.
     pub previous_principal_class: Option<String>,
@@ -306,8 +327,8 @@ fn reconcile_client_grant(
     node_identity: &ryeos_app::identity::NodeIdentity,
     auth_dir: &std::path::Path,
 ) -> Result<AuthorizeClientResult> {
-    if params.origin_site_id.is_some() && params.allow_wildcard {
-        bail!("remote-operator grants require exact, non-wildcard scopes");
+    if params.subject != AuthorizeClientSubject::LocalClient && params.allow_wildcard {
+        bail!("remote grants require exact, non-wildcard scopes");
     }
     let fp = lillux::crypto::fingerprint(&params.public_key);
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(params.public_key.as_bytes());
@@ -323,8 +344,19 @@ fn reconcile_client_grant(
     // Verified load, scope reconciliation, signing, and conditional
     // publication share one descriptor-pinned directory lock. A concurrent
     // merge can therefore never silently lose scopes.
+    let identity_subject = match &params.subject {
+        AuthorizeClientSubject::LocalClient => {
+            ryeos_app::identity::AuthorizedKeySubject::LocalClient
+        }
+        AuthorizeClientSubject::RemoteNode { origin_site_id } => {
+            ryeos_app::identity::AuthorizedKeySubject::RemoteNode { origin_site_id }
+        }
+        AuthorizeClientSubject::RemoteOperator { origin_site_id } => {
+            ryeos_app::identity::AuthorizedKeySubject::RemoteOperator { origin_site_id }
+        }
+    };
     let (path, dropped_scopes, transition) =
-        ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        ryeos_app::identity::reconcile_authorized_key_toml_scopes_for_subject(
             auth_dir,
             &fp,
             &key_b64,
@@ -335,7 +367,7 @@ fn reconcile_client_grant(
             node_identity,
             wildcard,
             params.merge,
-            params.origin_site_id.as_deref(),
+            identity_subject,
             params.allow_semantic_conversion,
         )
         .context("failed to write authorized-key TOML")?;
@@ -345,7 +377,7 @@ fn reconcile_client_grant(
         path,
         dropped_scopes,
         merged: params.merge,
-        origin_site_id: params.origin_site_id,
+        origin_site_id: transition.origin_site_id.clone(),
         previous_principal_class: transition
             .previous_principal_class
             .map(|class| class.as_str().to_string()),
@@ -620,7 +652,9 @@ admission_enabled: {admission_enabled}
             label: "forwarded operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            origin_site_id: Some("site:source".to_owned()),
+            subject: AuthorizeClientSubject::RemoteOperator {
+                origin_site_id: "site:source".to_owned(),
+            },
             allow_semantic_conversion: false,
         })
         .unwrap();
@@ -643,7 +677,7 @@ admission_enabled: {admission_enabled}
             label: "operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            origin_site_id: None,
+            subject: AuthorizeClientSubject::LocalClient,
             allow_semantic_conversion: false,
         })
         .unwrap();
@@ -657,7 +691,9 @@ admission_enabled: {admission_enabled}
             label: "operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            origin_site_id: Some("site:source".to_owned()),
+            subject: AuthorizeClientSubject::RemoteOperator {
+                origin_site_id: "site:source".to_owned(),
+            },
             allow_semantic_conversion: false,
         })
         .expect_err("class conversion must require explicit authorization");
@@ -673,7 +709,9 @@ admission_enabled: {admission_enabled}
             label: "operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            origin_site_id: Some("site:source".to_owned()),
+            subject: AuthorizeClientSubject::RemoteOperator {
+                origin_site_id: "site:source".to_owned(),
+            },
             allow_semantic_conversion: true,
         })
         .unwrap();
@@ -694,7 +732,7 @@ admission_enabled: {admission_enabled}
             label: "operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            origin_site_id: None,
+            subject: AuthorizeClientSubject::LocalClient,
             allow_semantic_conversion: true,
         })
         .expect_err("semantic conversion must prove stopped-node ownership");
@@ -702,6 +740,65 @@ admission_enabled: {admission_enabled}
             format!("{while_live:#}").contains("stopped-node authority"),
             "got: {while_live:#}"
         );
+    }
+
+    #[test]
+    fn authorize_client_maintains_remote_node_subject_without_conversion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
+        let subject = AuthorizeClientSubject::RemoteNode {
+            origin_site_id: "site:source".to_owned(),
+        };
+        let first = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.attest.request.forwarded-operator".to_owned()],
+            label: "remote node".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            subject: subject.clone(),
+            allow_semantic_conversion: false,
+        })
+        .unwrap();
+        assert_eq!(first.principal_class, "remote_node");
+
+        let maintained = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.objects/has".to_owned()],
+            label: "remote node".to_owned(),
+            allow_wildcard: false,
+            merge: true,
+            subject,
+            allow_semantic_conversion: false,
+        })
+        .unwrap();
+        assert_eq!(
+            maintained.previous_principal_class.as_deref(),
+            Some("remote_node")
+        );
+        assert_eq!(maintained.principal_class, "remote_node");
+        assert_eq!(maintained.origin_site_id.as_deref(), Some("site:source"));
+        let signed = std::fs::read_to_string(maintained.path).unwrap();
+        assert!(signed.contains("principal_class = \"remote_node\""));
+        assert!(signed.contains("ryeos.attest.request.forwarded-operator"));
+        assert!(signed.contains("ryeos.execute.service.objects/has"));
+
+        let wrong_origin = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.objects/get".to_owned()],
+            label: "remote node".to_owned(),
+            allow_wildcard: false,
+            merge: true,
+            subject: AuthorizeClientSubject::RemoteNode {
+                origin_site_id: "site:different".to_owned(),
+            },
+            allow_semantic_conversion: false,
+        })
+        .expect_err("scope merge must not conceal a remote-node origin change");
+        assert!(format!("{wrong_origin:#}").contains("cannot merge scopes"));
     }
 
     #[test]

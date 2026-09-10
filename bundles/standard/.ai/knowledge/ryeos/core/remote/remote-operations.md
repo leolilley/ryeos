@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-04T08:52:01Z:973399d15097f923654f5970e046708f16ca6f700e4ad396a4ef0b9fb5166d43:tUcI3PNdFLwHnzjjMgL/uL8Eikoelxr1w7QGd64bAwsVppXuloKS59JuFli6JoJ5URY0tJs8tVfJXEmH34VLAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T20:28:16Z:c37a22836be9cca6011ce0a5f075e10c8099358e0265ce737393d833da4998d3:5p6EW4vCEdz5guev5TTFjEIH7Dpk1B9hTY91+LGue8qKBE88I8LPjeqgFydUnPKgTZoNH/8LuJKeev5yvozlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -161,6 +161,21 @@ grant. The offline tool holds the same exclusive state lock as the daemon
 throughout publication and refuses if the daemon is live. When an incumbent
 grant is deliberately reclassified, `--allow-semantic-conversion` is required
 and `--merge-scopes` is forbidden.
+
+Admission initially grants only the declared admission scopes. When that same
+source node also transports object closures or project heads, the target-local
+operator extends its existing `remote_node` grant in place:
+
+```bash
+RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
+  --public-key "<source_node_raw_ed25519_base64>" \
+  --remote-node-origin-site-id "site:<source>" \
+  --merge-scopes \
+  --scopes "<comma-separated exact peer scopes>"
+```
+
+Do not use `--origin-site-id` for this key: that flag describes the separate
+forwarded `remote_operator` principal.
 
    Common remote-side scopes:
 

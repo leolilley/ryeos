@@ -258,6 +258,11 @@ enum Cmd {
         #[arg(long)]
         origin_site_id: Option<String>,
 
+        /// Bind this key as the authenticated identity of a remote RyeOS
+        /// node at this site. Mutually exclusive with --origin-site-id.
+        #[arg(long, conflicts_with = "origin_site_id")]
+        remote_node_origin_site_id: Option<String>,
+
         /// Explicitly permit an incumbent grant's principal class or origin
         /// to change. Use only while the daemon is stopped.
         #[arg(long)]
@@ -589,6 +594,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             label,
             merge_scopes,
             origin_site_id,
+            remote_node_origin_site_id,
             allow_semantic_conversion,
         } => run_authorize_client(
             app_root,
@@ -597,6 +603,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             label,
             merge_scopes,
             origin_site_id,
+            remote_node_origin_site_id,
             allow_semantic_conversion,
             cli.stdin_json,
         ),
@@ -1666,6 +1673,8 @@ struct AuthorizeClientStdinParams {
     #[serde(default)]
     origin_site_id: Option<String>,
     #[serde(default)]
+    remote_node_origin_site_id: Option<String>,
+    #[serde(default)]
     allow_semantic_conversion: bool,
 }
 
@@ -1680,6 +1689,7 @@ fn run_authorize_client(
     label: String,
     merge_scopes: bool,
     origin_site_id: Option<String>,
+    remote_node_origin_site_id: Option<String>,
     allow_semantic_conversion: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
@@ -1696,6 +1706,7 @@ fn run_authorize_client(
             value.label,
             value.merge_scopes,
             value.origin_site_id,
+            value.remote_node_origin_site_id,
             value.allow_semantic_conversion,
         )
     } else {
@@ -1711,6 +1722,7 @@ fn run_authorize_client(
             label,
             merge_scopes,
             origin_site_id,
+            remote_node_origin_site_id,
             allow_semantic_conversion,
         )
     };
@@ -1722,6 +1734,7 @@ fn run_authorize_client(
         label,
         merge_scopes,
         origin_site_id,
+        remote_node_origin_site_id,
         allow_semantic_conversion,
     ) = params;
 
@@ -1733,6 +1746,7 @@ fn run_authorize_client(
         label,
         merge_scopes,
         origin_site_id,
+        remote_node_origin_site_id,
         allow_semantic_conversion,
     }
     .into_params(app_root)?)?;
@@ -1843,8 +1857,24 @@ mod tests {
 
         assert_eq!(params.label, "cli-authorized");
         assert_eq!(params.origin_site_id.as_deref(), Some("site:source"));
+        assert_eq!(params.remote_node_origin_site_id, None);
         assert!(params.allow_semantic_conversion);
         assert!(params.merge_scopes);
+    }
+
+    #[test]
+    fn authorize_client_stdin_contract_carries_remote_node_subject() {
+        let params: AuthorizeClientStdinParams = serde_json::from_value(serde_json::json!({
+            "public_key": "ZmFrZQ==",
+            "scopes": "scope:a",
+            "remote_node_origin_site_id": "site:source"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.remote_node_origin_site_id.as_deref(),
+            Some("site:source")
+        );
+        assert_eq!(params.origin_site_id, None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-09T18:42:29Z:7c9417adc098971997ee166ae51d030f10617d5f4e485b6966f5584ec3cf0ace:y5odl+aTienJ19No2IEzM2MRQa0Lc8pstOdzhoata2slMr7Lvcm2A8lirkUiU/XgKhrva+7llp+jsEyveLlkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T20:28:16Z:d509c3b17ee301b9ff5ac51fd8eb4e101ec2123d5df47d281f62384fec5b4322:vWqko5BfpGmwRAcnkbnuIbRt4kPT4xK52C8YKZj/TSwAquwmnmRV5TkhgbFJUsrPgfJvbFlmfEWU3yB35UykAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -263,6 +263,23 @@ Keep the same `--origin-site-id` when updating a remote operator. Changing an
 incumbent principal's class or origin requires explicit
 `--allow-semantic-conversion` and stopped-node authority held through grant
 publication. Same-class scope updates need neither conversion nor a copied key.
+
+The admitted source-node key remains a distinct `remote_node` principal. Add
+the exact object, project, scheduler, or observation scopes required by the
+configured remote workflow without reclassifying that key:
+
+```bash
+RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
+  --public-key "<source_node_raw_ed25519_base64>" \
+  --label "admitted source node" \
+  --remote-node-origin-site-id "site:<source>" \
+  --merge-scopes \
+  --scopes "<comma-separated exact peer scopes>"
+```
+
+This is maintenance of the existing node-to-node authority, not configured
+operator continuity. The remote-node site must remain the same; changing its
+class or origin is an explicit stopped-node semantic conversion.
 
 Before installing that grant, admit the source node key with the exact
 `ryeos.attest.request.forwarded-operator` scope. The source site ID is the

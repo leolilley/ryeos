@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-08T21:59:10Z:64763068acb0126ff08902aa9c2194fe8c27a1e307265a6113e7b9d8a4a6b206:9uGmXuaJW6+eS3vUV0nCthovm/lrlhf/c80DGtCN5ZLD3dmxmphONEPWWqQ4sk+RBxXg90Buo9UCG8JkMQKXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T20:28:16Z:0571b485b5d6ab3f159d0061550849a6810276476f93cb0288f2887807c254e7:I5lQvB+QoeW49fglIUnelMI1yyy7NePCF8RyNyVDYeMt+ZKhjMYjvIMXcbS7w5rf9D1AGrOkgqG7AcCozduTBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -156,6 +156,9 @@ There is no worker Tool for this operation and no key mount into a subprocess.
 The external core-tools entry remains only for explicit host bootstrap; it
 shares request validation and the same writer, not a second grant protocol.
 Remote-operator grants require an exact origin site and reject wildcards.
+Existing remote-node grants are maintained with
+`--remote-node-origin-site-id`; this preserves the admitted node's principal
+class while reconciling its exact scopes through the same locked writer.
 Class/origin conversion still needs explicit stopped-node authority; ordinary
 same-class scope merging does not convert or copy any identity.
 
