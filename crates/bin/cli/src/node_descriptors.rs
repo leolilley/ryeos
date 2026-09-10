@@ -342,4 +342,28 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn remote_run_keeps_projectless_control_plane_execution_explicit() {
+        let command = source_command("core", "remote-run.yaml");
+        let project = command
+            .project
+            .as_ref()
+            .expect("remote run must declare its project selector");
+        assert_eq!(
+            project.resolution,
+            ryeos_runtime::CommandProjectResolution::Optional,
+            "the service owns both projectless control-plane and project-backed execution"
+        );
+        assert!(
+            project.no_project_flag,
+            "projectless control-plane work must require the explicit selector"
+        );
+        assert_eq!(project.bind_parameter.as_deref(), Some("project"));
+        assert!(matches!(
+            &command.dispatch,
+            CommandDispatch::ExecuteRef { execute, .. }
+                if execute == "service:remote/run"
+        ));
+    }
 }
