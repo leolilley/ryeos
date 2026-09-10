@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T10:38:49Z:372e72a6e2cd2c32454b977fed79b132eafe01d6106c57130193d7dd005553f2:IsLCoufd2UT2tPncnz8YHmsJbovQUoV8ynvyNtzstWLlhRef+6jTanJrfaMvTBdWHJ1IJN9JSygL8x4IZJ7eDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T10:47:37Z:25e50a308d5611b0bf544e6c85458daa3c84d74c41d7d11e4e5a93144d39151d:qyD+QkzLCUGrm28Cw/SijltzskUHi2jn+6QUj5va+InzyIMVGzBrY+wutDxG2MqFKm8RRAx7j19Zk6ULwrVsBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance checks for the OpenCode provider data."""
 
@@ -80,6 +80,27 @@ class OpenCodeContractTests(unittest.TestCase):
         match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), source_digest())
+
+    def test_profile_references_the_complete_json_source_closure(self) -> None:
+        profile = json.loads(PROFILE.read_text())
+        referenced = {
+            "structured-session.profile.json",
+            profile["baseline_config"],
+            profile["http_sse"]["readiness_schema"],
+        }
+        for route in profile["routes"]:
+            referenced.update(
+                (route["request_schema"], route["response_schema"], route["http_body_schema"])
+            )
+        referenced.update(rule["schema"] for rule in profile["notifications"])
+        referenced.update(profile["ignored_notifications"].values())
+        referenced.update(rule["schema"] for rule in profile["server_requests"])
+        present = {
+            path.relative_to(SOURCE).as_posix()
+            for path in SOURCE.rglob("*.json")
+            if path.is_file()
+        }
+        self.assertEqual(present, referenced)
 
     def test_worker_execution_never_grants_a_tool_wildcard(self) -> None:
         for path in EXECUTIONS:
