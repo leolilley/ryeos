@@ -261,7 +261,8 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 3)
+        self.assertEqual(self.profile["schema_version"], 4)
+        self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["workload_client"])
         immutable_args = "\n".join(self.profile["workload_args"])
         self.assertNotIn("/tmp/.ryeos-wc", immutable_args)

@@ -1,5 +1,6 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "transport": "stdio_jsonrpc",
   "configuration_authority": "immutable_argv",
   "workload_realization_id": "codex",
   "workload_executable": "codex",
@@ -36,7 +37,9 @@
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",
-  "required_process_environment": ["TMPDIR"],
+  "required_process_environment": [
+    "TMPDIR"
+  ],
   "workload_client": {
     "cli_endpoint_env": null,
     "structured_session": {
@@ -48,7 +51,10 @@
           {
             "op": "object",
             "fields": {
-              "type": {"op": "literal", "value": "function"},
+              "type": {
+                "op": "literal",
+                "value": "function"
+              },
               "name": {
                 "op": "literal",
                 "value": "ryeos_execute"
@@ -110,8 +116,8 @@
       "session_pointer": "/message/params/threadId",
       "operation_pointer": "/message/params/turnId",
       "call_pointer": "/message/params/callId",
-    "required_values": {
-      "/message/params/namespace": null,
+      "required_values": {
+        "/message/params/namespace": null,
         "/message/params/tool": "ryeos_execute"
       },
       "request": {
@@ -805,7 +811,9 @@
     {
       "id": "turn.start",
       "method": "turn/start",
-      "progress_notifications": ["turn/started"],
+      "progress_notifications": [
+        "turn/started"
+      ],
       "effect_class": "external_effect",
       "request_schema": "schema/TurnStartParams.json",
       "response_schema": "schema/TurnStartResponse.json",
@@ -1257,15 +1265,33 @@
           }
         }
       },
-      "observations": [{
-        "when": [],
-        "value": {"op":"object","fields":{
-          "kind":{"op":"literal","value":"state"},
-          "expected":{"op":"literal","value":"idle"},
-          "next":{"op":"literal","value":"turn_running"},
-          "turn_id":{"op":"pointer","pointer":"/message/params/turn/id","max_string_bytes":256}
-        }}
-      }],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "next": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "turn_id": {
+                "op": "pointer",
+                "pointer": "/message/params/turn/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
       "ceremony_clear": false
     },
     {

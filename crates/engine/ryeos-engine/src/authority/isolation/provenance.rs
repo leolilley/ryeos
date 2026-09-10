@@ -227,6 +227,8 @@ mod tests {
             adapter_protocol: Some(serde_json::from_value(protocol.into()).unwrap()),
             payloads: BTreeMap::new(),
             effective_capabilities: BTreeSet::new(),
+            process_scope_capabilities: BTreeSet::new(),
+            network_runtime_files: BTreeMap::new(),
             plan_digest: Some("sha256:attempt".to_string()),
         }
     }

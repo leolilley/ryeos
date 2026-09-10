@@ -141,6 +141,7 @@ type WorkloadCommandResult = (String, std::result::Result<WorkloadCommandOutput,
 #[serde(deny_unknown_fields)]
 struct StructuredSessionProfile {
     schema_version: u32,
+    transport: ProfileTransport,
     configuration_authority: ConfigurationAuthority,
     workload_realization_id: String,
     workload_executable: String,
@@ -161,6 +162,16 @@ struct StructuredSessionProfile {
     #[serde(default)]
     ignored_notifications: BTreeMap<String, String>,
     server_requests: Vec<ServerRequestRule>,
+}
+
+/// The workload transport selected by the admitted profile. The set mirrors
+/// the admission compiler exactly; the bridge never discovers a transport.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum ProfileTransport {
+    #[serde(rename = "stdio_jsonrpc")]
+    StdioJsonRpc,
+    #[serde(rename = "http_sse")]
+    HttpSse,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,6 +244,10 @@ struct RouteRule {
     post_success_routes: Vec<String>,
     #[serde(default)]
     progress_notifications: Vec<String>,
+    #[serde(default)]
+    http_method: Option<String>,
+    #[serde(default)]
+    http_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -334,6 +349,8 @@ struct ServerRequestRule {
     permission_delta_fields: Vec<String>,
     #[serde(default)]
     required_review_fields: Vec<String>,
+    #[serde(default)]
+    reply_http_path: Option<String>,
     display: ValueTemplate,
 }
 
@@ -426,6 +443,22 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
     }
     ryeos_engine::protocol_vocabulary::validate_env_name(&profile.workload_home_env)
         .map_err(|error| anyhow!(error))?;
+    if profile.transport == ProfileTransport::HttpSse {
+        // The admission vocabulary accepts the HTTP transport so profiles can
+        // be authored and admitted ahead of bridge support; this bridge build
+        // still fails closed rather than degrading an admitted contract.
+        bail!("structured-session http_sse transport is not implemented by this bridge build");
+    }
+    for route in &profile.routes {
+        if route.http_method.is_some() || route.http_path.is_some() {
+            bail!("structured-session route HTTP addressing requires the HTTP transport");
+        }
+    }
+    for request in &profile.server_requests {
+        if request.reply_http_path.is_some() {
+            bail!("structured-session reply HTTP path requires the HTTP transport");
+        }
+    }
     if let Some(workload_client) = &profile.workload_client {
         if workload_client
             .cli_endpoint_env
@@ -3472,6 +3505,7 @@ mod tests {
     fn gating_approval_profile() -> StructuredSessionProfile {
         serde_json::from_value(json!({
             "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"stdio_jsonrpc",
             "configuration_authority":"immutable_argv",
             "workload_realization_id":"test-realization",
             "workload_executable":"sh",
@@ -3896,6 +3930,7 @@ mod tests {
             },
             deny_only: false,
             permission_delta_fields: Vec::new(),
+            reply_http_path: None,
             required_review_fields: vec!["/message/params/command".to_owned()],
             display: ValueTemplate::Literal { value: Value::Null },
         };
@@ -3928,6 +3963,7 @@ mod tests {
             },
             deny_only: false,
             permission_delta_fields: Vec::new(),
+            reply_http_path: None,
             required_review_fields: Vec::new(),
             display: ValueTemplate::Literal { value: Value::Null },
         };
