@@ -153,10 +153,16 @@ Approval replies go to `POST /session/{session_id}/permissions/{permission_id}`.
 
 ## Open items
 
-- Acquisition recipes: pin the 1.18.30 standalone release artifacts and
-  member digests.
-- Bridge sets the four `XDG_*_HOME` variables to home-relative paths for
-  http_sse profiles (generic POSIX convention; verified necessary).
-- Worker-executions (login/session/bounded-turn), commands, knowledge
-  runbook, `test_contract.py` mirror, init-profile registration — all follow
-  the Codex bundle shape.
+- Bundle population/signing (`populate-bundles`), `test_contract.py` mirror,
+  and init-profile registration remain; this tree is authored source only.
+- The bridge binary is referenced as `bin:codex/ryeos-structured-session-bridge`
+  because the generic bridge is currently codex-bundle-owned; it should move
+  to the standard bundle before release qualification.
+- Worker-node loopback admission: the opencode worker runs a loopback TCP
+  listener inside its process scope, which the stdio Codex profile never
+  needed; node isolation policy must admit it for this worker family.
+- The environment config's `portable_state_contract: null` and omitted
+  subject projection need install-time validation against the signed
+  worker-environment schema.
+- Live qualification against an activated node (credential enrollment,
+  a credentialed session turn, restart recovery) is unrecorded.

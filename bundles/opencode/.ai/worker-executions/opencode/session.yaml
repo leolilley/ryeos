@@ -1,0 +1,32 @@
+version: "0.1.0"
+category: opencode
+description: Open one RyeOS-owned opencode session against an immutable project generation.
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: session
+  allowed_effect_classes:
+    - credential_read
+    - external_effect
+    - pure_read
+    - session_mutation
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 603600
+  recover_upstream_session: true
+  mode:
+    kind: session
+  candidate_disposition: owner_decision
+  workload_client_delegation_caps:
+    - ryeos.execute.tool.*
+limits:
+  duration_seconds: 604200
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

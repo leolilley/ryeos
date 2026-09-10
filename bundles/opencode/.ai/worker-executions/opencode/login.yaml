@@ -1,0 +1,31 @@
+version: "0.1.0"
+category: opencode
+description: Open one short-lived RyeOS-owned opencode credential-enrollment execution.
+config:
+  worker_ref: worker:opencode/hosted
+  environment_binding: null
+  required_credential_state: any
+  route_set: enrollment
+  allowed_effect_classes:
+    - credential_delete
+    - credential_read
+    - credential_write
+    - pure_read
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: false
+  required_terminal_publication: any
+  max_lifetime_seconds: 1500
+  recover_upstream_session: false
+  mode:
+    kind: session
+  candidate_disposition: owner_decision
+  workload_client_delegation_caps: []
+limits:
+  duration_seconds: 1800
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

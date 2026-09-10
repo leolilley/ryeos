@@ -1,0 +1,14 @@
+category: opencode/environments
+schema: ryeos.worker_environment.v6
+external_product_slots: []
+worker_ref: worker:opencode/hosted
+external_content: []
+configuration:
+  executable_search: []
+  process_environment:
+    OPENCODE_CONFIG_CONTENT: '{"autoupdate":false,"share":"disabled","mcp":{},"default_agent":"build","permission":{"edit":"allow","bash":"allow","webfetch":"ask"}}'
+credential_requirement:
+  workload_family: opencode
+  required_state: active
+portable_state_contract: null
+workload_client: null

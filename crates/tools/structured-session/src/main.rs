@@ -2600,10 +2600,15 @@ impl StructuredWorkload {
             .as_deref()
             .ok_or_else(|| anyhow!("structured-session HTTP server request lacks its reply path"))?;
         let correlation = canonical_id(request_id)?;
-        let path = substitute_http_path(
-            reply_path,
-            &[("request_id".to_owned(), correlation.clone())],
-        )?;
+        let mut substitutions = vec![("request_id".to_owned(), correlation.clone())];
+        if reply_path.contains("{session_id}") {
+            let session = self
+                .bound_session_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("structured-session reply path is not session bound"))?;
+            substitutions.push(("session_id".to_owned(), session.to_owned()));
+        }
+        let path = substitute_http_path(reply_path, &substitutions)?;
         let url = format!("{}{}", http.base_url, path);
         perform_http_request(&http.client, &url, "POST", &http.authorization, response)?;
         Ok(())

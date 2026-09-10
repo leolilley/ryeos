@@ -1,0 +1,651 @@
+{
+  "schema_version": 4,
+  "transport": "http_sse",
+  "http_sse": {
+    "username_env": "OPENCODE_SERVER_USERNAME",
+    "password_env": "OPENCODE_SERVER_PASSWORD",
+    "seed_path_env": "OPENCODE_CONFIG"
+  },
+  "configuration_authority": "immutable_argv",
+  "workload_realization_id": "opencode",
+  "workload_executable": "opencode",
+  "workload_args": [
+    "serve",
+    "--pure",
+    "--hostname",
+    "127.0.0.1",
+    "--port",
+    "0"
+  ],
+  "workload_home_env": "RYEOS_WORKLOAD_HOME",
+  "required_process_environment": [
+    "OPENCODE_CONFIG_CONTENT"
+  ],
+  "workload_client": null,
+  "baseline_config": "opencode.baseline.json",
+  "baseline_destination": "opencode.json",
+  "portable_state": null,
+  "credential_subject": null,
+  "initialization": [],
+  "recovery": {
+    "resume_route": "session.resume",
+    "inspect_route": "session.read",
+    "route_sets": [
+      "session"
+    ]
+  },
+  "route_sets": {
+    "enrollment": [
+      "credential.auth.remove",
+      "credential.auth.set",
+      "credential.providers.read"
+    ],
+    "session": [
+      "credential.providers.read",
+      "session.persist",
+      "session.read",
+      "session.resume",
+      "session.start",
+      "turn.interrupt",
+      "turn.start"
+    ]
+  },
+  "routes": [
+    {
+      "id": "credential.auth.set",
+      "method": "credential.auth.set",
+      "effect_class": "credential_write",
+      "http_method": "PUT",
+      "http_path": "/auth/{field:provider}",
+      "request_schema": "schema/AuthSetRequest.json",
+      "response_schema": "schema/AuthSetResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "forbidden_fields": [],
+      "post_success_routes": [],
+      "progress_notifications": [],
+      "audience": "public"
+    },
+    {
+      "id": "credential.auth.remove",
+      "method": "credential.auth.remove",
+      "effect_class": "credential_delete",
+      "http_method": "DELETE",
+      "http_path": "/auth/{field:provider}",
+      "request_schema": "schema/EmptyRequest.json",
+      "response_schema": "schema/AuthRemoveResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": "clear",
+      "forbidden_fields": [],
+      "post_success_routes": [],
+      "progress_notifications": [],
+      "audience": "public"
+    },
+    {
+      "id": "credential.providers.read",
+      "method": "credential.providers.read",
+      "effect_class": "credential_read",
+      "http_method": "GET",
+      "http_path": "/provider",
+      "request_schema": "schema/EmptyRequest.json",
+      "response_schema": "schema/ProviderListResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "forbidden_fields": [],
+      "post_success_routes": [],
+      "progress_notifications": [],
+      "audience": "public"
+    },
+    {
+      "id": "session.start",
+      "method": "session.start",
+      "effect_class": "external_effect",
+      "http_method": "POST",
+      "http_path": "/session",
+      "request_schema": "schema/SessionCreateRequest.json",
+      "response_schema": "schema/SessionCreateResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [
+        "parentID"
+      ],
+      "forbidden_fields": [],
+      "response_predicates": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_thread"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_new",
+        "request_field": null,
+        "response_pointer": "/result/id"
+      },
+      "post_success_routes": [
+        "session.persist"
+      ],
+      "progress_notifications": [],
+      "audience": "public"
+    },
+    {
+      "id": "session.persist",
+      "method": "session.persist",
+      "audience": "runtime",
+      "effect_class": "session_mutation",
+      "http_method": "PATCH",
+      "http_path": "/session/{session_id}",
+      "request_schema": "schema/SessionUpdateRequest.json",
+      "response_schema": "schema/SessionUpdateResponse.json",
+      "fixed_params": {
+        "title": "RyeOS hosted session"
+      },
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "sessionID",
+        "response_pointer": null
+      },
+      "post_success_routes": [],
+      "progress_notifications": []
+    },
+    {
+      "id": "session.read",
+      "method": "session.read",
+      "audience": "runtime",
+      "effect_class": "pure_read",
+      "http_method": "GET",
+      "http_path": "/session/{session_id}",
+      "request_schema": "schema/EmptyRequest.json",
+      "response_schema": "schema/SessionGetResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "sessionID",
+        "response_pointer": null
+      },
+      "forbidden_fields": [],
+      "post_success_routes": [],
+      "progress_notifications": []
+    },
+    {
+      "id": "session.resume",
+      "method": "session.resume",
+      "audience": "runtime",
+      "effect_class": "session_mutation",
+      "http_method": "GET",
+      "http_path": "/session/{session_id}",
+      "request_schema": "schema/SessionGetResponse.json",
+      "response_schema": "schema/SessionGetResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "response_predicates": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_thread_recovered"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_expected",
+        "request_field": "sessionID",
+        "response_pointer": "/result/id"
+      },
+      "forbidden_fields": [],
+      "post_success_routes": [],
+      "progress_notifications": []
+    },
+    {
+      "id": "turn.start",
+      "method": "turn.start",
+      "effect_class": "external_effect",
+      "http_method": "POST",
+      "http_path": "/session/{session_id}/prompt_async",
+      "request_schema": "schema/PromptAsyncRequest.json",
+      "response_schema": "schema/SessionGetResponse.json",
+      "fixed_params": {
+        "agent": "build"
+      },
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [
+        "system",
+        "tools",
+        "command"
+      ],
+      "forbidden_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "sessionID",
+        "response_pointer": null
+      },
+      "post_success_routes": [],
+      "progress_notifications": [],
+      "audience": "public"
+    },
+    {
+      "id": "turn.interrupt",
+      "method": "turn.interrupt",
+      "effect_class": "external_effect",
+      "http_method": "POST",
+      "http_path": "/session/{session_id}/abort",
+      "request_schema": "schema/EmptyRequest.json",
+      "response_schema": "schema/SessionAbortResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "response_predicates": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "sessionID",
+        "response_pointer": null
+      },
+      "forbidden_fields": [],
+      "post_success_routes": [],
+      "progress_notifications": [],
+      "audience": "public"
+    }
+  ],
+  "notifications": [
+    {
+      "method": "session.created",
+      "schema": "schema/SessionCreatedParams.json",
+      "upstream_session_pointer": "/message/params/sessionID",
+      "event_type": "session.created",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/sessionID"
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "session.idle",
+      "schema": "schema/SessionIdleParams.json",
+      "upstream_session_pointer": "/message/params/sessionID",
+      "event_type": "session.idle",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/sessionID"
+          }
+        }
+      },
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "next": {
+                "op": "literal",
+                "value": "idle"
+              }
+            }
+          }
+        }
+      ],
+      "ceremony_clear": false
+    },
+    {
+      "method": "session.next.prompted",
+      "schema": "schema/SessionNextPromptedParams.json",
+      "upstream_session_pointer": "/message/params/sessionID",
+      "event_type": "session.next.prompted",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/sessionID"
+          },
+          "message_id": {
+            "op": "pointer",
+            "pointer": "/message/params/messageID"
+          }
+        }
+      },
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "next": {
+                "op": "literal",
+                "value": "turn_running"
+              }
+            }
+          }
+        }
+      ],
+      "ceremony_clear": false
+    },
+    {
+      "method": "session.next.text.delta",
+      "schema": "schema/SessionNextTextDeltaParams.json",
+      "upstream_session_pointer": "/message/params/sessionID",
+      "event_type": "session.next.text.delta",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/sessionID"
+          },
+          "delta_digest": {
+            "op": "digest",
+            "pointer": "/message/params/delta"
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "session.next.tool.called",
+      "schema": "schema/SessionNextToolCalledParams.json",
+      "upstream_session_pointer": "/message/params/sessionID",
+      "event_type": "session.next.tool.called",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/sessionID"
+          },
+          "tool": {
+            "op": "pointer",
+            "pointer": "/message/params/tool",
+            "optional": true,
+            "max_string_bytes": 256
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "session.error",
+      "schema": "schema/SessionErrorParams.json",
+      "event_type": "session.error",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "installation.update-available",
+      "schema": "schema/InstallationUpdateAvailableParams.json",
+      "event_type": "installation.update-available",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    }
+  ],
+  "ignored_notifications": {
+    "catalog.updated": "schema/EventCatalogUpdated.json",
+    "command.executed": "schema/EventCommandExecuted.json",
+    "file.edited": "schema/EventFileEdited.json",
+    "file.watcher.updated": "schema/EventFileWatcherUpdated.json",
+    "global.disposed": "schema/EventGlobalDisposed.json",
+    "installation.updated": "schema/EventInstallationUpdated.json",
+    "integration.connection.updated": "schema/EventIntegrationConnectionUpdated.json",
+    "integration.updated": "schema/EventIntegrationUpdated.json",
+    "lsp.updated": "schema/EventLspUpdated.json",
+    "mcp.browser.open.failed": "schema/EventMcpBrowserOpenFailed.json",
+    "mcp.tools.changed": "schema/EventMcpToolsChanged.json",
+    "message.part.delta": "schema/EventMessagePartDelta.json",
+    "message.part.removed": "schema/EventMessagePartRemoved.json",
+    "message.part.updated": "schema/EventMessagePartUpdated.json",
+    "message.removed": "schema/EventMessageRemoved.json",
+    "message.updated": "schema/EventMessageUpdated.json",
+    "models-dev.refreshed": "schema/EventModels-devRefreshed.json",
+    "permission.asked": "schema/EventPermissionAsked.json",
+    "permission.replied": "schema/EventPermissionReplied.json",
+    "permission.v2.replied": "schema/EventPermissionV2Replied.json",
+    "plugin.added": "schema/EventPluginAdded.json",
+    "project.directories.updated": "schema/EventProjectDirectoriesUpdated.json",
+    "project.updated": "schema/EventProjectUpdated.json",
+    "pty.created": "schema/EventPtyCreated.json",
+    "pty.deleted": "schema/EventPtyDeleted.json",
+    "pty.exited": "schema/EventPtyExited.json",
+    "pty.updated": "schema/EventPtyUpdated.json",
+    "question.asked": "schema/EventQuestionAsked.json",
+    "question.rejected": "schema/EventQuestionRejected.json",
+    "question.replied": "schema/EventQuestionReplied.json",
+    "question.v2.asked": "schema/EventQuestionV2Asked.json",
+    "question.v2.rejected": "schema/EventQuestionV2Rejected.json",
+    "question.v2.replied": "schema/EventQuestionV2Replied.json",
+    "reference.updated": "schema/EventReferenceUpdated.json",
+    "server.connected": "schema/EventServerConnected.json",
+    "server.instance.disposed": "schema/EventServerInstanceDisposed.json",
+    "session.compacted": "schema/EventSessionCompacted.json",
+    "session.deleted": "schema/EventSessionDeleted.json",
+    "session.diff": "schema/EventSessionDiff.json",
+    "session.next.agent.switched": "schema/EventSessionNextAgentSwitched.json",
+    "session.next.compaction.delta": "schema/EventSessionNextCompactionDelta.json",
+    "session.next.compaction.ended": "schema/EventSessionNextCompactionEnded.json",
+    "session.next.compaction.started": "schema/EventSessionNextCompactionStarted.json",
+    "session.next.context.updated": "schema/EventSessionNextContextUpdated.json",
+    "session.next.model.switched": "schema/EventSessionNextModelSwitched.json",
+    "session.next.moved": "schema/EventSessionNextMoved.json",
+    "session.next.prompt.admitted": "schema/EventSessionNextPromptAdmitted.json",
+    "session.next.reasoning.delta": "schema/EventSessionNextReasoningDelta.json",
+    "session.next.reasoning.ended": "schema/EventSessionNextReasoningEnded.json",
+    "session.next.reasoning.started": "schema/EventSessionNextReasoningStarted.json",
+    "session.next.retried": "schema/EventSessionNextRetried.json",
+    "session.next.revert.cleared": "schema/EventSessionNextRevertCleared.json",
+    "session.next.revert.committed": "schema/EventSessionNextRevertCommitted.json",
+    "session.next.revert.staged": "schema/EventSessionNextRevertStaged.json",
+    "session.next.shell.ended": "schema/EventSessionNextShellEnded.json",
+    "session.next.shell.started": "schema/EventSessionNextShellStarted.json",
+    "session.next.step.ended": "schema/EventSessionNextStepEnded.json",
+    "session.next.step.failed": "schema/EventSessionNextStepFailed.json",
+    "session.next.step.started": "schema/EventSessionNextStepStarted.json",
+    "session.next.synthetic": "schema/EventSessionNextSynthetic.json",
+    "session.next.text.ended": "schema/EventSessionNextTextEnded.json",
+    "session.next.text.started": "schema/EventSessionNextTextStarted.json",
+    "session.next.tool.failed": "schema/EventSessionNextToolFailed.json",
+    "session.next.tool.input.delta": "schema/EventSessionNextToolInputDelta.json",
+    "session.next.tool.input.ended": "schema/EventSessionNextToolInputEnded.json",
+    "session.next.tool.input.started": "schema/EventSessionNextToolInputStarted.json",
+    "session.next.tool.progress": "schema/EventSessionNextToolProgress.json",
+    "session.next.tool.success": "schema/EventSessionNextToolSuccess.json",
+    "session.status": "schema/EventSessionStatus.json",
+    "session.updated": "schema/EventSessionUpdated.json",
+    "todo.updated": "schema/EventTodoUpdated.json",
+    "tui.command.execute": "schema/EventTuiCommandExecute.json",
+    "tui.prompt.append": "schema/EventTuiPromptAppend.json",
+    "tui.session.select": "schema/EventTuiSessionSelect.json",
+    "tui.toast.show": "schema/EventTuiToastShow.json",
+    "vcs.branch.updated": "schema/EventVcsBranchUpdated.json",
+    "workspace.failed": "schema/EventWorkspaceFailed.json",
+    "workspace.ready": "schema/EventWorkspaceReady.json",
+    "workspace.status": "schema/EventWorkspaceStatus.json",
+    "worktree.failed": "schema/EventWorktreeFailed.json",
+    "worktree.ready": "schema/EventWorktreeReady.json"
+  },
+  "server_requests": [
+    {
+      "method": "permission.v2.asked",
+      "schema": "schema/PermissionV2AskedParams.json",
+      "operation_class": "additional_permissions",
+      "correlation": {
+        "upstream_session_pointer": "/message/params/sessionID",
+        "operation_pointer": "/message/params/id"
+      },
+      "responses": {
+        "accept": {
+          "op": "literal",
+          "value": {
+            "response": "once"
+          }
+        },
+        "cancel": {
+          "op": "literal",
+          "value": {
+            "response": "reject"
+          }
+        },
+        "decline": {
+          "op": "literal",
+          "value": {
+            "response": "reject"
+          }
+        },
+        "expire": {
+          "op": "literal",
+          "value": {
+            "response": "reject"
+          }
+        }
+      },
+      "deny_only": true,
+      "permission_delta_fields": [
+        "/message/params/resources",
+        "/message/params/save"
+      ],
+      "required_review_fields": [
+        "/message/params/action",
+        "/message/params/resources"
+      ],
+      "reply_http_path": "/session/{session_id}/permissions/{request_id}",
+      "display": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/sessionID",
+            "max_string_bytes": 256
+          },
+          "request_id": {
+            "op": "pointer",
+            "pointer": "/message/params/id",
+            "max_string_bytes": 256
+          },
+          "action": {
+            "op": "pointer",
+            "pointer": "/message/params/action",
+            "max_string_bytes": 256
+          },
+          "resources_digest": {
+            "op": "digest",
+            "pointer": "/message/params/resources"
+          }
+        }
+      }
+    }
+  ]
+}

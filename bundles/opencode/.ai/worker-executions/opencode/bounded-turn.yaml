@@ -1,0 +1,36 @@
+version: "0.1.0"
+category: opencode
+description: Run one completion-fenced opencode turn and retain its private candidate for owner review.
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: session
+  allowed_effect_classes:
+    - credential_read
+    - external_effect
+    - pure_read
+    - session_mutation
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 14400
+  recover_upstream_session: true
+  mode:
+    kind: bounded_turn
+    session_start_route: session.start
+    turn_start_route: turn.start
+    max_uncontacted_attempts: 3
+  candidate_disposition: retained_for_review
+  workload_client_delegation_caps:
+    - ryeos.execute.tool.*
+limits:
+  turns: 1
+  duration_seconds: 15000
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

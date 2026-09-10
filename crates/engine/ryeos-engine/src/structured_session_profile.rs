@@ -417,7 +417,7 @@ pub fn compile(
         if binding_request_field.is_some_and(|field| controlled_fields.contains(field)) {
             bail!("structured-session binding field overlaps another route field policy");
         }
-        validate_route_transport_addressing(route, http_transport, binding_action, &controlled_fields)?;
+        validate_route_transport_addressing(route, http_transport, binding_action)?;
         validate_predicates(route.get("response_predicates"), 32)?;
         validate_observations(route.get("observations"), 16)?;
         if !matches!(
@@ -785,7 +785,7 @@ pub fn compile(
                 reply
                     .as_str()
                     .ok_or_else(|| anyhow!("structured-session reply HTTP path must be a string"))?,
-                &["request_id"],
+                &["request_id", "session_id"],
                 false,
             )?,
             (true, None) => {
@@ -1440,7 +1440,6 @@ fn validate_route_transport_addressing(
     route: &serde_json::Map<String, Value>,
     http_transport: bool,
     binding_action: Option<&str>,
-    controlled_fields: &BTreeSet<&str>,
 ) -> Result<()> {
     match (http_transport, route.get("http_method"), route.get("http_path")) {
         (true, Some(method), Some(path)) => {
@@ -1461,12 +1460,18 @@ fn validate_route_transport_addressing(
             }
             for segment in path.split('{').skip(1) {
                 if let Some((name, _)) = segment.split_once('}') {
-                    if let Some(field) = name.strip_prefix("field:")
-                        && !controlled_fields.contains(field)
-                    {
-                        bail!(
-                            "structured-session HTTP path field `{field}` is not suppliable by its route"
-                        );
+                    if let Some(field) = name.strip_prefix("field:") {
+                        for policy in ["forbidden_fields", "forbidden_non_null_fields"] {
+                            if route
+                                .get(policy)
+                                .and_then(Value::as_array)
+                                .is_some_and(|values| values.iter().any(|value| value == field))
+                            {
+                                bail!(
+                                    "structured-session HTTP path field `{field}` is not suppliable by its route"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1903,6 +1908,42 @@ mod tests {
     }
 
     #[test]
+    fn opencode_http_profile_compiles_from_the_exact_local_source_set() {
+        let root = crate::test_support::workspace_root()
+            .join("bundles/opencode/.ai/workers/opencode/lib/hosted");
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        let profile = compile(&files["structured-session.profile.json"], &files)
+            .expect("the authored opencode profile must compile from its local source set");
+        assert_eq!(
+            profile
+                .contract
+                .get("transport")
+                .and_then(Value::as_str),
+            Some("http_sse")
+        );
+    }
+
+    #[test]
     fn invocation_mapping_refuses_missing_paths_and_incompatible_shapes_at_admission() {
         let mut profile: Value =
             serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
@@ -2239,15 +2280,12 @@ mod tests {
 
         let mut fielded = http.clone();
         fielded["routes"][0]["http_path"] = json!("/auth/{field:provider}");
-        assert!(compile(&serde_json::to_vec(&fielded).unwrap(), &schemas()).is_err());
-
-        fielded["routes"][0]["fixed_params"] = json!({"provider":"opencode"});
         compile(&serde_json::to_vec(&fielded).unwrap(), &schemas())
-            .expect("an admitted route field must be substitutable into its path");
+            .expect("a payload field must be substitutable into its route path");
 
-        let mut unadmitted = fielded.clone();
-        unadmitted["routes"][0]["http_path"] = json!("/auth/{field:absent}");
-        assert!(compile(&serde_json::to_vec(&unadmitted).unwrap(), &schemas()).is_err());
+        let mut forbidden = fielded.clone();
+        forbidden["routes"][0]["forbidden_fields"] = json!(["provider"]);
+        assert!(compile(&serde_json::to_vec(&forbidden).unwrap(), &schemas()).is_err());
     }
 
     #[test]
@@ -2290,6 +2328,11 @@ mod tests {
             json!("/permissions/{request_id}");
         compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
             .expect("a complete HTTP server request must be admitted");
+
+        profile["server_requests"][0]["reply_http_path"] =
+            json!("/session/{session_id}/permissions/{request_id}");
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("a session-scoped reply path must be admitted");
 
         let mut stdio = profile.clone();
         stdio["transport"] = json!("stdio_jsonrpc");

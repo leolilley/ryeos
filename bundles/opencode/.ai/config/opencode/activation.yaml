@@ -1,0 +1,26 @@
+category: "opencode"
+schema: ryeos.external_content_activation.v3
+consumer_ref: worker:opencode/hosted
+sources:
+  - id: opencode-package
+    url: https://github.com/anomalyco/opencode/releases/download/v1.18.30/opencode-linux-x64.tar.gz
+    archive_format: tar_gzip
+    sha256: 55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+    maximum_compressed_bytes: 134217728
+    maximum_expanded_bytes: 201326592
+    maximum_entries: 8
+    members:
+      - path: opencode
+        disposition: import
+        sha256: 87bd160e053af86b5b409daabf71f8dc05bbc3a2a3a5f563f36011cdf706a999
+        maximum_bytes: 201326592
+        executable: true
+components:
+  - id: opencode
+    storage: large_content
+    shape:
+      kind: mapped
+      members:
+        - source: opencode-package
+          member: opencode
+          target: null
