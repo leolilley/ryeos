@@ -1991,7 +1991,6 @@ impl StructuredWorkload {
                 let sse_path = http_contract.event_path.clone();
                 let event_type_pointer = http_contract.event_type_pointer.clone();
                 let event_properties_pointer = http_contract.event_properties_pointer.clone();
-                let ignored_notification_projection = http_contract.ignored_notification_projection;
                 thread::Builder::new()
                     .name("ryeos-structured-session-event-reader".to_owned())
                     .spawn(move || {
@@ -2002,7 +2001,6 @@ impl StructuredWorkload {
                             sse_path,
                             event_type_pointer,
                             event_properties_pointer,
-                            ignored_notification_projection,
                             asks,
                             sse_sender,
                         )
@@ -3574,7 +3572,6 @@ fn read_http_events(
     event_path: String,
     event_type_pointer: String,
     event_properties_pointer: String,
-    _ignored_notification_projection: HttpEventProjection,
     asks: Vec<(String, String)>,
     sender: SyncSender<Result<Value, String>>,
 ) {
