@@ -1,17 +1,19 @@
+<!-- ryeos:signed:2026-09-10T10:38:49Z:4f07929a2e2fce51bbbfda29d0902680d37cae017807f59142510b299c4c5089:Y76H3jnkotHKwEusZFnC2lbF7A1f2J9o6zPgemX5KGAUWY3kYdF8e1iCYBv/jbNWJPUGlLQir5bIK4zGxcI1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: opencode
 tags: [opencode, hosted-worker, activation, runbook]
 version: "0.1.0"
 description: >-
   Activation and release-acceptance runbook for the pinned opencode server
-  hosted behind the RyeOS structured-session bridge. Seed; qualification
-  evidence is not yet recorded.
+hosted behind the RyeOS structured-session bridge. The executable and protocol
+closure are admitted; credentialed provider contact is deliberately not yet
+qualified.
 ---
 
 # opencode hosted activation
 
 This bundle hosts OpenCode `1.18.30` (linux-x64 glibc standalone archive)
-behind the signed `ryeos-structured-session-bridge` over the schema 4
+behind the signed `ryeos-structured-session-bridge` over the schema 6
 `http_sse` transport. The profile is `worker:opencode/hosted`; acquisitions
 are `config:opencode/activation`. The activation ceremony follows
 `knowledge:ryeos/core/execution/worker-hosted-execution` and the operator
@@ -43,9 +45,14 @@ flow of the Codex bundle README; only the opencode-specific facts live here.
 
 ## Credential and session posture
 
-- Enrollment is non-interactive: `worker_execution:opencode/login` drives
-  `PUT /auth/{provider}` with an operator-supplied API key through the
-  `credential.auth.set` route. There is no protocol-level device flow.
+- There is intentionally no `worker_execution:opencode/login` and no public
+  raw-key route. A hosted command is durable testimony, so an API key, OAuth
+  token or refresh token must not enter its payload even when its response is
+  ephemeral. OpenCode remains non-contact-qualified until RyeOS's existing
+  vault/credential-profile owner exposes a provider-neutral late-secret
+  projection to structured sessions. That future projection must carry only a
+  secret slot/reference in durable testimony and construct the vendor request
+  only at the final in-memory contact boundary.
 - Account facts are not projected: `credential_subject` is null because
   API-key providers expose no account identity through the server API.
 - Session state lives in the credential-bearing unified `opencode.db`;

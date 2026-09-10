@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T10:35:03Z:f441e4148f2c0156feab253e543d7c0f7af9e680f6e5f2ad2f74a614e46f677d:AyAnAYaPTsfA9mv9QA9G5bbexbNH0rodh7nc3bhwSLAraRTyBfTwZSbfbRn7Vup70FshLp4gm4F+3py1RNt4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T10:38:49Z:372e72a6e2cd2c32454b977fed79b132eafe01d6106c57130193d7dd005553f2:IsLCoufd2UT2tPncnz8YHmsJbovQUoV8ynvyNtzstWLlhRef+6jTanJrfaMvTBdWHJ1IJN9JSygL8x4IZJ7eDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance checks for the OpenCode provider data."""
 
@@ -19,7 +19,6 @@ SOURCE = BUNDLE / ".ai/workers/opencode/lib/hosted"
 PROFILE = SOURCE / "structured-session.profile.json"
 WORKER = BUNDLE / ".ai/workers/opencode/hosted.yaml"
 EXECUTIONS = (
-    BUNDLE / ".ai/worker-executions/opencode/login.yaml",
     BUNDLE / ".ai/worker-executions/opencode/session.yaml",
     BUNDLE / ".ai/worker-executions/opencode/bounded-turn.yaml",
 )
@@ -87,6 +86,11 @@ class OpenCodeContractTests(unittest.TestCase):
             definition = yaml.safe_load(path.read_text())
             caps = definition["config"]["workload_client_delegation_caps"]
             self.assertNotIn("ryeos.execute.tool.*", caps)
+
+    def test_no_raw_credential_enrollment_execution_is_published(self) -> None:
+        self.assertFalse(
+            (BUNDLE / ".ai/worker-executions/opencode/login.yaml").exists()
+        )
 
 
 if __name__ == "__main__":
