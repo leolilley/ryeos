@@ -25,6 +25,10 @@ const MAX_PENDING_SERVER_REQUESTS: usize = 128;
 const HTTP_REQUEST_WORKERS: usize = 4;
 const HTTP_REQUEST_QUEUE_CAPACITY: usize = 16;
 const APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
+/// A recorded server-request decision must be delivered promptly or fail the
+/// session. It must not occupy one of the long-running route workers for the
+/// general turn deadline.
+const SERVER_REQUEST_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 // A route that is gated by an admitted server request must remain alive long
 // enough for that request to expire and send its fail-closed upstream reply.
 // The enclosing persistent-session contract admits a one-hour request bound.
@@ -136,6 +140,7 @@ enum WorkloadIo {
 struct HttpWorkload {
     base_url: String,
     client: reqwest::blocking::Client,
+    server_request_client: reqwest::blocking::Client,
     authorization: String,
     ignored_notification_projection: HttpEventProjection,
     requests: SyncSender<HttpRequest>,
@@ -1960,6 +1965,11 @@ impl StructuredWorkload {
                     .timeout(ROUTE_CALL_TIMEOUT)
                     .build()
                     .context("build structured workload HTTP client")?;
+                let server_request_client = reqwest::blocking::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(SERVER_REQUEST_REPLY_TIMEOUT)
+                    .build()
+                    .context("build structured workload server-request client")?;
                 let readiness_url = format!("{}{}", base_url, http_contract.readiness_path);
                 let readiness = perform_http_request(
                     &client,
@@ -2020,6 +2030,7 @@ impl StructuredWorkload {
                 WorkloadIo::Http(HttpWorkload {
                     base_url,
                     client,
+                    server_request_client,
                     authorization,
                     ignored_notification_projection: http_contract.ignored_notification_projection,
                     requests: request_sender,
@@ -2694,7 +2705,7 @@ impl StructuredWorkload {
         let url = format!("{}{}", http.base_url, path);
         http.requests
             .try_send(HttpRequest {
-                client: http.client.clone(),
+                client: http.server_request_client.clone(),
                 url,
                 method: "POST".to_owned(),
                 authorization: http.authorization.clone(),
@@ -4985,6 +4996,8 @@ server.serve_forever()
     #[test]
     fn approval_expiry_is_inside_route_deadline_and_retains_exact_correlation() {
         assert!(ROUTE_CALL_TIMEOUT > APPROVAL_TTL);
+        assert!(SERVER_REQUEST_REPLY_TIMEOUT < ROUTE_CALL_TIMEOUT);
+        assert!(SERVER_REQUEST_REPLY_TIMEOUT < APPROVAL_TTL);
         let rule = ServerRequestRule {
             method: "approval/request".to_owned(),
             schema: "approval.json".to_owned(),
