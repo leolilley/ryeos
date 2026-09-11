@@ -100,10 +100,22 @@ pub async fn stop_with_progress(
         match pin_live_daemon(env).await {
             Ok(target) => Some(target),
             Err(_) => {
+                // `Failed` is retained exited-process testimony. The CLI tells
+                // the operator to inspect it and run `ryeos stop`; that
+                // explicit acknowledgement must make the node observably
+                // stopped. Remove the non-authoritative discovery hint first,
+                // then compare-and-remove only the exact failed marker. A
+                // concurrent replacement marker is never removed.
+                crate::DaemonMetadata::remove_hint(&env.config().app_root)?;
+                let runtime_state_dir =
+                    ryeos_engine::roots::RuntimeRoot::new(env.config().app_root.clone()).state();
+                crate::lifecycle_marker::acknowledge_startup_failure(&runtime_state_dir)?;
+                let settled = crate::status::status(env).await?;
+                if !matches!(settled, LifecycleStatus::Stopped { .. }) {
+                    bail!("startup failure acknowledgement did not settle the node offline");
+                }
                 return Ok(StopReport {
-                    status: LifecycleStatus::Stopped {
-                        app_root: env.config().app_root.clone(),
-                    },
+                    status: settled,
                     already_stopped: false,
                 });
             }

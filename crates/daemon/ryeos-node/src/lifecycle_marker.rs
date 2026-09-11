@@ -50,6 +50,30 @@ pub fn read(state_dir: &Path) -> Option<LifecycleMarker> {
     serde_json::from_slice(&raw).ok()
 }
 
+/// Retire exactly the retained startup-failure marker an operator has
+/// acknowledged with `ryeos stop`.
+///
+/// Callers must first prove there is no live daemon peer and, for supervised
+/// nodes, establish native down intent. The pinned compare-and-remove keeps a
+/// replacement startup marker from being removed by this acknowledgement.
+pub fn acknowledge_startup_failure(state_dir: &Path) -> anyhow::Result<()> {
+    let directory = lillux::PinnedDirectory::open(state_dir)?
+        .ok_or_else(|| anyhow::anyhow!("lifecycle state directory is absent"))?;
+    let marker = directory
+        .open_pinned_regular(std::ffi::OsStr::new(MARKER_FILE), false)?
+        .ok_or_else(|| anyhow::anyhow!("startup-failure marker is absent"))?;
+    let observation = marker.observation()?;
+    let raw = marker.read_stable_bounded(&observation, MAX_MARKER_BYTES)?;
+    let decoded: LifecycleMarker = serde_json::from_slice(&raw)?;
+    if !matches!(
+        decoded,
+        LifecycleMarker::Exited { ref reason, .. } if reason == "startup_failed"
+    ) {
+        anyhow::bail!("lifecycle marker is not an acknowledged startup failure");
+    }
+    directory.remove_pinned_regular_if_same(&marker)
+}
+
 /// Wall-clock age of the current marker file. The running marker is written
 /// immediately before startup listener publication, so this bounds how long a
 /// live marker may reasonably be treated as the narrow pre-control bootstrap
@@ -214,6 +238,29 @@ mod tests {
             }
             other => panic!("expected exited marker, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn startup_failure_acknowledgement_removes_only_the_pinned_failed_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let started_at = record_running(tmp.path());
+        record_exit(
+            tmp.path(),
+            "startup_failed",
+            &started_at,
+            Some("fixture failure"),
+        );
+        acknowledge_startup_failure(tmp.path()).unwrap();
+        assert!(read(tmp.path()).is_none());
+        assert!(acknowledge_startup_failure(tmp.path()).is_err());
+
+        let started_at = record_running(tmp.path());
+        record_exit(tmp.path(), "signal", &started_at, None);
+        assert!(acknowledge_startup_failure(tmp.path()).is_err());
+        assert!(matches!(
+            read(tmp.path()),
+            Some(LifecycleMarker::Exited { .. })
+        ));
     }
 
     #[cfg(unix)]
