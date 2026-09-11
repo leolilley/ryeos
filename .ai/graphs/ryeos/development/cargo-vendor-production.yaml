@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-11T10:47:57Z:9e7fee3054b41e1314601343728e39a086a2a24f0855efc82e61c4563882de7f:CF7+r/O+Ck9AdaGXIhq4pB7jN0HNAEDZkGPhMmmvFt4Rlzw4ngfenub4Bt6DiD9JmMZ4vzE0kR+yiMToPKrzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Produce the exact locked Cargo vendor closure as one retained named product
+effects: recorded
+product_recipe: config:development/ryeos/cargo-vendor-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/cargo-vendor-products
+      - ryeos.execute.tool.ryeos/development/cargo-vendor
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/cargo-vendor
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

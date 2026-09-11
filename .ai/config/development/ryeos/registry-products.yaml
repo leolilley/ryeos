@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T10:41:30Z:09eac1393edee1651e7dba2abbdeafd358df0dfa23085d48d779fed92180a1c3:N1Qk8X/i2NqtNIePTjtdDTx7iqAVrYIGUKPSDGU3h8GTU7GruXShc70CattXtIavMpyaEy8Hd38EpJ5tI5ipAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T10:48:19Z:e10e1088d65265eb4962b9070acfb249495cea2455c3747b2b22a411cb2df4df:PidFNXYMajPh4fvVGn7jIzvvtq4qVRydHCKqw5bDLolU27FMDfLvU7b2iLETS8Z/owvpajcTWHc14RnIHG2dAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 version: "1.0.0"
 description: Named retained exact public-registry input closure
@@ -25,3 +25,26 @@ build_products:
         maximum_depth: 16
         maximum_file_bytes: 134217728
         maximum_total_bytes: 268435456
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: registry_inputs_to_cargo_vendor
+      producer:
+        canonical_ref: graph:ryeos/development/registry-production
+        recipe_binding: product_recipe
+        product_name: registry_inputs
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/development/cargo-vendor
+        declaration_id: registry-inputs
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 2048
+          maximum_depth: 16
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []

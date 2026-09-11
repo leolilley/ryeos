@@ -1,0 +1,90 @@
+# ryeos:signed:2026-09-11T10:47:57Z:963c1fb1ec40ce7576c251b05f262cb31e0c88153ed5746350b0b57c43d46b4f:golZlB/m0MsQc5YGrxlP/ql+jTWVzRGG7/+quzN2zvfxxYl91gK82o6rPHIQj94wZj/xfVRgbUz/2Z0xXaryAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained exact Cargo vendor closure
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: cargo_vendor
+      path: products/cargo-vendor
+      storage: large_content
+      bounds:
+        maximum_entries: 50000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 1073741824
+  products:
+    - name: cargo_vendor
+      source: {kind: workspace_output, root: cargo_vendor}
+      path: products/cargo-vendor
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 50000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 1073741824
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: cargo_vendor_to_check
+      producer:
+        canonical_ref: graph:ryeos/development/cargo-vendor-production
+        recipe_binding: product_recipe
+        product_name: cargo_vendor
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/development/cargo-check
+        declaration_id: cargo-vendor
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 50000
+          maximum_depth: 64
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 1073741824
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: cargo_vendor_to_test
+      producer:
+        canonical_ref: graph:ryeos/development/cargo-vendor-production
+        recipe_binding: product_recipe
+        product_name: cargo_vendor
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/development/cargo-test
+        declaration_id: cargo-vendor
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 50000
+          maximum_depth: 64
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 1073741824
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: cargo_vendor_to_build
+      producer:
+        canonical_ref: graph:ryeos/development/cargo-vendor-production
+        recipe_binding: product_recipe
+        product_name: cargo_vendor
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/development/cargo-build
+        declaration_id: cargo-vendor
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 50000
+          maximum_depth: 64
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 1073741824
+      qualification:
+        policy_ref: null
+        required_claims: []

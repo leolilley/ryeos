@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-06T05:58:18Z:782ac0fe15717294995fe70ef01aa7f4c95feb91d4eb3ff321740d5e6efafaef:kLbgAKWKOTSDyhKkhlko3MCX0XwkMY04uU+Vshuy3nCf99Lm//gLsIb0pgA+pK4RaIUTV0Y6GiOsVPRlLElLCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T10:47:57Z:3c33b8386e2d4ea0ae2c530b761d38fe7e2e9c066e10cdd5d7b68695a1a979db:JEfQpRtc3CDdvjjCBu9erUW6NKDFFq7NcJEcRtagfg3eFTVZnTKebOSAk+mf7gocrBTBSNPVdhnC1iTO9BB0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/development
 name: cargo-vendor
-version: "1.0.0"
+version: "1.0.1"
 description: Produce locked vendored sources using admitted Cargo and exact public registry inputs
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
@@ -19,7 +19,7 @@ external_content:
   - id: registry-inputs
     kind: tree
     mode: pinned
-    digest: 45835b5cf9928ead34e9b8bd0946b05090b8e6eaa652e0052e07fb8aa09d8ac1
+    digest: 00fb991cb2e99e6b7c0b45d65432b8d5d3a2e807f3e4f79c27b98eb3638c6a9e
     mount_root: execution_runtime
     mount: registry-inputs
 env_config:
