@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-09T21:37:23Z:c7bd0e8e62c2dbc6622ac0efae916b7e9e4e1cde18bf55389eb06cd171a40119:hdNG756xXd2AynNhH5PvHobR3h97zXb5JbiPX/pVWOx8QzHT8wyIJGv1FVcESx5Y085EpfTlGiDRid88ePlvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-11T12:37:05Z:bb70f3cb93df5e72e85d93acfd0bd1307d621fa32f55f52788aae4e0e8908838:Hs5wXmd1UstLtKo0dgsh/NIhKmfs/oGt2Mt1zWR8jI8Nb7E8y7VkZxDsAg16hgweBnGuDLbkb6eSb51s1Cw2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -342,6 +342,14 @@ derive that presentation from the original admitted source, never candidate
 edits. The placement's immutable `hosted_session.workload_client_admitted`
 fact binds its profile, request and presentation digests before contact;
 reattachment must reproduce the same recipe. It does not grant execution.
+
+That public presentation uses the workload client's actual request grammar.
+In particular, a default call is presented as a null/omitted `call`, and a
+named call as `{method}` with its argument schema described separately. The
+tagged enums retained in the private admission ceiling are authority
+representation, not invocation examples, and must never be exposed as though
+the workload could submit them. The daemon compares a deterministic public
+authority projection with the retained ceiling before releasing the boot.
 
 CLI binding requires an exact client member in a declared pinned tree.
 Inside an enforced private-tmp and fresh
