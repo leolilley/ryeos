@@ -917,10 +917,7 @@ impl InstalledService {
                 }
             }
             DesiredState::Down => {
-                if !matches!(
-                    crate::status::status(&env).await?,
-                    crate::LifecycleStatus::Stopped { .. }
-                ) {
+                if !conclusively_stopped_for_upgrade(&crate::status::status(&env).await?) {
                     bail!("originally stopped host service is not conclusively stopped");
                 }
             }
@@ -958,6 +955,18 @@ impl InstalledService {
     }
 }
 
+/// A retained startup failure is explicit exited-process testimony, not stale
+/// liveness metadata. With native down intent established, `finish_upgrade`
+/// separately proves the complete delegated process tree empty before retiring
+/// installation inhibition. Every state that may still represent a live or
+/// uncertain daemon remains excluded here.
+fn conclusively_stopped_for_upgrade(status: &crate::LifecycleStatus) -> bool {
+    matches!(
+        status,
+        crate::LifecycleStatus::Stopped { .. } | crate::LifecycleStatus::Failed { .. }
+    )
+}
+
 /// The service entry must check this under the same gate before scope
 /// provisioning. A native up request cannot override installation inhibition;
 /// desired state must never be inferred from daemon liveness.
@@ -976,6 +985,35 @@ fn require_launch_allowed(desired: DesiredState, upgrade: Option<&UpgradeIntent>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn down_upgrade_accepts_only_conclusive_nonlive_status() {
+        let app_root = PathBuf::from("/node");
+        assert!(conclusively_stopped_for_upgrade(
+            &crate::LifecycleStatus::Stopped {
+                app_root: app_root.clone(),
+            }
+        ));
+        assert!(conclusively_stopped_for_upgrade(
+            &crate::LifecycleStatus::Failed {
+                metadata: crate::DaemonMetadata {
+                    pid: Some(7),
+                    bind: Some("127.0.0.1:7400".to_owned()),
+                    uds_path: Some(PathBuf::from("/runtime/ryeosd.sock")),
+                    started_at: Some("2026-09-11T00:00:00Z".to_owned()),
+                    version: None,
+                    revision: None,
+                    build_date: None,
+                    app_root,
+                },
+                startup: crate::lifecycle_wire::StartupSnapshot::failed_before_control(
+                    "2026-09-11T00:00:00Z".to_owned(),
+                    "2026-09-11T00:00:01Z".to_owned(),
+                    "fixture failure".to_owned(),
+                ),
+            }
+        ));
+    }
 
     #[test]
     fn host_launch_failure_maps_to_bounded_pre_control_status() {
