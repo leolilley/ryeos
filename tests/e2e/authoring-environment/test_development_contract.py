@@ -105,6 +105,8 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
             self.assertEqual(tool["network_authority"], "isolated")
             self.assertEqual(tool["filesystem_authority"], "captured_execution")
             self.assertEqual(tool["execution_protocol"], "protocol:ryeos/core/opaque")
+            self.assertEqual(tool["external_content"], [])
+            self.assertTrue(tool["external_product_slots"])
 
     def test_project_bounds_fit_explicit_development_node_ceiling(self):
         request = self.environment["workload_client"]
@@ -158,12 +160,19 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         )
 
     def test_development_closure_policy_covers_observed_vendor_artifact(self):
-        policy = load("bundles/.ai/node/init/profiles/development.yaml")["policies"]["object_closure"]
+        policies = load("bundles/.ai/node/init/profiles/development.yaml")["policies"]
+        policy = policies["object_closure"]
         # Observed complete vendor output, not an engine/compiler special case.
         # The registered Rust compiler separately validates protocol and encoded
         # response bounds when this signed policy is installed.
         self.assertGreaterEqual(policy["max_total_blob_bytes"], 575879606)
         self.assertGreaterEqual(policy["max_blobs"], 25804)
+        # One Cargo operation selects the independently retained platform and
+        # vendor closures as one complete consumer batch.
+        self.assertGreaterEqual(
+            policies["external_content"]["limits"]["max_total_bytes"],
+            1023940225 + 575879606,
+        )
 
     def test_platform_reproduction_is_an_offline_named_product(self):
         producer = load(".ai/graphs/ryeos/development/platform-production.yaml")
@@ -195,12 +204,19 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
             self.assertEqual(tool["workspace_access"], "immutable_current_generation")
             self.assertEqual(tool["filesystem_authority"], "captured_execution")
             self.assertEqual(tool["network_authority"], "isolated")
-            declarations = {entry["id"]: entry for entry in tool["external_content"]}
-            self.assertEqual(set(declarations), {"platform", "vendor"})
-            self.assertEqual(declarations["vendor"]["digest"],
-                             "8dac785a06faad238b3210c79ba3ca7bee37dc211fe0e95acf80dff6500a75ac")
+            self.assertEqual(tool["external_content"], [])
+            slots = {entry["id"]: entry for entry in tool["external_product_slots"]}
+            self.assertEqual(set(slots), {"platform", "vendor"})
+            self.assertEqual(slots["platform"]["relationship_ref"],
+                             "config:development/ryeos/platform-products")
+            self.assertEqual(slots["platform"]["relationship"],
+                             "platform_to_cargo_" + operation)
+            self.assertEqual(slots["vendor"]["relationship_ref"],
+                             "config:development/ryeos/cargo-vendor-products")
+            self.assertEqual(slots["vendor"]["relationship"],
+                             "cargo_vendor_to_" + operation)
             self.assertTrue(all(entry["mount_root"] == "execution_runtime"
-                                and entry["mode"] == "pinned" for entry in declarations.values()))
+                                and entry["kind"] == "tree" for entry in slots.values()))
             args = tool["config"]["args"]
             for flag in (operation, "--locked", "--frozen", "--offline", "--lib"):
                 self.assertIn(flag, args)

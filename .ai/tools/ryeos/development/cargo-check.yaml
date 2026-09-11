@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-07T04:35:59Z:dcbbd7cf82b4c109dd9fc588bca9a4b6274338edaa0d837108a7e162d9da9b8e:73HXBZ1ZqPF3P9oX+XNXOak+/cFra0fKJQ5kfx9fk6pMr/WKglKRcE7v+NNBAlngg+0/cySQ2uLLIEbedZ7dCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:45:13Z:d12951172d3e30819cf0ac0192bda37b7549cef3002ec1f1cc2c8322322c2ead:Ihzj2JGuZJRpm33fgeK+pQaiuOup+IZhnmzOrfRF/jTZfxMc6t32JeLcvFRTeUFsiyJ5AsF36Xz3RjGfe44lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/development
 name: cargo-check
 version: "1.0.1"
@@ -9,17 +9,18 @@ effects: live
 workspace_access: immutable_current_generation
 filesystem_authority: captured_execution
 network_authority: isolated
-external_content:
+external_content: []
+external_product_slots:
   - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_cargo_check
     kind: tree
-    mode: pinned
-    digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
     mount_root: execution_runtime
     mount: platform
   - id: vendor
+    relationship_ref: config:development/ryeos/cargo-vendor-products
+    relationship: cargo_vendor_to_check
     kind: tree
-    mode: pinned
-    digest: 8dac785a06faad238b3210c79ba3ca7bee37dc211fe0e95acf80dff6500a75ac
     mount_root: execution_runtime
     mount: cargo-vendor
 env_config:

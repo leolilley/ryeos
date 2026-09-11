@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T01:06:23Z:34dfc8bdf6f6666aaa1f145fc4010a9f7daf7b4f87df701e82417404119dd693:Oj0FAiflsAiCP0Dd235AoyMIUWQYgp7k/rKa6qROFDK6Z/JGdaQacQWq0l+sZftbOu46HuTGPiK8dLByl6o+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:45:13Z:79c073d32baf9a07242be4e03a3e1096831c265b6c094a4804da9db9545ff571:NYUt5lR2enDYyOl/xenxvmdqKdPU96y2ITe7pHrjUPC7XDPyfiHgGpTpyGH06PJNpJCvJxzlmnouKXW3nmv/BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/development
 name: format-check
 version: "1.0.0"
@@ -9,11 +9,12 @@ effects: live
 workspace_access: immutable_current_generation
 filesystem_authority: captured_execution
 network_authority: isolated
-external_content:
+external_content: []
+external_product_slots:
   - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_format_check
     kind: tree
-    mode: pinned
-    digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
     mount_root: execution_runtime
     mount: platform
 config:

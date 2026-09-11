@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T01:06:23Z:71bda4a349024e3ce45e64025218a17c7fe6bcaf9c83940ea91329eab1bdc151:AwFq5CbS4qavY/VcOI/SrS4lZKC5wVx23Rg4AmFBqRqMptx1rTF9IxODsL4omzlTMZkMvz8/ttdY2/s80jRKCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:45:13Z:3773ac80e136dd27faec285d21f0b3054efb726f6b5b9889439fd9a97facbd26:mU9l/zMT/HxNEmvDQQz4FfNgoElNC/sKwpTSmSOG4xA9flTqHyDaw2zhOzTdQC/fT4TZQMfUMNwhrunYfCrvBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/development
 name: format-file
 version: "1.0.0"
@@ -9,11 +9,12 @@ effects: live
 workspace_access: shared_exclusive
 filesystem_authority: captured_execution
 network_authority: isolated
-external_content:
+external_content: []
+external_product_slots:
   - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_format_file
     kind: tree
-    mode: pinned
-    digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
     mount_root: execution_runtime
     mount: platform
 config:

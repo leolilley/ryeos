@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T01:06:23Z:75876043456c124ed83c85a4a764beb695d6483c376c6c2d31c1719191668405:81IHv5XoGL8GlzY4l3pLF5rskVTt2pvPr0lmugwykWkz4V3sELGhfxCkti7Jjaatel02EotkiRWpr7/MZlwdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:45:13Z:d90076178b234644b2bf27e9d75d72db08ad33e75a4590c622e8d39c0b563a80:k12L03GmYkstyV78rMKRS/InVi8pEcrOWTpzxxfCE0100p+uScRHByTWxDTUSEkEr1EMPDJ/mu3tvejTM3rmDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/development
 name: platform-inspect
 version: "1.0.0"
@@ -9,11 +9,12 @@ effects: live
 workspace_access: immutable_current_generation
 filesystem_authority: captured_execution
 network_authority: isolated
-external_content:
+external_content: []
+external_product_slots:
   - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_inspect
     kind: tree
-    mode: pinned
-    digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
     mount_root: execution_runtime
     mount: platform
 config:
