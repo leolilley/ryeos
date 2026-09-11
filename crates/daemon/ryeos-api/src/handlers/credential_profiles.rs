@@ -101,11 +101,16 @@ async fn create(
             Err(cleanup) => error.context(format!("profile-home rollback failed: {cleanup}")),
         }));
     }
+    let created = state
+        .state_store
+        .credential_profile(&req.profile_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("created credential profile projection disappeared"))?;
     Ok(json!({
-        "profile_id": req.profile_id,
-        "home_id": home_id,
-        "credential_generation": 1,
-        "state": "unauthenticated",
+        "profile_id": created.profile_id,
+        "home_id": created.home_id,
+        "credential_generation": created.credential_generation,
+        "state": created.state,
     }))
 }
 

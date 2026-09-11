@@ -19639,6 +19639,80 @@ mod tests {
     }
 
     #[test]
+    fn recreated_credential_profile_persists_its_advanced_generation() {
+        let tmp = tempdir().expect("tempdir").keep();
+        let runtime_state_dir = tmp.join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
+        let trust = Arc::new(trust);
+        let open = || {
+            StateStore::new_with_head_trust(
+                tmp.clone(),
+                runtime_state_dir.clone(),
+                runtime_state_dir.join("runtime.sqlite3"),
+                Arc::clone(&signer),
+                WriteBarrier::new(),
+                Arc::clone(&trust),
+            )
+            .expect("state store")
+        };
+
+        let store = open();
+        let profile = NewCredentialProfile {
+            profile_id: "profile-recreated",
+            owner_principal: "fp:operator",
+            home_id: "credential-recreated",
+        };
+        store.create_credential_profile(profile.clone()).unwrap();
+        let revoked_generation = store
+            .revoke_credential_profile("profile-recreated", "fp:operator", 1)
+            .unwrap();
+        store
+            .finish_credential_profile_revocation(
+                "profile-recreated",
+                "fp:operator",
+                revoked_generation,
+            )
+            .unwrap();
+        let deleted_generation = store
+            .begin_credential_profile_deletion(
+                "profile-recreated",
+                "fp:operator",
+                revoked_generation,
+            )
+            .unwrap();
+        store
+            .finish_credential_profile_deletion(
+                "profile-recreated",
+                "fp:operator",
+                deleted_generation,
+            )
+            .unwrap();
+        store.create_credential_profile(profile).unwrap();
+        drop(store);
+
+        let reopened = open();
+        let recreated = reopened
+            .credential_profile("profile-recreated")
+            .unwrap()
+            .expect("recreated profile after reopen");
+        assert_eq!(recreated.credential_generation, deleted_generation + 1);
+        assert_eq!(recreated.state, "unauthenticated");
+        let stable = reopened
+            .with_state_db(|db| db.operational_credential_profiles())
+            .unwrap();
+        assert_eq!(stable.len(), 1);
+        assert_eq!(stable[0].credential_generation, deleted_generation + 1);
+        assert_eq!(stable[0].state, "unauthenticated");
+    }
+
+    #[test]
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");

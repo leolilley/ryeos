@@ -6206,22 +6206,85 @@ impl RuntimeDb {
             validate_bounded_runtime_text(label, value, 256)?;
         }
         let now = lillux::time::timestamp_millis() as i64;
-        let changed = self.conn.execute(
-            "INSERT INTO credential_profile (
-                profile_id, owner_principal, home_id, credential_generation, state,
-                active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                lock_owner, created_at_ms, updated_at_ms, authority_revision
-             ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4, 1)",
-            params![
-                profile.profile_id,
-                profile.owner_principal,
-                profile.home_id,
-                now
-            ],
-        )?;
-        if changed != 1 {
-            bail!("credential profile insertion did not create exactly one row");
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin credential-profile creation")?;
+        let prior = tx
+            .query_row(
+                "SELECT owner_principal, home_id, credential_generation, state,
+                        authority_revision
+                   FROM credential_profile WHERE profile_id=?1",
+                [profile.profile_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((owner, home_id, generation, state, revision)) = prior {
+            // Deletion is a durable tombstone, not removal of the logical
+            // profile identity. Recreating that profile therefore advances
+            // the same owner/home authority. The new credential generation
+            // prevents any historical worker or session from aliasing this
+            // fresh, empty incarnation of the home.
+            if owner != profile.owner_principal || home_id != profile.home_id {
+                bail!("deleted credential profile identity changed during recreation");
+            }
+            if state != "deleted" {
+                bail!("credential profile already exists");
+            }
+            let next_generation = generation
+                .checked_add(1)
+                .context("credential generation overflow during recreation")?;
+            let next_revision = revision
+                .checked_add(1)
+                .context("credential authority revision overflow during recreation")?;
+            let changed = tx.execute(
+                "UPDATE credential_profile
+                    SET credential_generation=?4, state='unauthenticated',
+                        active_login_id=NULL, login_expires_at_ms=NULL,
+                        sanitized_account_json=NULL, lock_owner=NULL,
+                        updated_at_ms=?5, authority_revision=?6
+                  WHERE profile_id=?1 AND owner_principal=?2 AND home_id=?3
+                    AND credential_generation=?7 AND state='deleted'
+                    AND authority_revision=?8",
+                params![
+                    profile.profile_id,
+                    profile.owner_principal,
+                    profile.home_id,
+                    next_generation,
+                    now,
+                    next_revision,
+                    generation,
+                    revision,
+                ],
+            )?;
+            if changed != 1 {
+                bail!("credential profile recreation lost its tombstone CAS");
+            }
+        } else {
+            let changed = tx.execute(
+                "INSERT INTO credential_profile (
+                    profile_id, owner_principal, home_id, credential_generation, state,
+                    active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision
+                 ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4, 1)",
+                params![
+                    profile.profile_id,
+                    profile.owner_principal,
+                    profile.home_id,
+                    now
+                ],
+            )?;
+            if changed != 1 {
+                bail!("credential profile insertion did not create exactly one row");
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -20308,6 +20371,50 @@ mod tests {
             )
             .is_err(),
             "a revoked unproved worker epoch must not append buffered testimony"
+        );
+    }
+
+    #[test]
+    fn deleted_credential_profile_recreation_advances_the_same_fenced_identity() {
+        let (_tmp, db) = fresh_db();
+        let profile = NewCredentialProfile {
+            profile_id: "P-recreated",
+            owner_principal: "fp:operator",
+            home_id: "home-P-recreated",
+        };
+        db.create_credential_profile(profile.clone()).unwrap();
+        let revoked_generation = db
+            .revoke_credential_profile("P-recreated", "fp:operator", 1)
+            .unwrap();
+        db.finish_credential_profile_revocation("P-recreated", "fp:operator", revoked_generation)
+            .unwrap();
+        let deleted_generation = db
+            .begin_credential_profile_deletion("P-recreated", "fp:operator", revoked_generation)
+            .unwrap();
+        db.finish_credential_profile_deletion("P-recreated", "fp:operator", deleted_generation)
+            .unwrap();
+        assert!(db.credential_profile("P-recreated").unwrap().is_none());
+
+        db.create_credential_profile(profile).unwrap();
+        let recreated = db
+            .credential_profile("P-recreated")
+            .unwrap()
+            .expect("recreated profile");
+        assert_eq!(recreated.owner_principal, "fp:operator");
+        assert_eq!(recreated.home_id, "home-P-recreated");
+        assert_eq!(recreated.credential_generation, deleted_generation + 1);
+        assert_eq!(recreated.state, "unauthenticated");
+        assert!(recreated.lock_owner.is_none());
+        assert!(recreated.sanitized_account.is_none());
+
+        assert!(
+            db.create_credential_profile(NewCredentialProfile {
+                profile_id: "P-recreated",
+                owner_principal: "fp:other",
+                home_id: "home-P-recreated",
+            })
+            .is_err(),
+            "recreation must not reclassify the retained profile identity"
         );
     }
 
