@@ -5380,18 +5380,26 @@ pub fn present_workload_execution(
                 WorkloadClientCallCeiling::Method { name } => Some(name.as_str()),
             };
             if execution.methods.is_empty() && selected.is_none() {
-                return Ok(serde_json::json!({"call":call,"method":null,"args":null}));
+                return Ok(
+                    serde_json::json!({"call":null,"resolved_method":null,"call_args_schema":null}),
+                );
             }
             let (name, method) = resolve_requested_method(selected, execution, &canonical.kind)?;
-            Ok(serde_json::json!({"call":call,"method":name,"args":method.args}))
+            let request_call = selected.map(|_| serde_json::json!({"method":name}));
+            Ok(serde_json::json!({
+                "call": request_call,
+                "resolved_method": name,
+                "call_args_schema": method.args,
+            }))
         })
         .collect::<Result<Vec<_>, DispatchError>>()?;
-    Ok(
-        serde_json::json!({"item":descriptor,"ceiling":ceiling,"calls":calls,
+    Ok(serde_json::json!({
+        "item":descriptor,
+        "authority":ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling),
+        "calls":calls,
         "source_digest":output.root.source_content_digest,
         "effective_definition_digest":ryeos_state::objects::canonical_value_digest(&output.composed.composed)
-            .map_err(DispatchError::Internal)?}),
-    )
+            .map_err(DispatchError::Internal)?}))
 }
 
 /// Preflight the dispatch route for accepted/background launch.

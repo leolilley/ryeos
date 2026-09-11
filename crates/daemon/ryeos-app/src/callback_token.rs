@@ -136,7 +136,12 @@ impl AdmittedWorkloadClientGrant {
                 .iter()
                 .zip(&self.executions)
                 .any(|(item, ceiling)| {
-                    item.get("ceiling") != serde_json::to_value(ceiling).ok().as_ref()
+                    item.get("authority")
+                        != Some(
+                            &ryeos_runtime::workload_client::execution_ceiling_presentation(
+                                ceiling,
+                            ),
+                        )
                 })
         {
             bail!("workload presentation contradicts its admitted execution ceiling");
@@ -1548,7 +1553,11 @@ mod tests {
             grant
                 .executions
                 .iter()
-                .map(|ceiling| serde_json::json!({"ceiling":ceiling}))
+                .map(|ceiling| {
+                    serde_json::json!({
+                        "authority": ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling)
+                    })
+                })
                 .collect(),
         );
         grant

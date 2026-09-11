@@ -153,6 +153,33 @@ pub enum WorkloadClientCallCeiling {
     Method { name: String },
 }
 
+/// Public, non-authorizing projection of one admitted execution ceiling.
+///
+/// The retained ceiling uses a tagged enum because it is authority data.  A
+/// worker must never be shown that internal representation as if it were an
+/// invocation example: `{ "kind": "default" }` is not a valid
+/// [`MethodCall`].  Keep the model/client-facing description in the actual
+/// request grammar while the daemon retains and enforces the full ceiling.
+pub fn execution_ceiling_presentation(ceiling: &WorkloadClientExecutionCeiling) -> Value {
+    let calls = ceiling
+        .calls
+        .iter()
+        .map(|call| match call {
+            WorkloadClientCallCeiling::Default => Value::Null,
+            WorkloadClientCallCeiling::Method { name } => {
+                serde_json::json!({"method": name})
+            }
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "item_ref": ceiling.item_ref,
+        "allowed_ref_bindings": ceiling.ref_bindings,
+        "calls": calls,
+        "effect_classes": ceiling.effect_classes,
+        "workspace_access": ceiling.workspace_access,
+    })
+}
+
 /// Target-local execution-policy ceiling. A null policy disables the feature.
 /// Values here bound project requests mechanically; they never add item,
 /// principal, project, effect, or child-program authority.
@@ -816,6 +843,25 @@ mod tests {
             max_invocations_per_boot: 8,
             max_lifetime_seconds: 300,
         }
+    }
+
+    #[test]
+    fn execution_presentation_uses_the_callable_wire_shape() {
+        let mut ceiling = execution("tool:project/check");
+        ceiling.calls.push(WorkloadClientCallCeiling::Method {
+            name: "inspect".to_owned(),
+        });
+        let presented = execution_ceiling_presentation(&ceiling);
+        assert_eq!(
+            presented["calls"],
+            serde_json::json!([null, {"method":"inspect"}])
+        );
+        assert!(
+            !lillux::canonical_json(&presented)
+                .unwrap()
+                .contains("\"kind\":\"default\""),
+            "internal authority variants must never be advertised as invocation input"
+        );
     }
 
     #[test]
