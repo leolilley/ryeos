@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T19:51:40Z:3895164dd022c1f40fe8f40760bbd1eb0ed3e720ed86896e0fe4ec9ba8c643c8:nfjqJY9pBeAECKlUG6Ym83+m/K6x2tHTZcAzg9XI+YFnmbbwZazUrXulrZARhLQmm5pLHZ5F3h/iw8FiTu0CBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:37:14Z:c01297654227ce58ea3fb47722d8da3ee580621d247e50c7cff9aefe9f33c06e:vy0cn2SUWXqFO9Zp2TOquokj6KM4DCdrnwfzwGruZ6If16wN6aH7L1tD3yRjdHYzyZ6kEqL5Mha5FTZKKHQoAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Repository capture intent, composed with the target's signed node patterns.
 # Git ignores are not snapshot authority. Keep source and the public developer
 # signing fixture, but never send local artifacts or nested worktrees as source.
@@ -48,6 +48,9 @@ exclusions:
   - "/bundles/local-inference/.ai/bin/"
   - "/bundles/local-inference/.ai/objects/"
   - "/bundles/local-inference/.ai/refs/"
+  - "/bundles/opencode/.ai/bin/"
+  - "/bundles/opencode/.ai/objects/"
+  - "/bundles/opencode/.ai/refs/"
   - "/bundles/ryeos-ui/.ai/bin/"
   - "/bundles/ryeos-ui/.ai/objects/"
   - "/bundles/ryeos-ui/.ai/refs/"

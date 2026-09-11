@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T06:42:46Z:3f11bcdb24414a5c5187966146ca573a1b459469f70e1395bb3deddd1d21a9bb:xuIWubHkV4PJ5tEE9xJsLK7fDFogBJgKeu/1kA+fKoT3+vkQzsjkWkzVhFuML+j2g1MaP54WIc0+C5ARGy4ABA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:36:02Z:b7ad948e605a891c2512b3be972a4f4b6593b2d4a7597c2c93a4653ab05fe7af:XU2eRIbGOKojZM6EUY5wX/Nwp3g7bL5rtJEYVcBFS2Gud7l2ENz7IoHUUVn1aptJEcfE7W37zbCFQIpnDA1IAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -258,11 +258,13 @@ policies:
     roots: {}
     limits:
       max_depth: 11
-      # The declared development platform contains about 19,500 entries. This
-      # opt-in profile admits its bounded tree; ordinary profiles stay unchanged.
+      # The retained development platform contains about 19,500 entries. Cargo
+      # operations compose that platform with the independently retained vendor
+      # closure, so the aggregate ceiling must admit both exact manifests.
+      # Ordinary profiles stay unchanged.
       max_entries: 65536
       max_file_bytes: 1503300328
-      max_total_bytes: 1514745854
+      max_total_bytes: 2147483648
       store_budget_bytes: 4294967296
       minimum_free_bytes: 2147483648
     managed_activation:
