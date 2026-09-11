@@ -150,6 +150,12 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         # Provisioning is operator-driven, not silently added to root worker grants.
         self.assertNotIn("tool:ryeos/development/cargo-vendor",
                          [route["item_ref"] for route in self.environment["workload_client"]["executions"]])
+        products = load(".ai/config/development/ryeos/cargo-vendor-products.yaml")
+        self.assertEqual(
+            {relationship["consumer"]["declaration_id"]
+             for relationship in products["product_relationships"]["relationships"]},
+            {"vendor"},
+        )
 
     def test_development_closure_policy_covers_observed_vendor_artifact(self):
         policy = load("bundles/.ai/node/init/profiles/development.yaml")["policies"]["object_closure"]
