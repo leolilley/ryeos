@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-11T10:41:30Z:07ae20fd3cb1fec336920dc7589d2cd8fb066151995ddafa00d468e3c13d2b3e:MI0D25VHfSZKzYWAAQzcrgrugg+btWTBRXUPCJbYdcRRHEyX4FuwxA72fhotsRJI+ItqWRdVAmCLJvi6TWlUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Produce exact verified public-registry inputs as one retained named product
+effects: recorded
+product_recipe: config:development/ryeos/registry-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/registry-products
+      - ryeos.execute.tool.ryeos/development/registry-production/assemble
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/registry-production/assemble
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

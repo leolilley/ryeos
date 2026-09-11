@@ -1,0 +1,27 @@
+# ryeos:signed:2026-09-11T10:41:30Z:09eac1393edee1651e7dba2abbdeafd358df0dfa23085d48d779fed92180a1c3:N1Qk8X/i2NqtNIePTjtdDTx7iqAVrYIGUKPSDGU3h8GTU7GruXShc70CattXtIavMpyaEy8Hd38EpJ5tI5ipAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained exact public-registry input closure
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: registry_inputs
+      path: products/registry-inputs
+      storage: large_content
+      bounds:
+        maximum_entries: 2048
+        maximum_depth: 16
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+  products:
+    - name: registry_inputs
+      source: {kind: workspace_output, root: registry_inputs}
+      path: products/registry-inputs
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 2048
+        maximum_depth: 16
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
