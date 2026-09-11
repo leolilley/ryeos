@@ -95,6 +95,12 @@ class CodexContractTests(unittest.TestCase):
                     self.assertEqual(filesystem["/ryeos/realizations/" + realization["mount"]], "read")
             self.assertEqual(filesystem[":root"], "deny")
             self.assertFalse(baseline["permissions"]["ryeos-workspace-only"]["network"]["enabled"])
+            self.assertFalse(baseline["features"]["code_mode_host"])
+            feature_args = [arg for arg in profile["workload_args"]
+                            if arg.startswith("features=")]
+            self.assertEqual(len(feature_args), 1)
+            self.assertIn("code_mode_host=false", feature_args[0])
+            self.assertNotIn("code_mode_host=true", feature_args[0])
 
     def test_turn_settings_notification_is_typed_bounded_testimony(self) -> None:
         schema_path = SOURCE / "schema/ThreadSettingsUpdatedNotification.json"

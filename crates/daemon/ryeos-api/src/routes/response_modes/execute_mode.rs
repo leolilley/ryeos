@@ -241,6 +241,7 @@ pub fn resolve_execution_project_authority(
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
     current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
+    project_site_id: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
@@ -249,6 +250,8 @@ pub fn resolve_execution_project_authority(
         ExecutionProjectAuthority, LiveProjectAccess, PinnedChildProjectRealization,
         PinnedProjectRealization, PinnedTerminalPublication,
     };
+
+    ryeos_app::identity::validate_canonical_site_id(project_site_id)?;
 
     // Authorization scopes are a set. Authorized-key files and composed
     // grants need not preserve a particular ordering, while the immutable
@@ -401,7 +404,14 @@ pub fn resolve_execution_project_authority(
             };
             ExecutionProjectAuthority::pinned(
                 root.as_ref()
-                    .map(|path| format!("local:{}", path.display()))
+                    .map(|path| {
+                        ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                            path,
+                            project_site_id,
+                        )
+                        .map(|identity| identity.normalized_logical_key)
+                    })
+                    .transpose()?
                     .unwrap_or_else(|| format!("snapshot:{snapshot_hash}")),
                 root,
                 snapshot_hash.to_string(),
@@ -499,6 +509,7 @@ pub fn resolve_execution_contract(
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
         project_ctx.current_head_destination.as_ref(),
+        state.threads.site_id(),
         &state.isolation,
         caller_scopes,
     )?;
@@ -2344,6 +2355,7 @@ mod tests {
             Some(project.path()),
             None,
             None,
+            "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
         )
@@ -2388,10 +2400,22 @@ mod tests {
             Some(project.path()),
             Some(&snapshot_hash),
             Some(&destination),
+            "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
         )
         .unwrap();
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity,
+            ..
+        } = &authority
+        else {
+            panic!("expected pinned project authority");
+        };
+        assert_eq!(
+            stable_project_identity,
+            &format!("site:test:{}", project.path().display())
+        );
         assert_eq!(
             authority.terminal_publication(),
             Some(
@@ -2409,6 +2433,7 @@ mod tests {
                 Some(project.path()),
                 Some(&snapshot_hash),
                 None,
+                "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
             )
@@ -2424,6 +2449,7 @@ mod tests {
                 Some(project.path()),
                 Some(&snapshot_hash),
                 Some(&mismatch),
+                "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
             )

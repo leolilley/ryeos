@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-09T18:08:16Z:f03f254b392fb57f1366ada26124585bb8d4f7bfbd21aa6cb980a66b764b311e:3aTSK8CKlNgRvL7DbDpXm1CdIPPq2VjyHw3Bvm9wvc7ArZr2Sc5RDIw3jS4kBvIJKsiJJhjfg96XdqfYW6xtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-11T06:42:46Z:ca2f6aaa31b126cf37b0f5d51f564ed4d91afe285b13f271cbb52e770824433c:6oIGZ90+NdbdfiYq02Q6wkotIuyMJD1jUbIjUbzwhEq2SxwLlLil0MNbLmBzOT3WddcB2HBwNC3vjGcZzC0BCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.10.1"
+version: "1.10.2"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -180,6 +180,17 @@ configured-operator forwarding route to inspect profiles on a remote node.
    credential-free registration probe passed; that alone is not model execution
    or installed development-loop evidence. `ryeos_execute` accepts the existing
    bounded execution request; the daemon retains and revalidates authority.
+
+   Both hosted profiles explicitly disable Codex's Code Mode host. RyeOS
+   registers finite dynamic tools directly; it does not execute model-authored
+   JavaScript or emulate an `exec` host to recover a model that selected the
+   wrong invocation surface. Model compatibility is therefore an acceptance
+   property of the exact Codex/model/profile generation. In the retained local
+   qualification, `gpt-5.6-luna` repeatedly selected disabled Code Mode `exec`
+   and completed without invoking RyeOS, while `gpt-5.3-codex-spark` emitted a
+   direct `ryeos_execute` call that reached the bounded child-operation
+   authority. Those observations prove only those runs; model availability,
+   pricing, and future tool-selection behavior must be checked independently.
 
    Ordinary shell/editing commands remain Codex commands. The Codex profiles
    mount their executable resources and command tools in the existing immutable

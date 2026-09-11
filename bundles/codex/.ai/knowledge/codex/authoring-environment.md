@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-07T01:28:01Z:ac8b855b08760320e6374df395b73af7c94da72e639345a079a560db0486ca26:hxL3cFPJpElBOGqNWVQ0gbkKe96zp5MpfgjqeWxFMPx3AP2dpQFxfcC8T0VOHeXxKV+Zf9x3Puuc10kSfBoGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-11T06:42:46Z:34c063d791c41af0a3449b763da1a843d877c914d4e2808fb14889f5d6c7467b:SMX0qETpVb9IvMgEXWv85+DOoWsfibG3B6sayhFpgD7jASwvJTZCqT27iQ2Mg/Hkobf9l8/htMRHESU7pM60CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [hosted-execution, environments, authoring, external-content]
-version: "1.0.2"
+version: "1.0.3"
 description: >
   Explicit authoring worker and command environment, separate from child
   project-operation dependencies and restricted client authority.
@@ -158,3 +158,8 @@ Root workers receive authoring utilities and, where explicitly configured, the
 restricted workload client. Child project-operation Tools own compiler/platform
 and locked project dependencies. Do not move that closure into the root worker
 or grant it ordinary daemon/vault/publication access to bypass child execution.
+The exact target generation must activate each child Tool's own external-content
+binding before a model turn is spent; activating the root worker's authoring
+tools does not authorize the formatter, compiler, Python, or project-dependency
+consumers. A missing child binding is a provisioning failure, not permission to
+inherit host PATH or reuse another consumer's grant.

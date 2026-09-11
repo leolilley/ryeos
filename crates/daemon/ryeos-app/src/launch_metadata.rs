@@ -111,7 +111,10 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // v34 retains source-bearing product selections; receipts are not semantic identity.
 // v35 combines source-bearing product selections and exact invocation/scope
 // authority. Both separately checkpointed branch shapes remain opaque history.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 35;
+// v36 requires site-qualified stable identity for pinned project generations.
+// Predecessor `local:<path>` pins remain opaque history and cannot authorize
+// candidate return or cross-site continuation under the current contract.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 36;
 
 /// Per-thread daemon-owned state directory.
 ///

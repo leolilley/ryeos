@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-09T21:37:23Z:010f6174a44fa9bacd8b76485918676d36bf3a8010fb489dbebe40e838787a95:vAvAhypIAboeS/RxrcXFXGxr2xAdCILUmzqiWJuTQ57XQAQrQ2RqqObwxy6Lame11zxhauSN10570KVwAt4pDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-11T06:42:46Z:3c0a2f95237299ec35bc59b19f77c8b7cfaae1e498246fd7da161689c69b7233:nXjeES44FNGEeqF7XUvAvXECd9UtOfN09b2zwxeCqFLllKAYqsXfmZlKlDByQKj48qkKQVoWm2doiwecsOqqCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -35,7 +35,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 28;
 - persistent-session capsule schema 11 (enforced session source is runtime-owned,
   never a project mountpoint; predecessor capsules are not reinterpreted);
-- runtime launch metadata epoch 35;
+- runtime launch metadata epoch 36;
 - the standalone runtime project-authority envelope epoch 5; and
 - the owned runtime SQLite operator schema epoch 33 (encoded in the RyeOS
   `PRAGMA application_id` family).

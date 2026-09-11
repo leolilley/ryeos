@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T12:59:28Z:07d418f4f080a13067bfd8df2972db1702ab8417b3ebd34f2dd0bf7b50f13932:eQkFKCfSAMEZ6Kl3g1awTGhKZ4UHjTNiiU2emjMm6Z6+CedUFDd7vgFiUkZPaD+P9AMVSOqg2024ZyWSIgvxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-11T06:42:46Z:489bed9e409dc8afd1fcc743f3852bf41b10ee37f4c495b4e3519c2c894e7744:9+eYyU9YDgIdqcVae6LMDzLAox18O1FOec2eAdwU6L8AOyHt3KOqjECnrfDGazNfRk4dsXrmtPTC03UFHMLOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -22,7 +22,10 @@ declarations and live inspected capabilities. It emits a strict backend-neutral
 plan; the selected adapter owns backend-specific inspection and launch
 compilation. Core ships the self-contained `linux-lillux` implementation as
 available signed data. The explicit development profile selects enforced
-execution; the general installation profiles retain their explicit disabled choice.
+execution, whole-process scope ownership, and the qualified nested-sandbox
+ceiling required by hosted development workers whose pinned client launches
+its own sandbox. The general installation profiles retain their explicit
+disabled choice.
 
 Durable execution workspaces use the isolation-adapter v10 contract. RyeOS owns
 one canonical private `project/` generation. Disabled/native execution creates

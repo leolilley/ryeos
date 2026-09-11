@@ -34,7 +34,7 @@
     "-c",
     "agents={ enabled=false }",
     "-c",
-    "features={ apps=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
+    "features={ apps=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode_host=false, code_mode={ enabled=false } }",
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",

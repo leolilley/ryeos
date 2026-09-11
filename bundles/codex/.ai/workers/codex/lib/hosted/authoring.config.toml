@@ -66,7 +66,9 @@ hooks = false
 multi_agent = false
 memories = false
 network_proxy = false
-code_mode_host = true
+# RyeOS presents admitted executions as direct dynamic tools. Advertising the
+# separate JavaScript host would make Codex request an unimplemented `exec`.
+code_mode_host = false
 
 [features.code_mode]
 enabled = false

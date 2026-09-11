@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-07T06:05:34Z:b37a7d25e2fd9f4db31417fa5ae7219344221b9c88133d3a1277ec64b3bb5d8e:PAbmwZW58+nNAlPmYQpd73PWRBrBVeM2kXexoJ+BhrmeTFgooLdkxgwZCaVao6As1K1Sfslpz3rWbezvgniYDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-11T06:46:15Z:6d2b5d41ff344f4d5ad36cad676745462f0b16b09d248a08f9de2675e7620a05:G8Er3+K91bdyABuEQsH1ra31ARFeAuEOCzwfNrZp9D5oeCxDA5xIHNrcEpniGUS2ahKIUyRYUFeiedcfCgXhAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -313,11 +313,12 @@ also retain and verify the workload's target-signed receipt, chain head, or
 other exact authority defined by that workload. Do not weaken owner-scoped
 chain APIs to manufacture that evidence for ordinary `remote execute`.
 
-For a long-running accepted workload, use the configured-operator push/run
-policy documented by the remote command reference, retain the returned chain
-root, launch and placement IDs, and inspect only that exact authority. After a
-completed turn has been fenced, the session is terminated, its candidate is
-validated, and status is `publish_ready`, return it explicitly with:
+For a long-running workload, use the configured-operator push/run policy
+documented by the remote command reference, retain the returned chain root,
+launch and placement IDs, and inspect only that exact authority. After a
+completed turn has been fenced, the session is terminated, and its frozen
+candidate closure and base have been validated, return that retained candidate
+explicitly for source-side review with:
 
 ```bash
 ryeos --project "$PROJECT" remote worker pull-result stronger <chain-root>
@@ -332,6 +333,13 @@ cannot select a newer candidate, silently advance either project HEAD, or
 dispose of the target candidate. The result returns the complete target-signed
 candidate testimony alongside the source-local job ID and apply counts so the
 evidence can be retained without reading node databases.
+
+This return is not independent task qualification. A `frozen` owner-retained
+candidate may be returned for inspection while its target root remains open for
+an owner decision. `publish_ready` additionally proves that the separately
+admitted evaluator accepted the candidate. Workflows claiming an accepted or
+publishable result must require `publish_ready`; workflows only returning an
+exact candidate for review must describe the weaker evidence honestly.
 
 For a model qualification, retain the exact signed worker/model refs,
 realization receipt/artifact hash, device profile, deterministic prompt/input,

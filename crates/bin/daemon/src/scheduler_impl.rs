@@ -99,6 +99,7 @@ impl AppSchedulerContext {
                 project_root,
                 snapshot_hash,
                 current_head_destination.as_ref(),
+                self.0.threads.site_id(),
                 &self.0.isolation,
                 &spec.execution.capabilities,
             )?;
@@ -293,6 +294,7 @@ impl SchedulerContext for AppSchedulerContext {
                     None,
                     None,
                     None,
+                    self.0.threads.site_id(),
                     &self.0.isolation,
                     &handler_context.scopes,
                 )?;
@@ -313,6 +315,7 @@ impl SchedulerContext for AppSchedulerContext {
                     Some(&canonical),
                     None,
                     None,
+                    self.0.threads.site_id(),
                     &self.0.isolation,
                     &handler_context.scopes,
                 )?;
@@ -358,6 +361,7 @@ impl SchedulerContext for AppSchedulerContext {
                         Some(&context.original_path),
                         context.snapshot_hash.as_deref(),
                         context.current_head_destination.as_ref(),
+                        state.threads.site_id(),
                         &state.isolation,
                         &handler_context.scopes,
                     )?;
