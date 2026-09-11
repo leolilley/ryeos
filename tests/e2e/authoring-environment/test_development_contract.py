@@ -159,6 +159,18 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertGreaterEqual(policy["max_total_blob_bytes"], 575879606)
         self.assertGreaterEqual(policy["max_blobs"], 25804)
 
+    def test_platform_reproduction_is_an_offline_named_product(self):
+        producer = load(".ai/graphs/ryeos/development/platform-production.yaml")
+        products = load(".ai/config/development/ryeos/platform-products.yaml")
+        self.assertEqual(producer["product_recipe"],
+                         "config:development/ryeos/platform-products")
+        self.assertEqual(products["build_products"]["products"][0]["name"], "platform")
+        tool_text = (ROOT / ".ai/tools/ryeos/development/platform-production/assemble.py").read_text()
+        self.assertIn("#   network_authority: isolated", tool_text)
+        self.assertIn("#   filesystem_authority: captured_execution", tool_text)
+        self.assertIn("digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316",
+                      tool_text)
+
     def test_producer_timeouts_survive_project_execution_config_precedence(self):
         execution = load(".ai/config/execution/execution.yaml")["items"]["tool"]
         runtime = load(".ai/tools/ryeos/development/authoring-environment-production/runtime.yaml")

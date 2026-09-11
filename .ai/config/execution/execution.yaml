@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T10:36:34Z:d56417fe4e049e376a12e32fb77c41d1aae08a75ba72aca506b0dc1a29f932a7:8bX51wzeFpjoIUh0dmEuKO7Cq2+Tgl+VM7p8ciWOL3j1iCaU8Wlp8yKPuzmssIHowxfoY9joM1T0eh71TBV1Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T11:10:34Z:501727f1a25dba43029f9a6f3a0d1b4a7d6e9e6f75e8ce37aabf9db3e2deb889:SkezhnMW7FWg4KLMmIKsJZA/2HAvMeljohFE66MWqFeK1r5QBygbNpVH7JUexJHUAPcrlcYVSjrM+Umg27QoCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: execution
 version: "1.0.0"
 schema_version: "2.1.0"
@@ -25,11 +25,15 @@ items:
       timeout: 1860
     ryeos/development/authoring-built-utilities-production-recorded:
       timeout: 1920
+    ryeos/development/platform-production:
+      timeout: 900
   tool:
     ryeos/development/authoring-environment-production/build-utilities:
       timeout: 1800
     ryeos/development/registry-production/assemble:
       timeout: 60
+    ryeos/development/platform-production/assemble:
+      timeout: 600
     ryeos/development/repository-validation/dependency-layers:
       timeout: 30
     ryeos/development/repository-validation/naming:

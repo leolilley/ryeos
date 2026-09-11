@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-11T11:10:34Z:a9e7dcf274def3c18fd9d2b47bf1d9cb444240ccf874eed297fff76ca25e9c82:nEz9ktUmPnwjQmoA887tr7caNthXKf+Ev1z+3oZqhmsFmEsJne/Kfd7e9GfdhApdwOuzJ9eSfxLriKt6QktUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Reproduce the exact admitted development platform as one retained named product
+effects: recorded
+product_recipe: config:development/ryeos/platform-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/platform-products
+      - ryeos.execute.tool.ryeos/development/platform-production/assemble
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/platform-production/assemble
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"
