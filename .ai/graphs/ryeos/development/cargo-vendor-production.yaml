@@ -1,13 +1,21 @@
-# ryeos:signed:2026-09-11T10:47:57Z:9e7fee3054b41e1314601343728e39a086a2a24f0855efc82e61c4563882de7f:CF7+r/O+Ck9AdaGXIhq4pB7jN0HNAEDZkGPhMmmvFt4Rlzw4ngfenub4Bt6DiD9JmMZ4vzE0kR+yiMToPKrzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T10:53:16Z:b08637da668f76088b404158f9f96c7678b470b9c142e37e1b19009096134b15:htrMisJVB68cOC32fP7mnNolzZbhNyBlZ/Akz3AqPS/N89glu4D1AWOYRzs68jy2HbFMw2Vlza4vkkljxz/hAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
 description: Produce the exact locked Cargo vendor closure as one retained named product
 effects: recorded
 product_recipe: config:development/ryeos/cargo-vendor-products
+external_product_slots:
+  - id: registry-inputs
+    relationship_ref: config:development/ryeos/registry-products
+    relationship: registry_inputs_to_cargo_vendor
+    kind: tree
+    mount_root: execution_runtime
+    mount: registry-inputs
 requires:
   capabilities:
     declared:
       - ryeos.execute.config.development/ryeos/cargo-vendor-products
+      - ryeos.execute.config.development/ryeos/registry-products
       - ryeos.execute.tool.ryeos/development/cargo-vendor
 config:
   start: produce

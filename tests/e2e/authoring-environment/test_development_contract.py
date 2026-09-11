@@ -124,11 +124,20 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertFalse(tool["config_schema"]["additionalProperties"])
         self.assertEqual(tool["config_schema"]["properties"], {})
         declarations = {entry["id"]: entry for entry in tool["external_content"]}
-        self.assertEqual(set(declarations), {"platform", "registry-inputs"})
+        self.assertEqual(set(declarations), {"platform"})
         for declaration in declarations.values():
             self.assertEqual(declaration["mode"], "pinned")
             self.assertEqual(declaration["mount_root"], "execution_runtime")
             self.assertRegex(declaration["digest"], r"^[0-9a-f]{64}$")
+        producer = load(".ai/graphs/ryeos/development/cargo-vendor-production.yaml")
+        self.assertEqual(producer["external_product_slots"], [{
+            "id": "registry-inputs",
+            "relationship_ref": "config:development/ryeos/registry-products",
+            "relationship": "registry_inputs_to_cargo_vendor",
+            "kind": "tree",
+            "mount_root": "execution_runtime",
+            "mount": "registry-inputs",
+        }])
         args = tool["config"]["args"]
         for required in ("--locked", "--frozen", "--offline", "--respect-source-config", "--versioned-dirs"):
             self.assertIn(required, args)

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T10:48:19Z:e10e1088d65265eb4962b9070acfb249495cea2455c3747b2b22a411cb2df4df:PidFNXYMajPh4fvVGn7jIzvvtq4qVRydHCKqw5bDLolU27FMDfLvU7b2iLETS8Z/owvpajcTWHc14RnIHG2dAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-11T10:53:16Z:b1adf54e072fa6b02bb272b0abd71d7b235cc4f9f0c3ea8ac25eeb2550771332:LeZ1sg14/J7jyLo97C+Wd96Bc8pcV6v+d++0TgMR56s/XlSoJqvtQz7cf98s8NMWVuOh5diBY9Q4Xi2QlS8eBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 version: "1.0.0"
 description: Named retained exact public-registry input closure
@@ -35,7 +35,7 @@ product_relationships:
         product_name: registry_inputs
         parameters: {}
       consumer:
-        canonical_ref: tool:ryeos/development/cargo-vendor
+        canonical_ref: graph:ryeos/development/cargo-vendor-production
         declaration_id: registry-inputs
       required_product:
         shape: tree
