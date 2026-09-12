@@ -47,6 +47,10 @@ Options:
                         Explicitly replace an obsolete complete node-policy
                         generation from this bundle set's signed init profile.
                         Requires init and preserves all non-policy node state.
+  --app-root DIR        Select the exact existing node to initialize and manage.
+                        This explicit value survives the root-owned package
+                        transaction; no privileged re-exec inherits it from the
+                        ambient environment.
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
@@ -518,6 +522,8 @@ node_profile_override=""
 jobs=""            # forwarded to populate as cargo -j N
 crates=""          # forwarded to populate to rebuild only these Cargo packages
 populate_all=0     # explicit opt-in to rebuild the whole bundle set
+init_app_root="${RYEOS_APP_ROOT:-}"
+app_root_argument_present=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -544,6 +550,16 @@ while [[ $# -gt 0 ]]; do
         --reset-node-policy-generation)
             reset_node_policy_generation=1
             shift
+            ;;
+        --app-root)
+            [[ $# -ge 2 && -n "$2" ]] || die "--app-root requires a path"
+            [[ "$2" == /* ]] || die "--app-root requires an absolute path"
+            if [[ -n "$init_app_root" && "$init_app_root" != "$2" ]]; then
+                die "--app-root contradicts RYEOS_APP_ROOT"
+            fi
+            init_app_root="$2"
+            app_root_argument_present=1
+            shift 2
             ;;
         --key)
             [[ $# -ge 2 ]] || die "--key requires a path"
@@ -588,6 +604,17 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$init_app_root" && "$init_app_root" != /* ]]; then
+    die "selected app root must be an absolute path"
+fi
+# Environment selection is accepted at the unprivileged entrypoint for normal
+# RyeOS CLI consistency, but is converted into an explicit argument before the
+# sanitized administrator-owned re-exec. The privileged process never relies
+# on inheriting RYEOS_APP_ROOT.
+if [[ -n "$init_app_root" && $app_root_argument_present -eq 0 ]]; then
+    installer_original_args+=(--app-root "$init_app_root")
+fi
 
 cd "$repo_root"
 
@@ -640,7 +667,6 @@ bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
 doc_dir="/usr/share/doc/ryeos"
 target_dir="$repo_root/target/release"
-init_app_root="${RYEOS_APP_ROOT:-}"
 install_transaction_active=0
 
 # Only a root-owned Lillux lock on the exact shared package namespace permits
