@@ -5861,11 +5861,38 @@ async fn run_claimed_thread_row(
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
                     crate::structured_error::dispatch_error_value(dispatch_error.as_ref())
                 }
-                other => json!({
-                    "code": "launch_preparation_failed",
-                    "message": format!("{other:#}"),
-                    "retryable": other.retryable_launch_interruption(),
-                }),
+                other => {
+                    let mut terminal_error = json!({
+                        "code": "launch_preparation_failed",
+                        "message": format!("{other}"),
+                        "retryable": other.retryable_launch_interruption(),
+                    });
+                    // Retain a bounded, sanitized cause chain. Stage labels
+                    // and digests are static diagnostics; environment values
+                    // and secrets never enter this chain by construction.
+                    const MAX_CAUSE_CHAIN_BYTES: usize = 2048;
+                    let mut chain = Vec::new();
+                    let mut total = 0usize;
+                    let mut current: Option<&(dyn std::error::Error + 'static)> =
+                        Some(other as &(dyn std::error::Error + 'static));
+                    while let Some(cause) = current {
+                        if chain.len() >= 16 {
+                            break;
+                        }
+                        let text = cause.to_string();
+                        total = total.saturating_add(text.len());
+                        if total > MAX_CAUSE_CHAIN_BYTES && !chain.is_empty() {
+                            break;
+                        }
+                        chain.push(text);
+                        if total > MAX_CAUSE_CHAIN_BYTES {
+                            break;
+                        }
+                        current = cause.source();
+                    }
+                    terminal_error["cause_chain"] = json!(chain);
+                    terminal_error
+                }
             };
             if let Err(cleanup_error) = crate::dispatch::finalize_method_thread_if_needed(
                 params.state,

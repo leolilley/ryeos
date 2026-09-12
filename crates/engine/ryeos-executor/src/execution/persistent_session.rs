@@ -2064,38 +2064,54 @@ fn verify_session_capsule(
     evidence_attachments: &[PreparedEvidenceAttachment],
     content_target_contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
 ) -> Result<AdmittedPersistentSessionCapsule> {
-    let capsule = load_capsule(state, capsule_hash)?;
-    validate_session_process_control(state, &retained_session_protocol(engine, &capsule)?)?;
-    let exact = retained_exact_program(&capsule)?;
+    let capsule =
+        load_capsule(state, capsule_hash).with_context(|| "session-capsule/load stage")?;
+    validate_session_process_control(
+        state,
+        &retained_session_protocol(engine, &capsule)
+            .with_context(|| "session-capsule/retained-protocol stage")?,
+    )
+    .with_context(|| "session-capsule/process-control stage")?;
+    let exact =
+        retained_exact_program(&capsule).with_context(|| "session-capsule/exact-program stage")?;
     let retained_dependency =
         ryeos_engine::resolution::RetainedResolutionOutput::capture(&dependency.resolution);
     if exact.resolution_output.root_ref() != dependency.canonical_ref
         || canonical_hash(&serde_json::to_value(&exact.resolution_output)?)?
             != canonical_hash(&serde_json::to_value(&retained_dependency)?)?
     {
-        bail!("persistent-session capsule contradicts its captured dependency");
+        bail!("session-capsule/captured-dependency: capsule contradicts its captured dependency");
     }
     if capsule.executable_search != executable_search {
-        bail!("persistent-session capsule contradicts its executable-search dependency");
+        bail!("session-capsule/executable-search: capsule contradicts its executable-search dependency");
     }
     if &capsule.process_environment != environment {
-        bail!("persistent-session capsule contradicts its process-environment contribution");
+        bail!("session-capsule/process-environment: capsule contradicts its process-environment contribution");
     }
     if exact.evidence_attachments != evidence_attachments {
-        bail!("persistent-session capsule contradicts its evidence attachments");
+        bail!("session-capsule/evidence-attachments: capsule contradicts its evidence attachments");
     }
-    validate_exact_evidence_attachments(&exact)?;
-    let observed_digest = exact.resolution_output.effective_definition_digest()?;
+    validate_exact_evidence_attachments(&exact)
+        .with_context(|| "session-capsule/evidence-validation stage")?;
+    let observed_digest = exact
+        .resolution_output
+        .effective_definition_digest()
+        .with_context(|| "session-capsule/effective-definition stage")?;
     if observed_digest.as_str() != exact.effective_definition_digest {
-        bail!("persistent-session exact effective-definition digest changed");
+        bail!("session-capsule/effective-definition-digest: exact effective-definition digest changed");
     }
-    validate_capsule_current_trust(engine, &capsule)?;
-    let (protocol_ref, protocol_digest) = capsule_protocol_identity(&capsule)?;
+    validate_capsule_current_trust(engine, &capsule)
+        .with_context(|| "session-capsule/current-trust stage")?;
+    let (protocol_ref, protocol_digest) = capsule_protocol_identity(&capsule)
+        .with_context(|| "session-capsule/protocol-identity stage")?;
     let resolution = exact.resolution_output.restore();
-    ryeos_app::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)?;
-    ryeos_app::external_content_admission::recover_external_realizations(state, &resolution)?;
+    ryeos_app::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)
+        .with_context(|| "session-capsule/source-closure stage")?;
+    ryeos_app::external_content_admission::recover_external_realizations(state, &resolution)
+        .with_context(|| "session-capsule/external-realizations stage")?;
     if let Some(contract) = content_target_contract {
-        validate_captured_target_content(state, &resolution, contract, evidence_attachments)?;
+        validate_captured_target_content(state, &resolution, contract, evidence_attachments)
+            .with_context(|| "session-capsule/target-content stage")?;
     }
     super::execution_realization::verify_persistent_session(
         state,
@@ -2104,7 +2120,8 @@ fn verify_session_capsule(
         &exact.effective_definition_digest,
         protocol_ref,
         protocol_digest,
-    )?;
+    )
+    .with_context(|| "session-capsule/persistent-session-realization stage")?;
     Ok(capsule)
 }
 
