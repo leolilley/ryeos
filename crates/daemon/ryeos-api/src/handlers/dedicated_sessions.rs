@@ -9958,6 +9958,14 @@ async fn discard(
             retained_operation_id,
             &req.candidate_snapshot_hash,
         )?;
+        // The first response may have crashed after the terminal disposition
+        // commit but before best-effort kernel-resource retirement. Re-drive
+        // the existing closed-workspace journal only after the exact owner
+        // fact above is reverified; this does not make a read path mutating.
+        state
+            .state_store
+            .resume_closed_worker_scope_retirement_for_session(&session.placement_thread_id)
+            .map_err(internal)?;
         return Ok(json!({
             "chain_root_id":session.chain_root_id,
             "placement_thread_id":session.placement_thread_id,

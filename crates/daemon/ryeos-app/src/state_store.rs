@@ -6046,6 +6046,26 @@ impl StateStore {
         }
     }
 
+    /// Re-drive the existing exact retirement owner after an idempotent
+    /// terminal disposition retry. The disposition service has already
+    /// reverified its immutable owner fact; this method neither discovers a
+    /// scope nor grants removal authority of its own.
+    pub fn resume_closed_worker_scope_retirement_for_session(&self, placement: &str) -> Result<()> {
+        let workspace = {
+            let g = self.lock()?;
+            let session = g
+                .runtime_db
+                .dedicated_session(placement)?
+                .ok_or_else(|| anyhow!("dedicated session disappeared before scope retirement"))?;
+            g.runtime_db
+                .workspace(&session.workspace_id)?
+                .filter(|workspace| workspace.state == runtime_db::WorkspaceState::Closed)
+                .map(|workspace| workspace.workspace_id)
+                .ok_or_else(|| anyhow!("dedicated session workspace is not closed"))?
+        };
+        self.retire_closed_worker_scopes_for_workspace(&workspace)
+    }
+
     /// Scope reservation uses the same workspace/shutdown admission owner as
     /// attachment. No child may be spawned until this pre-contact write commits.
     pub fn reserve_dedicated_worker_scope(
@@ -6373,7 +6393,14 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .settle_dedicated_candidate_retained_for_review(placement_thread_id, snapshot_hash)
+            .settle_dedicated_candidate_retained_for_review(placement_thread_id, snapshot_hash)?;
+        drop(g);
+        // Candidate disposition can be the last of the two independent
+        // settlement facts (closed workspace and reaped worker). Re-drive the
+        // existing exact retirement owner here so cleanup does not depend on
+        // which fact happened last or on a later daemon restart.
+        self.note_closed_worker_scope_retirement_for_session(placement_thread_id);
+        Ok(())
     }
 
     pub fn reserve_dedicated_candidate_publication(
@@ -6407,7 +6434,10 @@ impl StateStore {
             publication_root_id,
             publication_operation_id,
             publication_result,
-        )
+        )?;
+        drop(g);
+        self.note_closed_worker_scope_retirement_for_session(placement_thread_id);
+        Ok(())
     }
 
     pub fn reserve_dedicated_candidate_validation(
@@ -6556,7 +6586,10 @@ impl StateStore {
             candidate_snapshot_hash,
             disposition_root_id,
             disposition_operation_id,
-        )
+        )?;
+        drop(g);
+        self.note_closed_worker_scope_retirement_for_session(placement_thread_id);
+        Ok(())
     }
 
     /// Run a state publication while the exact execution launch owner remains
