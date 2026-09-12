@@ -274,42 +274,52 @@ pub fn resolve_execution_project_authority(
             }
         };
 
-    let environment = match &policy.environment {
-        ExecutionEnvironmentPolicy::None => EnvironmentAuthority::None,
-        ExecutionEnvironmentPolicy::ProjectOverlay {
-            include_operator_vault,
-            name_policy,
-        } => {
-            let root = project_path.ok_or_else(|| {
-                anyhow::anyhow!("project overlay requires a resolved project root")
-            })?;
-            EnvironmentAuthority::ProjectOverlay {
-                project_authority_id: lillux::sha256_hex(
-                    format!("live-project\0local:{}\0{}", root.display(), root.display(),)
-                        .as_bytes(),
-                ),
-                source_identity: format!("dotenv:{}", root.join(".env").display()),
-                include_operator_vault: *include_operator_vault,
-                name_authority: resolve_name_authority(name_policy),
-            }
-        }
-        ExecutionEnvironmentPolicy::Vault {
-            namespace,
-            name_policy,
-        } => EnvironmentAuthority::Vault {
-            namespace: namespace.clone(),
-            name_authority: resolve_name_authority(name_policy),
-        },
-        ExecutionEnvironmentPolicy::Delegated {
-            provider,
-            grant_id,
-            name_policy,
-        } => EnvironmentAuthority::Delegated {
-            provider: provider.clone(),
-            grant_id: grant_id.clone(),
-            name_authority: resolve_name_authority(name_policy),
-        },
-    };
+    // A project-overlay environment is part of the exact project authority,
+    // not an independently authored path setting. Resolve it only after the
+    // live or pinned project identity is known so remote pinned generations
+    // bind to their destination-site identity instead of a synthetic local
+    // identity. Vault and delegated environments remain project-independent.
+    let resolve_environment =
+        |project: Option<(&str, &Path)>| -> anyhow::Result<EnvironmentAuthority> {
+            Ok(match &policy.environment {
+                ExecutionEnvironmentPolicy::None => EnvironmentAuthority::None,
+                ExecutionEnvironmentPolicy::ProjectOverlay {
+                    include_operator_vault,
+                    name_policy,
+                } => {
+                    let (project_identity, root) = project.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "project overlay requires an exact resolved project authority"
+                        )
+                    })?;
+                    EnvironmentAuthority::ProjectOverlay {
+                        project_authority_id: lillux::sha256_hex(
+                            format!("live-project\0{}\0{}", project_identity, root.display())
+                                .as_bytes(),
+                        ),
+                        source_identity: format!("dotenv:{}", root.join(".env").display()),
+                        include_operator_vault: *include_operator_vault,
+                        name_authority: resolve_name_authority(name_policy),
+                    }
+                }
+                ExecutionEnvironmentPolicy::Vault {
+                    namespace,
+                    name_policy,
+                } => EnvironmentAuthority::Vault {
+                    namespace: namespace.clone(),
+                    name_authority: resolve_name_authority(name_policy),
+                },
+                ExecutionEnvironmentPolicy::Delegated {
+                    provider,
+                    grant_id,
+                    name_policy,
+                } => EnvironmentAuthority::Delegated {
+                    provider: provider.clone(),
+                    grant_id: grant_id.clone(),
+                    name_authority: resolve_name_authority(name_policy),
+                },
+            })
+        };
 
     let child_policy = match &policy.project {
         ProjectExecutionPolicy::Projectless => ChildProjectAuthorityPolicy::Inherit,
@@ -337,14 +347,17 @@ pub fn resolve_execution_project_authority(
     };
 
     let authority = match &policy.project {
-        ProjectExecutionPolicy::Projectless => ExecutionProjectAuthority::projectless(environment),
+        ProjectExecutionPolicy::Projectless => {
+            ExecutionProjectAuthority::projectless(resolve_environment(None)?)
+        }
         ProjectExecutionPolicy::LiveDirect { access, .. } => {
             let root = project_path
                 .ok_or_else(|| anyhow::anyhow!("live project policy requires project root"))?
                 .to_path_buf();
+            let authored_project_identity = format!("local:{}", root.display());
             ExecutionProjectAuthority::live(
                 root.clone(),
-                format!("local:{}", root.display()),
+                authored_project_identity.clone(),
                 match access {
                     ryeos_app::execution_policy::LiveAccess::ReadOnly => {
                         LiveProjectAccess::ReadOnly
@@ -356,7 +369,7 @@ pub fn resolve_execution_project_authority(
                 ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
                     isolation.inspection(),
                 ),
-                environment,
+                resolve_environment(Some((&authored_project_identity, &root)))?,
                 capability_ceiling.clone(),
             )
         }
@@ -365,6 +378,17 @@ pub fn resolve_execution_project_authority(
             let snapshot_hash = snapshot_hash.ok_or_else(|| {
                 anyhow::anyhow!("pinned project policy did not resolve an immutable snapshot")
             })?;
+            let stable_project_identity = root
+                .as_ref()
+                .map(|path| {
+                    ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                        path,
+                        project_site_id,
+                    )
+                    .map(|identity| identity.normalized_logical_key)
+                })
+                .transpose()?
+                .unwrap_or_else(|| format!("snapshot:{snapshot_hash}"));
             let realization = match realization {
                 PinnedRealization::ReadOnly => PinnedProjectRealization::ReadOnly,
                 PinnedRealization::Cow {
@@ -403,20 +427,14 @@ pub fn resolve_execution_project_authority(
                 },
             };
             ExecutionProjectAuthority::pinned(
-                root.as_ref()
-                    .map(|path| {
-                        ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                            path,
-                            project_site_id,
-                        )
-                        .map(|identity| identity.normalized_logical_key)
-                    })
-                    .transpose()?
-                    .unwrap_or_else(|| format!("snapshot:{snapshot_hash}")),
-                root,
+                stable_project_identity.clone(),
+                root.clone(),
                 snapshot_hash.to_string(),
                 realization,
-                environment,
+                resolve_environment(
+                    root.as_deref()
+                        .map(|root| (stable_project_identity.as_str(), root)),
+                )?,
                 capability_ceiling,
             )
         }
@@ -2455,6 +2473,72 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn pinned_project_overlay_binds_to_destination_site_identity() {
+        let project = tempfile::tempdir().unwrap();
+        let snapshot_hash = "d".repeat(64);
+        let destination = project_source::ResolvedCurrentHeadDestination {
+            principal_key: "e".repeat(64),
+            project_hash: "f".repeat(64),
+            expected_hash: snapshot_hash.clone(),
+        };
+        let policy = ExecutionPolicy {
+            schema_version: 2,
+            ownership: ryeos_app::execution_policy::ExecutionOwnership::DaemonOwned,
+            recovery: ryeos_app::execution_policy::ExecutionRecovery::RestartRecoverable,
+            response: ExecutionResponse::Accepted,
+            target: ryeos_app::execution_policy::ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::ProjectOverlay {
+                include_operator_vault: false,
+                name_policy:
+                    ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
+            },
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                },
+                child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+            },
+        };
+
+        let authority = resolve_execution_project_authority(
+            &policy,
+            Some(project.path()),
+            Some(&snapshot_hash),
+            Some(&destination),
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &[],
+        )
+        .unwrap();
+
+        let stable_identity = format!("site:test:{}", project.path().display());
+        let expected_environment_id = lillux::sha256_hex(
+            format!(
+                "live-project\0{}\0{}",
+                stable_identity,
+                project.path().display()
+            )
+            .as_bytes(),
+        );
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity,
+            environment:
+                ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                    project_authority_id,
+                    ..
+                },
+            ..
+        } = &authority
+        else {
+            panic!("expected pinned project-overlay authority");
+        };
+        assert_eq!(stable_project_identity, &stable_identity);
+        assert_eq!(project_authority_id, &expected_environment_id);
+        authority.validate().unwrap();
     }
 
     #[test]
