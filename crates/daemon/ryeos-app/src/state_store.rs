@@ -15569,6 +15569,17 @@ impl StateStore {
         self.lock()?.runtime_db.runtime_action_intents()
     }
 
+    /// Retained workload-client dispatch summaries for one placement caller.
+    /// Observation projection only: reads existing intents, mints nothing.
+    pub fn workload_child_dispatches(
+        &self,
+        first_caller_thread_id: &str,
+    ) -> Result<Vec<runtime_db::WorkloadChildDispatch>> {
+        self.lock()?
+            .runtime_db
+            .workload_child_dispatches(first_caller_thread_id)
+    }
+
     /// Durable, non-released shared-workspace operations for one hosted root.
     /// This derives from RuntimeActionIntent; callers must not create a second
     /// lease registry for boot, freeze, handoff, or capability-mint fencing.

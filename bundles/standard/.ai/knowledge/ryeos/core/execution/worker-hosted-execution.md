@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-11T12:37:05Z:bb70f3cb93df5e72e85d93acfd0bd1307d621fa32f55f52788aae4e0e8908838:Hs5wXmd1UstLtKo0dgsh/NIhKmfs/oGt2Mt1zWR8jI8Nb7E8y7VkZxDsAg16hgweBnGuDLbkb6eSb51s1Cw2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-12T07:36:30Z:1f888e8720da3d2b75804e2a1244ef80f14456b7011a027da01bb18efe76a2d1:8+WmjbfyIKXFw8i84HP8u3bf+ECBQrGDC9SfPzPjUinMp8Tu7gIg9o3AjpKnXq3xq6L0H99B2lyJVY/X9kKBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -1063,6 +1063,20 @@ credential fences. This is not successful execution recovery: unrelated node
 work may proceed, but cleanup still requires exact settlement proof. An older
 record that lost that proof is not repaired by interpreting NULL as process
 death, and history is not implicitly reset.
+
+## Child-execution observation
+
+A hosted operator proves the tool operations a worker invoked through the
+placement's settled command observation. For every workload-client dispatch
+the daemon retains one runtime action intent binding the ingress provenance
+to exactly one daemon-minted child execution; the command observation
+projects each retained dispatch together with its child's authoritative
+terminal snapshot and replayable result. The projection reads existing
+state only: it never re-executes a child, never widens thread-children
+listing authority, and fails closed when a child snapshot contradicts its
+placement's ownership. Worker prose about child outcomes is orientation;
+the projected dispatch, capsule, terminal, and result facts are the
+acceptance evidence.
 
 ## Explicit non-claims
 

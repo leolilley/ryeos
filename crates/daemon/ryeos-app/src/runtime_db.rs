@@ -431,6 +431,18 @@ pub struct RuntimeActionIntent {
     pub workspace_operation: Option<RuntimeWorkspaceOperation>,
 }
 
+/// Read-only projection of one retained workload-client dispatch. The
+/// invocation is the ingress provenance recorded at admission; the child's
+/// terminal facts live on its authoritative thread snapshot.
+#[derive(Debug, Clone)]
+pub struct WorkloadChildDispatch {
+    pub operation_id: String,
+    pub mode: RuntimeActionMode,
+    pub child_thread_id: String,
+    pub created_at_ms: i64,
+    pub workload_invocation: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeWorkspaceOperationPhase {
     Reserved,
@@ -12187,6 +12199,54 @@ impl RuntimeDb {
         Ok(intents)
     }
 
+    /// Operator-facing dispatch summary for one workload-client child of a
+    /// placement. This reads retained rows only; it mints no authority and
+    /// exists so hosted placement observation can prove child executions
+    /// without the generic thread-children listing surface.
+    pub fn workload_child_dispatches(
+        &self,
+        first_caller_thread_id: &str,
+    ) -> Result<Vec<WorkloadChildDispatch>> {
+        let mut statement = self.conn.prepare(
+            "SELECT operation_id, mode, child_thread_id, created_at_ms, workload_invocation
+               FROM runtime_action_intent
+              WHERE first_caller_thread_id=?1 AND workload_invocation IS NOT NULL
+              ORDER BY created_at_ms, operation_id",
+        )?;
+        let dispatches = statement
+            .query_map([first_caller_thread_id], |row| {
+                let mode = RuntimeActionMode::parse(row.get::<_, String>(1)?.as_str())
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?;
+                let invocation = row
+                    .get::<_, Option<String>>(4)?
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?;
+                Ok(WorkloadChildDispatch {
+                    operation_id: row.get(0)?,
+                    mode,
+                    child_thread_id: row.get(2)?,
+                    created_at_ms: row.get(3)?,
+                    workload_invocation: invocation,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(anyhow::Error::from)?;
+        Ok(dispatches)
+    }
+
     pub fn transition_runtime_workspace_operation(
         &self,
         operation_id: &str,
@@ -22726,6 +22786,77 @@ mod tests {
             "T-child"
         );
         assert_eq!(db.runtime_action_intents().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn workload_child_dispatches_project_only_workload_rows_for_their_caller() {
+        use ryeos_runtime::workload_client::WorkloadInvocationSource;
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let mut seed = runtime_workspace_seed(
+            ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+        );
+        seed.invocation = WorkloadInvocationSource::StructuredSession {
+            upstream_session_id: "session-one".to_owned(),
+            operation_id: "turn-one".to_owned(),
+            call_id: "call-one".to_owned(),
+        };
+        db.reserve_runtime_action_intent_with_workspace(
+            &seed
+                .invocation
+                .runtime_operation_id(seed.workload_client_grant_digest)
+                .unwrap(),
+            "T-chain",
+            "T-parent",
+            RuntimeActionMode::Inline,
+            &"e".repeat(64),
+            "T-child-workload",
+            None,
+            Some(&seed),
+        )
+        .unwrap();
+        db.reserve_runtime_action_intent(
+            &"1".repeat(64),
+            "T-chain",
+            "T-parent",
+            RuntimeActionMode::Inline,
+            &"f".repeat(64),
+            "T-child-hook",
+            None,
+        )
+        .unwrap();
+        let mut unrelated = seed.clone();
+        unrelated.workspace_id = "workspace-other";
+        unrelated.invocation = WorkloadInvocationSource::StructuredSession {
+            upstream_session_id: "session-two".to_owned(),
+            operation_id: "turn-two".to_owned(),
+            call_id: "call-two".to_owned(),
+        };
+        db.reserve_runtime_action_intent_with_workspace(
+            &unrelated
+                .invocation
+                .runtime_operation_id(unrelated.workload_client_grant_digest)
+                .unwrap(),
+            "T-chain",
+            "T-unrelated",
+            RuntimeActionMode::Inline,
+            &"9".repeat(64),
+            "T-child-other-workload",
+            None,
+            Some(&unrelated),
+        )
+        .unwrap();
+
+        let dispatches = db.workload_child_dispatches("T-parent").unwrap();
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].child_thread_id, "T-child-workload");
+        assert_eq!(dispatches[0].mode, RuntimeActionMode::Inline);
+        assert!(dispatches[0].workload_invocation.is_some());
+
+        let unrelated = db.workload_child_dispatches("T-unrelated").unwrap();
+        assert_eq!(unrelated.len(), 1);
+        assert_eq!(unrelated[0].child_thread_id, "T-child-other-workload");
+
+        assert!(db.workload_child_dispatches("T-absent").unwrap().is_empty());
     }
 
     #[test]

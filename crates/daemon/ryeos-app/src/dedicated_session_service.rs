@@ -4245,6 +4245,7 @@ pub fn command_observation(
         "completion_operation_id":completion_operation_id.clone(),
         "completion_source":completion_source,
     });
+    let child_executions = workload_child_execution_facts(state, &session)?;
     if let Some(completion_operation_id) = completion_operation_id {
         result["completion_fence"] = serde_json::to_value(HostedCommandCompletionFence {
             placement_thread_id: session.placement_thread_id,
@@ -4256,7 +4257,57 @@ pub fn command_observation(
             completion_operation_id,
         })?;
     }
+    result["child_executions"] = child_executions;
     Ok(result)
+}
+
+/// Project every retained workload-client child execution of this placement
+/// from existing state: the placement's runtime action dispatches joined to
+/// each child thread's authoritative terminal snapshot. This is an
+/// observation read for the hosted operator, who cannot reach the generic
+/// thread-children listing surface; it re-executes nothing and grants
+/// nothing. A dispatch whose child snapshot contradicts the placement's
+/// ownership fails closed instead of projecting mixed authority.
+fn workload_child_execution_facts(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+) -> Result<Value> {
+    let dispatches = state
+        .state_store
+        .workload_child_dispatches(&session.placement_thread_id)?;
+    let owner = session.owner_principal.as_str();
+    let mut children = Vec::with_capacity(dispatches.len());
+    for dispatch in dispatches {
+        let child = state
+            .state_store
+            .get_authoritative_root_thread_snapshot(&dispatch.child_thread_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "workload child dispatch `{}` has no authoritative snapshot",
+                    dispatch.operation_id
+                )
+            })?;
+        if child.chain_root_id != session.chain_root_id
+            || child.requested_by.as_deref().unwrap_or_default() != owner
+        {
+            bail!("workload child dispatch contradicts its placement ownership");
+        }
+        children.push(json!({
+            "operation_id": dispatch.operation_id,
+            "mode": dispatch.mode.as_str(),
+            "child_thread_id": dispatch.child_thread_id,
+            "created_at_ms": dispatch.created_at_ms,
+            "invocation": dispatch.workload_invocation,
+            "item_ref": child.item_ref,
+            "status": child.status.as_str(),
+            "outcome_code": child.outcome_code,
+            "finished_at": child.finished_at,
+            "error": child.error,
+            "admitted_launch_capsule_hash": child.admitted_launch_capsule_hash,
+            "result": child.result,
+        }));
+    }
+    Ok(Value::Array(children))
 }
 
 fn bounded_attempt_key(
