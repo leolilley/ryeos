@@ -5343,6 +5343,7 @@ pub fn preflight_root_resolution(
 /// or execution probe: no synthetic arguments and no mutable workspace read.
 pub fn present_workload_execution(
     ceiling: &ryeos_runtime::workload_client::WorkloadClientExecutionCeiling,
+    product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
     project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -5362,6 +5363,32 @@ pub fn present_workload_execution(
         ))
     })?;
     let output = validated.closure.output();
+    let product_slots = ryeos_engine::external_content::authored_external_content_shape(
+        &output.composed.composed,
+        schema.external_content_contract(),
+        ryeos_engine::external_content::declaring_authority(output)
+            .map_err(DispatchError::Internal)?,
+    )
+    .map_err(DispatchError::Internal)?
+    .map(|shape| shape.product_slots)
+    .unwrap_or_default();
+    if product_slots.len() != product_selections.len()
+        || product_slots.iter().any(|slot| {
+            !product_selections.iter().any(|input| {
+                matches!(
+                    input.target,
+                    ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+                ) && input.selection.declaration_id == slot.id
+            })
+        })
+    {
+        return Err(DispatchError::CapabilityRejected {
+            reason: format!(
+                "workload execution `{}` does not have one exact selection for every signed product slot",
+                ceiling.item_ref
+            ),
+        });
+    }
     let mut descriptor = ryeos_engine::inventory::descriptor_from_parsed_item(
         &canonical,
         schema,

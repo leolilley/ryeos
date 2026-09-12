@@ -483,7 +483,8 @@ fn match_retained_verifier_root_selections(
     for input in inputs {
         match &input.target {
             ProductSelectionTarget::Root {} => selectors.push(input.selection.clone()),
-            ProductSelectionTarget::ContentDependency { .. } => bail!(
+            ProductSelectionTarget::ContentDependency { .. }
+            | ProductSelectionTarget::WorkloadExecution { .. } => bail!(
                 "qualification verifier uses a prepared content-dependency product selection, whose current authority is unsupported"
             ),
         }

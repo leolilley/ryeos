@@ -180,6 +180,53 @@ pub fn execution_ceiling_presentation(ceiling: &WorkloadClientExecutionCeiling) 
     })
 }
 
+/// Compile root-launch selectors for the finite child operations exposed by a
+/// workload-client request. This is structural routing only: ordinary product
+/// admission still verifies every witness, relationship, binding and manifest
+/// against the destination node when the child is prepared.
+pub fn admitted_execution_product_selections(
+    inputs: &[ryeos_state::external_content::products::composition::ProductSelectionInput],
+    request: Option<&WorkloadClientRequestContract>,
+) -> anyhow::Result<
+    BTreeMap<String, ryeos_state::external_content::products::composition::ProductSelectionInputs>,
+> {
+    use ryeos_state::external_content::products::composition::{
+        ProductSelectionInput, ProductSelectionTarget, canonicalize_product_selection_inputs,
+    };
+
+    let mut admitted = BTreeMap::<String, Vec<ProductSelectionInput>>::new();
+    for input in inputs {
+        let ProductSelectionTarget::WorkloadExecution { item_ref } = &input.target else {
+            continue;
+        };
+        let request = request.ok_or_else(|| {
+            anyhow::anyhow!("product selector targets a disabled workload-client surface")
+        })?;
+        if request
+            .executions
+            .binary_search_by(|entry| entry.item_ref.as_str().cmp(item_ref))
+            .is_err()
+        {
+            anyhow::bail!(
+                "product selector targets an execution outside the workload-client request"
+            );
+        }
+        admitted
+            .entry(item_ref.clone())
+            .or_default()
+            .push(ProductSelectionInput {
+                target: ProductSelectionTarget::Root {},
+                selection: input.selection.clone(),
+            });
+    }
+    admitted
+        .into_iter()
+        .map(|(item_ref, selections)| {
+            Ok((item_ref, canonicalize_product_selection_inputs(selections)?))
+        })
+        .collect()
+}
+
 /// Target-local execution-policy ceiling. A null policy disables the feature.
 /// Values here bound project requests mechanically; they never add item,
 /// principal, project, effect, or child-program authority.
@@ -862,6 +909,42 @@ mod tests {
                 .contains("\"kind\":\"default\""),
             "internal authority variants must never be advertised as invocation input"
         );
+    }
+
+    #[test]
+    fn workload_product_selectors_require_and_normalize_an_exact_child() {
+        use ryeos_state::external_content::products::composition::{
+            ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+        };
+        let request = request(vec![execution("tool:project/check")]);
+        let selection = ProductSelection {
+            declaration_id: "platform".to_owned(),
+            witness_hash: "a".repeat(64),
+            witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+            qualification_hash: Some("b".repeat(64)),
+        };
+        let input = ProductSelectionInput {
+            target: ProductSelectionTarget::WorkloadExecution {
+                item_ref: "tool:project/check".to_owned(),
+            },
+            selection: selection.clone(),
+        };
+        let admitted =
+            admitted_execution_product_selections(&[input.clone()], Some(&request)).unwrap();
+        assert_eq!(
+            admitted["tool:project/check"],
+            vec![ProductSelectionInput {
+                target: ProductSelectionTarget::Root {},
+                selection,
+            }]
+        );
+        assert!(admitted_execution_product_selections(&[input.clone()], None).is_err());
+
+        let mut outside = input;
+        outside.target = ProductSelectionTarget::WorkloadExecution {
+            item_ref: "tool:project/other".to_owned(),
+        };
+        assert!(admitted_execution_product_selections(&[outside], Some(&request)).is_err());
     }
 
     #[test]

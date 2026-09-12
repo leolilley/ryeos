@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-09T19:41:44Z:fbb4b118bd5e80b6f163dc2bafd1706df1367b47459428a50a13dad5d357fa89:Hignl1nDDdqUdi51O/emdMGOAhHFVdAIbarDyZvetlgBBeJrEwZrD/i0wLgYnaGGGczu03MzB1C9b41RhmecDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-12T01:05:15Z:79c5185587510efcd30dac2abc644a27143f5d5f23b7d037c924131e5e8719aa:qnTU2mrBlozd6rECEcdmb8XIqAQCVPQ7bdmZ3ZPgXjH5W0UlksguS2FDi1bJMfl3sM6TrFi5L2TlcHBW9kH2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -272,6 +272,17 @@ signed Tool. Compiler content is child-owned, not root-worker content. The
 request does not itself grant authority: node policy, initiating principal,
 parent delegation and resolved child contracts still intersect at admission.
 The Codex bundle's general authoring environment remains client-free.
+
+When one of those child operations declares product slots, its exact
+destination-local selection is a root-launch input targeted at that admitted
+workload execution. The portable environment continues to name only the
+logical child ref and signed product relationship. Worker boot compiles the
+operator-selected testimony into the callback grant, and the daemon injects it
+as an ordinary root selection immediately before the existing child admission.
+The workload wire has no product-selection field: a model or bridge cannot
+name witness hashes, omit the retained selection, or substitute another
+target. Selectors for a disabled or undeclared child surface fail launch
+preparation instead of becoming inert capsule data.
 
 Native CLI ingress remains a separate explicit environment selection and
 qualification lane under the same restricted invocation authority. Source

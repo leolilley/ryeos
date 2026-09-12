@@ -310,7 +310,16 @@ impl ExternalProductSlotDeclaration {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProductSelectionTarget {
     Root {},
-    ContentDependency { binding: String },
+    ContentDependency {
+        binding: String,
+    },
+    /// Exact target-local product testimony for one operation exposed through
+    /// an admitted workload-client grant. The workload never receives or
+    /// authors this selector; boot admission converts it to an ordinary root
+    /// selection only after resolving the exact signed child operation.
+    WorkloadExecution {
+        item_ref: String,
+    },
 }
 
 impl ProductSelectionTarget {
@@ -318,6 +327,9 @@ impl ProductSelectionTarget {
         match self {
             Self::Root {} => Ok(()),
             Self::ContentDependency { binding } => validate_binding_name(binding),
+            Self::WorkloadExecution { item_ref } => {
+                validate_canonical_unsuffixed_ref("workload execution", item_ref)
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-11T06:42:46Z:3c0a2f95237299ec35bc59b19f77c8b7cfaae1e498246fd7da161689c69b7233:nXjeES44FNGEeqF7XUvAvXECd9UtOfN09b2zwxeCqFLllKAYqsXfmZlKlDByQKj48qkKQVoWm2doiwecsOqqCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-12T01:05:15Z:784f07e2ea783f639bbe4f6b769b01452bf1ea47f5aa16c02402337cf910ea35:lRUwBwS4MPpmJ3P8QGtf3yD1SejRdwTMMLIMaZ4EfP2Ey+moG20sYZS/02dkUHfyQubJZC9BNv4I36eWYRlUCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -37,7 +37,7 @@ The current clean-cut execution formats include:
   never a project mountpoint; predecessor capsules are not reinterpreted);
 - runtime launch metadata epoch 36;
 - the standalone runtime project-authority envelope epoch 5; and
-- the owned runtime SQLite operator schema epoch 33 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 34 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 Hosted command-outbox startup replay preserves an exact predecessor session
@@ -51,7 +51,7 @@ cleanup-unproved placements. No reset or rewrite of retained history is part
 of this terminal-history classification.
 
 The combined workload-invocation and environment-product cut uses launch
-metadata 35 and runtime epoch 33. It preserves invocation ingress provenance
+metadata 35 and runtime epoch 34. It preserves invocation ingress provenance
 and product selection/retention together; neither branch's earlier epoch may be
 reinterpreted as the combined authority. The existing
 runtime-action row now retains trusted ingress provenance; a partial unique

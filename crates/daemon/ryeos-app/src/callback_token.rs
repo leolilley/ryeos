@@ -112,6 +112,13 @@ pub struct AdmittedWorkloadClientGrant {
     pub node_policy_generation_digest: String,
     pub ingresses: Vec<ryeos_runtime::workload_client::WorkloadClientIngress>,
     pub executions: Vec<ryeos_runtime::workload_client::WorkloadClientExecutionCeiling>,
+    /// Exact destination-local selectors admitted for child operations at
+    /// worker boot. Keys are a complete subset of `executions`; values are
+    /// normalized ordinary root selections and are never client controls.
+    pub execution_product_selections: std::collections::BTreeMap<
+        String,
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    >,
     pub execution_presentation: serde_json::Value,
     pub effective_caps: Vec<String>,
     pub max_in_flight: u16,
@@ -121,7 +128,7 @@ pub struct AdmittedWorkloadClientGrant {
 }
 
 impl AdmittedWorkloadClientGrant {
-    pub const SCHEMA: u32 = 2;
+    pub const SCHEMA: u32 = 3;
 
     pub fn validate(&self) -> Result<()> {
         ryeos_runtime::workload_client::validate_execution_presentation(
@@ -192,6 +199,28 @@ impl AdmittedWorkloadClientGrant {
         }
         ryeos_runtime::workload_client::validate_workload_client_ingresses(&self.ingresses)?;
         ryeos_runtime::workload_client::validate_execution_ceilings(&self.executions)?;
+        for (item_ref, selections) in &self.execution_product_selections {
+            if self
+                .executions
+                .binary_search_by(|entry| entry.item_ref.as_str().cmp(item_ref))
+                .is_err()
+            {
+                bail!("workload product selection names an ungranted execution");
+            }
+            ryeos_state::external_content::products::composition::validate_product_selection_inputs(
+                selections,
+            )?;
+            if selections.is_empty()
+                || selections.iter().any(|input| {
+                    !matches!(
+                        input.target,
+                        ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+                    )
+                })
+            {
+                bail!("workload product selections are not a nonempty normalized root batch");
+            }
+        }
         ryeos_runtime::workload_client::validate_workload_client_limits(
             self.max_in_flight,
             self.max_invocations_per_boot,
@@ -222,9 +251,6 @@ impl AdmittedWorkloadClientGrant {
     }
 
     pub fn authorize_action(&self, action: &ryeos_runtime::callback::ActionPayload) -> Result<()> {
-        if !action.product_selections.is_empty() {
-            bail!("workload-client grant does not admit product selection controls");
-        }
         if action.thread != "inline" || action.facets.is_some() || action.launch_window.is_some() {
             bail!("workload-client grant admits only unary inline execution");
         }
@@ -234,6 +260,9 @@ impl AdmittedWorkloadClientGrant {
             .ok()
             .and_then(|index| self.executions.get(index))
             .ok_or_else(|| anyhow::anyhow!("workload-client item is outside the admitted grant"))?;
+        if action.product_selections != self.product_selections_for_action(&action.item_id) {
+            bail!("workload-client action contradicts its daemon-admitted product selections");
+        }
         for (name, item_ref) in &action.ref_bindings {
             let allowed = execution.ref_bindings.get(name).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -254,6 +283,16 @@ impl AdmittedWorkloadClientGrant {
             bail!("workload-client method is outside the admitted grant");
         }
         Ok(())
+    }
+
+    pub fn product_selections_for_action(
+        &self,
+        item_ref: &str,
+    ) -> ryeos_state::external_content::products::composition::ProductSelectionInputs {
+        self.execution_product_selections
+            .get(item_ref)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn authorize_effect_class(
@@ -1543,6 +1582,7 @@ mod tests {
                         ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
                 },
             ],
+            execution_product_selections: std::collections::BTreeMap::new(),
             effective_caps: vec!["ryeos.execute.tool.project/check".to_owned()],
             max_in_flight: 2,
             max_invocations_per_boot: 8,
@@ -1602,6 +1642,35 @@ mod tests {
         let mut detached = workload_client_action();
         detached.thread = "detached".to_owned();
         assert!(grant.authorize_action(&detached).is_err());
+    }
+
+    #[test]
+    fn workload_client_grant_injects_but_never_delegates_product_selection_control() {
+        use ryeos_state::external_content::products::composition::{
+            ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+        };
+        let mut grant = workload_client_grant();
+        let selection = ProductSelectionInput {
+            target: ProductSelectionTarget::Root {},
+            selection: ProductSelection {
+                declaration_id: "platform".to_owned(),
+                witness_hash: "6".repeat(64),
+                witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                qualification_hash: Some("7".repeat(64)),
+            },
+        };
+        grant
+            .execution_product_selections
+            .insert("tool:project/check".to_owned(), vec![selection.clone()]);
+        grant.validate().unwrap();
+
+        let mut injected = workload_client_action();
+        injected.product_selections = vec![selection];
+        grant.authorize_action(&injected).unwrap();
+        assert!(grant.authorize_action(&workload_client_action()).is_err());
+
+        injected.product_selections[0].selection.witness_hash = "8".repeat(64);
+        assert!(grant.authorize_action(&injected).is_err());
     }
 
     #[test]

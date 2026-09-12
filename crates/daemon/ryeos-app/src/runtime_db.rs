@@ -1739,7 +1739,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 32 requires exact product receipt authority and semantic definition v3.
 // Epoch 33 combines product/capture authority with exact workload invocation
 // and retained process-scope authority. Neither branch epoch grants this union.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 33;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 34;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

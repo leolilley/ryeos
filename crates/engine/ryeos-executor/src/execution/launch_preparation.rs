@@ -1968,6 +1968,41 @@ fn finish_runtime_launch_preparation_parts(
     };
 
     validate_result(contract, ref_bindings, &inputs.config_inputs, &mut result)?;
+    let workload_client_request = result
+        .runtime_facts
+        .get(ryeos_runtime::workload_client::WORKLOAD_CLIENT_REQUEST_FACT)
+        .cloned()
+        .map(
+            serde_json::from_value::<ryeos_runtime::workload_client::WorkloadClientRequestContract>,
+        )
+        .transpose()
+        .map_err(|error| {
+            preparation_error(
+                "workload_client_request_invalid",
+                error.to_string(),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+    if let Some(request) = &workload_client_request {
+        request.validate().map_err(|error| {
+            preparation_error(
+                "workload_client_request_invalid",
+                error.to_string(),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+    }
+    ryeos_runtime::workload_client::admitted_execution_product_selections(
+        &inputs.product_selections,
+        workload_client_request.as_ref(),
+    )
+    .map_err(|error| {
+        preparation_error(
+            "workload_execution_product_selection_invalid",
+            error.to_string(),
+            LaunchPrepareErrorClass::Caller,
+        )
+    })?;
     let execution_dependencies =
         resolve_execution_dependencies(engine, contract, inputs, result.execution_dependencies)?;
     let content_dependencies = resolve_content_dependencies(

@@ -195,6 +195,11 @@ pub(super) fn prepare_for_dedicated_boot(
     let request_digest = digest_value(&request)?;
     let caller_scope_digest = digest_value(&canonical_strings(ingress.scopes.clone()))?;
     let root_delegation_digest = digest_value(&root_delegation_caps)?;
+    let execution_product_selections =
+        ryeos_runtime::workload_client::admitted_execution_product_selections(
+            sealed.product_selections(),
+            Some(&request),
+        )?;
     let execution_presentation = present_admitted_executions(
         state,
         root_capability,
@@ -203,6 +208,7 @@ pub(super) fn prepare_for_dedicated_boot(
         owner_principal,
         &root_thread.current_site_id,
         &root_thread.origin_site_id,
+        &execution_product_selections,
     )?;
     let grant = AdmittedWorkloadClientGrant {
         schema: AdmittedWorkloadClientGrant::SCHEMA,
@@ -228,6 +234,7 @@ pub(super) fn prepare_for_dedicated_boot(
             .map(|binding| binding.ingress())
             .collect(),
         executions: request.executions.clone(),
+        execution_product_selections,
         execution_presentation,
         effective_caps: effective_caps.clone(),
         max_in_flight: request.max_in_flight,
@@ -247,6 +254,7 @@ pub(super) fn prepare_for_dedicated_boot(
         "request_digest":grant.request_digest,
         "profile_hash":profile_hash,
         "presentation_digest":digest_value(&grant.execution_presentation)?,
+        "execution_product_selections_digest":digest_value(&grant.execution_product_selections)?,
         "ingresses":grant.ingresses,
     });
     if identity.boot_epoch > 1 {
@@ -475,6 +483,10 @@ fn present_admitted_executions(
     owner: &str,
     current_site: &str,
     origin_site: &str,
+    product_selections: &std::collections::BTreeMap<
+        String,
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    >,
 ) -> Result<Value> {
     use ryeos_engine::contracts::{
         EffectivePrincipal, PlanContext, Principal, ProjectContext, SubjectResolutionAuthority,
@@ -515,8 +527,18 @@ fn present_admitted_executions(
         .executions
         .iter()
         .map(|ceiling| {
-            ryeos_executor::dispatch::present_workload_execution(ceiling, &binding, &context, state)
-                .map_err(anyhow::Error::new)
+            let selections = product_selections
+                .get(&ceiling.item_ref)
+                .cloned()
+                .unwrap_or_default();
+            ryeos_executor::dispatch::present_workload_execution(
+                ceiling,
+                &selections,
+                &binding,
+                &context,
+                state,
+            )
+            .map_err(anyhow::Error::new)
         })
         .collect::<Result<Vec<_>>>()?;
     let presentation = Value::Array(presentation);
@@ -678,7 +700,7 @@ fn dispatch_request(
         // second child operation.
         let operation_id = dispatch.source.runtime_operation_id(grant_digest)?;
         let action = ryeos_runtime::callback::ActionPayload {
-            product_selections: Vec::new(),
+            product_selections: grant.product_selections_for_action(&execute.item_ref),
             operation_id: Some(operation_id),
             item_id: execute.item_ref,
             ref_bindings: execute.ref_bindings,
@@ -858,10 +880,80 @@ fn bounded_error(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use ryeos_app::runtime_db::{
         DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession, RuntimeDb,
     };
+
+    fn test_execution(
+        item_ref: &str,
+    ) -> ryeos_runtime::workload_client::WorkloadClientExecutionCeiling {
+        ryeos_runtime::workload_client::WorkloadClientExecutionCeiling {
+            item_ref: item_ref.to_owned(),
+            ref_bindings: BTreeMap::new(),
+            calls: vec![ryeos_runtime::workload_client::WorkloadClientCallCeiling::Default],
+            effect_classes: vec!["live".to_owned()],
+            workspace_access:
+                ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+        }
+    }
+
+    #[test]
+    fn launch_selections_are_normalized_for_only_the_exact_admitted_child() {
+        use ryeos_state::external_content::products::composition::{
+            ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+        };
+        let request = WorkloadClientRequestContract {
+            protocol: WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            bindings: vec![
+                ryeos_runtime::workload_client::WorkloadClientBinding::StructuredSession {},
+            ],
+            executions: vec![test_execution("tool:project/check")],
+            max_in_flight: 1,
+            max_invocations_per_boot: 2,
+            max_lifetime_seconds: 60,
+        };
+        let selected = ProductSelection {
+            declaration_id: "platform".to_owned(),
+            witness_hash: "a".repeat(64),
+            witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+            qualification_hash: Some("b".repeat(64)),
+        };
+        let inputs = vec![ProductSelectionInput {
+            target: ProductSelectionTarget::WorkloadExecution {
+                item_ref: "tool:project/check".to_owned(),
+            },
+            selection: selected.clone(),
+        }];
+        let admitted = ryeos_runtime::workload_client::admitted_execution_product_selections(
+            &inputs,
+            Some(&request),
+        )
+        .unwrap();
+        assert_eq!(
+            admitted["tool:project/check"],
+            vec![ProductSelectionInput {
+                target: ProductSelectionTarget::Root {},
+                selection: selected.clone(),
+            }]
+        );
+
+        let outside = vec![ProductSelectionInput {
+            target: ProductSelectionTarget::WorkloadExecution {
+                item_ref: "tool:project/other".to_owned(),
+            },
+            selection: selected,
+        }];
+        assert!(
+            ryeos_runtime::workload_client::admitted_execution_product_selections(
+                &outside,
+                Some(&request)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn workload_client_requires_the_real_pending_session_reservation() {

@@ -57,7 +57,8 @@ pub fn admit_root_product_selections(
         .iter()
         .filter_map(|input| match &input.target {
             ProductSelectionTarget::Root {} => Some(input.selection.clone()),
-            ProductSelectionTarget::ContentDependency { .. } => None,
+            ProductSelectionTarget::ContentDependency { .. }
+            | ProductSelectionTarget::WorkloadExecution { .. } => None,
         })
         .collect::<Vec<_>>();
     if selectors.is_empty() && resolved_external_product_selections(resolution)?.is_none() {
