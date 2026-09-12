@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-11T06:42:46Z:34c063d791c41af0a3449b763da1a843d877c914d4e2808fb14889f5d6c7467b:SMX0qETpVb9IvMgEXWv85+DOoWsfibG3B6sayhFpgD7jASwvJTZCqT27iQ2Mg/Hkobf9l8/htMRHESU7pM60CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-12T04:00:24Z:938e2efd173b6759fc2e3da042e17b92acc8e409561e6a83c2297a466839f9c9:xBd5xOJSAoEVFWnH/Jq9pSLFN4m+7v/ZeVKZecn2b7r4q6cEbciKfzj+ux/ubbnP6PyNbBErHNzfFur1sPL3Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [hosted-execution, environments, authoring, external-content]
@@ -158,6 +158,10 @@ Root workers receive authoring utilities and, where explicitly configured, the
 restricted workload client. Child project-operation Tools own compiler/platform
 and locked project dependencies. Do not move that closure into the root worker
 or grant it ordinary daemon/vault/publication access to bypass child execution.
+The authoring profile enables Codex's exact pinned same-version code-mode host
+for ordinary read/edit/shell tools, but keeps model-authored JavaScript Code
+Mode disabled. That workload-owned helper does not replace the restricted
+`ryeos_execute` dynamic tool used for admitted child RyeOS operations.
 The exact target generation must activate each child Tool's own external-content
 binding before a model turn is spent; activating the root worker's authoring
 tools does not authorize the formatter, compiler, Python, or project-dependency

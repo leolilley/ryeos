@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T10:35:03Z:4112aa0bd2074532c7186492499048e45e236d2766a19572c6f671cf64957f08:J0pqCj86BjbUJ9ZQ7M/W2WVGr0owYxuc+a6N1lwLcBR7doTI/uYzMhh8nY84ydXaN4NrU3lWm8GK2wn0Tta4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-12T04:00:24Z:1682163c03cbea062b011361fcd369b23cb91ac83aa18bc2a66726b7cfc6aae3:AIs4yXWz/nkmTptmlmv8R9othPm3awSJ7SYN0lS14SmvQqsedOxLxVYYGtu6E/Bzw7PMdk6Nl5bG+2oslUsUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -95,12 +95,18 @@ class CodexContractTests(unittest.TestCase):
                     self.assertEqual(filesystem["/ryeos/realizations/" + realization["mount"]], "read")
             self.assertEqual(filesystem[":root"], "deny")
             self.assertFalse(baseline["permissions"]["ryeos-workspace-only"]["network"]["enabled"])
-            self.assertFalse(baseline["features"]["code_mode_host"])
+            expected_code_mode_host = name == "authoring.profile.json"
+            self.assertEqual(
+                baseline["features"]["code_mode_host"], expected_code_mode_host
+            )
+            self.assertFalse(baseline["features"]["code_mode"]["enabled"])
             feature_args = [arg for arg in profile["workload_args"]
                             if arg.startswith("features=")]
             self.assertEqual(len(feature_args), 1)
-            self.assertIn("code_mode_host=false", feature_args[0])
-            self.assertNotIn("code_mode_host=true", feature_args[0])
+            self.assertIn(
+                f"code_mode_host={'true' if expected_code_mode_host else 'false'}",
+                feature_args[0],
+            )
 
     def test_turn_settings_notification_is_typed_bounded_testimony(self) -> None:
         schema_path = SOURCE / "schema/ThreadSettingsUpdatedNotification.json"

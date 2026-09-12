@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-11T06:42:46Z:ca2f6aaa31b126cf37b0f5d51f564ed4d91afe285b13f271cbb52e770824433c:6oIGZ90+NdbdfiYq02Q6wkotIuyMJD1jUbIjUbzwhEq2SxwLlLil0MNbLmBzOT3WddcB2HBwNC3vjGcZzC0BCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-12T04:00:24Z:722b59d3ebbbe95bd5899a693da2bb852a1ecba541232153b56099a35d854a62:Rwc/Hb7ipGosV7/RbjwrzFYwoxWKIlVEqamIyplbFo9R5DQgk5dCRXdqstihnsnW/u3A6L/Un9I6IlJiBTryAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -181,16 +181,14 @@ configured-operator forwarding route to inspect profiles on a remote node.
    or installed development-loop evidence. `ryeos_execute` accepts the existing
    bounded execution request; the daemon retains and revalidates authority.
 
-   Both hosted profiles explicitly disable Codex's Code Mode host. RyeOS
-   registers finite dynamic tools directly; it does not execute model-authored
-   JavaScript or emulate an `exec` host to recover a model that selected the
-   wrong invocation surface. Model compatibility is therefore an acceptance
-   property of the exact Codex/model/profile generation. In the retained local
-   qualification, `gpt-5.6-luna` repeatedly selected disabled Code Mode `exec`
-   and completed without invoking RyeOS, while `gpt-5.3-codex-spark` emitted a
-   direct `ryeos_execute` call that reached the bounded child-operation
-   authority. Those observations prove only those runs; model availability,
-   pricing, and future tool-selection behavior must be checked independently.
+   The minimal hosted profile disables Codex's Code Mode host. The authoring
+   profile enables the exact pinned same-version host for Codex's ordinary
+   read/edit/shell tools, while model-authored JavaScript Code Mode remains
+   disabled. This host is not a RyeOS execution authority: finite child RyeOS
+   operations are still registered as direct dynamic tools and revalidated by
+   the daemon. Model tool selection remains an acceptance property of the exact
+   Codex/model/profile generation; a completed turn without an edit or child
+   operation is not successful development evidence.
 
    Ordinary shell/editing commands remain Codex commands. The Codex profiles
    mount their executable resources and command tools in the existing immutable
