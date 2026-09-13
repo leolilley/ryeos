@@ -2418,6 +2418,7 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "ryeos-provider-contract",
  "ryeos-runtime",

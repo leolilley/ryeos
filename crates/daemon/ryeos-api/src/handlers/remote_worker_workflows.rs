@@ -19,6 +19,7 @@ use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::{self, ProjectSyncScope, RemoteConfig};
 use crate::remote::push::push_snapshot_generation;
+use ryeos_app::hosted_candidate_result::HostedCandidateResultResponse;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
@@ -34,7 +35,9 @@ const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v1";
 const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v1";
 const DRIVE_INTENT_EVENT: &str = "remote_worker_workflow.drive_intent";
 const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
+const LAUNCH_ACCEPTED_EVENT: &str = "remote_worker_workflow.launch_accepted";
 const DRIVE_FACT_SCHEMA: &str = "ryeos.remote_worker_workflow_drive_fact.v1";
+const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v1";
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 const LAUNCH_CONTACT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
@@ -46,6 +49,10 @@ struct TargetLaunchNotBound;
 #[derive(Debug, thiserror::Error)]
 #[error("target launch settled terminally: {0}")]
 struct TargetLaunchTerminal(String);
+
+#[derive(Debug, thiserror::Error)]
+#[error("target workflow terminal authority is invalid: {0}")]
+struct TargetWorkflowTerminalInvalid(String);
 
 fn default_remote() -> String {
     "default".to_owned()
@@ -106,6 +113,8 @@ struct Progress {
     workflow_digest: Option<String>,
     target_request_digest: Option<String>,
     target_chain_root_id: Option<String>,
+    target_admission: Option<TargetAdmissionEvidence>,
+    launch_acceptance_drive_root_id: Option<String>,
     drive_root_id: Option<String>,
 }
 
@@ -113,14 +122,20 @@ struct Progress {
 #[serde(deny_unknown_fields)]
 struct Receipt {
     schema: String,
+    allowed_next_action: String,
     source_work_id: String,
     remote: String,
     source_snapshot_hash: String,
     workflow_ref: String,
     workflow_digest: String,
     target_launch_id: String,
+    launch_acceptance_drive_root_id: String,
     target_chain_root_id: String,
     target_admission: TargetAdmissionEvidence,
+    target_workflow_terminal_thread_id: String,
+    target_workflow_result_digest: String,
+    candidate_terminal_thread_id: String,
+    candidate_result: HostedCandidateResultResponse,
     settlement_drive_root_id: String,
 }
 
@@ -130,6 +145,36 @@ struct TargetAdmissionEvidence {
     admitted_capsule_hash: String,
     exact_program_hash: String,
     effective_definition_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchAcceptance {
+    schema: String,
+    source_work_id: String,
+    operation_digest: String,
+    workflow_digest: String,
+    target_request_digest: String,
+    target_launch_id: String,
+    target_chain_root_id: String,
+    target_admission: TargetAdmissionEvidence,
+    launch_acceptance_drive_root_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowGraphResult {
+    schema: String,
+    candidate_terminal_thread_id: String,
+}
+
+const WORKFLOW_GRAPH_RESULT_SCHEMA: &str = "ryeos.remote_worker_workflow_graph_result.v1";
+const MAX_TARGET_CHAIN_SEGMENTS: usize = 1024;
+
+enum DriveOutcome {
+    LaunchAccepted,
+    CompletionPending,
+    Completed(Receipt),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -317,17 +362,71 @@ async fn drive_operation(
     let Some(mut attempt) = WorkflowAttempt::begin(state.clone(), &job_id)? else {
         return Ok(in_progress_response(&operation, &job, &progress));
     };
-    let drive_result: Result<Receipt> = async {
+    let drive_result: Result<DriveOutcome> = async {
         let prior_drive_root_id = progress.drive_root_id.clone();
         if let Some(prior_drive_root_id) = prior_drive_root_id.as_deref() {
             validate_drive_intent(&state, prior_drive_root_id, &operation, &operation_digest)?;
             if let Some(receipt) =
                 read_settlement_fact(&state, prior_drive_root_id, &operation, &operation_digest)?
             {
-                return Ok(receipt);
+                return Ok(DriveOutcome::Completed(receipt));
             }
         }
         append_drive_intent(&state, drive_root_id, &operation, &operation_digest)?;
+        let remote = validate_current_route(&state, &operation)?;
+        let client = RemoteClient::from_remote_cfg_as_retained_configured_operator(
+            &state,
+            &remote,
+            &operation.operator_fingerprint,
+            &operation.operator_authority_digest,
+        )?;
+
+        let snapshot_hash = operation.source_snapshot_hash.as_str();
+        let compiled = compile_workflow(
+            &state,
+            &operation.workflow_ref,
+            snapshot_hash,
+            Path::new(&operation.local_project_path),
+            &operation.task,
+            &operation.credential_profile_id,
+        )?;
+        let had_launch_contact = progress.target_request_digest.is_some();
+        if progress
+            .workflow_digest
+            .as_deref()
+            .is_some_and(|digest| digest != compiled.digest)
+        {
+            bail!("remote-worker workflow recompilation differs from retained launch contact");
+        }
+        progress.workflow_digest = Some(compiled.digest.clone());
+        let parameters = compiled.parameters.clone();
+        let execution_policy = exact_snapshot_execution_policy(snapshot_hash)?;
+        let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "driver": compiled.driver,
+            "ref_bindings": compiled.ref_bindings,
+            "parameters": parameters,
+            "target_project_path": operation.target_project_path,
+            "target_launch_id": operation.target_launch_id,
+            "source_snapshot_hash": snapshot_hash,
+            "execution_policy": execution_policy,
+            "product_selections": [],
+        }))?;
+        if progress
+            .target_request_digest
+            .as_deref()
+            .is_some_and(|digest| digest != request_digest)
+        {
+            bail!("remote-worker workflow recompilation differs from retained launch contact");
+        }
+        progress.target_request_digest = Some(request_digest.clone());
+        reconcile_launch_acceptance(
+            &state,
+            &operation,
+            &operation_digest,
+            &compiled.digest,
+            &request_digest,
+            &mut progress,
+        )?;
         progress.drive_root_id = Some(drive_root_id.to_owned());
         update_progress(
             &state,
@@ -336,13 +435,56 @@ async fn drive_operation(
             &progress,
             vec![operation.source_snapshot_hash.clone()],
         )?;
-        let remote = validate_current_route(&state, &operation)?;
-        let client = RemoteClient::from_remote_cfg_as_retained_configured_operator(
-            &state,
-            &remote,
-            &operation.operator_fingerprint,
-            &operation.operator_authority_digest,
-        )?;
+
+        match (
+            progress.target_chain_root_id.as_deref(),
+            progress.target_admission.as_ref(),
+        ) {
+            (Some(target_chain_root_id), Some(target_admission)) => {
+                update_progress(
+                    &state,
+                    &job_id,
+                    "completion_observing",
+                    &progress,
+                    vec![snapshot_hash.to_owned()],
+                )?;
+                let Some(receipt) = observe_target_completion(
+                    &client,
+                    &operation,
+                    &compiled,
+                    target_chain_root_id,
+                    target_admission,
+                    progress
+                        .launch_acceptance_drive_root_id
+                        .as_deref()
+                        .context("launch acceptance omitted its drive root")?,
+                    &remote.pinned_signing_key()?,
+                    drive_root_id,
+                )
+                .await?
+                else {
+                    update_progress(
+                        &state,
+                        &job_id,
+                        "completion_pending",
+                        &progress,
+                        vec![snapshot_hash.to_owned()],
+                    )?;
+                    return Ok(DriveOutcome::CompletionPending);
+                };
+                append_settlement_fact(
+                    &state,
+                    drive_root_id,
+                    &operation,
+                    &operation_digest,
+                    &receipt,
+                )?;
+                return Ok(DriveOutcome::Completed(receipt));
+            }
+            (None, None) => {}
+            _ => bail!("remote-worker workflow launch acceptance is incomplete"),
+        }
+
         if !progress.pushed {
             update_progress(
                 &state,
@@ -368,41 +510,6 @@ async fn drive_operation(
             )?;
         }
 
-        let snapshot_hash = operation.source_snapshot_hash.as_str();
-        let compiled = compile_workflow(
-            &state,
-            &operation.workflow_ref,
-            snapshot_hash,
-            Path::new(&operation.local_project_path),
-            &operation.task,
-            &operation.credential_profile_id,
-        )?;
-        let parameters = compiled.parameters.clone();
-        let execution_policy = exact_snapshot_execution_policy(snapshot_hash)?;
-        let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-            "driver": compiled.driver,
-            "ref_bindings": compiled.ref_bindings,
-            "parameters": parameters,
-            "target_project_path": operation.target_project_path,
-            "target_launch_id": operation.target_launch_id,
-            "source_snapshot_hash": snapshot_hash,
-            "execution_policy": execution_policy,
-            "product_selections": [],
-        }))?;
-        if progress
-            .workflow_digest
-            .as_deref()
-            .is_some_and(|digest| digest != compiled.digest)
-            || progress
-                .target_request_digest
-                .as_deref()
-                .is_some_and(|digest| digest != request_digest)
-        {
-            bail!("remote-worker workflow recompilation differs from retained launch contact");
-        }
-        let had_launch_contact = progress.target_request_digest.is_some();
-        progress.workflow_digest = Some(compiled.digest.clone());
-        progress.target_request_digest = Some(request_digest);
         update_progress(
             &state,
             &job_id,
@@ -445,31 +552,41 @@ async fn drive_operation(
             &target_chain_root_id,
         )
         .await?;
-        progress.target_chain_root_id = Some(target_chain_root_id.clone());
-        let receipt = Receipt {
-            schema: RESPONSE_SCHEMA.to_owned(),
-            source_work_id: source_work_id.clone(),
-            remote: operation.remote.clone(),
-            source_snapshot_hash: snapshot_hash.to_owned(),
-            workflow_ref: operation.workflow_ref.clone(),
-            workflow_digest: compiled.digest,
+        let acceptance = LaunchAcceptance {
+            schema: LAUNCH_ACCEPTANCE_SCHEMA.to_owned(),
+            source_work_id: operation.source_work_id.clone(),
+            operation_digest: operation_digest.clone(),
+            workflow_digest: compiled.digest.clone(),
+            target_request_digest: request_digest,
             target_launch_id: operation.target_launch_id.clone(),
-            target_chain_root_id,
-            target_admission,
-            settlement_drive_root_id: drive_root_id.to_owned(),
+            launch_acceptance_drive_root_id: drive_root_id.to_owned(),
+            target_chain_root_id: target_chain_root_id.clone(),
+            target_admission: target_admission.clone(),
         };
-        append_settlement_fact(
+        append_launch_acceptance(&state, &operation, drive_root_id, &acceptance)?;
+        progress.launch_acceptance_drive_root_id = Some(drive_root_id.to_owned());
+        progress.target_chain_root_id = Some(target_chain_root_id.clone());
+        progress.target_admission = Some(target_admission);
+        update_progress(
             &state,
-            drive_root_id,
-            &operation,
-            &operation_digest,
-            &receipt,
+            &job_id,
+            "launch_accepted",
+            &progress,
+            vec![snapshot_hash.to_owned()],
         )?;
-        Ok(receipt)
+        Ok(DriveOutcome::LaunchAccepted)
     }
     .await;
     match drive_result {
-        Ok(receipt) => {
+        Ok(DriveOutcome::LaunchAccepted) => {
+            attempt.pause(&operation, &progress, "launch_accepted")?;
+            Ok(launch_accepted_response(&operation, &progress))
+        }
+        Ok(DriveOutcome::CompletionPending) => {
+            attempt.pause(&operation, &progress, "completion_pending")?;
+            Ok(completion_pending_response(&operation, &progress))
+        }
+        Ok(DriveOutcome::Completed(receipt)) => {
             attempt.complete(&operation, &receipt)?;
             Ok(serde_json::to_value(receipt)?)
         }
@@ -510,24 +627,29 @@ pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>)
             "workflow_digest": receipt.workflow_digest,
             "target_launch_id": receipt.target_launch_id,
             "target_chain_root_id": receipt.target_chain_root_id,
+            "candidate_terminal_thread_id": receipt.candidate_terminal_thread_id,
+            "allowed_next_action": "pull_result",
             "receipt": receipt,
         }));
     }
-    let progress = Progress::from_job(&job)?;
+    let mut progress = Progress::from_job(&job)?;
+    let digest = operation_digest(&operation)?;
+    reconcile_launch_acceptance_for_query(&state, &operation, &digest, &mut progress)?;
     if let Some(drive_root_id) = progress.drive_root_id.as_deref() {
-        let digest = operation_digest(&operation)?;
         validate_drive_intent(&state, drive_root_id, &operation, &digest)?;
         if let Some(receipt) = read_settlement_fact(&state, drive_root_id, &operation, &digest)? {
             return Ok(serde_json::json!({
                 "source_work_id": operation.source_work_id,
                 "state": "completed",
-                "phase": "accepted",
+                "phase": "completed",
                 "remote": operation.remote,
                 "source_snapshot_hash": receipt.source_snapshot_hash,
                 "workflow_ref": receipt.workflow_ref,
                 "workflow_digest": receipt.workflow_digest,
                 "target_launch_id": receipt.target_launch_id,
                 "target_chain_root_id": receipt.target_chain_root_id,
+                "candidate_terminal_thread_id": receipt.candidate_terminal_thread_id,
+                "allowed_next_action": "pull_result",
                 "receipt": receipt,
             }));
         }
@@ -542,6 +664,8 @@ pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>)
         "workflow_digest": progress.workflow_digest,
         "target_launch_id": operation.target_launch_id,
         "target_chain_root_id": progress.target_chain_root_id,
+        "target_admission": progress.target_admission,
+        "allowed_next_action": "resume",
         "error": job.last_error,
         "receipt": if job.state == SyncJobState::Completed { job.result } else { None },
     }))
@@ -820,6 +944,160 @@ async fn verify_target_launch(
     })
 }
 
+async fn observe_target_completion(
+    client: &RemoteClient,
+    operation: &Operation,
+    compiled: &CompiledWorkflow,
+    target_chain_root_id: &str,
+    target_admission: &TargetAdmissionEvidence,
+    launch_acceptance_drive_root_id: &str,
+    target_signing_key: &lillux::crypto::VerifyingKey,
+    settlement_drive_root_id: &str,
+) -> Result<Option<Receipt>> {
+    let Some((terminal_thread_id, graph_result, graph_result_digest)) =
+        observe_exact_graph_terminal(client, target_chain_root_id, compiled, target_admission)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let returned: WorkflowGraphResult = serde_json::from_value(
+        graph_result
+            .result
+            .clone()
+            .context("target Graph terminal omitted its signed workflow return")?,
+    )
+    .map_err(|error| TargetWorkflowTerminalInvalid(error.to_string()))?;
+    if returned.schema != WORKFLOW_GRAPH_RESULT_SCHEMA {
+        return Err(TargetWorkflowTerminalInvalid(
+            "target Graph returned another workflow-result schema".to_owned(),
+        )
+        .into());
+    }
+    ryeos_runtime::validate_runtime_thread_id(&returned.candidate_terminal_thread_id)
+        .map_err(|error| TargetWorkflowTerminalInvalid(error.to_string()))?;
+
+    let candidate_result = super::remote_pull_worker_result::query_candidate_result_with_client(
+        client,
+        &returned.candidate_terminal_thread_id,
+        &operation.source_site_id,
+        &format!("fp:{}", operation.operator_fingerprint),
+        &operation.target_site_id,
+        target_signing_key,
+    )
+    .await?;
+    let evidence = &candidate_result.evidence;
+    // v1 deliberately supports only the bounded single-placement seam. The
+    // Graph return is a terminal thread coordinate, not a general chain-root
+    // resolver; continued or moved worker children therefore fail closed.
+    if evidence.chain_root_id != returned.candidate_terminal_thread_id
+        || evidence.base_snapshot_hash != operation.source_snapshot_hash
+        || evidence.target_project_path != operation.target_project_path
+    {
+        return Err(TargetWorkflowTerminalInvalid(
+            "candidate testimony differs from the exact bounded Graph return".to_owned(),
+        )
+        .into());
+    }
+
+    Ok(Some(Receipt {
+        schema: RESPONSE_SCHEMA.to_owned(),
+        allowed_next_action: "pull_result".to_owned(),
+        source_work_id: operation.source_work_id.clone(),
+        remote: operation.remote.clone(),
+        source_snapshot_hash: operation.source_snapshot_hash.clone(),
+        workflow_ref: operation.workflow_ref.clone(),
+        workflow_digest: compiled.digest.clone(),
+        target_launch_id: operation.target_launch_id.clone(),
+        target_chain_root_id: target_chain_root_id.to_owned(),
+        target_admission: target_admission.clone(),
+        launch_acceptance_drive_root_id: launch_acceptance_drive_root_id.to_owned(),
+        target_workflow_terminal_thread_id: terminal_thread_id,
+        target_workflow_result_digest: graph_result_digest,
+        candidate_terminal_thread_id: returned.candidate_terminal_thread_id,
+        candidate_result,
+        settlement_drive_root_id: settlement_drive_root_id.to_owned(),
+    }))
+}
+
+async fn observe_exact_graph_terminal(
+    client: &RemoteClient,
+    target_chain_root_id: &str,
+    compiled: &CompiledWorkflow,
+    target_admission: &TargetAdmissionEvidence,
+) -> Result<Option<(String, ryeos_graph_definition::GraphResult, String)>> {
+    ryeos_runtime::validate_runtime_thread_id(target_chain_root_id).map_err(anyhow::Error::msg)?;
+    let mut current = target_chain_root_id.to_owned();
+    for _ in 0..MAX_TARGET_CHAIN_SEGMENTS {
+        let response = client.threads_get(&current).await?;
+        if response.is_null() {
+            bail!("target Graph thread is not observable by its admitted owner");
+        }
+        if response
+            .pointer("/thread/thread_id")
+            .and_then(Value::as_str)
+            != Some(current.as_str())
+            || response
+                .pointer("/thread/chain_root_id")
+                .and_then(Value::as_str)
+                != Some(target_chain_root_id)
+            || response.pointer("/thread/item_ref").and_then(Value::as_str)
+                != Some(compiled.driver.as_str())
+        {
+            return Err(TargetWorkflowTerminalInvalid(
+                "target Graph continuation differs from admitted workflow identity".to_owned(),
+            )
+            .into());
+        }
+        if let Some(successor) = response
+            .pointer("/thread/successor_thread_id")
+            .and_then(Value::as_str)
+        {
+            ryeos_runtime::validate_runtime_thread_id(successor)
+                .map_err(|error| TargetWorkflowTerminalInvalid(error.to_string()))?;
+            current = successor.to_owned();
+            continue;
+        }
+        match response.pointer("/thread/status").and_then(Value::as_str) {
+            Some("created" | "running" | "queued") => {
+                return Ok(None);
+            }
+            Some("completed") => {}
+            Some("continued") => {
+                return Err(TargetWorkflowTerminalInvalid(
+                    "target Graph continuation omitted its successor".to_owned(),
+                )
+                .into());
+            }
+            Some(status) => return Err(TargetLaunchTerminal(status.to_owned()).into()),
+            None => {
+                return Err(TargetWorkflowTerminalInvalid(
+                    "target Graph thread omitted status".to_owned(),
+                )
+                .into());
+            }
+        }
+        let value = response
+            .pointer("/result/result")
+            .cloned()
+            .context("completed target Graph omitted its result")?;
+        let digest = ryeos_state::objects::canonical_value_digest(&value)?;
+        let result: ryeos_graph_definition::GraphResult = serde_json::from_value(value)
+            .map_err(|error| TargetWorkflowTerminalInvalid(error.to_string()))?;
+        if !result.success
+            || result.status != ryeos_graph_definition::GraphRunStatus::Completed
+            || result.definition_ref != compiled.driver
+            || result.effective_definition_digest != target_admission.effective_definition_digest
+        {
+            return Err(TargetWorkflowTerminalInvalid(
+                "target Graph result contradicts admitted effective definition".to_owned(),
+            )
+            .into());
+        }
+        return Ok(Some((current, result, digest)));
+    }
+    Err(TargetWorkflowTerminalInvalid("target Graph continuation exceeds bound".to_owned()).into())
+}
+
 fn decode_target_capsule(
     expected_hash: &str,
     value: Value,
@@ -965,6 +1243,7 @@ fn validate_operation(operation: &Operation) -> Result<()> {
 
 fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
     if receipt.schema != RESPONSE_SCHEMA
+        || receipt.allowed_next_action != "pull_result"
         || receipt.source_work_id != operation.source_work_id
         || receipt.remote != operation.remote
         || receipt.workflow_ref != operation.workflow_ref
@@ -973,6 +1252,7 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
         || !lillux::valid_hash(&receipt.workflow_digest)
         || !lillux::valid_hash(&receipt.target_admission.admitted_capsule_hash)
         || !lillux::valid_hash(&receipt.target_admission.exact_program_hash)
+        || !lillux::valid_hash(&receipt.target_workflow_result_digest)
         || ryeos_engine::resolution::EffectiveDefinitionDigest::parse(
             receipt.target_admission.effective_definition_digest.clone(),
         )
@@ -982,6 +1262,23 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
     }
     ryeos_runtime::validate_runtime_thread_id(&receipt.target_chain_root_id)
         .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_runtime::validate_runtime_thread_id(&receipt.launch_acceptance_drive_root_id)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_runtime::validate_runtime_thread_id(&receipt.target_workflow_terminal_thread_id)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_runtime::validate_runtime_thread_id(&receipt.candidate_terminal_thread_id)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    receipt.candidate_result.evidence.validate()?;
+    if receipt.candidate_result.evidence.chain_root_id != receipt.candidate_terminal_thread_id
+        || receipt.candidate_result.evidence.source_site_id != operation.source_site_id
+        || receipt.candidate_result.evidence.target_site_id != operation.target_site_id
+        || receipt.candidate_result.evidence.owner_principal
+            != format!("fp:{}", operation.operator_fingerprint)
+        || receipt.candidate_result.evidence.base_snapshot_hash != operation.source_snapshot_hash
+        || receipt.candidate_result.evidence.target_project_path != operation.target_project_path
+    {
+        bail!("remote-worker workflow candidate receipt contradicts retained authority");
+    }
     Ok(())
 }
 
@@ -1041,6 +1338,180 @@ fn validate_recorded_invocation(
 
 fn operation_digest(operation: &Operation) -> Result<String> {
     ryeos_state::objects::canonical_value_digest(&serde_json::to_value(operation)?)
+}
+
+fn launch_acceptance_operation_id(source_work_id: &str) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema": "ryeos.remote_worker_workflow_launch_acceptance_operation.v1",
+        "source_work_id": source_work_id,
+    }))
+}
+
+fn append_launch_acceptance(
+    state: &AppState,
+    operation: &Operation,
+    drive_root_id: &str,
+    acceptance: &LaunchAcceptance,
+) -> Result<()> {
+    validate_launch_acceptance(acceptance, operation, &operation_digest(operation)?)?;
+    if acceptance.launch_acceptance_drive_root_id != drive_root_id {
+        bail!("remote-worker workflow launch acceptance names another drive root");
+    }
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        drive_root_id,
+        LAUNCH_ACCEPTED_EVENT,
+        &launch_acceptance_operation_id(&operation.source_work_id)?,
+        serde_json::to_value(acceptance)?,
+    )
+}
+
+fn read_launch_acceptance(
+    state: &AppState,
+    operation: &Operation,
+    operation_digest: &str,
+    drive_root_id: &str,
+) -> Result<Option<LaunchAcceptance>> {
+    let fact = ryeos_app::authoritative_root_fact::lookup(
+        state,
+        drive_root_id,
+        LAUNCH_ACCEPTED_EVENT,
+        &launch_acceptance_operation_id(&operation.source_work_id)?,
+    )?;
+    if fact.count == 0 {
+        return Ok(None);
+    }
+    if fact.count != 1 {
+        bail!("remote-worker workflow launch acceptance fact is duplicated");
+    }
+    let acceptance: LaunchAcceptance = serde_json::from_value(
+        fact.payload
+            .context("remote-worker workflow launch acceptance fact is unavailable")?,
+    )?;
+    validate_launch_acceptance(&acceptance, operation, operation_digest)?;
+    Ok(Some(acceptance))
+}
+
+fn validate_launch_acceptance(
+    acceptance: &LaunchAcceptance,
+    operation: &Operation,
+    operation_digest: &str,
+) -> Result<()> {
+    if acceptance.schema != LAUNCH_ACCEPTANCE_SCHEMA
+        || acceptance.source_work_id != operation.source_work_id
+        || acceptance.operation_digest != operation_digest
+        || acceptance.target_launch_id != operation.target_launch_id
+        || acceptance.launch_acceptance_drive_root_id.trim().is_empty()
+        || !lillux::valid_hash(&acceptance.workflow_digest)
+        || !lillux::valid_hash(&acceptance.target_request_digest)
+        || !lillux::valid_hash(&acceptance.target_admission.admitted_capsule_hash)
+        || !lillux::valid_hash(&acceptance.target_admission.exact_program_hash)
+        || ryeos_engine::resolution::EffectiveDefinitionDigest::parse(
+            acceptance
+                .target_admission
+                .effective_definition_digest
+                .clone(),
+        )
+        .is_err()
+    {
+        bail!("remote-worker workflow launch acceptance contradicts retained authority");
+    }
+    ryeos_runtime::validate_runtime_thread_id(&acceptance.target_chain_root_id)
+        .map_err(anyhow::Error::msg)?;
+    ryeos_runtime::validate_runtime_thread_id(&acceptance.launch_acceptance_drive_root_id)
+        .map_err(anyhow::Error::msg)
+}
+
+fn reconcile_launch_acceptance(
+    state: &AppState,
+    operation: &Operation,
+    operation_digest: &str,
+    workflow_digest: &str,
+    target_request_digest: &str,
+    progress: &mut Progress,
+) -> Result<()> {
+    let acceptance_root = progress
+        .launch_acceptance_drive_root_id
+        .as_deref()
+        .or(progress.drive_root_id.as_deref());
+    let acceptance = match acceptance_root {
+        Some(root) => read_launch_acceptance(state, operation, operation_digest, root)?,
+        None => None,
+    };
+    let Some(acceptance) = acceptance else {
+        if progress.target_chain_root_id.is_some() || progress.target_admission.is_some() {
+            bail!("remote-worker workflow projection claims unproved launch acceptance");
+        }
+        return Ok(());
+    };
+    if acceptance.workflow_digest != workflow_digest
+        || acceptance.target_request_digest != target_request_digest
+        || acceptance_root != Some(acceptance.launch_acceptance_drive_root_id.as_str())
+        || progress
+            .target_chain_root_id
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_chain_root_id)
+        || progress
+            .target_admission
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_admission)
+    {
+        bail!("remote-worker workflow projection differs from launch acceptance fact");
+    }
+    progress.workflow_digest = Some(acceptance.workflow_digest);
+    progress.target_request_digest = Some(acceptance.target_request_digest);
+    progress.launch_acceptance_drive_root_id = Some(acceptance.launch_acceptance_drive_root_id);
+    progress.target_chain_root_id = Some(acceptance.target_chain_root_id);
+    progress.target_admission = Some(acceptance.target_admission);
+    Ok(())
+}
+
+fn reconcile_launch_acceptance_for_query(
+    state: &AppState,
+    operation: &Operation,
+    operation_digest: &str,
+    progress: &mut Progress,
+) -> Result<()> {
+    let acceptance_root = progress
+        .launch_acceptance_drive_root_id
+        .as_deref()
+        .or(progress.drive_root_id.as_deref());
+    let acceptance = match acceptance_root {
+        Some(root) => read_launch_acceptance(state, operation, operation_digest, root)?,
+        None => None,
+    };
+    let Some(acceptance) = acceptance else {
+        if progress.target_chain_root_id.is_some() || progress.target_admission.is_some() {
+            bail!("remote-worker workflow projection claims unproved launch acceptance");
+        }
+        return Ok(());
+    };
+    if progress
+        .workflow_digest
+        .as_ref()
+        .is_some_and(|value| value != &acceptance.workflow_digest)
+        || progress
+            .target_request_digest
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_request_digest)
+        || progress
+            .target_chain_root_id
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_chain_root_id)
+        || progress
+            .target_admission
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_admission)
+        || acceptance_root != Some(acceptance.launch_acceptance_drive_root_id.as_str())
+    {
+        bail!("remote-worker workflow projection differs from launch acceptance fact");
+    }
+    progress.workflow_digest = Some(acceptance.workflow_digest);
+    progress.target_request_digest = Some(acceptance.target_request_digest);
+    progress.launch_acceptance_drive_root_id = Some(acceptance.launch_acceptance_drive_root_id);
+    progress.target_chain_root_id = Some(acceptance.target_chain_root_id);
+    progress.target_admission = Some(acceptance.target_admission);
+    Ok(())
 }
 
 fn drive_fact_operation_id(
@@ -1222,6 +1693,19 @@ fn authoritative_receipt(
     operation_digest: &str,
 ) -> Result<()> {
     validate_receipt(receipt, operation)?;
+    let acceptance = read_launch_acceptance(
+        state,
+        operation,
+        operation_digest,
+        &receipt.launch_acceptance_drive_root_id,
+    )?
+    .context("completed workflow lacks authoritative launch acceptance")?;
+    if acceptance.workflow_digest != receipt.workflow_digest
+        || acceptance.target_chain_root_id != receipt.target_chain_root_id
+        || acceptance.target_admission != receipt.target_admission
+    {
+        bail!("completed workflow receipt contradicts launch acceptance");
+    }
     validate_drive_intent(
         state,
         &receipt.settlement_drive_root_id,
@@ -1269,20 +1753,50 @@ impl WorkflowAttempt {
                 &self.attempt_id,
                 &ryeos_state::FinishSyncJobAttempt {
                     state: ryeos_state::SyncJobAttemptState::Completed,
-                    phase: "accepted".to_owned(),
+                    phase: "completed".to_owned(),
                     error: None,
                     result: Some(serde_json::to_value(receipt)?),
                 },
                 &self.job_id,
                 &SyncJobUpdate {
                     state: SyncJobState::Completed,
-                    phase: "accepted".to_owned(),
+                    phase: "completed".to_owned(),
                     roots: Some(vec![operation.source_snapshot_hash.clone()]),
                     heads: Some(vec![operation.source_snapshot_hash.clone()]),
                     uploaded_hashes: latest.uploaded_hashes,
                     fetched_hashes: latest.fetched_hashes,
                     last_error: None,
                     result: Some(serde_json::to_value(receipt)?),
+                },
+            )
+        })?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn pause(&mut self, operation: &Operation, progress: &Progress, phase: &str) -> Result<()> {
+        self.state.state_store.with_state_db(|db| {
+            let latest = db
+                .get_sync_job(&self.job_id)?
+                .context("remote-worker workflow disappeared after launch acceptance")?;
+            db.finish_sync_job_attempt_and_update_job(
+                &self.attempt_id,
+                &ryeos_state::FinishSyncJobAttempt {
+                    state: ryeos_state::SyncJobAttemptState::Completed,
+                    phase: phase.to_owned(),
+                    error: None,
+                    result: Some(serde_json::to_value(progress)?),
+                },
+                &self.job_id,
+                &SyncJobUpdate {
+                    state: SyncJobState::Running,
+                    phase: phase.to_owned(),
+                    roots: Some(vec![operation.source_snapshot_hash.clone()]),
+                    heads: Some(Vec::new()),
+                    uploaded_hashes: latest.uploaded_hashes,
+                    fetched_hashes: latest.fetched_hashes,
+                    last_error: None,
+                    result: Some(serde_json::to_value(progress)?),
                 },
             )
         })?;
@@ -1400,6 +1914,14 @@ impl Drop for WorkflowAttempt {
 }
 
 fn in_progress_response(operation: &Operation, job: &SyncJobRecord, progress: &Progress) -> Value {
+    let allowed_next_action = if matches!(
+        job.state,
+        SyncJobState::Running | SyncJobState::Retryable | SyncJobState::Planned
+    ) {
+        Value::String("resume".to_owned())
+    } else {
+        Value::Null
+    };
     serde_json::json!({
         "source_work_id": operation.source_work_id,
         "state": job.state.as_str(),
@@ -1410,15 +1932,54 @@ fn in_progress_response(operation: &Operation, job: &SyncJobRecord, progress: &P
         "workflow_digest": progress.workflow_digest,
         "target_launch_id": operation.target_launch_id,
         "target_chain_root_id": progress.target_chain_root_id,
+        "target_admission": progress.target_admission,
+        "allowed_next_action": allowed_next_action,
         "error": job.last_error,
         "receipt": Value::Null,
     })
 }
 
+fn launch_accepted_response(operation: &Operation, progress: &Progress) -> Value {
+    serde_json::json!({
+        "source_work_id": operation.source_work_id,
+        "state": "running",
+        "phase": "launch_accepted",
+        "remote": operation.remote,
+        "source_snapshot_hash": operation.source_snapshot_hash,
+        "workflow_ref": operation.workflow_ref,
+        "workflow_digest": progress.workflow_digest,
+        "target_launch_id": operation.target_launch_id,
+        "target_chain_root_id": progress.target_chain_root_id,
+        "target_admission": progress.target_admission,
+        "allowed_next_action": "resume",
+        "receipt": Value::Null,
+    })
+}
+
+fn completion_pending_response(operation: &Operation, progress: &Progress) -> Value {
+    serde_json::json!({
+        "source_work_id": operation.source_work_id,
+        "state": "running",
+        "phase": "completion_pending",
+        "remote": operation.remote,
+        "source_snapshot_hash": operation.source_snapshot_hash,
+        "workflow_ref": operation.workflow_ref,
+        "workflow_digest": progress.workflow_digest,
+        "target_launch_id": operation.target_launch_id,
+        "target_chain_root_id": progress.target_chain_root_id,
+        "target_admission": progress.target_admission,
+        "allowed_next_action": "resume",
+        "receipt": Value::Null,
+    })
+}
+
 fn workflow_error_is_retryable(error: &anyhow::Error) -> bool {
-    !error
-        .chain()
-        .any(|cause| cause.downcast_ref::<TargetLaunchTerminal>().is_some())
+    !error.chain().any(|cause| {
+        cause.downcast_ref::<TargetLaunchTerminal>().is_some()
+            || cause
+                .downcast_ref::<TargetWorkflowTerminalInvalid>()
+                .is_some()
+    })
 }
 
 fn bounded_error(value: &str) -> String {
@@ -1540,6 +2101,7 @@ pub const RESUME_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_state::signer::Signer;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_state_store(root: &Path) -> ryeos_app::state_store::StateStore {
@@ -1617,6 +2179,49 @@ mod tests {
     }
 
     #[test]
+    fn ryeos_project_workflow_uses_the_exact_signed_driver_and_environment() {
+        let root = ryeos_engine::test_support::workspace_root();
+        let config_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join(".ai/config/development/ryeos/remote-worker.yaml"))
+                .unwrap(),
+        )
+        .unwrap();
+        let config: WorkflowConfig = serde_json::from_value(config_value).unwrap();
+        assert_eq!(config.schema, WORKFLOW_SCHEMA);
+        assert_eq!(config.driver, "graph:ryeos/development/remote-worker");
+        assert!(config.ref_bindings.is_empty());
+
+        let graph_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join(".ai/graphs/ryeos/development/remote-worker.yaml"))
+                .unwrap(),
+        )
+        .unwrap();
+        let graph: ryeos_graph_definition::GraphFile =
+            serde_json::from_value(graph_value.clone()).unwrap();
+        ryeos_graph_definition::validate_graph_file(&graph).unwrap();
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/item_id"),
+            Some(&Value::String(
+                "worker_execution:codex/bounded-turn".to_owned()
+            ))
+        );
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/ref_bindings/environment"),
+            Some(&Value::String(
+                "config:development/ryeos/worker-environment".to_owned()
+            ))
+        );
+        assert_eq!(
+            graph_value.pointer("/config/nodes/done/output/schema"),
+            Some(&Value::String(WORKFLOW_GRAPH_RESULT_SCHEMA.to_owned()))
+        );
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/assign/candidate_terminal_thread_id"),
+            Some(&Value::String("${dispatch.child_thread_id}".to_owned()))
+        );
+    }
+
+    #[test]
     fn resume_contract_accepts_only_source_work_id() {
         let request = serde_json::json!({
             "source_work_id": "T-0025cdcf-c920-0783-ff3a-95250dd8f8d2",
@@ -1634,6 +2239,7 @@ mod tests {
         receipt.source_snapshot_hash = "f".repeat(64);
         assert!(validate_receipt(&receipt, &operation).is_err());
         operation.source_snapshot_hash = receipt.source_snapshot_hash.clone();
+        let receipt = receipt_fixture(&operation);
         assert!(validate_receipt(&receipt, &operation).is_ok());
 
         let mut receipt = receipt_fixture(&operation);
@@ -1647,6 +2253,52 @@ mod tests {
         let mut receipt = receipt_fixture(&operation);
         receipt.target_admission.effective_definition_digest = "invalid".into();
         assert!(validate_receipt(&receipt, &operation).is_err());
+
+        let mut receipt = receipt_fixture(&operation);
+        receipt.candidate_terminal_thread_id = "T-another-candidate".into();
+        assert!(validate_receipt(&receipt, &operation).is_err());
+    }
+
+    #[test]
+    fn workflow_graph_return_is_closed_and_names_a_terminal_coordinate() {
+        let returned: WorkflowGraphResult = serde_json::from_value(serde_json::json!({
+            "schema": WORKFLOW_GRAPH_RESULT_SCHEMA,
+            "candidate_terminal_thread_id": "T-target-candidate",
+        }))
+        .unwrap();
+        ryeos_runtime::validate_runtime_thread_id(&returned.candidate_terminal_thread_id).unwrap();
+        assert!(
+            serde_json::from_value::<WorkflowGraphResult>(serde_json::json!({
+                "schema": WORKFLOW_GRAPH_RESULT_SCHEMA,
+                "candidate_terminal_thread_id": "T-target-candidate",
+                "chain_root_id": "T-untrusted-alternate-authority",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn launch_acceptance_binds_operation_request_and_drive_root() {
+        let operation = operation_fixture();
+        let digest = operation_digest(&operation).unwrap();
+        let mut acceptance = LaunchAcceptance {
+            schema: LAUNCH_ACCEPTANCE_SCHEMA.into(),
+            source_work_id: operation.source_work_id.clone(),
+            operation_digest: digest.clone(),
+            workflow_digest: "1".repeat(64),
+            target_request_digest: "2".repeat(64),
+            target_launch_id: operation.target_launch_id.clone(),
+            launch_acceptance_drive_root_id: operation.source_work_id.clone(),
+            target_chain_root_id: "T-target-graph".into(),
+            target_admission: TargetAdmissionEvidence {
+                admitted_capsule_hash: "3".repeat(64),
+                exact_program_hash: "4".repeat(64),
+                effective_definition_digest: "5".repeat(64),
+            },
+        };
+        validate_launch_acceptance(&acceptance, &operation, &digest).unwrap();
+        acceptance.target_launch_id = derive_target_launch_id("T-another-source").unwrap();
+        assert!(validate_launch_acceptance(&acceptance, &operation, &digest).is_err());
     }
 
     #[test]
@@ -1834,8 +2486,10 @@ mod tests {
     }
 
     fn receipt_fixture(operation: &Operation) -> Receipt {
+        let candidate_result = candidate_result_fixture(operation);
         Receipt {
             schema: RESPONSE_SCHEMA.into(),
+            allowed_next_action: "pull_result".into(),
             source_work_id: operation.source_work_id.clone(),
             remote: operation.remote.clone(),
             source_snapshot_hash: operation.source_snapshot_hash.clone(),
@@ -1848,7 +2502,95 @@ mod tests {
                 exact_program_hash: "1".repeat(64),
                 effective_definition_digest: "2".repeat(64),
             },
+            launch_acceptance_drive_root_id: operation.source_work_id.clone(),
+            target_workflow_terminal_thread_id: "T-target-graph-terminal".into(),
+            target_workflow_result_digest: "3".repeat(64),
+            candidate_terminal_thread_id: "T-target-candidate".into(),
+            candidate_result,
             settlement_drive_root_id: operation.source_work_id.clone(),
         }
+    }
+
+    fn candidate_result_fixture(operation: &Operation) -> HostedCandidateResultResponse {
+        struct TestSigner {
+            key: lillux::crypto::SigningKey,
+            fingerprint: String,
+        }
+        impl Signer for TestSigner {
+            fn sign(&self, data: &[u8]) -> Vec<u8> {
+                use lillux::crypto::Signer as _;
+                self.key.sign(data).to_bytes().to_vec()
+            }
+            fn fingerprint(&self) -> &str {
+                &self.fingerprint
+            }
+            fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+                self.key.verifying_key()
+            }
+        }
+        let key = lillux::crypto::SigningKey::from_bytes(&[29_u8; 32]);
+        let signer = TestSigner {
+            fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
+            key,
+        };
+        let candidate = "6".repeat(64);
+        let validation =
+            ryeos_app::thread_lifecycle::candidate_validation_identity(&candidate).unwrap();
+        let closure_validation =
+            ryeos_app::hosted_candidate_result::HostedCandidateClosureValidation {
+                schema: "ryeos.hosted_candidate_closure_and_base_validation.v2".into(),
+                checks: ryeos_app::hosted_candidate_result::HostedCandidateClosureChecks {
+                    canonical_snapshot_closure: true,
+                    base_ancestry: true,
+                },
+                candidate_snapshot_hash: candidate.clone(),
+                candidate_validation_hash: validation.clone(),
+                base_snapshot_hash: operation.source_snapshot_hash.clone(),
+                candidate_tree_hash: "7".repeat(64),
+                base_tree_hash: "8".repeat(64),
+                candidate_policy_hash: "9".repeat(64),
+                changed_path_count: 1,
+                changed_paths_digest: "0".repeat(64),
+                object_count: 4,
+                blob_count: 1,
+            };
+        let evidence = ryeos_app::hosted_candidate_result::HostedCandidateResultEvidence {
+            schema: ryeos_app::hosted_candidate_result::HOSTED_CANDIDATE_RESULT_SCHEMA.into(),
+            owner_principal: format!("fp:{}", operation.operator_fingerprint),
+            source_site_id: operation.source_site_id.clone(),
+            target_site_id: operation.target_site_id.clone(),
+            chain_root_id: "T-target-candidate".into(),
+            placement_thread_id: "T-target-candidate".into(),
+            chain_head_hash: "a".repeat(64),
+            last_event_hash: "b".repeat(64),
+            admitted_launch_capsule_hash: "c".repeat(64),
+            admitted_session_capsule_hash: "d".repeat(64),
+            stable_project_identity: ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                Path::new(&operation.target_project_path),
+                &operation.target_site_id,
+            )
+            .unwrap()
+            .normalized_logical_key,
+            target_project_path: operation.target_project_path.clone(),
+            base_snapshot_hash: operation.source_snapshot_hash.clone(),
+            candidate_snapshot_hash: candidate,
+            candidate_validation_hash: validation,
+            completion_fence: ryeos_app::dedicated_session_service::HostedCommandCompletionFence {
+                placement_thread_id: "T-target-candidate".into(),
+                admitted_capsule_hash: "d".repeat(64),
+                worker_boot_epoch: 1,
+                command_sequence: 2,
+                request_digest: "e".repeat(64),
+                turn_id: "turn-1".into(),
+                completion_operation_id: "f".repeat(64),
+            },
+            command_response_digest: "1".repeat(64),
+            candidate_capture_operation_id: "2".repeat(64),
+            closure_validation_hash: closure_validation.content_hash().unwrap(),
+            closure_validation,
+            candidate_state: ryeos_app::hosted_candidate_result::HostedCandidateState::Frozen,
+            disposition: ryeos_app::hosted_candidate_result::HostedCandidateDisposition::Retained,
+        };
+        HostedCandidateResultResponse::new(evidence, &signer).unwrap()
     }
 }

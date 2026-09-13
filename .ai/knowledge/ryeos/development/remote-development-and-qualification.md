@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-11T06:46:15Z:6d2b5d41ff344f4d5ad36cad676745462f0b16b09d248a08f9de2675e7620a05:G8Er3+K91bdyABuEQsH1ra31ARFeAuEOCzwfNrZp9D5oeCxDA5xIHNrcEpniGUS2ahKIUyRYUFeiedcfCgXhAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T03:32:01Z:37cf7e4c497de515b14ab7c038a19c9e4fbeb7260a480c70b038f1bf4c823362:0DUpMH4WagAOsBU46YzUv+Ojkl++2qpw38S/2jZFgvZ3jPjtU0Y33OYuTe46rJXOXN0pYUKsn8MeRwu89ROnDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -87,6 +87,36 @@ closure through ordinary object transport, and uses the existing atomic
 clean-base result apply. The target candidate remains retained; pulling never
 publishes or discards it. `remote pull` remains the lower-level operation for
 caller-known typed object/blob hashes and is not this authority flow.
+
+For a project-owned long worker workflow, use `remote worker run` with a signed
+project Config using `ryeos.remote_worker_workflow.v1`. The Config selects one
+signed project Graph and maps only the task and credential-profile inputs. The
+Graph owns provider selection and its exact worker environment; Core contains
+no Codex, model, or project-product branch.
+
+The v1 lifecycle is explicit and finite:
+
+1. `remote worker run` pushes the pinned source generation and establishes the
+   target launch. Its intermediate result is `launch_accepted` with
+   `allowed_next_action: resume`.
+2. `remote worker resume <source_work_id>` performs one recorded recovery or
+   target-completion observation. A live target returns
+   `completion_pending` and the same `resume` action; it is not recorded as a
+   failure. RyeOS does not poll in the background.
+3. A completed target Graph must return the exact followed worker terminal as
+   `candidate_terminal_thread_id`. The source checks the Graph's effective
+   definition digest against the admitted capsule and asks the existing
+   `worker-executions/candidate-result` authority for that exact coordinate.
+4. Completion records the target-signed candidate testimony and returns
+   `allowed_next_action: pull_result`. Pull remains a separate explicit
+   `remote worker pull-result` operation.
+
+The first v1 seam accepts only a bounded worker whose terminal thread is also
+its candidate chain root. A continued or cross-site-moved child is refused
+until a signed lineage resolver exists; a terminal thread ID must never be
+silently treated as a general chain-root coordinate. `remote worker status` is
+strictly a local read of the source recovery projection and never contacts the
+target or advances recovery.
 
 `remote bundle-install` is remote-to-caller import: the caller fetches an
 installed bundle from its named remote into the caller's live node. It does
