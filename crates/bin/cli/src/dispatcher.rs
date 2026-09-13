@@ -3393,6 +3393,64 @@ mod tests {
     }
 
     #[test]
+    fn signed_remote_worker_run_accepts_complete_yaml_file_input() {
+        let source = std::fs::read_to_string(
+            ryeos_engine::test_support::core_bundle_root()
+                .join(".ai/node/commands/remote-worker-run.yaml"),
+        )
+        .unwrap();
+        let mut command: CommandDef = serde_yaml::from_str(&source).unwrap();
+        command.name = "remote-worker-run".to_string();
+        let project = tempfile::tempdir().unwrap();
+        let input = project.path().join("remote-worker-launch.yaml");
+        std::fs::write(
+            &input,
+            r#"remote: qualification
+workflow_ref: config:development/ryeos/remote-worker
+credential_profile_id: personal
+target_product_selections: []
+task:
+  goal: fix the focused test
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "remote",
+                "worker",
+                "run",
+                "--input",
+                input.to_str().unwrap(),
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(project.path()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.item_ref, "service:remote-worker-workflows/start");
+        assert_eq!(resolved.parameters["remote"], "qualification");
+        assert_eq!(
+            resolved.parameters["workflow_ref"],
+            "config:development/ryeos/remote-worker"
+        );
+        assert_eq!(resolved.parameters["credential_profile_id"], "personal");
+        assert_eq!(
+            resolved.parameters["target_product_selections"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            resolved.parameters["task"],
+            serde_json::json!({"goal": "fix the focused test"})
+        );
+        assert_eq!(
+            resolved.project_path.as_deref(),
+            Some(project.path().canonicalize().unwrap().as_path())
+        );
+    }
+
+    #[test]
     fn signed_remote_worker_recovery_commands_accept_only_source_work_id() {
         for (file, tokens, service_ref) in [
             (

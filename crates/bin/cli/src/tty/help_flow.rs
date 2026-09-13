@@ -782,7 +782,7 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
             && let Some(input_flag) = &binding.input_flag
         {
             output.push_str(&format!(
-                "--{input_flag} <file>  read JSON parameters from file or stdin\n"
+                "--{input_flag} <file|json|->  read JSON/YAML parameters from a file or stdin, or an inline JSON object/array\n"
             ));
         }
     }

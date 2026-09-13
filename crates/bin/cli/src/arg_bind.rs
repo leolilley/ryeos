@@ -5,9 +5,9 @@
 //! escape-hatch path (item_ref direct mode). Token mode sends raw
 //! tokens to the daemon, which binds them server-side.
 //!
-//! The `--input` flag provides a JSON-first escape hatch for complex
-//! parameters (arrays, nested objects, numbers) that the heuristic
-//! binder cannot express.
+//! The `--input` flag provides a structured JSON/YAML file or stdin path, plus
+//! an inline-JSON escape hatch, for complex parameters (arrays, nested
+//! objects, numbers) that the heuristic binder cannot express.
 
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
 /// Parse `--input` arguments from tail and return the JSON value.
 ///
 /// Handles three forms:
-/// - `--input <file>` — reads file as JSON
+/// - `--input <file>` — reads a JSON or YAML file
 ///
 /// Descriptor-declared parameter short-circuits, shared by the daemon
 /// and offline dispatch paths so the two cannot drift:
