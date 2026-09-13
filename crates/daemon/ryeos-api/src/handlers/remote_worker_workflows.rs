@@ -1057,24 +1057,10 @@ async fn observe_exact_graph_terminal(
             current = successor.to_owned();
             continue;
         }
-        match response.pointer("/thread/status").and_then(Value::as_str) {
-            Some("created" | "running" | "queued") => {
-                return Ok(None);
-            }
-            Some("completed") => {}
-            Some("continued") => {
-                return Err(TargetWorkflowTerminalInvalid(
-                    "target Graph continuation omitted its successor".to_owned(),
-                )
-                .into());
-            }
-            Some(status) => return Err(TargetLaunchTerminal(status.to_owned()).into()),
-            None => {
-                return Err(TargetWorkflowTerminalInvalid(
-                    "target Graph thread omitted status".to_owned(),
-                )
-                .into());
-            }
+        if !target_graph_tip_is_terminal(
+            response.pointer("/thread/status").and_then(Value::as_str),
+        )? {
+            return Ok(None);
         }
         let value = response
             .pointer("/result/result")
@@ -1096,6 +1082,17 @@ async fn observe_exact_graph_terminal(
         return Ok(Some((current, result, digest)));
     }
     Err(TargetWorkflowTerminalInvalid("target Graph continuation exceeds bound".to_owned()).into())
+}
+
+fn target_graph_tip_is_terminal(status: Option<&str>) -> Result<bool> {
+    match status {
+        Some("created" | "running" | "queued" | "continued") => Ok(false),
+        Some("completed") => Ok(true),
+        Some(status) => Err(TargetLaunchTerminal(status.to_owned()).into()),
+        None => Err(
+            TargetWorkflowTerminalInvalid("target Graph thread omitted status".to_owned()).into(),
+        ),
+    }
 }
 
 fn decode_target_capsule(
@@ -2275,6 +2272,14 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn followed_graph_without_resume_successor_is_completion_pending() {
+        assert!(!target_graph_tip_is_terminal(Some("continued")).unwrap());
+        assert!(!target_graph_tip_is_terminal(Some("running")).unwrap());
+        assert!(target_graph_tip_is_terminal(Some("completed")).unwrap());
+        assert!(target_graph_tip_is_terminal(Some("failed")).is_err());
     }
 
     #[test]
