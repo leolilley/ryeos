@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lillux::{PinnedDirectory, PinnedDirectoryIdentity, PinnedDirectoryLock};
+use lillux::{PinnedDirectory, PinnedDirectoryLock};
 use serde::{Deserialize, Serialize};
 
 use crate::NodeConfig;
@@ -26,19 +26,15 @@ const UPGRADE: &str = "upgrade.json";
 const LAUNCH_FAILURE: &str = "launch-failure.json";
 const MAX_HOST_DOCUMENT_BYTES: u64 = 64 * 1024;
 const MAX_HOST_LAUNCH_ERROR_BYTES: usize = 8 * 1024;
-const HOST_SERVICE_BINDING_SCHEMA_VERSION: u32 = 2;
+const HOST_SERVICE_BINDING_SCHEMA_VERSION: u32 = 3;
 const HOST_LAUNCH_FAILURE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostServiceBinding {
     pub schema_version: u32,
-    pub app_root: PathBuf,
-    pub app_root_identity: PinnedDirectoryIdentity,
-    pub node_fingerprint: String,
-    pub account: lillux::ControllerAccount,
+    pub runtime: crate::host_runtime::HostRuntimeBinding,
     pub daemon_executable: PathBuf,
-    pub process_scopes: lillux::ProcessScopeConfiguration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,12 +256,13 @@ pub fn provision_host_service(
             .map_err(anyhow::Error::msg)?;
     let binding = HostServiceBinding {
         schema_version: HOST_SERVICE_BINDING_SCHEMA_VERSION,
-        app_root: app_root.path().to_path_buf(),
-        app_root_identity: app_root.identity()?,
-        node_fingerprint,
-        account,
+        runtime: crate::host_runtime::HostRuntimeBinding::capture(
+            &app_root,
+            node_fingerprint,
+            account,
+            process_scopes,
+        )?,
         daemon_executable: daemon.path().to_path_buf(),
-        process_scopes,
     };
     let launch = expected_native_launch(&binding);
     lillux::provision_host_service(&association_name, &launch)?;
@@ -298,10 +295,10 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
         )?,
     }
     let control = directory.open_or_create_child(OsStr::new(CONTROL), 0o700)?;
-    binding.account.grant_private_directory(&control)?;
+    binding.runtime.account.grant_private_directory(&control)?;
     match control.open_pinned_regular(OsStr::new(DESIRED), false)? {
         Some(existing) => {
-            binding.account.grant_private_file(&existing)?;
+            binding.runtime.account.grant_private_file(&existing)?;
             let _: DesiredState = serde_json::from_slice(
                 &existing.read_stable_bounded(&existing.observation()?, 1024)?,
             )
@@ -317,7 +314,7 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
             let desired = control
                 .open_pinned_regular(OsStr::new(DESIRED), false)?
                 .context("published host desired-state record disappeared")?;
-            binding.account.grant_private_file(&desired)?;
+            binding.runtime.account.grant_private_file(&desired)?;
         }
     }
     Ok(())
@@ -330,14 +327,14 @@ fn expected_native_launch(binding: &HostServiceBinding) -> lillux::HostServiceLa
         arguments: vec![
             "host-service".to_owned(),
             "--app-root".to_owned(),
-            binding.app_root.to_string_lossy().into_owned(),
+            binding.runtime.app_root.to_string_lossy().into_owned(),
         ],
         // RyeOS bootstrap configuration is complete before host setup. The
         // node service therefore has no ambient HOME, PATH, XDG, or login-
         // session dependency. This remains explicit launch data at Lillux's
         // generic native-service boundary.
         environment: Default::default(),
-        account: binding.account.clone(),
+        account: binding.runtime.account.clone(),
     }
 }
 
@@ -379,14 +376,16 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
         }
         let root = service
             .binding
+            .runtime
             .app_root
             .to_str()
             .context("host app root cannot be represented in daemon arguments")?;
         service
             .binding
+            .runtime
             .process_scopes
             .exec_controller(
-                &service.binding.account,
+                &service.binding.runtime.account,
                 &executable,
                 &["--app-root".to_owned(), root.to_owned()],
                 &service.app_root,
@@ -521,12 +520,9 @@ impl InstalledService {
         &self,
         identity: &ryeos_app::identity::NodeIdentity,
     ) -> Result<()> {
-        self.binding.account.require_current_process()?;
+        self.binding.runtime.account.require_current_process()?;
         self.check_binding()?;
-        if identity.fingerprint() != self.binding.node_fingerprint {
-            bail!("loaded node signing identity differs from the host service association");
-        }
-        Ok(())
+        self.binding.runtime.verify_loaded_node_identity(identity)
     }
 
     /// Open the opaque Lillux scope provider retained by this exact protected
@@ -536,9 +532,7 @@ impl InstalledService {
         &self,
     ) -> Result<std::sync::Arc<lillux::ProcessScopeProvider>> {
         self.check_binding()?;
-        lillux::ProcessScopeProvider::open(&self.binding.process_scopes)
-            .map(std::sync::Arc::new)
-            .map_err(anyhow::Error::msg)
+        self.binding.runtime.open_process_scope_provider()
     }
 
     pub fn discover(config: &NodeConfig) -> Result<Option<Self>> {
@@ -571,41 +565,12 @@ impl InstalledService {
         let observation = description.observation()?;
         let raw = description.read_stable_bounded(&observation, MAX_HOST_DOCUMENT_BYTES)?;
         let binding: HostServiceBinding = serde_json::from_slice(&raw)?;
-        if binding.schema_version != HOST_SERVICE_BINDING_SCHEMA_VERSION
-            || binding.app_root != expected_root
-        {
+        if binding.schema_version != HOST_SERVICE_BINDING_SCHEMA_VERSION {
             bail!("host service has a wrong epoch or app root");
         }
-        binding.account.validate().map_err(anyhow::Error::msg)?;
+        let app_root = binding.runtime.validate(expected_root)?;
         if launch != expected_native_launch(&binding) {
             bail!("native host service launch differs from its application association");
-        }
-        if !lillux::valid_hash(&binding.node_fingerprint) {
-            bail!("host association has an invalid node public identity");
-        }
-        binding
-            .process_scopes
-            .validate()
-            .map_err(anyhow::Error::msg)?;
-        let app_root =
-            PinnedDirectory::open(expected_root)?.context("associated app root is absent")?;
-        binding.account.require_directory_owner(&app_root)?;
-        if app_root.identity()? != binding.app_root_identity {
-            bail!("host-associated app root has been replaced");
-        }
-        let identity_path =
-            Path::new(ryeos_engine::AI_DIR).join("node/identity/public-identity.json");
-        let identity_file = app_root
-            .open_pinned_regular_descendant(&identity_path, false)?
-            .context("host-associated node public identity is absent")?;
-        let observation = identity_file.observation()?;
-        let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
-            &identity_file.read_stable_bounded(&observation, MAX_HOST_DOCUMENT_BYTES)?,
-        )?;
-        // Use the existing identity envelope. This still does not replace live
-        // node authentication or prove which key a future process will open.
-        if identity.verified_fingerprint()? != binding.node_fingerprint {
-            bail!("host-associated node identity changed");
         }
         let binding_digest = lillux::sha256_hex(
             lillux::canonical_json(&serde_json::to_value(&binding)?)?.as_bytes(),
@@ -646,7 +611,10 @@ impl InstalledService {
             .directory
             .open_child_directory(OsStr::new(CONTROL))?
             .context("configured service operator controls are missing")?;
-        self.binding.account.require_directory_owner(&directory)?;
+        self.binding
+            .runtime
+            .account
+            .require_directory_owner(&directory)?;
         Ok(directory)
     }
 
@@ -799,8 +767,9 @@ impl InstalledService {
             bail!("package replacement is forbidden after restoration has begun");
         }
         self.binding
+            .runtime
             .process_scopes
-            .require_controller_tree_empty(&self.binding.account)
+            .require_controller_tree_empty(&self.binding.runtime.account)
             .map_err(anyhow::Error::msg)
     }
 
@@ -830,6 +799,7 @@ impl InstalledService {
         let executable = daemon.inherited_descriptor_authority()?;
         let root = self
             .binding
+            .runtime
             .app_root
             .to_str()
             .context("host app root is not UTF-8")?;
@@ -858,7 +828,7 @@ impl InstalledService {
                 inherited_fd_mappings: vec![],
                 supervised_status: None,
             },
-            &self.binding.account,
+            &self.binding.runtime.account,
         );
         if !result.success {
             bail!(
@@ -868,8 +838,9 @@ impl InstalledService {
         }
         if intent.desired == DesiredState::Down {
             self.binding
+                .runtime
                 .process_scopes
-                .require_controller_tree_empty(&self.binding.account)
+                .require_controller_tree_empty(&self.binding.runtime.account)
                 .map_err(anyhow::Error::msg)?;
         }
         self.check_binding()?;
@@ -888,8 +859,8 @@ impl InstalledService {
     /// the node account while the administrator parent retains the launch gate.
     /// It must not acquire that gate again or mutate the protected journal.
     pub async fn observe_upgrade(&self, expected_daemon_sha256: &str) -> Result<()> {
-        self.binding.account.require_current_process()?;
-        let env = crate::LocalLifecycleEnv::load(Some(self.binding.app_root.clone()))?;
+        self.binding.runtime.account.require_current_process()?;
+        let env = crate::LocalLifecycleEnv::load(Some(self.binding.runtime.app_root.clone()))?;
         self.check_binding()?;
         let intent = self
             .upgrade_intent()?
@@ -1091,6 +1062,23 @@ mod tests {
         let mut missing = serde_json::to_value(&intent).unwrap();
         missing.as_object_mut().unwrap().remove("native_state");
         assert!(serde_json::from_value::<UpgradeIntent>(missing).is_err());
+    }
+
+    #[test]
+    fn predecessor_flat_host_binding_is_not_reinterpreted() {
+        let predecessor = serde_json::json!({
+            "schema_version": 2,
+            "app_root": "/node",
+            "app_root_identity": {"containing_device": 1, "inode": 2},
+            "node_fingerprint": "a".repeat(64),
+            "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+            "daemon_executable": "/usr/bin/ryeosd",
+            "process_scopes": {
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
+            }
+        });
+        assert!(serde_json::from_value::<HostServiceBinding>(predecessor).is_err());
     }
 
     #[test]

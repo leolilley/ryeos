@@ -13,6 +13,7 @@ pub mod signature;
 pub mod time;
 pub mod vault;
 
+pub use exec::InheritedReadonlyDocument;
 pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
     AbortedProcess, AttachmentAbortError, AttachmentReleaseError, CooperativeChildTermination,

@@ -589,6 +589,41 @@ impl ProcessScopeConfiguration {
         cwd: &crate::PinnedDirectory,
         environment: &[(String, String)],
     ) -> Result<std::convert::Infallible, String> {
+        self.exec_controller_inner(account, executable, arguments, cwd, environment, None)
+    }
+
+    /// External-supervisor entry using one exact administrator-owned launch
+    /// document. This has the same placement and credential-drop semantics as
+    /// a native host service; only the protected transport differs.
+    pub fn exec_controller_with_inherited_document(
+        &self,
+        account: &ControllerAccount,
+        executable: &crate::PinnedRegularFile,
+        arguments: &[String],
+        cwd: &crate::PinnedDirectory,
+        environment: &[(String, String)],
+        document: crate::InheritedReadonlyDocument,
+        descriptor_env_name: &str,
+    ) -> Result<std::convert::Infallible, String> {
+        self.exec_controller_inner(
+            account,
+            executable,
+            arguments,
+            cwd,
+            environment,
+            Some((document, descriptor_env_name)),
+        )
+    }
+
+    fn exec_controller_inner(
+        &self,
+        account: &ControllerAccount,
+        executable: &crate::PinnedRegularFile,
+        arguments: &[String],
+        cwd: &crate::PinnedDirectory,
+        environment: &[(String, String)],
+        inherited_document: Option<(crate::InheritedReadonlyDocument, &str)>,
+    ) -> Result<std::convert::Infallible, String> {
         self.validate()?;
         account.validate()?;
         if !executable.path().is_absolute() || !cwd.path().is_absolute() {
@@ -606,6 +641,15 @@ impl ProcessScopeConfiguration {
             {
                 return Err("controller environment must have unique nonempty exact names and NUL-free values".to_owned());
             }
+        }
+        if let Some((_, descriptor_env_name)) = inherited_document.as_ref()
+            && names
+                .iter()
+                .any(|name| name.as_str() == *descriptor_env_name)
+        {
+            return Err(
+                "controller environment duplicates inherited document transport".to_owned(),
+            );
         }
         #[cfg(target_os = "linux")]
         {
@@ -631,6 +675,9 @@ impl ProcessScopeConfiguration {
                 .args(arguments)
                 .env_clear()
                 .envs(environment.iter().map(|(key, value)| (key, value)));
+            if let Some((document, descriptor_env_name)) = inherited_document {
+                document.bind_to_command(&mut command, descriptor_env_name)?;
+            }
             bootstrap.configure_command(&mut command)?;
             cwd.configure_command_cwd(&mut command)
                 .map_err(|error| error.to_string())?;
@@ -641,7 +688,7 @@ impl ProcessScopeConfiguration {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (account, arguments);
+            let _ = (account, arguments, inherited_document);
             Err("scope controller provisioning is unavailable on this OS".to_owned())
         }
     }

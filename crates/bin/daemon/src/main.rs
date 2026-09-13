@@ -352,7 +352,7 @@ fn main() -> Result<()> {
                 service.finish_upgrade(digest)?;
             }
             config::HostUpgradeAction::Observe => {
-                service.binding.account.require_current_process()?;
+                service.binding.runtime.account.require_current_process()?;
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?
@@ -370,6 +370,19 @@ fn main() -> Result<()> {
             Err(error) => Err(error),
         };
     }
+    if let Some(config::DaemonCommand::HostRuntime { binding }) = &cli.command {
+        // As with native host-service entry, consume the administrator-owned
+        // launch document before async runtime creation, tracing, config loads
+        // or node-state writes. The child receives only its exact descriptor.
+        let executable = std::env::current_exe().context("locate host-runtime daemon image")?;
+        return match ryeos_node::host_runtime::exec_external_controller(binding, &executable) {
+            Ok(never) => match never {},
+            Err(error) => Err(error),
+        };
+    }
+    let external_host_runtime =
+        ryeos_node::host_runtime::ExternalHostRuntime::take_from_environment()
+            .context("consume inherited external host-runtime authority")?;
     ryeos_app::provider_object_contracts::install()
         .context("install application object contracts")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -377,7 +390,7 @@ fn main() -> Result<()> {
         .build()
         .context("build daemon async runtime")?;
     let mut process_state_lock = None;
-    let result = runtime.block_on(run(cli, &mut process_state_lock));
+    let result = runtime.block_on(run(cli, &mut process_state_lock, external_host_runtime));
 
     // Tokio cannot cancel work already admitted to spawn_blocking. Never let
     // abandoned request work keep a lifecycle-complete daemon alive holding
@@ -420,7 +433,11 @@ fn build_handoff_phase_gate(
     ))))
 }
 
-async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -> Result<()> {
+async fn run(
+    cli: Cli,
+    process_state_lock: &mut Option<state_lock::StateLock>,
+    external_host_runtime: Option<ryeos_node::host_runtime::ExternalHostRuntime>,
+) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
     let process_started = Instant::now();
@@ -458,10 +475,17 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
     // to require administrator-owned ancestors above an ordinary app root.
     let host_service =
         ryeos_node::supervision::InstalledService::discover_app_root(&selected_app_root)?;
+    if host_service.is_some() && external_host_runtime.is_some() {
+        anyhow::bail!("native and external host-runtime authorities are both present");
+    }
     if let Some(service) = &host_service {
         // Refuse a misconfigured root/wrong-account daemon before init checks,
         // state-lock creation, tracing or lifecycle metadata writes.
-        service.binding.account.require_current_process()?;
+        service.binding.runtime.account.require_current_process()?;
+    }
+    if let Some(runtime) = &external_host_runtime {
+        runtime.binding().account.require_current_process()?;
+        runtime.binding().validate(&selected_app_root)?;
     }
     ryeosd::init_shutdown_channel();
 
@@ -486,6 +510,9 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
                 unreachable!("handled before node startup")
             }
             config::DaemonCommand::HostService { .. } => {
+                unreachable!("handled before runtime startup")
+            }
+            config::DaemonCommand::HostRuntime { .. } => {
                 unreachable!("handled before runtime startup")
             }
             config::DaemonCommand::BuildInfo { .. } => unreachable!("handled before config load"),
@@ -681,6 +708,9 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
             if let Some(service) = &host_service {
                 service.verify_loaded_node_identity(&identity)?;
             }
+            if let Some(runtime) = &external_host_runtime {
+                runtime.binding().verify_loaded_node_identity(&identity)?;
+            }
             ryeos_api::auth::validate_authorized_key_directory(
                 &config.authorized_keys_dir,
                 &identity,
@@ -708,8 +738,16 @@ async fn run(cli: Cli, process_state_lock: &mut Option<state_lock::StateLock>) -
             }
 
             // ── Two-phase node-config bootstrap ──
+            let host_runtime = external_host_runtime
+                .as_ref()
+                .map(|runtime| runtime.binding())
+                .or_else(|| {
+                    host_service
+                        .as_ref()
+                        .map(|service| &service.binding.runtime)
+                });
             let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
-                bootstrap::load_node_config_two_phase(&config)?;
+                bootstrap::load_node_config_two_phase_with_host_runtime(&config, host_runtime)?;
 
             // Build the service registry early — self-check needs it.
             let services = Arc::new(build_service_registry()?);

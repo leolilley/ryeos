@@ -1,6 +1,7 @@
 //! Shared RyeOS local node lifecycle and bootstrap semantics.
 
 mod control;
+pub mod host_runtime;
 pub mod init;
 pub mod init_check;
 pub mod lifecycle_marker;
