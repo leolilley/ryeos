@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T03:28:03Z:9d7f086723ad2299bf0f6ce4554a6606fe1a53251559df59d2c46c05544fc717:ocbuy5w2RaQj7BipjBULC8P5JFEwQ+0Hn08fgClMIYztkp6BF8lvfOo3vH+9Sz4NXRYV8GcyMimVS6iBf0PUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T08:45:08Z:4bf3d35e513f216f7631858d3dd664156d71ac42e6cd392c62d24a0c0d924c12:J9pYs/rGwyDAgg6ODP1pU27kYqLUwpRVKjnoFqb7zQXH6ZwTGcNbF10G7JmTI9fEVEIrpmQ24KI9E7Zlir7qCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.2.0"
 location:
@@ -73,6 +73,11 @@ execution:
 formats:
   - extensions: [".py"]
     parser: parser:ryeos/core/python/tool-header
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".sh"]
+    parser: parser:ryeos/core/shell/tool-header
     signature:
       prefix: "#"
       after_shebang: true

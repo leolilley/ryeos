@@ -1719,8 +1719,37 @@ print("fixture")
 "#,
         )
         .unwrap();
+        let shell_tool = namespace.join("shell-program.sh");
+        std::fs::write(
+            &shell_tool,
+            r#"#!/usr/bin/env bash
+# ryeos-tool:
+#   category: example
+#   name: shell-program
+#   version: "1.0.0"
+#   executor_id: tool:ryeos/core/runtimes/bash/script
+#   execution_protocol: protocol:ryeos/core/tool_callback
+#   effects: live
+#   filesystem_authority: captured_execution
+#   network_authority: isolated
+
+printf '%s\n' fixture
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shell_tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let helper = namespace.join("lib/helper.py");
         std::fs::write(&helper, "VALUE = 1\n").unwrap();
+        let shell_helper = namespace.join("lib/helper.sh");
+        std::fs::write(
+            &shell_helper,
+            "#!/usr/bin/env bash\nprintf '%s\\n' fixture\n",
+        )
+        .unwrap();
         let key = SigningKey::generate(&mut OsRng);
         write_project_trust(project, &key);
         let engine = live_bundle_engine();
@@ -1736,8 +1765,8 @@ print("fixture")
 
         let first = run_sign_online_batch(&refs, project, &engine, &ignore, &key).unwrap();
         assert!(first.failed.is_empty(), "{:#?}", first.failed);
-        assert_eq!(first.total(), 2);
-        assert_eq!(first.signed.len(), 2);
+        assert_eq!(first.total(), 3);
+        assert_eq!(first.signed.len(), 3);
         assert!(
             first
                 .signed
@@ -1749,11 +1778,23 @@ print("fixture")
                 .unwrap()
                 .contains("ryeos:signed:")
         );
+        let signed_shell = std::fs::read_to_string(&shell_helper).unwrap();
+        assert!(signed_shell.starts_with("#!/usr/bin/env bash\n# ryeos:signed:"));
+        let signed_shell_tool = std::fs::read_to_string(&shell_tool).unwrap();
+        assert!(signed_shell_tool.starts_with("#!/usr/bin/env bash\n# ryeos:signed:"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(&shell_tool).unwrap().permissions().mode() & 0o111,
+                0
+            );
+        }
 
         let second = run_sign_online_batch(&refs, project, &engine, &ignore, &key).unwrap();
         assert!(second.failed.is_empty(), "{:#?}", second.failed);
         assert!(second.signed.is_empty(), "{:#?}", second.signed);
-        assert_eq!(second.validated.len(), 2);
+        assert_eq!(second.validated.len(), 3);
         assert!(
             second
                 .validated

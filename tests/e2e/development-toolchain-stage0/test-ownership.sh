@@ -14,6 +14,7 @@ for source in "$acquire" "$producer" "$contract"; do
     [[ -f "$source" && ! -L "$source" ]]
     bash -n "$source"
 done
+[[ -x "$producer" && -x "$contract" ]]
 
 grep -Fq 'curl --fail' "$acquire"
 if grep -Eq '(^|[^a-z])curl([^-a-z]|$)|https://' "$producer"; then
@@ -133,6 +134,10 @@ if "$producer" --inputs "$tmp/inputs.yaml" --input-root "$tmp/acquired" \
     echo 'Stage0 producer accepted an extra acquisition member' >&2
     exit 1
 fi
-grep -Fq 'contains a missing, extra, linked, or special member' "$tmp/extra-error"
+if ! grep -Fq 'contains a missing, extra, linked, or special member' "$tmp/extra-error"; then
+    cat "$tmp/extra-error" >&2
+    echo 'Stage0 producer did not report the expected closed-inventory refusal' >&2
+    exit 1
+fi
 
 echo 'Stage0 acquisition/offline-production ownership checks passed'
