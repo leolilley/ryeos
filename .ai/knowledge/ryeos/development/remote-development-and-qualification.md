@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T03:32:01Z:37cf7e4c497de515b14ab7c038a19c9e4fbeb7260a480c70b038f1bf4c823362:0DUpMH4WagAOsBU46YzUv+Ojkl++2qpw38S/2jZFgvZ3jPjtU0Y33OYuTe46rJXOXN0pYUKsn8MeRwu89ROnDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T03:54:51Z:809ac9edb90be17ed1447562275e9f73259ea7410a0ee15842dd717d57f08819:5XXhWqHB+6hQxkrsq5ljrgbFRU/efr4c/Xffq8xEJ69IzJDloWswwzrL+MsLeDFMWlEXshlEe2dX+mQAfhV4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -117,6 +117,56 @@ until a signed lineage resolver exists; a terminal thread ID must never be
 silently treated as a general chain-root coordinate. `remote worker status` is
 strictly a local read of the source recovery projection and never contacts the
 target or advances recovery.
+
+The project Config maps its `task` input directly to the bounded worker's
+closed goal envelope. For the current Codex App Server profile, the bridge
+injects the workspace `cwd`, immutable approval policy, and bound `threadId`;
+the caller must not supply those fields. A complete low-cost qualification
+launch therefore has this shape (replace only the named remote, credential
+profile, and task text):
+
+```bash
+ryeos --project . remote worker run qualification \
+  config:development/ryeos/remote-worker personal \
+  --input '{
+    "task": {
+      "session_start_payload": {
+        "model": "gpt-5.3-codex-spark"
+      },
+      "turn_start_payload": {
+        "effort": "low",
+        "input": [
+          {
+            "type": "text",
+            "text": "Make the requested bounded change and use only the admitted verification operations."
+          }
+        ]
+      }
+    }
+  }'
+```
+
+Retain the returned `source_work_id`. Drive and inspect only through that
+stable source-local handle:
+
+```bash
+ryeos remote worker status <source_work_id>
+ryeos remote worker resume <source_work_id>
+```
+
+Repeat the explicit `resume` only when the recorded result says
+`allowed_next_action: resume`. Once it says `pull_result`, take the returned
+`remote` and `candidate_terminal_thread_id` and invoke the existing explicit
+candidate transfer:
+
+```bash
+ryeos --project . remote worker pull-result \
+  <remote> <candidate_terminal_thread_id>
+```
+
+The model name is an ordinary bounded-turn request choice supported by the
+pinned Codex version, not a Core default or provider branch. A different
+signed project workflow may select a different worker and task schema.
 
 `remote bundle-install` is remote-to-caller import: the caller fetches an
 installed bundle from its named remote into the caller's live node. It does
