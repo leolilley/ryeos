@@ -30,7 +30,7 @@ done
 
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 inputs="$root/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml"
-producer="$root/scripts/release/produce-development-toolchain-stage0.sh"
+producer="$root/.ai/tools/ryeos/development/stage0-platform-production/produce.sh"
 verifier="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -40,7 +40,7 @@ trap 'rm -rf "$tmp"' EXIT
 sed '$a zig_index_url: "https://ziglang.org/download/index.json"' \
     "$inputs" > "$tmp/mutable-input.yaml"
 if "$producer" --inputs "$tmp/mutable-input.yaml" \
-    --cache "$tmp/cache" --output "$tmp/output.tar.gz" \
+    --input-root "$tmp/missing-inputs" --output "$tmp/output.tar.gz" \
     > "$tmp/producer-refusal" 2>&1; then
     echo "Stage-0 producer accepted a mutable catalog dependency" >&2
     exit 1

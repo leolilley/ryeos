@@ -76,7 +76,7 @@ runtime_symbol_snapshot() {
 }
 
 runtime_assemble() {
-    local tree="$1" scratch="$2" package="$3"
+    local tree="$1" scratch="$2" package="$3" image_root="$4"
     local key source destination mode bytes sha extra member relative magic before after
     local patcher="$scratch/patchelf"
     ar p "$package" data.tar.xz | tar -xOJf - ./usr/bin/patchelf > "$patcher"
@@ -86,15 +86,18 @@ runtime_assemble() {
     : > "$tree/RYEOS-RUNTIME-SOURCES"
     for key in "${image_member_keys[@]}"; do
         read -r source destination mode bytes sha extra <<< "$(contract_value "$key")"
-        # Canonical member paths must not silently traverse image aliases.
-        [[ -f "$source" && ! -L "$source" && "$(readlink -f "$source")" == "$source" \
-            && "$(stat -c '%s' "$source")" == "$bytes" \
-            && "$(stat -c '%a' "$source")" == "$mode" \
-            && "$(sha256sum "$source" | awk '{print $1}')" == "$sha" ]] || {
+        # Acquisition already resolved the absolute publisher-image coordinate.
+        # Offline production accepts only the key-named regular copy whose
+        # mode, size and digest still match the signed Config.
+        member="$image_root/$key"
+        [[ -f "$member" && ! -L "$member" \
+            && "$(stat -c '%s' "$member")" == "$bytes" \
+            && "$(stat -c '%a' "$member")" == "$mode" \
+            && "$(sha256sum "$member" | awk '{print $1}')" == "$sha" ]] || {
             echo "pinned publisher member contradicts $key" >&2; return 2;
         }
         [[ ! -e "$tree/$destination" ]]
-        install -D -m "$mode" "$source" "$tree/$destination"
+        install -D -m "$mode" "$member" "$tree/$destination"
         printf '%s\t%s\t%s\t%s\t%s\n' "$source" "$destination" "$mode" "$bytes" "$sha" >> "$tree/RYEOS-RUNTIME-SOURCES"
     done
     for key in "${runtime_alias_keys[@]}"; do

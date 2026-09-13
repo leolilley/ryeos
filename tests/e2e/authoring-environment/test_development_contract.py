@@ -186,6 +186,45 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertIn("digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316",
                       tool_text)
 
+    def test_stage0_acquisition_is_retained_input_not_compiler_production(self):
+        products = load(
+            ".ai/config/development/ryeos/stage0-acquisition-products.yaml")
+        declaration, = products["build_products"]["products"]
+        self.assertEqual(products["build_products"]["output_roots"], [])
+        self.assertEqual(declaration, {
+            "name": "stage0_acquisition_inputs",
+            "source": {"kind": "retained_project"},
+            "path": "stage0-acquisition",
+            "shape": "tree",
+            "storage": "large_content",
+            "required": True,
+            "bounds": {
+                "maximum_entries": 64,
+                "maximum_depth": 3,
+                "maximum_file_bytes": 134217728,
+                "maximum_total_bytes": 268435456,
+            },
+        })
+        # A retained witness is not consumer launch authority.
+        self.assertEqual(products["product_relationships"]["relationships"], [])
+
+        capture = load(
+            ".ai/graphs/ryeos/development/stage0-acquisition-capture.yaml")
+        self.assertEqual(capture["product_recipe"],
+                         "config:development/ryeos/stage0-acquisition-products")
+        self.assertEqual(capture["requires"]["capabilities"]["declared"], [
+            "ryeos.execute.config.development/ryeos/stage0-acquisition-products",
+        ])
+        self.assertNotIn("external_product_slots", capture)
+        node, = capture["config"]["nodes"].values()
+        self.assertEqual(node["node_type"], "return")
+        self.assertEqual(node["output"], {
+            "retained_input": "stage0-acquisition",
+            "compiler_produced": False,
+            "consumer_bound": False,
+        })
+        self.assertNotIn("action", node)
+
     def test_producer_timeouts_survive_project_execution_config_precedence(self):
         execution = load(".ai/config/execution/execution.yaml")["items"]["tool"]
         runtime = load(".ai/tools/ryeos/development/authoring-environment-production/runtime.yaml")

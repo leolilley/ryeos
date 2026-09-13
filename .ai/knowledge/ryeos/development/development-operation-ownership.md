@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T00:17:31Z:e6824259a0a7355f96213d915fb2060bd534bd80b07143890f7efa2d712778d7:sqEMMF+2SE/3WXh+vF2RuhrqZGKu9WQU2oVTWU8EMj+pqdTnEv/INZnivlytDa/ArKak6sfY3gZVWJJ/JsVVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T01:03:16Z:607ff3edb058c78fac4ba391a1dda6afc17bd8375e7ad2210411e7c3703de5c3:YkYGhSSKBNT55p14VtL2qB3DDdTCZurVRjJyLgRzSwoEL/jy+DZWOqog7ksXJIpN5Q0nKWlfJhYZRkvEwmAwAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
@@ -35,7 +35,9 @@ by moving source into a different directory.
 | `dev/qualify-configured-remote.sh`, `dev/test-qualify-configured-remote.sh` | Moved to `tests/e2e/configured-remote/`; exact installed CLI drives existing configured remote authority. | Focused fake-client contract suite plus separately recorded real remote campaign; do not conflate them. |
 | `smoke-execute-stream.sh`, `smoke-installed-resume.sh` | Moved to `tests/e2e/execute-stream/smoke.sh` and `tests/e2e/installed-resume/smoke.sh`. External acceptance, not worker production. | Update terminal-library paths and CI/container callers; live smoke requires explicitly selected node credentials/lifecycle scope. |
 | `release/fetch-development-registry.py`, `release/test-development-registry.py` | Selection/verification/assembly now share `registry-production/lib/registry_inputs.py` with the signed offline `assemble` Tool. Project paths and acquisition selection are Config. The external entry retains only first-bootstrap transport/input loading; its curl tests stay there, production tests moved to E2E. Stage0 Cargo remains sole vendor producer. | Confined offline input construction and full byte comparison must pass separately from existing admitted vendoring; no host Cargo/cache/credential import. Network bootstrap is not an admitted transport. |
-| `release/produce-development-toolchain-stage0.sh` | Temporary combined first-bootstrap entry. Split exact HTTPS/publisher-image acquisition from offline production; the external boundary must seed only Rust/Zig archives, the ELF tool and explicitly selected image members. Canonical runtime transformation and bootstrap-artifact verification now live under `.ai/tools/ryeos/development/stage0-platform-production/`. | Exact retained acquisition-input product and exact admitted producer closure; both bootstrap and Stage1 call one offline implementation; actual admitted reproduction, byte/manifest comparison and descendants' closure. No duplicated verifier or execution-host library discovery. |
+| `release/acquire-development-toolchain-stage0.sh` | The remaining pre-RyeOS entry owns only exact HTTPS transport, cache verification and capture of Config-selected publisher-image members. It atomically emits `ryeos.development.stage0-acquisition.v1`; it does not produce or verify the compiler platform. | Place the result at `stage0-acquisition` in the selected source snapshot and run `graph:ryeos/development/stage0-acquisition-capture`. Existing retained-project product authority captures the exact tree; network and publisher-image access never enter the graph or offline producer. |
+| `config:development/ryeos/stage0-acquisition-products`, `graph:ryeos/development/stage0-acquisition-capture` | Existing retained-project product authority records the exact closed acquisition tree without copying it or relabelling it as compiler output. The graph has no action node, network authority or consumer relationship. | A retained product witness exists for the exact source snapshot. Consumer linkage remains absent until the admitted Stage1 runtime is complete. |
+| `stage0-platform-production/{produce.sh,lib/contract.sh,lib/runtime.sh}` | One canonical offline compiler producer and shared Config/runtime implementation. Bootstrap and future Stage1 call this source with an exact acquisition directory. | Admit an exact Stage1 runtime product containing the complete Bash/archive/helper closure, then run a fresh reproduction and independently compare its archive/tree testimony. Current build support lacks `tar` and `gzip`; host PATH and substitute toolboxes are refused. |
 | `tests/e2e/development-toolchain-stage0/test-artifact.sh`, `tests/e2e/development-toolchain-stage0/test-runtime.sh` | Focused qualification tests beside the existing compiler behavior fixture. They call the canonical Tool-adjacent runtime/artifact verification source. | Exact retained archive inputs, corrupt/member/ELF refusal and independent equality. No archive mutation or relabeling of bootstrap provenance. |
 | `release/author-local-inference-realizations.py`, `release/local-inference-qwen3-0.6b-v1.json`, `release/verify-local-inference-release.py` | Local-inference realization production/verification Tools, input selection under project development Config, composition in Graph. Current host entry is not the final owner. | Pin the actual Python/archive/ELF/LLVM/acquisition closure; retain manifests/licenses; eliminate hard-coded source selections in production code. Preserve published artifacts and independent local-inference acceptance. Not a hosted-Codex dependency. |
 | `release/package-workload-client-realization.sh`, `release/verify-workload-client-realization.sh`, `release/test-workload-client-realization.sh` | Signed release-artifact packaging/verification operations; external release job supplies the already built static executable and immutable release coordinates. Tests stay with the external script until the replacement is qualified. | Exact archive/ELF/provenance support; one packager/verifier implementation; refuse development testimony and reproduce deterministic content. No Docker-image mining or worker client installation. |
@@ -81,15 +83,22 @@ It neither executes Cargo nor establishes consumer bindings. Until TLS/resolver,
 network admission and exact transport are supplied, do not sign an ambient
 curl/Python wrapper and call acquisition converted.
 
-Compiler Stage0 similarly has two scopes: first immutable input acquisition,
+Compiler Stage0 similarly has two scopes: first exact input acquisition,
 then reusable offline install/relocation/inventory/archive verification. The
-runtime transformation and bootstrap-artifact verifier now have their canonical
-source beside `stage0-platform-production`; their focused tests live in E2E.
-The remaining combined producer is explicitly temporary. Both bootstrap and
-admitted Stage1 must ultimately call the same offline production implementation.
-Changing that implementation creates new production testimony; preserved
-historical archives keep their original input/producer hashes. Source moves,
-passing fixture tests and archive verification are not fresh reproduction.
+external acquisition entry now emits only exact archives and exact selected
+publisher-image members. Bootstrap calls the same offline `produce.sh` beside
+`stage0-platform-production` that Stage1 must call. `contract.sh`, `runtime.sh`
+and the independent bootstrap-artifact verifier remain in that owner; focused
+tests live in E2E. Changing the canonical producer creates new production
+testimony; preserved historical archives keep their original input/producer
+hashes. Source moves, passing fixture tests and archive verification are not
+fresh reproduction. The return-only
+`graph:ryeos/development/stage0-acquisition-capture` captures a
+`stage0-acquisition` directory from the exact retained source snapshot as an
+ordinary product. It deliberately has no consumer relationship and makes no
+compiler-production claim. Admitted Stage1 remains gated on exact `tar`/`gzip` plus the
+complete Bash/helper runtime closure; neither host PATH nor a substitute
+toolbox may satisfy it.
 
 ## Utility-build support remains an independent deliverable
 
