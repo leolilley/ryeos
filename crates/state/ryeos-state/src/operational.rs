@@ -3910,11 +3910,15 @@ impl OperationalDb {
                          ORDER BY created_at DESC, job_id DESC LIMIT ?4",
                     )
                     .context("failed to prepare paged sync operation history query")?;
-                stmt.query_map(
+                let mut rows = stmt.query_map(
                     rusqlite::params![operation_type, created_at, job_id, limit],
                     sync_job_from_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                )?;
+                let mut jobs = Vec::new();
+                while let Some(row) = rows.next() {
+                    jobs.push(row?);
+                }
+                jobs
             }
             None => {
                 let mut stmt = self
@@ -3928,8 +3932,13 @@ impl OperationalDb {
                          ORDER BY created_at DESC, job_id DESC LIMIT ?2",
                     )
                     .context("failed to prepare sync operation history query")?;
-                stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
+                let mut rows =
+                    stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
+                let mut jobs = Vec::new();
+                while let Some(row) = rows.next() {
+                    jobs.push(row?);
+                }
+                jobs
             }
         };
         Ok(rows)
