@@ -74,10 +74,21 @@ pub(crate) fn consumer_authority(
         (
             ryeos_engine::contracts::ItemSpace::Bundle,
             ryeos_engine::contracts::ItemSourceRoot::Bundle { .. },
-        ) => ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
-            resolution.root.resolved_ref.clone(),
-            publisher,
-        ),
+        ) => {
+            // A bundle-provided consumer can deliberately compose product
+            // relationship definitions from a pinned project. In that case
+            // the executable bytes remain bundle-owned, but the effective
+            // pre-realization program and its relationship closure are
+            // generation-scoped.
+            let Some(project_snapshot_hash) = subject_resolution_authority.operational_generation()
+            else {
+                return ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+                    resolution.root.resolved_ref.clone(),
+                    publisher,
+                );
+            };
+            pinned_project_consumer_authority(resolution, publisher, project_snapshot_hash)
+        }
         (
             ryeos_engine::contracts::ItemSpace::Project,
             ryeos_engine::contracts::ItemSourceRoot::Project,
@@ -89,28 +100,34 @@ pub(crate) fn consumer_authority(
                         "project external-content consumer requires exact generation authority"
                     )
                 })?;
-            let source_closure = resolution
-                .composed
-                .derived
-                .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
-                .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
-                .transpose()?;
-            let effective_consumer_digest =
-                ryeos_engine::external_content::pre_external_realization_consumer_digest(
-                    resolution,
-                )?;
-            ryeos_state::objects::ExternalContentConsumerAuthority::pinned_project(
-                resolution.root.resolved_ref.clone(),
-                publisher,
-                project_snapshot_hash.to_owned(),
-                effective_consumer_digest,
-                source_closure,
-            )
+            pinned_project_consumer_authority(resolution, publisher, project_snapshot_hash)
         }
         _ => anyhow::bail!(
             "external-content consumer has incoherent or unsupported source authority"
         ),
     }
+}
+
+fn pinned_project_consumer_authority(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    publisher: String,
+    project_snapshot_hash: &str,
+) -> anyhow::Result<ryeos_state::objects::ExternalContentConsumerAuthority> {
+    let source_closure = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+        .transpose()?;
+    let effective_consumer_digest =
+        ryeos_engine::external_content::pre_external_realization_consumer_digest(resolution)?;
+    ryeos_state::objects::ExternalContentConsumerAuthority::pinned_project(
+        resolution.root.resolved_ref.clone(),
+        publisher,
+        project_snapshot_hash.to_owned(),
+        effective_consumer_digest,
+        source_closure,
+    )
 }
 
 /// Admission evidence retained until the finalized launch capsule becomes the
@@ -1222,6 +1239,30 @@ mod consumer_authority_tests {
         let source_owning = consumer_authority(&resolution, &generation).unwrap();
         assert_eq!(source_owning.source_closure(), Some(&source));
         assert_ne!(source_owning, declarative);
+
+        resolution.root.source_space = ItemSpace::Bundle;
+        resolution.root.source_root = ItemSourceRoot::Bundle {
+            name: "standard".into(),
+        };
+        resolution.root.trust_class = TrustClass::TrustedBundle;
+        let bundle_with_project_relationships =
+            consumer_authority(&resolution, &generation).unwrap();
+        assert!(matches!(
+            bundle_with_project_relationships,
+            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }
+        ));
+        assert_eq!(
+            bundle_with_project_relationships.source_closure(),
+            Some(&source)
+        );
+        assert!(matches!(
+            consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).unwrap(),
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
+        ));
+
+        resolution.root.source_space = ItemSpace::Project;
+        resolution.root.source_root = ItemSourceRoot::Project;
+        resolution.root.trust_class = TrustClass::TrustedProject;
         resolution.composed.derived.insert(
             ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
             Value::Null,
