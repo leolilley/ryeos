@@ -9455,6 +9455,7 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let session: Option<(
             String,
+            String,
             Option<String>,
             Option<i64>,
             String,
@@ -9464,7 +9465,8 @@ impl RuntimeDb {
             String,
         )> = tx
             .query_row(
-                "SELECT s.placement_thread_id, s.worker_instance_id, s.worker_boot_epoch,
+                "SELECT s.placement_thread_id, s.admitted_capsule_hash,
+                    s.worker_instance_id, s.worker_boot_epoch,
                     s.state, s.send_boundary, s.worker_scope, s.scope_retirement, w.state
                FROM dedicated_session s JOIN execution_workspace w
                  ON w.workspace_id=s.workspace_id AND w.thread_id=s.placement_thread_id
@@ -9480,12 +9482,14 @@ impl RuntimeDb {
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )
             .optional()?;
         let Some((
             placement,
+            admitted_capsule_hash,
             active_worker,
             active_epoch,
             state,
@@ -9519,6 +9523,7 @@ impl RuntimeDb {
         };
         let mut scopes = BTreeMap::new();
         let mut active_found = false;
+        let mut reaped_current_capsule = false;
         for id in ids {
             let worker = self
                 .worker_process(&id)?
@@ -9526,6 +9531,7 @@ impl RuntimeDb {
             if worker.state != WorkerProcessState::Dead || worker.cleanup_state != "reaped" {
                 bail!("worker scope retirement retains an unsettled process owner");
             }
+            reaped_current_capsule |= worker.session_capsule_hash == admitted_capsule_hash;
             if active_worker.as_deref() == Some(id.as_str()) {
                 if active_epoch != Some(i64::try_from(worker.boot_epoch)?) {
                     bail!("scope retirement active epoch contradicts its worker");
@@ -9542,10 +9548,16 @@ impl RuntimeDb {
         if active_worker.is_some() && !active_found {
             bail!("scope retirement lacks its active worker settlement");
         }
-        if active_worker.is_none()
-            && (active_epoch.is_some() || state != "terminal" || boundary == "outcome_unknown")
-        {
-            bail!("scope retirement lacks explicit failed-start settlement");
+        if active_worker.is_none() {
+            let failed_start_settled = state == "terminal" && boundary != "outcome_unknown";
+            let retired_for_recovery = matches!(
+                (state.as_str(), boundary.as_str()),
+                ("recovering", "none") | ("outcome_unknown", "outcome_unknown")
+            ) && pending.is_none()
+                && reaped_current_capsule;
+            if active_epoch.is_some() || (!failed_start_settled && !retired_for_recovery) {
+                bail!("scope retirement lacks explicit failed-start settlement");
+            }
         }
         if let Some(raw) = pending {
             let reservation: DedicatedWorkerScopeReservation = serde_json::from_str(&raw)?;
@@ -18468,22 +18480,27 @@ mod tests {
 
     #[test]
     fn dedicated_worker_attachment_atomically_owns_process_workspace_and_session() {
-        check_dedicated_worker_attachment(false, false, false);
+        check_dedicated_worker_attachment(false, false, false, false);
     }
 
     #[test]
     fn dedicated_scope_is_reserved_once_and_attachment_requires_exact_evidence() {
-        check_dedicated_worker_attachment(true, false, false);
+        check_dedicated_worker_attachment(true, false, false, false);
     }
 
     #[test]
     fn dedicated_precontact_scope_survives_quarantine_and_failed_start_settlement() {
-        check_dedicated_worker_attachment(true, true, false);
+        check_dedicated_worker_attachment(true, true, false, false);
     }
 
     #[test]
     fn dedicated_unbound_scope_survives_restart_without_granting_contact() {
-        check_dedicated_worker_attachment(true, true, true);
+        check_dedicated_worker_attachment(true, true, true, false);
+    }
+
+    #[test]
+    fn dedicated_reaped_recovery_owner_authorizes_closed_scope_retirement() {
+        check_dedicated_worker_attachment(true, false, false, true);
     }
 
     #[test]
@@ -18569,7 +18586,12 @@ mod tests {
         assert!(read_scope_lifetime_fence(&db.conn).unwrap().is_none());
     }
 
-    fn check_dedicated_worker_attachment(scoped: bool, abandoned: bool, unbound: bool) {
+    fn check_dedicated_worker_attachment(
+        scoped: bool,
+        abandoned: bool,
+        unbound: bool,
+        unattached_recovery: bool,
+    ) {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-one", "worker-one");
         db.conn
@@ -19060,6 +19082,51 @@ mod tests {
                 .unwrap(),
             "reconciled terminal authority cannot advance twice"
         );
+        if unattached_recovery {
+            // Model the daemon-owned recovery cut after the exact prior boot
+            // is proved dead and reaped. The historical worker journal, not
+            // absence of a current PID or an empty host scope, authorizes the
+            // subsequent resource retirement.
+            db.conn
+                .execute(
+                    "UPDATE dedicated_session
+                        SET worker_instance_id=NULL, worker_boot_epoch=NULL,
+                            worker_scope=NULL, state='recovering', send_boundary='none'
+                      WHERE placement_thread_id='T-one'",
+                    [],
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE execution_workspace SET state='closed' WHERE workspace_id='W-one'",
+                    [],
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE dedicated_session SET admitted_capsule_hash=?1
+                      WHERE placement_thread_id='T-one'",
+                    ["c".repeat(64)],
+                )
+                .unwrap();
+            assert!(
+                db.reserve_closed_worker_scope_retirement("W-one").is_err(),
+                "reaped history for another capsule cannot settle current recovery"
+            );
+            db.conn
+                .execute(
+                    "UPDATE dedicated_session SET admitted_capsule_hash=?1
+                      WHERE placement_thread_id='T-one'",
+                    ["a".repeat(64)],
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE execution_workspace SET state='active' WHERE workspace_id='W-one'",
+                    [],
+                )
+                .unwrap();
+        }
         check_closed_worker_scope_retirement(&db, usize::from(scoped));
     }
 
