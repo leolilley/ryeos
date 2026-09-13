@@ -1140,6 +1140,45 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// Submit one accepted launch under an explicit caller-owned total
+    /// deadline. Generic `/execute` remains deliberately unbounded; durable
+    /// orchestration uses this narrow boundary so an admitted operation
+    /// attempt cannot be held forever by a peer that stops producing bytes.
+    pub async fn execute_accepted_with_total_timeout(
+        &self,
+        item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
+        product_selections: &[ryeos_state::external_content::products::composition::ProductSelectionInput],
+        project_path: Option<&str>,
+        parameters: &Value,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        launch_id: &str,
+        total_timeout: lillux::time::Duration,
+    ) -> Result<Value> {
+        if execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Accepted {
+            anyhow::bail!("bounded accepted execution requires accepted response mode");
+        }
+        tokio::time::timeout(
+            total_timeout,
+            self.execute(
+                item_ref,
+                ref_bindings,
+                product_selections,
+                project_path,
+                parameters,
+                execution_policy,
+                Some(launch_id),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "remote accepted launch `{launch_id}` exceeded total timeout of {} seconds",
+                total_timeout.as_secs()
+            )
+        })?
+    }
+
     /// Execute one wait-mode service and return its typed service value rather
     /// than the surrounding `/execute` audit envelope. Internal node-to-node
     /// protocols use this boundary so callers cannot accidentally deserialize
@@ -3482,6 +3521,8 @@ mod tests {
 
         let app = axum::Router::new()
             .route("/execute", axum::routing::post(never_finishes))
+            .route("/execute/launch", axum::routing::post(never_finishes))
+            .route("/objects/get", axum::routing::post(never_finishes))
             .route("/objects/closure/get", axum::routing::post(never_finishes));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3508,6 +3549,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(execute_error.to_string().contains("exceeded total timeout"));
+
+        let accepted_error = client
+            .execute_accepted_with_total_timeout(
+                "graph:test/never-finishes",
+                &BTreeMap::new(),
+                &[],
+                Some("/target"),
+                &serde_json::json!({}),
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Accepted,
+                ),
+                "L-0123456789abcdef0123456789abcdef",
+                timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            accepted_error
+                .to_string()
+                .contains("exceeded total timeout")
+        );
+
+        let object_error = client
+            .objects_get_with_response_limit_and_total_timeout(
+                &["b".repeat(64)],
+                &[],
+                1024,
+                timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(object_error.to_string().contains("exceeded total timeout"));
 
         let closure_error = client
             .objects_closure_get_with_total_timeout(

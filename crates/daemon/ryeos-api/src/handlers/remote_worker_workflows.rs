@@ -1,8 +1,10 @@
 //! Source-owned orchestration for one bounded remote worker workflow.
 //!
 //! The recorded start-service root is the public work identity. The sync-job
-//! row below is only its crash-recovery projection and CAS-root owner; it never
-//! manufactures a second caller-facing coordinate.
+//! row below is only its crash-recovery projection and root inventory; it never
+//! manufactures a second caller-facing coordinate. Content liveness comes from
+//! the recorded root's pinned project authority and the existing active-job GC
+//! fence, not from `sync_jobs.roots_json` acting as a CAS pin.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,6 +37,8 @@ const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
 const DRIVE_FACT_SCHEMA: &str = "ryeos.remote_worker_workflow_drive_fact.v1";
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+const LAUNCH_CONTACT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+const MAX_ADMITTED_CAPSULE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 #[error("target launch contact is accepted but not yet bound")]
@@ -117,7 +121,16 @@ struct Receipt {
     workflow_digest: String,
     target_launch_id: String,
     target_chain_root_id: String,
+    target_admission: TargetAdmissionEvidence,
     settlement_drive_root_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetAdmissionEvidence {
+    admitted_capsule_hash: String,
+    exact_program_hash: String,
+    effective_definition_digest: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -407,14 +420,15 @@ async fn drive_operation(
             thread_id
         } else {
             let response = client
-                .execute(
+                .execute_accepted_with_total_timeout(
                     &compiled.driver,
                     &compiled.ref_bindings,
                     &[],
                     Some(&operation.target_project_path),
                     &parameters,
                     &execution_policy,
-                    Some(&operation.target_launch_id),
+                    &operation.target_launch_id,
+                    LAUNCH_CONTACT_TIMEOUT,
                 )
                 .await?;
             response
@@ -423,7 +437,7 @@ async fn drive_operation(
                 .context("accepted target launch omitted thread_id")?
                 .to_owned()
         };
-        verify_target_launch(
+        let target_admission = verify_target_launch(
             &client,
             &operation,
             &compiled,
@@ -442,6 +456,7 @@ async fn drive_operation(
             workflow_digest: compiled.digest,
             target_launch_id: operation.target_launch_id.clone(),
             target_chain_root_id,
+            target_admission,
             settlement_drive_root_id: drive_root_id.to_owned(),
         };
         append_settlement_fact(
@@ -713,7 +728,7 @@ async fn verify_target_launch(
     parameters: &Value,
     execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
     expected_thread_id: &str,
-) -> Result<()> {
+) -> Result<TargetAdmissionEvidence> {
     ryeos_runtime::validate_runtime_thread_id(expected_thread_id).map_err(anyhow::Error::msg)?;
     let status = client
         .execute_service_result_with_total_timeout(
@@ -751,15 +766,21 @@ async fn verify_target_launch(
     if !lillux::valid_hash(capsule_hash) {
         bail!("bound target launch capsule identity is invalid");
     }
-    let fetched = client.objects_get(&[capsule_hash.to_owned()], &[]).await?;
+    let fetched = client
+        .objects_get_with_response_limit_and_total_timeout(
+            &[capsule_hash.to_owned()],
+            &[],
+            MAX_ADMITTED_CAPSULE_RESPONSE_BYTES,
+            STATUS_TIMEOUT,
+        )
+        .await?;
     let capsule_value = fetched
         .entries
         .into_iter()
         .find(|entry| entry.hash == capsule_hash && entry.kind == "object")
         .and_then(|entry| entry.value)
         .context("bound target launch capsule is unavailable")?;
-    let capsule: ryeos_state::objects::AdmittedLaunchCapsule =
-        serde_json::from_value(capsule_value)?;
+    let capsule = decode_target_capsule(capsule_hash, capsule_value)?;
     let sealed: ryeos_app::thread_lifecycle::SealedRootExecutionRequest =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
             &capsule,
@@ -798,7 +819,21 @@ async fn verify_target_launch(
     {
         bail!("bound target launch capsule differs from retained workflow request");
     }
-    Ok(())
+    Ok(TargetAdmissionEvidence {
+        admitted_capsule_hash: capsule_hash.to_owned(),
+        exact_program_hash: capsule.exact_program_hash.clone(),
+        effective_definition_digest: sealed.effective_definition_digest().as_str().to_owned(),
+    })
+}
+
+fn decode_target_capsule(
+    expected_hash: &str,
+    value: Value,
+) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
+    if ryeos_state::objects::canonical_value_digest(&value)? != expected_hash {
+        bail!("bound target launch capsule bytes differ from their CAS identity");
+    }
+    serde_json::from_value(value).context("decode bound target launch capsule")
 }
 
 fn resolve_route(
@@ -942,6 +977,12 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
         || receipt.target_launch_id != operation.target_launch_id
         || receipt.source_snapshot_hash != operation.source_snapshot_hash
         || !lillux::valid_hash(&receipt.workflow_digest)
+        || !lillux::valid_hash(&receipt.target_admission.admitted_capsule_hash)
+        || !lillux::valid_hash(&receipt.target_admission.exact_program_hash)
+        || ryeos_engine::resolution::EffectiveDefinitionDigest::parse(
+            receipt.target_admission.effective_definition_digest.clone(),
+        )
+        .is_err()
     {
         bail!("remote-worker workflow receipt contradicts retained operation authority");
     }
@@ -1151,6 +1192,15 @@ fn read_settlement_fact(
     let payload = fact
         .payload
         .context("remote-worker workflow settlement fact is unavailable")?;
+    decode_settlement_payload(payload, drive_root_id, operation, operation_digest).map(Some)
+}
+
+fn decode_settlement_payload(
+    payload: Value,
+    drive_root_id: &str,
+    operation: &Operation,
+    operation_digest: &str,
+) -> Result<Receipt> {
     if payload.get("schema").and_then(Value::as_str) != Some(DRIVE_FACT_SCHEMA)
         || payload.get("source_work_id").and_then(Value::as_str)
             != Some(operation.source_work_id.as_str())
@@ -1168,7 +1218,7 @@ fn read_settlement_fact(
     if receipt.settlement_drive_root_id != drive_root_id {
         bail!("remote-worker workflow settlement names another drive occurrence");
     }
-    Ok(Some(receipt))
+    Ok(receipt)
 }
 
 fn authoritative_receipt(
@@ -1496,6 +1546,7 @@ pub const RESUME_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_state_store(root: &Path) -> ryeos_app::state_store::StateStore {
         let identity =
@@ -1590,6 +1641,115 @@ mod tests {
         assert!(validate_receipt(&receipt, &operation).is_err());
         operation.source_snapshot_hash = receipt.source_snapshot_hash.clone();
         assert!(validate_receipt(&receipt, &operation).is_ok());
+
+        let mut receipt = receipt_fixture(&operation);
+        receipt.target_admission.admitted_capsule_hash = "invalid".into();
+        assert!(validate_receipt(&receipt, &operation).is_err());
+
+        let mut receipt = receipt_fixture(&operation);
+        receipt.target_admission.exact_program_hash = "invalid".into();
+        assert!(validate_receipt(&receipt, &operation).is_err());
+
+        let mut receipt = receipt_fixture(&operation);
+        receipt.target_admission.effective_definition_digest = "invalid".into();
+        assert!(validate_receipt(&receipt, &operation).is_err());
+    }
+
+    #[test]
+    fn target_capsule_bytes_must_match_the_status_identity() {
+        let value = serde_json::json!({"kind": "not-the-requested-capsule"});
+        let another_hash = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "kind": "another-capsule"
+        }))
+        .unwrap();
+        assert!(decode_target_capsule(&another_hash, value).is_err());
+    }
+
+    #[test]
+    fn settlement_fact_payload_repairs_only_with_exact_receipt() {
+        let operation = operation_fixture();
+        let receipt = receipt_fixture(&operation);
+        let digest = operation_digest(&operation).unwrap();
+        let payload = serde_json::json!({
+            "schema": DRIVE_FACT_SCHEMA,
+            "source_work_id": operation.source_work_id,
+            "operation_digest": digest,
+            "receipt": receipt,
+        });
+        assert_eq!(
+            decode_settlement_payload(
+                payload.clone(),
+                &operation.source_work_id,
+                &operation,
+                &operation_digest(&operation).unwrap(),
+            )
+            .unwrap(),
+            receipt_fixture(&operation)
+        );
+        let mut forged = payload;
+        forged["receipt"]["target_admission"]["exact_program_hash"] =
+            Value::String("invalid".into());
+        assert!(
+            decode_settlement_payload(
+                forged,
+                &operation.source_work_id,
+                &operation,
+                &operation_digest(&operation).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_launch_ack_adopts_bound_coordinate_without_second_execute() {
+        #[derive(Clone)]
+        struct Fixture {
+            calls: Arc<AtomicUsize>,
+            launch_id: String,
+        }
+        async fn status(
+            axum::extract::State(fixture): axum::extract::State<Fixture>,
+        ) -> axum::Json<Value> {
+            fixture.calls.fetch_add(1, Ordering::SeqCst);
+            axum::Json(serde_json::json!({
+                "thread": {
+                    "status": "completed",
+                    "thread_id": "svc-1789074790258-1427d4e2",
+                },
+                "result": {
+                    "launch_id": fixture.launch_id,
+                    "status": "bound",
+                    "thread_id": "T-12345678-1234-1234-1234-123456789abc",
+                }
+            }))
+        }
+
+        let operation = operation_fixture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route("/execute", axum::routing::post(status))
+            .with_state(Fixture {
+                calls: calls.clone(),
+                launch_id: operation.target_launch_id.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let identity = Arc::new(
+            ryeos_app::identity::NodeIdentity::create(&directory.path().join("operator.pem"))
+                .unwrap(),
+        );
+        let client = RemoteClient::new(&format!("http://{address}"), "fp:peer", identity);
+
+        assert_eq!(
+            adopt_contacted_launch(&client, &operation).await.unwrap(),
+            Some("T-12345678-1234-1234-1234-123456789abc".into())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
     }
 
     #[test]
@@ -1689,6 +1849,11 @@ mod tests {
             workflow_digest: "e".repeat(64),
             target_launch_id: operation.target_launch_id.clone(),
             target_chain_root_id: "T-target".into(),
+            target_admission: TargetAdmissionEvidence {
+                admitted_capsule_hash: "f".repeat(64),
+                exact_program_hash: "1".repeat(64),
+                effective_definition_digest: "2".repeat(64),
+            },
             settlement_drive_root_id: operation.source_work_id.clone(),
         }
     }
