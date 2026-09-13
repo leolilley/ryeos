@@ -130,3 +130,5 @@ __pycache__/
 !development-toolchain-stage0/app/tests/child.rs
 !development-toolchain-stage0/macro/Cargo.toml
 !development-toolchain-stage0/macro/src/lib.rs
+!development-toolchain-stage0/test-artifact.sh
+!development-toolchain-stage0/test-runtime.sh

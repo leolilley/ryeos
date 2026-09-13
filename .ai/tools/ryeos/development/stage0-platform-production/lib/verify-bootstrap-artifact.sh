@@ -129,9 +129,9 @@ rust_dist_base="${rust_manifest_url%/*}"
 [[ "$maximum_tree_bytes" =~ ^[1-9][0-9]*$ ]]
 [[ "$maximum_tree_entries" =~ ^[1-9][0-9]*$ ]]
 [[ "$execution_gate" == target_local_binding_and_isolated_acceptance_required ]]
-runtime_helper="$(dirname "$0")/development-toolchain-stage0-runtime.sh"
+runtime_helper="$(dirname "$0")/runtime.sh"
 [[ -f "$runtime_helper" && ! -L "$runtime_helper" ]]
-# shellcheck source=development-toolchain-stage0-runtime.sh
+# shellcheck source=runtime.sh
 source "$runtime_helper"
 runtime_contract_validate
 expected_output_name="ryeos-development-toolchain-stage0-rust-${rust_version}-zig-${zig_version}-${target}.tar.gz"

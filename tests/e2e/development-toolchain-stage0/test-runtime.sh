@@ -2,11 +2,28 @@
 # Cheap contract tests: no Docker, downloads, Rust compilation or node access.
 set -euo pipefail
 export LC_ALL=C
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
 contract="$root/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml"
-helper="$root/scripts/release/development-toolchain-stage0-runtime.sh"
+helper="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh"
+verifier="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh"
+producer="$root/scripts/release/produce-development-toolchain-stage0.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# Exercise the moved verifier with the valid contract far enough to prove it
+# resolves the canonical sibling runtime helper. The deliberately wrong archive
+# name is rejected before any archive parsing or expensive tree verification.
+: > "$tmp/not-stage0.tar.gz"
+if bash "$verifier" --inputs "$contract" --producer "$producer" \
+    --archive "$tmp/not-stage0.tar.gz" > "$tmp/verifier-error" 2>&1; then
+    echo 'Stage-0 verifier accepted a wrongly named empty archive' >&2
+    exit 1
+fi
+grep -Fq 'unexpected Stage-0 archive name' "$tmp/verifier-error" || {
+    cat "$tmp/verifier-error" >&2
+    echo 'Stage-0 verifier did not reach post-helper archive validation' >&2
+    exit 1
+}
 
 # Run validation as a top-level command in a fresh shell. Putting the function
 # in an `if` would disable errexit inside it and give false refusal evidence.
@@ -30,7 +47,7 @@ if [[ "$#" -eq 2 && "$1" == --verify-tree ]]; then
     validate "$contract" "$2"
     exit
 fi
-[[ "$#" -eq 0 ]] || { echo 'usage: test-development-toolchain-stage0-runtime.sh [--verify-tree DIR]' >&2; exit 2; }
+[[ "$#" -eq 0 ]] || { echo 'usage: test-runtime.sh [--verify-tree DIR]' >&2; exit 2; }
 validate "$contract"
 
 refuse() {
