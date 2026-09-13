@@ -1007,6 +1007,7 @@ pub struct AdmittedExecutionComparisonEvidence {
 pub struct AuthoritativeThreadSubject {
     pub thread_id: String,
     pub chain_root_id: String,
+    pub item_ref: String,
     pub status: ryeos_state::objects::ThreadStatus,
     pub requested_by: Option<String>,
     pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
@@ -11442,6 +11443,7 @@ impl StateStore {
                 Ok(Some(AuthoritativeThreadSubject {
                     thread_id: snapshot.thread_id,
                     chain_root_id: snapshot.chain_root_id,
+                    item_ref: snapshot.item_ref,
                     status: snapshot.status,
                     requested_by: snapshot.requested_by,
                     project_authority: snapshot.project_authority,

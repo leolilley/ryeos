@@ -890,6 +890,7 @@ pub async fn execute_service_verified(
         let recorded_admission = ryeos_app::thread_lifecycle::RecordedServiceAdmission::new(
             root_admission,
             endpoint.clone(),
+            &params,
         )?;
         // Registration precedes publication, while launch metadata and the
         // created→running transition commit atomically with root birth.

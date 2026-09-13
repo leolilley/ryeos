@@ -89,6 +89,7 @@ pub mod remote_threads;
 pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
+pub mod remote_worker_workflows;
 pub mod scheduler_deregister;
 pub mod scheduler_explain;
 pub mod scheduler_list;
@@ -241,6 +242,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,
     remote_status::DESCRIPTOR,
+    remote_worker_workflows::START_DESCRIPTOR,
+    remote_worker_workflows::RESUME_DESCRIPTOR,
+    remote_worker_workflows::QUERY_DESCRIPTOR,
     remote_push::DESCRIPTOR,
     remote_reconcile_project_head::DESCRIPTOR,
     remote_sync_project_ai::DESCRIPTOR,

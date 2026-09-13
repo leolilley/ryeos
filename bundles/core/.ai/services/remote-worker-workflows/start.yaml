@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-13T02:16:11Z:fd2db777514f097aace61b49105c8d0c8553a90f9db9a61299b75636166814b0:9+krP+bkRCHYhGqvgCjHplji2WASn+Yu7/zFjXmFZvUxkNMSB4P0lt/1NKCUnQ4alyVmT1VEo3UZHGXIOsLqAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote-worker-workflows.start
+availability: daemon_only
+record_thread: true
+result_retention: full
+required_caps: ["ryeos.execute.service.remote/admin"]
+schema:
+  remote: string?
+  workflow_ref: string
+  credential_profile_id: string
+  task: object
+description: "Start one source-owned bounded remote-worker workflow. Target path and launch coordinates are derived internally; interrupted contact is resumed by the separate recorded resume service using source_work_id."

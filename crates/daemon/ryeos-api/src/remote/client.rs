@@ -1085,6 +1085,19 @@ impl RemoteClient {
         self.signed_post("/project/status", &body).await
     }
 
+    /// Bounded project-status read for recovery decisions that hold a durable
+    /// operation attempt. Bulk project transfer remains separately bounded.
+    pub async fn project_status_bounded(&self, project_path: &str) -> Result<Value> {
+        let body = serde_json::json!({ "project_path": project_path });
+        self.signed_post_with_response_limit_and_timeout(
+            "/project/status",
+            &body,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            CONTROL_PLANE_TIMEOUT,
+        )
+        .await
+    }
+
     /// POST `/execute` for wait mode or `/execute/launch` for accepted mode
     /// (authenticated).
     /// Product selections name the destination's retained witnesses, not

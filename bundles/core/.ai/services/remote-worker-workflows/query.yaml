@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-13T02:16:11Z:5b4a4ba52051483e65afb6a6b9365a3487f0458a0ab3a8624e5de55ff13eea23:FyM5pL9w39+p2g5TjGPTdhldhhCvJbYAPp5Hj2XyxtDxCLYZQPgpJj4DzRQf+ngmvBVGjCleo9qlUWsUDyWSAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote-worker-workflows.query
+availability: daemon_only
+record_thread: false
+state_access: read_only_existing
+required_caps: ["ryeos.execute.service.remote/admin"]
+schema:
+  source_work_id: string
+description: "Read the compact retained projection for one operator-owned remote-worker workflow. This service never advances recovery or contacts a worker."
