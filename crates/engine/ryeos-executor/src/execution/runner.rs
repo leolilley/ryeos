@@ -7400,6 +7400,11 @@ pub(crate) fn retained_workspace_provenance_for_native_resume(
 
     // Build the immutable project engine from a shared read-only realization;
     // mutable workspace bytes are never re-admitted as engine configuration.
+    tracing::debug!(
+        thread_id,
+        recovery_stage = "project-engine-reconstruction",
+        "retained workspace recovery stage"
+    );
     let resolved = super::project_source::resolve_pinned_snapshot_context(
         state,
         snapshot_hash,
@@ -7408,6 +7413,11 @@ pub(crate) fn retained_workspace_provenance_for_native_resume(
         super::project_source::PinnedContextRealization::ReadOnly,
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    tracing::debug!(
+        thread_id,
+        recovery_stage = "project-engine-reconstructed",
+        "retained workspace recovery stage"
+    );
     let materialization = {
         let authority = super::pinned_state_authority(state)?;
         let cas_guard = authority.acquire_shared_guard()?;
@@ -7423,6 +7433,11 @@ pub(crate) fn retained_workspace_provenance_for_native_resume(
             expected_project_identity,
         )?
     };
+    tracing::debug!(
+        thread_id,
+        recovery_stage = "retained-backing-recovered",
+        "retained workspace recovery stage"
+    );
     // The materialization now owns its exact pinned root, CAS and loaded tree;
     // it does not borrow the mutation guard. End that guard's fork-sensitive
     // descriptor lease before rebind/Create can spawn the workspace creator.
@@ -7451,6 +7466,11 @@ pub(crate) fn retained_workspace_provenance_for_native_resume(
     // borrower admission: recovered disposition may only finish a previously
     // frozen result and never launch a target. The resumed launch binds its
     // member separately at the ordinary before-contact boundary.
+    tracing::debug!(
+        thread_id,
+        recovery_stage = "workspace-rebind",
+        "retained workspace recovery stage"
+    );
     prepare_owned_workspace_after_thread_birth(
         state,
         &provenance,
@@ -7458,6 +7478,11 @@ pub(crate) fn retained_workspace_provenance_for_native_resume(
         recovery_launch_owner,
         WorkspaceConstructionInput::RetainedBacking(&workspace),
     )?;
+    tracing::debug!(
+        thread_id,
+        recovery_stage = "workspace-rebound",
+        "retained workspace recovery stage"
+    );
     if workspace.state == WorkspaceState::Freezing {
         let frozen = frozen_generation.as_ref().ok_or_else(|| {
             anyhow::anyhow!("retained frozen disposition has no committed result generation")

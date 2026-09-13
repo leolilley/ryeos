@@ -9740,6 +9740,11 @@ async fn launch_claimed_native_resume_inner(
     // happens inside; working dir + runtime registry then follow the
     // provenance so the resumed run resolves against the pinned overlay
     // engine when the original spawn was pushed-head.
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "workspace-reconstruction",
+        "managed native recovery stage"
+    );
     let retained_provenance = match live_provenance {
         Some(provenance) => Some(provenance),
         None => crate::execution::runner::retained_workspace_provenance_for_native_resume(
@@ -9750,6 +9755,11 @@ async fn launch_claimed_native_resume_inner(
             preparation_owner,
         )?,
     };
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "workspace-reconstructed",
+        "managed native recovery stage"
+    );
     if recovered_candidate_workspace_id.is_some()
         && let Some(provenance) = retained_provenance.as_ref()
     {
@@ -9762,6 +9772,11 @@ async fn launch_claimed_native_resume_inner(
         )
         .await;
     }
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "sealed-request-reconstruction",
+        "managed native recovery stage"
+    );
     let params = crate::execution::runner::execution_params_from_sealed_root_request(
         state,
         &thread_id,
@@ -9769,6 +9784,11 @@ async fn launch_claimed_native_resume_inner(
         sealed,
         retained_provenance,
     )?;
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "sealed-request-reconstructed",
+        "managed native recovery stage"
+    );
     let project_path = params.provenance.effective_path().to_path_buf();
 
     if !params.provenance.is_borrowed_child()
@@ -9777,6 +9797,11 @@ async fn launch_claimed_native_resume_inner(
         preparation_owner.track_owned_workspace_lifeline(workspace)?;
     }
 
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "launch-preparation",
+        "managed native recovery stage"
+    );
     let result = run_claimed_thread_row(
         BuildAndLaunchParams {
             state,
@@ -9807,6 +9832,12 @@ async fn launch_claimed_native_resume_inner(
         thread,
     )
     .await;
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "launch-preparation-settled",
+        succeeded = result.is_ok(),
+        "managed native recovery stage"
+    );
     drop(params);
     result
 }

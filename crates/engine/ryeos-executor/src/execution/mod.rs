@@ -493,9 +493,19 @@ pub(crate) fn checkout_project_snapshot(
         &cas,
         snapshot_hash,
     )?;
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "closure-loaded",
+        "project checkout stage"
+    );
     let project_files = closure.tree().files();
 
     let _build_lock = cache.generation_build_lock(snapshot_hash)?;
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "build-lock-acquired",
+        "project checkout stage"
+    );
     if cache
         .verify_completion_marker_for_files(project_files, snapshot_hash)
         .is_err()
@@ -532,6 +542,11 @@ pub(crate) fn checkout_project_snapshot(
         }
         construction?;
     }
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "generation-available",
+        "project checkout stage"
+    );
     let realized_path = match materialization {
         ProjectMaterialization::SharedReadOnly => cache.cache_dir(snapshot_hash),
         ProjectMaterialization::EnforcedCowProject(target_dir) => {
@@ -602,9 +617,29 @@ pub(crate) fn checkout_project_snapshot(
         }
         Err(error) => return Err(error),
     };
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "materialization-verified",
+        "project checkout stage"
+    );
     let lease = cache.generation_lease(snapshot_hash)?;
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "lease-acquired",
+        "project checkout stage"
+    );
     drop(_build_lock);
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "cache-prune",
+        "project checkout stage"
+    );
     cache.prune(128)?;
+    tracing::debug!(
+        snapshot_hash,
+        checkout_stage = "cache-pruned",
+        "project checkout stage"
+    );
     Ok((realized_path, lease, materialization))
 }
 

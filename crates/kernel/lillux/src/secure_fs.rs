@@ -552,7 +552,11 @@ fn read_regular_file_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::
 fn digest_open_regular_file_exact(file: &File, expected_bytes: u64) -> Result<String> {
     let mut digest = sha2::Sha256::new();
     use sha2::Digest as _;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // This verifier is used from bounded runtime workers as well as ordinary
+    // host threads. Keep the bounded I/O workspace on the heap: a 1 MiB stack
+    // array can exhaust a correctly finite runtime stack before a single byte
+    // is read, turning valid snapshot verification into a process abort.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     let mut remaining = expected_bytes;
     while remaining > 0 {
         let requested = usize::try_from(remaining.min(buffer.len() as u64))
@@ -6625,6 +6629,30 @@ mod tests {
 
         let mut file = File::open(&path).unwrap();
         assert!(digest_open_regular_file_stable_exact(&mut file, 1).is_err());
+    }
+
+    #[test]
+    fn stable_exact_digest_does_not_consume_runtime_worker_stack() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("value");
+        let bytes = vec![0x5a; 21 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let expected = crate::sha256_hex(&bytes);
+
+        let observed = std::thread::Builder::new()
+            .name("bounded-file-digest".to_owned())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let file = File::open(path).unwrap();
+                digest_open_regular_file_stable_exact(&file, bytes.len() as u64)
+                    .unwrap()
+                    .0
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(observed, expected);
     }
 
     #[cfg(unix)]

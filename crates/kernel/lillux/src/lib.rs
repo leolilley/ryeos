@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod exec;
 pub mod host_service;
 pub mod identity;
+pub mod json;
 pub mod local_ipc;
 pub mod locks;
 pub mod process_control;
@@ -47,6 +48,7 @@ pub use host_service::{
     exec_install_transaction, provision_host_service, run_as_administrator,
     validate_install_transaction,
 };
+pub use json::deserialize_json_str_stack_safe;
 pub use local_ipc::{
     LocalDuplexStream, OwnerPrivateLocalDuplexListener, authenticated_unix_peer_from_stream,
 };

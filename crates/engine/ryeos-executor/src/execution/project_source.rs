@@ -750,6 +750,11 @@ fn resolve_pinned_snapshot_context_admitted(
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
 
+    tracing::debug!(
+        checkout_id,
+        recovery_stage = "snapshot-validation",
+        "pinned project resolution stage"
+    );
     ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?
         .ok_or_else(|| {
@@ -758,6 +763,11 @@ fn resolve_pinned_snapshot_context_admitted(
                 snapshot_hash
             ))
         })?;
+    tracing::debug!(
+        checkout_id,
+        recovery_stage = "snapshot-validated",
+        "pinned project resolution stage"
+    );
     // ── 1. Realize the selected immutable filesystem contract ───────
     let runtime_cache = state.config.runtime_root().cache();
     let materialization_cache =
@@ -844,6 +854,11 @@ fn resolve_pinned_snapshot_context_admitted(
             &materialization_cache,
         )
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+    tracing::debug!(
+        checkout_id,
+        recovery_stage = "snapshot-materialized",
+        "pinned project resolution stage"
+    );
     let project_guard = match project_guard {
         Some(guard) => guard,
         None => Arc::new(TempDirGuard::new_borrowed_cache(effective_path.clone())),
@@ -857,6 +872,11 @@ fn resolve_pinned_snapshot_context_admitted(
     };
 
     let immutable_project_root = materialization_cache.cache_dir(snapshot_hash);
+    tracing::debug!(
+        checkout_id,
+        recovery_stage = "request-engine-reconstruction",
+        "pinned project resolution stage"
+    );
     let request_engine = state.engine_cache.get_or_insert_with(
         cache_key,
         || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
@@ -876,6 +896,11 @@ fn resolve_pinned_snapshot_context_admitted(
             Ok((Arc::new(built), None))
         },
     )?;
+    tracing::debug!(
+        checkout_id,
+        recovery_stage = "request-engine-reconstructed",
+        "pinned project resolution stage"
+    );
 
     Ok(ResolvedProjectContext {
         original_path: original_path.unwrap_or_else(|| effective_path.clone()),

@@ -446,6 +446,11 @@ fn observe_materialized_tree(
     root: &lillux::PinnedDirectory,
     expected: &BTreeMap<String, ProjectFile>,
 ) -> anyhow::Result<Arc<BTreeMap<String, ProjectFile>>> {
+    tracing::debug!(
+        expected_files = expected.len(),
+        materialization_stage = "tree-observation",
+        "project materialization verification stage"
+    );
     let mut observed = BTreeMap::new();
     let mut descriptor_bytes = 0_u64;
     root.visit_regular_files_bounded(
@@ -455,6 +460,14 @@ fn observe_materialized_tree(
         ),
         |_relative, _directory| Ok(false),
         |relative, mut file| {
+            if observed.len() % 256 == 0 {
+                tracing::debug!(
+                    observed_files = observed.len(),
+                    expected_files = expected.len(),
+                    materialization_stage = "tree-observation-progress",
+                    "project materialization verification stage"
+                );
+            }
             if observed.len() >= crate::project_sync::MAX_PROJECT_TREE_FILES {
                 anyhow::bail!(
                     "materialized project exceeds {} regular files",
@@ -527,6 +540,12 @@ fn observe_materialized_tree(
             Ok(())
         },
     )?;
+    tracing::debug!(
+        observed_files = observed.len(),
+        expected_files = expected.len(),
+        materialization_stage = "tree-observed",
+        "project materialization verification stage"
+    );
     Ok(Arc::new(observed))
 }
 

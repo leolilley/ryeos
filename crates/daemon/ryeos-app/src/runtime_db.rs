@@ -3776,15 +3776,48 @@ fn encode_current_project_authority(
     lillux::canonical_json(&value).context("canonicalize current project authority")
 }
 
-fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
-    let value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("stored launch metadata must be an object"))?;
-    let schema_version = object
+#[derive(Clone, Copy)]
+struct LaunchMetadataHeader {
+    schema_version: u64,
+    admitted_launch_capsule_schema: Option<u64>,
+    sealed: bool,
+}
+
+/// Read only the top-level compatibility coordinates. Values remain raw JSON,
+/// so classifying an unsupported record never recursively interprets its
+/// retained authority tree.
+fn decode_launch_metadata_header(raw: &str) -> Result<LaunchMetadataHeader> {
+    let fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_str(raw).context("decode stored launch metadata envelope")?;
+    let schema_version = fields
         .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
+        .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))
+        .and_then(|value| {
+            serde_json::from_str(value.get())
+                .map_err(anyhow::Error::from)
+                .context("stored launch metadata has no numeric schema_version")
+        })?;
+    let admitted_launch_capsule_schema = fields
+        .get("admitted_launch_capsule_schema")
+        .filter(|value| value.get() != "null")
+        .map(|value| serde_json::from_str(value.get()))
+        .transpose()
+        .context("stored launch metadata has a non-numeric admitted capsule schema")?;
+    let sealed = fields
+        .get("sealed_root_request")
+        .is_some_and(|value| value.get() != "null");
+    Ok(LaunchMetadataHeader {
+        schema_version,
+        admitted_launch_capsule_schema,
+        sealed,
+    })
+}
+
+fn decode_current_launch_metadata_after_header(
+    raw: &str,
+    header: LaunchMetadataHeader,
+) -> Result<RuntimeLaunchMetadata> {
+    let schema_version = header.schema_version;
     if schema_version != u64::from(LAUNCH_METADATA_SCHEMA_VERSION) {
         return Err(incompatible_runtime_execution_schema(
             format!(
@@ -3793,15 +3826,24 @@ fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
             schema_version < u64::from(LAUNCH_METADATA_SCHEMA_VERSION),
         ));
     }
+    // Launch authority legitimately contains nested, producer-authored JSON.
+    // Grow the parser stack on demand rather than making every Tokio worker
+    // stack larger or allowing a malformed record to abort the daemon.
     let decoded: RuntimeLaunchMetadata =
-        serde_json::from_value(value.clone()).context("validate current launch metadata")?;
+        lillux::deserialize_json_str_stack_safe(raw).context("validate current launch metadata")?;
     decoded.validate()?;
+    let value = serde_json::to_value(&decoded).context("encode current launch metadata")?;
     let canonical =
         lillux::canonical_json(&value).context("canonicalize current launch metadata")?;
     if canonical != raw {
         bail!("stored launch metadata is not canonical under the exact current contract");
     }
     Ok(decoded)
+}
+
+fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
+    let header = decode_launch_metadata_header(raw)?;
+    decode_current_launch_metadata_after_header(raw, header)
 }
 
 // The Current variant carries the full launch metadata by design; the
@@ -3833,20 +3875,10 @@ impl StoredLaunchMetadata {
 /// type; it remains opaque history until retention or explicit discard removes
 /// it.
 fn decode_stored_launch_metadata(raw: &str) -> Result<StoredLaunchMetadata> {
-    let value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("stored launch metadata must be an object"))?;
-    let schema_version = object
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
-    let capsule_schema = object
-        .get("admitted_launch_capsule_schema")
-        .and_then(Value::as_u64);
-    let sealed = object
-        .get("sealed_root_request")
-        .is_some_and(|value| !value.is_null());
+    let header = decode_launch_metadata_header(raw)?;
+    let schema_version = header.schema_version;
+    let capsule_schema = header.admitted_launch_capsule_schema;
+    let sealed = header.sealed;
     let current_capsule_schema =
         u64::from(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
     if schema_version != u64::from(LAUNCH_METADATA_SCHEMA_VERSION)
@@ -3859,7 +3891,7 @@ fn decode_stored_launch_metadata(raw: &str) -> Result<StoredLaunchMetadata> {
             },
         ));
     }
-    decode_current_launch_metadata(raw)
+    decode_current_launch_metadata_after_header(raw, header)
         .map(Box::new)
         .map(StoredLaunchMetadata::Current)
 }
@@ -22230,6 +22262,32 @@ mod tests {
         );
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
+    }
+
+    #[test]
+    fn nested_launch_metadata_decode_does_not_exhaust_worker_stack() {
+        let mut nested = serde_json::json!("leaf");
+        for _ in 0..24 {
+            nested = serde_json::json!({"nested": nested});
+        }
+        let mut value = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
+        value["follow_parent_context"] = serde_json::json!({
+            "parent_thread_id": "T-parent",
+            "hard_limits": nested,
+            "depth": 1
+        });
+        let raw = lillux::canonical_json(&value).unwrap();
+
+        let result = std::thread::Builder::new()
+            .name("launch-metadata-small-stack".to_string())
+            .stack_size(512 * 1024)
+            .spawn(move || decode_current_launch_metadata(&raw).map(|_| ()))
+            .unwrap()
+            .join();
+
+        result
+            .expect("launch metadata decoding must not overflow the worker stack")
+            .expect("nested current launch metadata must decode");
     }
 
     #[test]
