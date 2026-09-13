@@ -715,6 +715,25 @@ fn product_consumer_source(
     ) {
         bail!("product consumption requires an admitted signed consumer");
     }
+    // Selection testimony names the owner of the declaration-bearing
+    // executable, not the project context used to resolve its relationship
+    // Configs. A bundled verifier may require a pinned project for those
+    // Configs while retaining its bundle provenance in every selected product
+    // record. The binding authority separately carries that pinned context.
+    if matches!(
+        declaring_authority(resolution)?,
+        ryeos_engine::external_content::DeclaringAuthority::Bundle(_)
+    ) {
+        let publisher_fingerprint = resolution
+            .root
+            .signer_fingerprint
+            .clone()
+            .context("bundle product consumer has no verified publisher fingerprint")?;
+        return Ok(ResolvedProductConsumerSource::InstalledBundle {
+            consumer_ref: resolution.root.resolved_ref.clone(),
+            publisher_fingerprint,
+        });
+    }
     // The existing owner supplies exact source closure and source provenance.
     // Strip its effective digest: source testimony cannot embed the D1 which
     // this selection itself will compute.
@@ -1050,6 +1069,53 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn bundle_product_selection_provenance_remains_bundle_owned_under_pinned_context() {
+        use ryeos_engine::contracts::ItemSourceRoot;
+        use ryeos_engine::resolution::{
+            KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+        };
+
+        let resolution = ResolutionOutput {
+            root: ResolvedAncestor {
+                requested_id: "qualification/verify".into(),
+                resolved_ref: "tool:qualification/verify".into(),
+                source_path: "/bundles/standard/.ai/tools/qualification/verify.py".into(),
+                source_space: ItemSpace::Bundle,
+                source_root: ItemSourceRoot::Bundle {
+                    name: "standard".into(),
+                },
+                trust_class: TrustClass::TrustedBundle,
+                signer_fingerprint: Some("a".repeat(64)),
+                alias_resolution: None,
+                added_by: ResolutionStepName::PipelineInit,
+                raw_content: String::new(),
+                source_content_digest: "b".repeat(64),
+                raw_content_digest: "c".repeat(64),
+            },
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: Default::default(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView::identity(serde_json::json!({
+                "executor_id": "@subprocess",
+                "config": {"command": "verification"}
+            })),
+        };
+        let source = product_consumer_source(
+            &resolution,
+            &SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: "d".repeat(64),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            source,
+            ResolvedProductConsumerSource::InstalledBundle { .. }
+        ));
     }
 
     #[test]
