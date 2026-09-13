@@ -19,7 +19,9 @@ use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::{self, ProjectSyncScope, RemoteConfig};
 use crate::remote::push::push_snapshot_generation;
-use ryeos_app::hosted_candidate_result::HostedCandidateResultResponse;
+use ryeos_app::hosted_candidate_result::{
+    HostedCandidateResultRequest, HostedCandidateResultResponse,
+};
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
@@ -29,9 +31,9 @@ use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
-const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v1";
-const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v1";
-const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v1";
+const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v2";
+const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v2";
+const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v2";
 const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v1";
 const DRIVE_INTENT_EVENT: &str = "remote_worker_workflow.drive_intent";
 const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
@@ -95,6 +97,7 @@ struct Operation {
     remote_url: String,
     target_site_id: String,
     target_principal_id: String,
+    target_signing_key: String,
     local_project_path: String,
     target_project_path: String,
     source_snapshot_hash: String,
@@ -194,6 +197,7 @@ struct CompiledWorkflow {
     ref_bindings: BTreeMap<String, String>,
     parameters: Value,
     digest: String,
+    effective_definition_digest: String,
 }
 
 impl Progress {
@@ -271,6 +275,7 @@ pub async fn start(
         remote_url: remote.url,
         target_site_id: remote.site_id,
         target_principal_id: remote.principal_id,
+        target_signing_key: remote.signing_key,
         local_project_path,
         target_project_path,
         source_snapshot_hash,
@@ -654,21 +659,7 @@ pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>)
             }));
         }
     }
-    Ok(serde_json::json!({
-        "source_work_id": operation.source_work_id,
-        "state": job.state.as_str(),
-        "phase": job.phase,
-        "remote": operation.remote,
-        "source_snapshot_hash": operation.source_snapshot_hash,
-        "workflow_ref": operation.workflow_ref,
-        "workflow_digest": progress.workflow_digest,
-        "target_launch_id": operation.target_launch_id,
-        "target_chain_root_id": progress.target_chain_root_id,
-        "target_admission": progress.target_admission,
-        "allowed_next_action": "resume",
-        "error": job.last_error,
-        "receipt": if job.state == SyncJobState::Completed { job.result } else { None },
-    }))
+    Ok(in_progress_response(&operation, &job, &progress))
 }
 
 fn compile_workflow(
@@ -738,7 +729,7 @@ fn compile_workflow(
         }
     }
     let parameters = render_driver_parameters(&config.parameters, task, credential_profile_id)?;
-    let effective = engine.effective_item(EffectiveItemRequest {
+    let effective = engine.effective_resolution_output(EffectiveItemRequest {
         item_ref: driver,
         expected_kind: Some("graph".to_owned()),
         project_root: Some(context.effective_path.clone()),
@@ -746,14 +737,24 @@ fn compile_workflow(
             snapshot_hash: snapshot_hash.to_owned(),
         },
     })?;
-    if !effective.trusted {
+    if !matches!(
+        effective.effective_trust_class,
+        ryeos_engine::resolution::TrustClass::TrustedBundle
+            | ryeos_engine::resolution::TrustClass::TrustedProject
+    ) {
         bail!("remote-worker workflow driver is not trusted");
     }
+    let effective_definition_digest = effective
+        .effective_definition_digest()
+        .context("compute source Graph effective-definition identity")?
+        .as_str()
+        .to_owned();
     Ok(CompiledWorkflow {
         driver: config.driver,
         ref_bindings: config.ref_bindings,
         parameters,
         digest: ryeos_state::objects::canonical_value_digest(&resolved.value)?,
+        effective_definition_digest,
     })
 }
 
@@ -908,24 +909,46 @@ async fn verify_target_launch(
         &operation.target_site_id,
     )?
     .normalized_logical_key;
+    let expected_project_authority_id = lillux::sha256_hex(
+        format!(
+            "live-project\0{}\0{}",
+            expected_project_identity, operation.target_project_path
+        )
+        .as_bytes(),
+    );
+    let expected_environment = ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+        project_authority_id: expected_project_authority_id,
+        source_identity: format!(
+            "dotenv:{}",
+            Path::new(&operation.target_project_path)
+                .join(".env")
+                .display()
+        ),
+        include_operator_vault: true,
+        name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+    };
     let project_semantics_match = matches!(
         sealed.project_authority(),
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
             stable_project_identity,
             display_path: Some(display_path),
+            base_snapshot_hash,
+            snapshot_hash,
             realization: ryeos_state::objects::PinnedProjectRealization::Cow {
                 terminal_publication: ryeos_state::objects::PinnedTerminalPublication::RetainResult,
             },
-            environment: ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
-                include_operator_vault: true,
-                ..
-            },
+            workspace_outputs: None,
+            environment,
+            capability_ceiling: _,
             child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
-            ..
         } if stable_project_identity == &expected_project_identity
             && display_path == Path::new(&operation.target_project_path)
+            && base_snapshot_hash == &operation.source_snapshot_hash
+            && snapshot_hash == &operation.source_snapshot_hash
+            && environment == &expected_environment
     );
     if sealed.item_ref() != compiled.driver
+        || sealed.effective_definition_digest().as_str() != compiled.effective_definition_digest
         || sealed.admitted_parameters_digest()?
             != ryeos_state::objects::canonical_value_digest(parameters)?
         || sealed.project_authority().subject_base_snapshot_hash()
@@ -1174,6 +1197,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
     if remote.url != operation.remote_url
         || remote.site_id != operation.target_site_id
         || remote.principal_id != operation.target_principal_id
+        || remote.signing_key != operation.target_signing_key
         || target != operation.target_project_path
     {
         bail!("remote-worker workflow route authority changed");
@@ -1230,6 +1254,10 @@ fn validate_operation(operation: &Operation) -> Result<()> {
     if !lillux::valid_hash(target_fingerprint) {
         bail!("remote-worker target principal fingerprint is invalid");
     }
+    let target_key = config::decode_signing_key(&operation.target_signing_key)?;
+    if lillux::crypto::fingerprint(&target_key) != target_fingerprint {
+        bail!("remote-worker target key differs from target principal");
+    }
     let workflow = CanonicalRef::parse(&operation.workflow_ref)?;
     if workflow.kind != "config" || workflow.suffix.is_some() {
         bail!("remote-worker workflow reference is invalid");
@@ -1265,7 +1293,16 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
         .map_err(|error| anyhow::anyhow!(error))?;
     ryeos_runtime::validate_runtime_thread_id(&receipt.candidate_terminal_thread_id)
         .map_err(|error| anyhow::anyhow!(error))?;
-    receipt.candidate_result.evidence.validate()?;
+    let candidate_request = HostedCandidateResultRequest {
+        chain_root_id: receipt.candidate_terminal_thread_id.clone(),
+        source_site_id: operation.source_site_id.clone(),
+    };
+    receipt.candidate_result.validate_against(
+        &candidate_request,
+        &format!("fp:{}", operation.operator_fingerprint),
+        &operation.target_site_id,
+        &config::decode_signing_key(&operation.target_signing_key)?,
+    )?;
     if receipt.candidate_result.evidence.chain_root_id != receipt.candidate_terminal_thread_id
         || receipt.candidate_result.evidence.source_site_id != operation.source_site_id
         || receipt.candidate_result.evidence.target_site_id != operation.target_site_id
@@ -1911,14 +1948,7 @@ impl Drop for WorkflowAttempt {
 }
 
 fn in_progress_response(operation: &Operation, job: &SyncJobRecord, progress: &Progress) -> Value {
-    let allowed_next_action = if matches!(
-        job.state,
-        SyncJobState::Running | SyncJobState::Retryable | SyncJobState::Planned
-    ) {
-        Value::String("resume".to_owned())
-    } else {
-        Value::Null
-    };
+    let allowed_next_action = allowed_next_action_for_state(job.state);
     serde_json::json!({
         "source_work_id": operation.source_work_id,
         "state": job.state.as_str(),
@@ -1934,6 +1964,17 @@ fn in_progress_response(operation: &Operation, job: &SyncJobRecord, progress: &P
         "error": job.last_error,
         "receipt": Value::Null,
     })
+}
+
+fn allowed_next_action_for_state(state: SyncJobState) -> Value {
+    if matches!(
+        state,
+        SyncJobState::Running | SyncJobState::Retryable | SyncJobState::Planned
+    ) {
+        Value::String("resume".to_owned())
+    } else {
+        Value::Null
+    }
 }
 
 fn launch_accepted_response(operation: &Operation, progress: &Progress) -> Value {
@@ -2098,6 +2139,7 @@ pub const RESUME_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use ryeos_state::signer::Signer;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2254,6 +2296,28 @@ mod tests {
         let mut receipt = receipt_fixture(&operation);
         receipt.candidate_terminal_thread_id = "T-another-candidate".into();
         assert!(validate_receipt(&receipt, &operation).is_err());
+
+        let mut receipt = receipt_fixture(&operation);
+        receipt.candidate_result.attestation.signature = "invalid".to_owned();
+        assert!(validate_receipt(&receipt, &operation).is_err());
+    }
+
+    #[test]
+    fn only_drivable_workflow_states_offer_resume() {
+        for state in [
+            SyncJobState::Planned,
+            SyncJobState::Running,
+            SyncJobState::Retryable,
+        ] {
+            assert_eq!(allowed_next_action_for_state(state), "resume");
+        }
+        for state in [
+            SyncJobState::Completed,
+            SyncJobState::Failed,
+            SyncJobState::Cancelled,
+        ] {
+            assert_eq!(allowed_next_action_for_state(state), Value::Null);
+        }
     }
 
     #[test]
@@ -2456,6 +2520,7 @@ mod tests {
     }
 
     fn operation_fixture() -> Operation {
+        let target_key = lillux::crypto::SigningKey::from_bytes(&[29_u8; 32]).verifying_key();
         let request = serde_json::json!({
             "workflow_ref": "config:development/remote-worker",
             "credential_profile_id": "personal",
@@ -2474,7 +2539,11 @@ mod tests {
             remote: "default".into(),
             remote_url: "https://example.invalid".into(),
             target_site_id: "site:target".into(),
-            target_principal_id: format!("fp:{}", "c".repeat(64)),
+            target_principal_id: format!("fp:{}", lillux::crypto::fingerprint(&target_key)),
+            target_signing_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(target_key.as_bytes())
+            ),
             local_project_path: "/source".into(),
             target_project_path: "/target".into(),
             source_snapshot_hash: "d".repeat(64),
