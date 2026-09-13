@@ -4051,6 +4051,29 @@ config:
       node_type: return
 "#;
 
+const FOLLOW_WITH_PRODUCT_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action:
+        item_id: "directive:child"
+        ref_bindings: {}
+        product_selections:
+          - target: {kind: root}
+            selection:
+              declaration_id: authoring-tools
+              witness_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              witness_source: {kind: local_capture}
+              qualification_hash: null
+        params: {}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+
 const GRAPH_FOLLOW_YAML: &str = r#"
 version: "1.0.0"
 category: test
@@ -4113,6 +4136,24 @@ async fn follow_suspend_emits_events_and_no_receipt() {
     );
     assert_eq!(reqs[0].children.len(), 1);
     assert_eq!(reqs[0].children[0].item_ref, "directive:child");
+}
+
+#[tokio::test]
+async fn follow_seals_the_actions_exact_product_selections_into_the_child() {
+    let (walker, recorder) =
+        make_recording_walker(make_graph(FOLLOW_WITH_PRODUCT_YAML), vec![], None);
+    let result = walker
+        .execute(json!({}), Some("gr-follow-products".to_string()))
+        .await;
+    assert_eq!(result.status, GraphRunStatus::Continued);
+    let requests = recorder.recorded_follow_requests();
+    assert_eq!(requests.len(), 1);
+    let child = &requests[0].children[0];
+    assert_eq!(child.product_selections.len(), 1);
+    assert_eq!(
+        child.product_selections[0].selection.declaration_id,
+        "authoring-tools"
+    );
 }
 
 #[tokio::test]
@@ -4646,6 +4687,13 @@ config:
       action:
         item_id: "directive:${job.kind}"
         ref_bindings: {}
+        product_selections:
+          - target: {kind: root}
+            selection:
+              declaration_id: authoring-tools
+              witness_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              witness_source: {kind: local_capture}
+              qualification_hash: null
         params:
           value: "${job.value}"
           run: "${run.graph_run_id}"
@@ -4746,6 +4794,14 @@ async fn follow_fanout_spawns_one_ordered_rendered_cohort() {
     let children = &request.children;
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].item_ref, "directive:alpha");
+    assert_eq!(
+        children[0].product_selections[0].selection.declaration_id,
+        "authoring-tools"
+    );
+    assert_eq!(
+        children[1].product_selections,
+        children[0].product_selections
+    );
     assert_eq!(children[0].parameters["step"], 0);
     assert_eq!(children[1].parameters["step"], 0);
     assert_eq!(

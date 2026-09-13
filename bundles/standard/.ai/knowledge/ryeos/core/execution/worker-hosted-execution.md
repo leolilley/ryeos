@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-13T00:23:34Z:f7bb1b919a4255d7a2e27777bc9156a17b32fd219b3028f4dc31a7f77f2c1c3f:a45Ub1db47Bk1HlcE4teSSSOgxuO1oXpMnL/tvNG59y0QqUAGteUyAF2d1e6Du1uawhqYuG+cnB7bkzwaTpjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:38:33Z:dfd6b69ea21fe0c4d6eea798d301d11f3a3a2ad06a7a55f41ed51eddccd4d881:3Fgl4X1Ws0+lQD9PSvIE57CxKNCgfnWwrfsKmrWolu3VhYJEYENfLLmG52OeDwRCkgvwtDDPAHYYMue7ahjJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.8.1"
+version: "1.8.2"
 ```
 
 # Worker-Hosted Execution
@@ -22,6 +22,12 @@ The v6 contract combines product slots with explicitly selected CLI and/or
 structured-session invocation bindings. The two earlier v5 branch shapes are
 not accepted as this combined contract. Source integration and separate prior
 acceptance runs do not qualify a newly built combined generation.
+
+A Graph follow action may carry the ordinary typed `product_selections` field
+for its child. Single and cohort follow seal that exact canonical batch into
+each child's ordinary root admission and durable follow specification. The
+follow parent never inherits or adopts it, and follow does not introduce a
+latest-binding resolver or another product authority.
 
 Worker-hosted execution runs one long-lived subordinate workload for one
 ordinary RyeOS root execution. It is generic execution substrate, not an

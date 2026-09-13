@@ -3158,6 +3158,7 @@ mod tests {
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(
             item_ref,
             &std::collections::BTreeMap::new(),
+            &Vec::new(),
             &json!(null),
             None,
         )

@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-13T03:32:01Z:e166fb02876a463689c7a9e208fbacd8d4d1a37908c96b4fb28e2e4bddb548c5:ywHvmXMsndxAQ/fcZ2XbMoB/llkId1Ay7OimRP+P8XY47nnCY00FK7ZqBf7Q9udmd/jvbpF2oqSNm+NBPE6kAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T04:38:33Z:3f46cfcdc80e96d442212270a9300877db7bc0f1c60546d174fdde9ca527c4a6:MR/03zUbMOjTeLBYf2gtruDfcQzocRi7Z6FFIBIWwCIQ6M6BD7DDdWVnUY5rOeHCHkmYhAPiagYZhnOyyv5bDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [remote, worker, run]
-description: "Launch one source-owned remote-worker workflow; source_work_id is its stable handle and the accepted result explicitly directs the caller to resume"
+description: "Launch one source-owned remote-worker workflow from an input object containing explicit destination-local target_product_selections; source_work_id is its stable handle and the accepted result explicitly directs the caller to resume"
 forms:
   - slots:
       - field: remote

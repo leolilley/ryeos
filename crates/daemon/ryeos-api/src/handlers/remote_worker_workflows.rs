@@ -31,9 +31,9 @@ use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
-const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v2";
-const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v2";
-const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v2";
+const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v3";
+const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v3";
+const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v3";
 const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v1";
 const DRIVE_INTENT_EVENT: &str = "remote_worker_workflow.drive_intent";
 const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
@@ -68,6 +68,8 @@ pub struct StartRequest {
     workflow_ref: String,
     credential_profile_id: String,
     task: Value,
+    target_product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +107,9 @@ struct Operation {
     credential_profile_id: String,
     task: Value,
     task_digest: String,
+    target_product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    target_product_selections_digest: String,
     target_launch_id: String,
 }
 
@@ -139,6 +144,7 @@ struct Receipt {
     target_workflow_result_digest: String,
     candidate_terminal_thread_id: String,
     candidate_result: HostedCandidateResultResponse,
+    target_product_selections_digest: String,
     settlement_drive_root_id: String,
 }
 
@@ -245,6 +251,8 @@ pub async fn start(
     if !req.task.is_object() || serde_json::to_vec(&req.task)?.len() > MAX_TASK_BYTES {
         bail!("remote-worker workflow task must be an object within the 64 KiB limit");
     }
+    let target_product_selections =
+        validate_target_product_selections(req.target_product_selections.clone())?;
     let workflow = CanonicalRef::parse(&req.workflow_ref)?;
     if workflow.kind != "config" || workflow.suffix.is_some() {
         bail!("remote-worker workflow_ref must be an unsuffixed config reference");
@@ -283,6 +291,10 @@ pub async fn start(
         credential_profile_id: req.credential_profile_id,
         task_digest: ryeos_state::objects::canonical_value_digest(&req.task)?,
         task: req.task,
+        target_product_selections_digest: target_product_selections_digest(
+            &target_product_selections,
+        )?,
+        target_product_selections,
         target_launch_id: derive_target_launch_id(&invocation_root)?,
     };
     drive_operation(state, operation, true, &invocation_root).await
@@ -394,6 +406,7 @@ async fn drive_operation(
             Path::new(&operation.local_project_path),
             &operation.task,
             &operation.credential_profile_id,
+            &operation.target_product_selections,
         )?;
         let had_launch_contact = progress.target_request_digest.is_some();
         if progress
@@ -414,7 +427,9 @@ async fn drive_operation(
             "target_launch_id": operation.target_launch_id,
             "source_snapshot_hash": snapshot_hash,
             "execution_policy": execution_policy,
-            "product_selections": [],
+            "outer_product_selections": [],
+            "target_product_selections": operation.target_product_selections,
+            "target_product_selections_digest": operation.target_product_selections_digest,
         }))?;
         if progress
             .target_request_digest
@@ -669,6 +684,7 @@ fn compile_workflow(
     original_project_path: &Path,
     task: &Value,
     credential_profile_id: &str,
+    target_product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
 ) -> Result<CompiledWorkflow> {
     let canonical = CanonicalRef::parse(workflow_ref)?;
     let context = ryeos_executor::execution::project_source::resolve_read_only_snapshot_context(
@@ -728,7 +744,12 @@ fn compile_workflow(
             bail!("remote-worker workflow binding kind is not registered");
         }
     }
-    let parameters = render_driver_parameters(&config.parameters, task, credential_profile_id)?;
+    let parameters = render_driver_parameters(
+        &config.parameters,
+        task,
+        credential_profile_id,
+        target_product_selections,
+    )?;
     let effective = engine.effective_resolution_output(EffectiveItemRequest {
         item_ref: driver,
         expected_kind: Some("graph".to_owned()),
@@ -762,6 +783,7 @@ fn render_driver_parameters(
     source: &Value,
     task: &Value,
     credential_profile_id: &str,
+    target_product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
 ) -> Result<Value> {
     let template = ryeos_runtime::CompiledJsonTemplate::compile(
         source,
@@ -775,6 +797,7 @@ fn render_driver_parameters(
         "inputs": {
             "task": task,
             "credential_profile_id": credential_profile_id,
+            "target_product_selections": target_product_selections,
         }
     });
     let limits = ryeos_runtime::EvaluationLimits::default();
@@ -1021,6 +1044,33 @@ async fn observe_target_completion(
         )
         .into());
     }
+    let fetched = client
+        .objects_get_with_total_timeout(
+            &[evidence.admitted_launch_capsule_hash.clone()],
+            &[],
+            STATUS_TIMEOUT,
+        )
+        .await?;
+    let candidate_capsule_value = fetched
+        .entries
+        .into_iter()
+        .find(|entry| entry.hash == evidence.admitted_launch_capsule_hash && entry.kind == "object")
+        .and_then(|entry| entry.value)
+        .context("candidate launch capsule is unavailable")?;
+    let candidate_capsule = decode_target_capsule(
+        &evidence.admitted_launch_capsule_hash,
+        candidate_capsule_value,
+    )?;
+    let candidate_sealed: ryeos_app::thread_lifecycle::SealedRootExecutionRequest =
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+            &candidate_capsule,
+        )?;
+    if candidate_sealed.product_selections() != &operation.target_product_selections {
+        return Err(TargetWorkflowTerminalInvalid(
+            "candidate launch used different target product selections".to_owned(),
+        )
+        .into());
+    }
 
     Ok(Some(Receipt {
         schema: RESPONSE_SCHEMA.to_owned(),
@@ -1038,6 +1088,7 @@ async fn observe_target_completion(
         target_workflow_result_digest: graph_result_digest,
         candidate_terminal_thread_id: returned.candidate_terminal_thread_id,
         candidate_result,
+        target_product_selections_digest: operation.target_product_selections_digest.clone(),
         settlement_drive_root_id: settlement_drive_root_id.to_owned(),
     }))
 }
@@ -1222,6 +1273,7 @@ fn validate_operation(operation: &Operation) -> Result<()> {
         || request.workflow_ref != operation.workflow_ref
         || request.credential_profile_id != operation.credential_profile_id
         || request.task != operation.task
+        || request.target_product_selections != operation.target_product_selections
     {
         bail!("remote-worker workflow operation differs from its admitted start request");
     }
@@ -1233,6 +1285,16 @@ fn validate_operation(operation: &Operation) -> Result<()> {
         || ryeos_state::objects::canonical_value_digest(&operation.task)? != operation.task_digest
     {
         bail!("remote-worker workflow task differs from its retained digest");
+    }
+    let canonical =
+        ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(
+            operation.target_product_selections.clone(),
+        )?;
+    if canonical != operation.target_product_selections
+        || target_product_selections_digest(&canonical)?
+            != operation.target_product_selections_digest
+    {
+        bail!("remote-worker workflow target product selections differ from retained authority");
     }
     if !lillux::valid_hash(&operation.operator_fingerprint)
         || !lillux::valid_hash(&operation.operator_authority_digest)
@@ -1273,6 +1335,7 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
         || receipt.remote != operation.remote
         || receipt.workflow_ref != operation.workflow_ref
         || receipt.target_launch_id != operation.target_launch_id
+        || receipt.target_product_selections_digest != operation.target_product_selections_digest
         || receipt.source_snapshot_hash != operation.source_snapshot_hash
         || !lillux::valid_hash(&receipt.workflow_digest)
         || !lillux::valid_hash(&receipt.target_admission.admitted_capsule_hash)
@@ -2097,6 +2160,25 @@ fn validate_profile_id(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_target_product_selections(
+    inputs: ryeos_state::external_content::products::composition::ProductSelectionInputs,
+) -> Result<ryeos_state::external_content::products::composition::ProductSelectionInputs> {
+    let canonical =
+        ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(
+            inputs.clone(),
+        )?;
+    if canonical != inputs {
+        bail!("target_product_selections must be in canonical order");
+    }
+    Ok(canonical)
+}
+
+fn target_product_selections_digest(
+    inputs: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&serde_json::to_value(inputs)?)
+}
+
 pub const START_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote-worker-workflows/start",
     endpoint: "remote-worker-workflows.start",
@@ -2169,13 +2251,52 @@ mod tests {
             "workflow_ref": "config:development/remote-worker",
             "credential_profile_id": "personal",
             "task": {"objective": "change one file"},
+            "target_product_selections": [],
         });
         serde_json::from_value::<StartRequest>(request.clone()).unwrap();
+        let mut missing = request.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("target_product_selections");
+        assert!(serde_json::from_value::<StartRequest>(missing).is_err());
         for field in ["launch_id", "project", "target_project_path"] {
             let mut invalid = request.clone();
             invalid[field] = Value::String("caller-owned".into());
             assert!(serde_json::from_value::<StartRequest>(invalid).is_err());
         }
+    }
+
+    fn product_selection(
+        declaration_id: &str,
+    ) -> ryeos_state::external_content::products::composition::ProductSelectionInput {
+        serde_json::from_value(serde_json::json!({
+            "target": {"kind": "root"},
+            "selection": {
+                "declaration_id": declaration_id,
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "qualification_hash": null,
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn target_product_selections_use_the_existing_bounded_canonical_contract() {
+        let first = product_selection("a");
+        let second = product_selection("b");
+        assert!(validate_target_product_selections(vec![first.clone(), second.clone()]).is_ok());
+        assert!(validate_target_product_selections(vec![second, first.clone()]).is_err());
+        assert!(validate_target_product_selections(vec![first.clone(), first.clone()]).is_err());
+        assert!(
+            validate_target_product_selections(vec![
+                first;
+                ryeos_state::external_content::products::composition::MAX_PRODUCT_SELECTIONS
+                    + 1
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2202,6 +2323,7 @@ mod tests {
                 &config.parameters,
                 &serde_json::json!({"objective": "edit"}),
                 "personal",
+                &Vec::new(),
             )
             .unwrap(),
             serde_json::json!({"request": {"objective": "edit"}, "profile": "personal"})
@@ -2366,6 +2488,20 @@ mod tests {
             },
         };
         validate_launch_acceptance(&acceptance, &operation, &digest).unwrap();
+
+        let mut changed = operation.clone();
+        changed.target_product_selections = vec![product_selection("authoring-tools")];
+        changed.target_product_selections_digest =
+            target_product_selections_digest(&changed.target_product_selections).unwrap();
+        changed.admitted_start_request["target_product_selections"] =
+            serde_json::to_value(&changed.target_product_selections).unwrap();
+        changed.admitted_start_request_digest =
+            ryeos_state::objects::canonical_value_digest(&changed.admitted_start_request).unwrap();
+        validate_operation(&changed).unwrap();
+        let changed_digest = operation_digest(&changed).unwrap();
+        assert_ne!(changed_digest, digest);
+        assert!(validate_launch_acceptance(&acceptance, &changed, &changed_digest).is_err());
+
         acceptance.target_launch_id = derive_target_launch_id("T-another-source").unwrap();
         assert!(validate_launch_acceptance(&acceptance, &operation, &digest).is_err());
     }
@@ -2473,6 +2609,10 @@ mod tests {
         assert!(validate_operation(&operation).is_ok());
         operation.task["objective"] = Value::String("different".into());
         assert!(validate_operation(&operation).is_err());
+
+        let mut operation = operation_fixture();
+        operation.target_product_selections_digest = "f".repeat(64);
+        assert!(validate_operation(&operation).is_err());
     }
 
     #[test]
@@ -2525,6 +2665,7 @@ mod tests {
             "workflow_ref": "config:development/remote-worker",
             "credential_profile_id": "personal",
             "task": {"objective": "edit"},
+            "target_product_selections": [],
         });
         Operation {
             operation_type: OPERATION_TYPE.into(),
@@ -2554,6 +2695,9 @@ mod tests {
             )
             .unwrap(),
             task: serde_json::json!({"objective":"edit"}),
+            target_product_selections: Vec::new(),
+            target_product_selections_digest: target_product_selections_digest(&Vec::new())
+                .unwrap(),
             target_launch_id: derive_target_launch_id("T-0025cdcf-c920-0783-ff3a-95250dd8f8d2")
                 .unwrap(),
         }
@@ -2581,6 +2725,7 @@ mod tests {
             target_workflow_result_digest: "3".repeat(64),
             candidate_terminal_thread_id: "T-target-candidate".into(),
             candidate_result,
+            target_product_selections_digest: operation.target_product_selections_digest.clone(),
             settlement_drive_root_id: operation.source_work_id.clone(),
         }
     }

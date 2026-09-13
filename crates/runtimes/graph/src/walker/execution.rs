@@ -238,19 +238,6 @@ impl Walker {
         // action off to a detached child and suspend (handled in commit_step). The
         // result is consumed on resume, so nothing is dispatched or cached here.
         if node.follow && resumed_follow_envelope.is_none() {
-            if rendered_action
-                .get("product_selections")
-                .is_some_and(|value| value.as_array().is_none_or(|items| !items.is_empty()))
-            {
-                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
-                    item_id: Some(dispatched_item_id),
-                    error: "product selection controls are not admitted on follow actions"
-                        .to_owned(),
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: elapsed,
-                    cost: None,
-                });
-            }
             let ref_bindings = match rendered_action.get("ref_bindings") {
                 Some(value) => {
                     match serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
@@ -279,6 +266,19 @@ impl Walker {
             return StepOutcome::FollowSuspend(FollowSuspendOutcome {
                 item_id: dispatched_item_id,
                 ref_bindings,
+                product_selections: match dispatch::product_selections_from_action(&rendered_action)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                            item_id: Some(dispatched_item_id),
+                            error: format!("follow action has invalid product selections: {error}"),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: elapsed,
+                            cost: None,
+                        });
+                    }
+                },
                 params: rendered_action
                     .get("params")
                     .cloned()
@@ -1098,20 +1098,20 @@ impl Walker {
                     cost: None,
                 });
             }
-            if action
-                .get("product_selections")
-                .is_some_and(|value| value.as_array().is_none_or(|items| !items.is_empty()))
-            {
-                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
-                    item_id: Some(item_ref),
-                    error: format!(
-                        "product selection controls are not admitted on follow fanout item {index}"
-                    ),
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    cost: None,
-                });
-            }
+            let product_selections = match dispatch::product_selections_from_action(&action) {
+                Ok(value) => value,
+                Err(error) => {
+                    return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                        item_id: Some(item_ref),
+                        error: format!(
+                            "follow fanout item {index} has invalid product selections: {error}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                    });
+                }
+            };
             let ref_bindings = match action.get("ref_bindings") {
                 Some(value) => {
                     match serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
@@ -1159,6 +1159,11 @@ impl Walker {
                 serde_json::to_value(&ref_bindings)
                     .expect("validated ref bindings must serialize as JSON"),
             );
+            child_fields.insert(
+                "product_selections".to_string(),
+                serde_json::to_value(&product_selections)
+                    .expect("validated product selections must serialize as JSON"),
+            );
             child_fields.insert("parameters".to_string(), parameters);
             if let Some(facets) = facets {
                 child_fields.insert("facets".to_string(), facets);
@@ -1189,9 +1194,16 @@ impl Walker {
                 .remove("parameters")
                 .expect("bounded follow child carries parameters");
             let facets = child_fields.remove("facets");
+            let product_selections = serde_json::from_value(
+                child_fields
+                    .remove("product_selections")
+                    .expect("bounded follow child carries product selections"),
+            )
+            .expect("validated product selections retain their typed JSON shape");
             children.push(ryeos_runtime::callback::FollowChildSpec {
                 item_ref,
                 ref_bindings,
+                product_selections,
                 parameters,
                 facets,
             });

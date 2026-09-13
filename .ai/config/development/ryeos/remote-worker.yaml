@@ -1,7 +1,8 @@
-# ryeos:signed:2026-09-13T03:32:01Z:233fd85362d0ef972b75ef5ba1a1376cf2f7bcb15eb0b8480e27df4e76723752:w2eiPRRdnkANZviVNBgw3ciXzf0ReF7zDAOHEim1lquDlHWybd8xnJCvtgYOEE5/0v/Ax7whMwL2WX9PpXNSAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T04:38:33Z:e7e923998c0be36c28a63286dedbd6b50cf5ac116472b26daaba5c33644d3556:ahysvL8lxqE6Yj5mUSfE1T6s8IWnWMSA3hvGWvwgWnuBxsEG9wWe3vKt/tgvuZfqyiOA7w7+wGi4hLaEX/+jAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: ryeos.remote_worker_workflow.v1
 driver: graph:ryeos/development/remote-worker
 ref_bindings: {}
 parameters:
   goal: "${inputs.task}"
   credential_profile_id: "${inputs.credential_profile_id}"
+  target_product_selections: "${inputs.target_product_selections}"

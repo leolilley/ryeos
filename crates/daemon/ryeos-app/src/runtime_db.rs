@@ -1041,12 +1041,14 @@ pub struct FollowWaiterChild {
 pub fn follow_child_spec_hash(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
+    product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
     parameters: &Value,
     facets: Option<&Value>,
 ) -> Result<String> {
     let spec = serde_json::json!({
         "item_ref": item_ref,
         "ref_bindings": ref_bindings,
+        "product_selections": product_selections,
         "parameters": parameters,
         "facets": facets.cloned().unwrap_or(Value::Null),
     });
@@ -25552,7 +25554,8 @@ mod tests {
             follow_key,
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &parameters, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &parameters, None)
+                .unwrap(),
             child_thread_id,
             child_chain_root_id,
             &sealed,
@@ -25627,7 +25630,8 @@ mod tests {
             "fk-cohort",
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &params_0, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &params_0, None)
+                .unwrap(),
             "child-0",
             "chain-0",
             &sealed,
@@ -25641,7 +25645,8 @@ mod tests {
             "fk-cohort",
             1,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &params_1, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &params_1, None)
+                .unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -25683,11 +25688,27 @@ mod tests {
         let changed = serde_json::json!({"episode": 2});
         let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let item_ref = sealed.item_ref();
+        let selected: ryeos_state::external_content::products::composition::ProductSelectionInputs =
+            serde_json::from_value(serde_json::json!([{
+                "target": {"kind": "root"},
+                "selection": {
+                    "declaration_id": "authoring-tools",
+                    "witness_hash": "a".repeat(64),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": null,
+                }
+            }]))
+            .unwrap();
+        assert_ne!(
+            follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &first, None).unwrap(),
+            follow_child_spec_hash(item_ref, &BTreeMap::new(), &selected, &first, None).unwrap(),
+            "follow replay identity must bind the exact child product authority"
+        );
         db.set_follow_child(
             "fk1",
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &first, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &first, None).unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -25698,7 +25719,8 @@ mod tests {
                 "fk1",
                 0,
                 item_ref,
-                &follow_child_spec_hash(item_ref, &BTreeMap::new(), &changed, None,).unwrap(),
+                &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &changed, None,)
+                    .unwrap(),
                 "child-1",
                 "chain-1",
                 &sealed,

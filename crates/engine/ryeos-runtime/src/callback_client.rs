@@ -662,6 +662,7 @@ impl CallbackClient {
         step_count: i64,
         child_item_ref: &str,
         ref_bindings: std::collections::BTreeMap<String, String>,
+        product_selections: ryeos_state::external_content::products::composition::ProductSelectionInputs,
         child_parameters: Value,
         frontier_id: Option<String>,
         completion: TerminalCompletion,
@@ -681,6 +682,7 @@ impl CallbackClient {
             children: vec![crate::callback::FollowChildSpec {
                 item_ref: child_item_ref.to_string(),
                 ref_bindings,
+                product_selections,
                 parameters: child_parameters,
                 facets: None,
             }],

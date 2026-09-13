@@ -3344,7 +3344,7 @@ mod tests {
                     "config:development/remote-worker",
                     "codex-main",
                     "--input",
-                    r#"{"task":{"goal":"fix the tests"}}"#,
+                    r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
                 ]),
                 "production",
             ),
@@ -3356,7 +3356,7 @@ mod tests {
                     "config:development/remote-worker",
                     "codex-main",
                     "--input",
-                    r#"{"task":{"goal":"fix the tests"}}"#,
+                    r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
                 ]),
                 "default",
             ),
@@ -3379,6 +3379,10 @@ mod tests {
             assert_eq!(
                 resolved.parameters["task"],
                 serde_json::json!({"goal": "fix the tests"})
+            );
+            assert_eq!(
+                resolved.parameters["target_product_selections"],
+                serde_json::json!([])
             );
             assert!(!resolved.async_launch);
             assert_eq!(

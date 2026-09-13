@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-13T03:32:01Z:5aa2fa6cee4d4ec5ed98c1f33ae57ed505d9c6b05fd1cec8ca4f8615b6eea525:IOsOBGj95kIfJjq2ri7aYsmU/3ikIQcVTpP7c4RoJZ9VxDayoDPdAejEXlU/x1cMPt/YRBsJtpsNC/32uHAACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T04:38:33Z:1242267ebda4e19aed6a6952c58d147e427271825bae6dceecc69543b14d2f38:Sqwlsw8BTRFCHdJy31e7ym+KGBY9l/k5lgfRIlcj1z3Xa08o4tvz/InGxsIgZO+WstW3sRAHgXmL7DMC7gvFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
 description: Run one bounded Codex development turn and return its exact terminal candidate coordinate
@@ -17,7 +17,8 @@ config:
     properties:
       goal: {type: object}
       credential_profile_id: {type: string, minLength: 1, maxLength: 256}
-    required: [goal, credential_profile_id]
+      target_product_selections: {type: array}
+    required: [goal, credential_profile_id, target_product_selections]
     additionalProperties: false
   nodes:
     run:
@@ -29,6 +30,7 @@ config:
         item_id: worker_execution:codex/bounded-turn
         ref_bindings:
           environment: config:development/ryeos/worker-environment
+        product_selections: "${inputs.target_product_selections}"
         params:
           goal: "${inputs.goal}"
           credential_profile_id: "${inputs.credential_profile_id}"
