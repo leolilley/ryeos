@@ -4,7 +4,7 @@
 # workflow workloads.
 #
 # Bakes the exact hosted-workflow bundle set: core + central-auth + standard +
-# hosted-node + codex. This is the remote
+# hosted-node + codex + opencode. This is the remote
 # admission/execution substrate of the hosted-node image PLUS the
 # standard bundle's scheduler/graph/directive/knowledge services,
 # kind schemas, and runtimes. Use this when a hosted node owns
@@ -70,6 +70,7 @@ COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex       /opt/ryeos/codex
+COPY --from=builder /build/bundles/opencode    /opt/ryeos/opencode
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

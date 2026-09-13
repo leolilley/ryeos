@@ -254,6 +254,7 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
 # provider/workload policy from the bundles present in an image.
 ! grep -Fq 'hosted-workflow' "$root/deploy/entrypoint.sh"
 ! grep -Fiq 'codex' "$root/deploy/entrypoint.sh"
+! grep -Fiq 'opencode' "$root/deploy/entrypoint.sh"
 (
     # shellcheck source=deploy/entrypoint.sh
     source "$root/deploy/entrypoint.sh"
