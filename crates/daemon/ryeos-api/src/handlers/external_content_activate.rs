@@ -801,6 +801,7 @@ async fn run_attempt(
                 project_snapshot_hash: None,
                 project_path: None,
                 product_selections: None,
+                product_owner_principal: None,
             },
         )
         .await?;

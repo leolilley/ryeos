@@ -546,6 +546,7 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
             project_snapshot_hash: None,
             project_path: None,
             product_selections: None,
+            product_owner_principal: None,
         },
     )
     .await
@@ -566,6 +567,19 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
     )
     .unwrap()
     .unwrap();
+    let product_authority =
+        ryeos_app::operator_authority::admitted_operator_authority_for_principal(
+            &fixture.state,
+            &operator.principal_id(),
+        )
+        .unwrap();
+    assert_eq!(product_authority.owner_principal, operator.principal_id());
+    assert_eq!(product_authority.origin_site_id, REMOTE_ORIGIN);
+    assert_eq!(
+        product_authority.principal_class,
+        AuthorizedKeyPrincipalClass::RemoteOperator
+    );
+    assert_eq!(product_authority.grant_digest, grant.source_file_hash);
     let consumer = ExternalContentConsumerAuthority::installed_bundle(
         "config:test/product-consumer".into(),
         "a".repeat(64),
@@ -630,6 +644,14 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
         "changed grant cannot authorize its previous binding"
     );
     std::fs::remove_file(grant_path).unwrap();
+    assert!(
+        ryeos_app::operator_authority::admitted_operator_authority_for_principal(
+            &fixture.state,
+            &operator.principal_id(),
+        )
+        .is_err(),
+        "revoked remote product owner cannot prepare a selected consumer"
+    );
     assert!(
         read().is_err(),
         "revoked grant cannot authorize retained binding bytes"

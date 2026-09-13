@@ -2737,6 +2737,7 @@ mod tests {
             "qualification_hash":null
         }]);
         let selections_arg = selections.to_string();
+        let product_owner = format!("fp:{}", "b".repeat(64));
         let selected = resolve_command_for_daemon_with_commands(
             &s(&[
                 "external-content",
@@ -2748,6 +2749,8 @@ mod tests {
                 "installed_bundle",
                 "--product-selections",
                 &selections_arg,
+                "--product-owner-principal",
+                &product_owner,
                 "--no-project",
             ]),
             std::slice::from_ref(&command),
@@ -2756,6 +2759,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.parameters["product_selections"], selections);
+        assert_eq!(
+            selected.parameters["product_owner_principal"],
+            product_owner
+        );
         assert!(selected.parameters.get("project_path").is_none());
     }
 

@@ -161,6 +161,10 @@ pub struct BindRequest {
     #[serde(default)]
     pub product_selections:
         Option<Vec<ryeos_state::external_content::products::composition::ProductSelection>>,
+    /// Exact currently admitted operator that owns every selected product.
+    /// The configured local operator still authorizes and publishes the bind.
+    #[serde(default)]
+    pub product_owner_principal: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -172,8 +176,25 @@ pub enum BindConsumerKind {
 
 impl BindRequest {
     pub fn validate_consumer_request(&self) -> anyhow::Result<()> {
-        if let Some(selections) = &self.product_selections {
-            product_composition::validate_selection_batch(selections)?;
+        match (&self.product_selections, &self.product_owner_principal) {
+            (Some(selections), Some(owner)) => {
+                product_composition::validate_selection_batch(selections)?;
+                let fingerprint = owner.strip_prefix("fp:").ok_or_else(|| {
+                    anyhow::anyhow!("selected binding product_owner_principal is not canonical")
+                })?;
+                if !lillux::valid_hash(fingerprint)
+                    || fingerprint.bytes().any(|byte| byte.is_ascii_uppercase())
+                {
+                    anyhow::bail!("selected binding product_owner_principal is not canonical");
+                }
+            }
+            (Some(_), None) => {
+                anyhow::bail!("selected binding requires an exact product_owner_principal")
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("unselected binding cannot carry product_owner_principal")
+            }
+            (None, None) => {}
         }
         match self.consumer_kind {
             BindConsumerKind::InstalledBundle
@@ -685,11 +706,16 @@ pub async fn bind_selected_literal_resolution(
         .product_selections
         .as_deref()
         .expect("selected binding subject requires selections");
+    let product_owner = request
+        .product_owner_principal
+        .as_deref()
+        .expect("selected binding validation requires product owner");
+    crate::operator_authority::admitted_operator_authority_for_principal(&state, product_owner)?;
     product_composition::verify_recovered_selections(
         &state,
         resolution,
         &subject,
-        &context.fingerprint,
+        product_owner,
         selections,
     )?;
     let publication = BindPublicationRequest {
@@ -2141,6 +2167,7 @@ mod tests {
             project_snapshot_hash: None,
             project_path: None,
             product_selections: None,
+            product_owner_principal: None,
         };
         assert!(bundle.validate_consumer_request().is_ok());
         let selection =
@@ -2152,6 +2179,7 @@ mod tests {
             };
         let selected_bundle = BindRequest {
             product_selections: Some(vec![selection.clone()]),
+            product_owner_principal: Some(format!("fp:{}", "d".repeat(64))),
             ..bundle.clone()
         };
         assert!(selected_bundle.validate_consumer_request().is_ok());
@@ -2166,6 +2194,7 @@ mod tests {
         assert!(
             BindRequest {
                 product_selections: Some(Vec::new()),
+                product_owner_principal: Some(format!("fp:{}", "d".repeat(64))),
                 ..bundle.clone()
             }
             .validate_consumer_request()
@@ -2180,6 +2209,7 @@ mod tests {
         assert!(project.validate_consumer_request().is_ok());
         let selected_project = BindRequest {
             product_selections: Some(vec![selection]),
+            product_owner_principal: Some(format!("fp:{}", "d".repeat(64))),
             ..project.clone()
         };
         assert!(matches!(
@@ -2201,6 +2231,29 @@ mod tests {
             .is_err()
         );
         assert!(selected_bind_subject(&bundle).is_err());
+        assert!(
+            BindRequest {
+                product_selections: Some(vec![
+                    ryeos_state::external_content::products::composition::ProductSelection {
+                        declaration_id: "runtime".to_owned(),
+                        witness_hash: "f".repeat(64),
+                        witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                        qualification_hash: None,
+                    }
+                ]),
+                ..bundle.clone()
+            }
+            .validate_consumer_request()
+            .is_err()
+        );
+        assert!(
+            BindRequest {
+                product_owner_principal: Some(format!("fp:{}", "d".repeat(64))),
+                ..bundle
+            }
+            .validate_consumer_request()
+            .is_err()
+        );
     }
 
     #[test]

@@ -16,6 +16,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     req.validate_consumer_request()?;
     if let Some(selections) = req.product_selections.clone() {
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
+        let product_owner_context =
+            ryeos_app::operator_authority::admitted_operator_authority_for_principal(
+                &state,
+                req.product_owner_principal
+                    .as_deref()
+                    .expect("validated selected binding owner"),
+            )?
+            .handler_context();
         let preparation_state = Arc::clone(&state);
         let preparation_context = ctx.clone();
         let preparation_consumer_ref = req.consumer_ref.clone();
@@ -50,7 +58,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             };
             prepared.select_products_only(
                 &preparation_state,
-                &preparation_context,
+                &product_owner_context,
                 &selections,
             )?;
             anyhow::Ok(prepared)

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-09T14:21:58Z:5477fce0195ed2fd2164f26d5fb4ede9559a5fa446bbdda71cdc7d58c40e2b70:jRoUBFaKEm8LGdkWp7IjEsE37mfkRylXZrQBjvdalO4D6VJIJuEgusMyiryVibw3pni5HKrm0dm57nKgqLv3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T11:09:28Z:3f3f46c8fbfef02cf8ce68039516386c4cffc495722f1f0ebd8d4c583f798d69:VhuurYdqujIcSlocEIqf9Nl429MbGuHnPerNqIj91cPhmyu84CeVZRvQrA9mI4kS5QQodggTU42eahl8kPGACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]
-version: "1.4.0"
+version: "1.4.1"
 description: Finite production and qualification of the shared command environment.
 ---
 
@@ -59,6 +59,11 @@ Named-root filesystem import, general binding and managed activation remain
 local-operator operations. Current binding authorizer grant digests remain
 revocable; changing a grant invalidates bindings signed against its old digest.
 Establish the complete finite operator grant before production and binding.
+When a literal dependency is bound to an exact selected D1, the local binding
+request also names the canonical `product_owner_principal`. The target verifies
+that current admitted operator grant and checks every selected witness against
+that owner; the field separates product ownership from local binding authority
+and does not delegate the bind to the remote operator.
 
 The received-witness API remains a separate same-operator transfer contract.
 Do not relabel historical foreign-owner witnesses as fresh local captures or
