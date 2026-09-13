@@ -20,3 +20,14 @@ This is authoring-side behavior evidence, **not Lillux isolation acceptance**.
 The same cases must later pass through admitted project Tools and the actual
 target-local binding before hosted development is qualified. Do not install
 this probe as a worker-side command dispatcher or add it to release test gates.
+
+The adjacent `test-runtime.sh` and `test-artifact.sh` own focused source and
+artifact qualification. They call the canonical runtime verifier at
+`.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh` and the
+bootstrap-artifact verifier in that same library. Tests live here; reusable
+verification behavior does not.
+
+`test-artifact.sh` requires two independently produced archive/checksum pairs.
+It does not download inputs, produce an archive, or treat a moved source file as
+new reproduction evidence. Historical archives retain the producer digest they
+were originally emitted with.

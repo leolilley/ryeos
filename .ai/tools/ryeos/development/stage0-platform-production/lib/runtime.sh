@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-# Shared Stage-0 publisher/verifier functions, never a worker-side dispatcher.
+# Canonical shared Stage-0 publisher/verifier functions. Source ownership here
+# does not grant execution: the external first-bootstrap publisher and the
+# later admitted producer must call this same implementation.
 # The signed input owns all image members. These functions run only during
 # artifact authoring/verification; RyeOS import and binding still own launch.
 # Do not replace this with execution-host discovery, compiler wrappers, or a

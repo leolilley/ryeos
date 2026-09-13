@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-12T01:05:15Z:79c5185587510efcd30dac2abc644a27143f5d5f23b7d037c924131e5e8719aa:qnTU2mrBlozd6rECEcdmb8XIqAQCVPQ7bdmZ3ZPgXjH5W0UlksguS2FDi1bJMfl3sM6TrFi5L2TlcHBW9kH2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T00:19:08Z:78d3ed8d60ba32d866e4bfa8928211f57ca04f91ef3d9e9c2b3f2c7e01111c73:JHx0PwOzaYQgoqe4DT/uP+BFuqFd6lUk3Un8CfYIZPyDWFwZYZ3ph+HhXSmRKxicT1+vcO2psVRKv/OpvGA6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -568,9 +568,12 @@ the produced tree.
 The official GNU Rust host executables are dynamically linked. The separately
 pinned upstream ELF authoring tool rewrites their interpreter and library paths
 to `/ryeos/realizations/platform`, with default-library search disabled. The
-shared publisher/verifier helper currently executes in the publisher boundary.
-Its reusable production behavior belongs beside compiler production Tools;
-the first-bootstrap caller must reuse that same implementation, not fork it.
+shared runtime transformation/verifier helper and bootstrap-artifact verifier
+now live under
+`.ai/tools/ryeos/development/stage0-platform-production/`. Source ownership does
+not claim admitted execution: the current combined first-bootstrap producer
+still runs in the publisher boundary. Its replacement and admitted Stage1
+producer must reuse this canonical behavior, not fork it.
 It records every pre/post digest in `RYEOS-ELF-TRANSFORMS`, records selected image
 members in `RYEOS-RUNTIME-SOURCES`, and inventories final interpreter/DT_NEEDED
 edges in `RYEOS-RUNTIME-DEPENDENCIES`. The verifier resolves every such edge
@@ -600,7 +603,7 @@ evidence and signed bounds before optionally publishing one sibling-staged
 directory. It does not clear the execution gate:
 
 ```bash
-scripts/release/verify-development-toolchain-stage0.sh \
+bash .ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh \
   --inputs .ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml \
   --producer scripts/release/produce-development-toolchain-stage0.sh \
   --archive "$stage0_archive" \
@@ -610,7 +613,8 @@ scripts/release/verify-development-toolchain-stage0.sh \
 
 Qualifying Stage 0 runs the pinned publisher twice into distinct output
 directories (and preferably distinct empty caches), then passes both archive /
-checksum pairs to `test-development-toolchain-stage0.sh`. The test requires
+checksum pairs to
+`tests/e2e/development-toolchain-stage0/test-artifact.sh`. The test requires
 byte-identical archives and checksums before applying the full verifier once; it
 does not build or acquire anything itself. The tracked artifact tests consume
 already-built archives, do not compile RyeOS, and never manufacture substitute

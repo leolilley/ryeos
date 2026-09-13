@@ -2,9 +2,9 @@
 # Cheap contract tests: no Docker, downloads, Rust compilation or node access.
 set -euo pipefail
 export LC_ALL=C
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
 contract="$root/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml"
-helper="$root/scripts/release/development-toolchain-stage0-runtime.sh"
+helper="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -30,7 +30,7 @@ if [[ "$#" -eq 2 && "$1" == --verify-tree ]]; then
     validate "$contract" "$2"
     exit
 fi
-[[ "$#" -eq 0 ]] || { echo 'usage: test-development-toolchain-stage0-runtime.sh [--verify-tree DIR]' >&2; exit 2; }
+[[ "$#" -eq 0 ]] || { echo 'usage: test-runtime.sh [--verify-tree DIR]' >&2; exit 2; }
 validate "$contract"
 
 refuse() {

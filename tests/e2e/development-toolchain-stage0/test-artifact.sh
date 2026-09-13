@@ -28,10 +28,10 @@ done
 [[ -n "$archive" && -n "$checksum" \
     && -n "$reproduction_archive" && -n "$reproduction_checksum" ]] || usage
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
 inputs="$root/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml"
 producer="$root/scripts/release/produce-development-toolchain-stage0.sh"
-verifier="$root/scripts/release/verify-development-toolchain-stage0.sh"
+verifier="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -46,7 +46,7 @@ if "$producer" --inputs "$tmp/mutable-input.yaml" \
     exit 1
 fi
 grep -Fq 'unknown field: zig_index_url' "$tmp/producer-refusal"
-if "$verifier" --inputs "$tmp/mutable-input.yaml" \
+if bash "$verifier" --inputs "$tmp/mutable-input.yaml" \
     --producer "$producer" --archive "$archive" \
     > "$tmp/verifier-refusal" 2>&1; then
     echo "Stage-0 verifier accepted a mutable catalog dependency" >&2
@@ -63,7 +63,7 @@ cmp "$checksum" "$reproduction_checksum" || {
     exit 1
 }
 
-"$verifier" \
+bash "$verifier" \
     --inputs "$inputs" \
     --producer "$producer" \
     --archive "$archive" \
@@ -74,7 +74,7 @@ cmp "$checksum" "$reproduction_checksum" || {
 # Mutations are confined to this test's fresh, verifier-produced copy. No
 # installed or caller-owned tree is edited. Exercise the shared recursive
 # verifier directly so refusal tests do not repeatedly decompress 300 MB.
-runtime_test="$root/scripts/release/test-development-toolchain-stage0-runtime.sh"
+runtime_test="$root/tests/e2e/development-toolchain-stage0/test-runtime.sh"
 bash "$runtime_test"
 mv "$tmp/toolchain/lib/libz.so.1" "$tmp/libz.so.1"
 if bash "$runtime_test" --verify-tree "$tmp/toolchain" >/dev/null 2>&1; then
@@ -101,7 +101,7 @@ mv "$tmp/transforms" "$tmp/toolchain/RYEOS-ELF-TRANSFORMS"
 # verification of that identical content once is sufficient; do not walk and
 # hash another 20,000-file extraction just to establish the same proposition.
 
-if "$verifier" \
+if bash "$verifier" \
     --inputs "$inputs" \
     --producer "$producer" \
     --archive "$archive" \
@@ -115,7 +115,7 @@ mkdir "$tmp/bad"
 checksum_name="$(basename "$checksum")"
 cp "$checksum" "$tmp/bad/$checksum_name"
 sed -i -E 's/^[0-9a-f]{64}/0000000000000000000000000000000000000000000000000000000000000000/' "$tmp/bad/$checksum_name"
-if "$verifier" \
+if bash "$verifier" \
     --inputs "$inputs" \
     --producer "$producer" \
     --archive "$archive" \
