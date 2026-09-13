@@ -34,6 +34,92 @@ use super::launch_preparation::{
     PreparedRuntimeLaunch, RefBindingLaunchRecord,
 };
 
+/// Closed, secret-free recovery diagnostic vocabulary for persistent-session
+/// capsule verification. The wrapped error remains available to local tracing,
+/// but durable terminal testimony may retain only these reviewed labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SessionCapsuleVerificationStage {
+    #[error("session-capsule/load")]
+    Load,
+    #[error("session-capsule/retained-protocol")]
+    RetainedProtocol,
+    #[error("session-capsule/process-control")]
+    ProcessControl,
+    #[error("session-capsule/exact-program")]
+    ExactProgram,
+    #[error("session-capsule/captured-dependency")]
+    CapturedDependency,
+    #[error("session-capsule/executable-search")]
+    ExecutableSearch,
+    #[error("session-capsule/process-environment")]
+    ProcessEnvironment,
+    #[error("session-capsule/evidence-attachments")]
+    EvidenceAttachments,
+    #[error("session-capsule/evidence-validation")]
+    EvidenceValidation,
+    #[error("session-capsule/effective-definition")]
+    EffectiveDefinition,
+    #[error("session-capsule/effective-definition-digest")]
+    EffectiveDefinitionDigest,
+    #[error("session-capsule/current-trust")]
+    CurrentTrust,
+    #[error("session-capsule/protocol-identity")]
+    ProtocolIdentity,
+    #[error("session-capsule/source-closure")]
+    SourceClosure,
+    #[error("session-capsule/external-realizations")]
+    ExternalRealizations,
+    #[error("session-capsule/target-content")]
+    TargetContent,
+    #[error("session-capsule/persistent-session-realization")]
+    PersistentSessionRealization,
+}
+
+impl SessionCapsuleVerificationStage {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 17] = [
+        Self::Load,
+        Self::RetainedProtocol,
+        Self::ProcessControl,
+        Self::ExactProgram,
+        Self::CapturedDependency,
+        Self::ExecutableSearch,
+        Self::ProcessEnvironment,
+        Self::EvidenceAttachments,
+        Self::EvidenceValidation,
+        Self::EffectiveDefinition,
+        Self::EffectiveDefinitionDigest,
+        Self::CurrentTrust,
+        Self::ProtocolIdentity,
+        Self::SourceClosure,
+        Self::ExternalRealizations,
+        Self::TargetContent,
+        Self::PersistentSessionRealization,
+    ];
+
+    pub(crate) fn stable_label(self) -> &'static str {
+        match self {
+            Self::Load => "session-capsule/load",
+            Self::RetainedProtocol => "session-capsule/retained-protocol",
+            Self::ProcessControl => "session-capsule/process-control",
+            Self::ExactProgram => "session-capsule/exact-program",
+            Self::CapturedDependency => "session-capsule/captured-dependency",
+            Self::ExecutableSearch => "session-capsule/executable-search",
+            Self::ProcessEnvironment => "session-capsule/process-environment",
+            Self::EvidenceAttachments => "session-capsule/evidence-attachments",
+            Self::EvidenceValidation => "session-capsule/evidence-validation",
+            Self::EffectiveDefinition => "session-capsule/effective-definition",
+            Self::EffectiveDefinitionDigest => "session-capsule/effective-definition-digest",
+            Self::CurrentTrust => "session-capsule/current-trust",
+            Self::ProtocolIdentity => "session-capsule/protocol-identity",
+            Self::SourceClosure => "session-capsule/source-closure",
+            Self::ExternalRealizations => "session-capsule/external-realizations",
+            Self::TargetContent => "session-capsule/target-content",
+            Self::PersistentSessionRealization => "session-capsule/persistent-session-realization",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PersistentSessionEligibilityPreview {
     pub(crate) ready_for_admission: bool,
@@ -2065,53 +2151,62 @@ fn verify_session_capsule(
     content_target_contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule =
-        load_capsule(state, capsule_hash).with_context(|| "session-capsule/load stage")?;
+        load_capsule(state, capsule_hash).context(SessionCapsuleVerificationStage::Load)?;
     validate_session_process_control(
         state,
         &retained_session_protocol(engine, &capsule)
-            .with_context(|| "session-capsule/retained-protocol stage")?,
+            .context(SessionCapsuleVerificationStage::RetainedProtocol)?,
     )
-    .with_context(|| "session-capsule/process-control stage")?;
+    .context(SessionCapsuleVerificationStage::ProcessControl)?;
     let exact =
-        retained_exact_program(&capsule).with_context(|| "session-capsule/exact-program stage")?;
+        retained_exact_program(&capsule).context(SessionCapsuleVerificationStage::ExactProgram)?;
     let retained_dependency =
         ryeos_engine::resolution::RetainedResolutionOutput::capture(&dependency.resolution);
     if exact.resolution_output.root_ref() != dependency.canonical_ref
         || canonical_hash(&serde_json::to_value(&exact.resolution_output)?)?
             != canonical_hash(&serde_json::to_value(&retained_dependency)?)?
     {
-        bail!("session-capsule/captured-dependency: capsule contradicts its captured dependency");
+        return Err(anyhow!("capsule contradicts its captured dependency"))
+            .context(SessionCapsuleVerificationStage::CapturedDependency);
     }
     if capsule.executable_search != executable_search {
-        bail!("session-capsule/executable-search: capsule contradicts its executable-search dependency");
+        return Err(anyhow!(
+            "capsule contradicts its executable-search dependency"
+        ))
+        .context(SessionCapsuleVerificationStage::ExecutableSearch);
     }
     if &capsule.process_environment != environment {
-        bail!("session-capsule/process-environment: capsule contradicts its process-environment contribution");
+        return Err(anyhow!(
+            "capsule contradicts its process-environment contribution"
+        ))
+        .context(SessionCapsuleVerificationStage::ProcessEnvironment);
     }
     if exact.evidence_attachments != evidence_attachments {
-        bail!("session-capsule/evidence-attachments: capsule contradicts its evidence attachments");
+        return Err(anyhow!("capsule contradicts its evidence attachments"))
+            .context(SessionCapsuleVerificationStage::EvidenceAttachments);
     }
     validate_exact_evidence_attachments(&exact)
-        .with_context(|| "session-capsule/evidence-validation stage")?;
+        .context(SessionCapsuleVerificationStage::EvidenceValidation)?;
     let observed_digest = exact
         .resolution_output
         .effective_definition_digest()
-        .with_context(|| "session-capsule/effective-definition stage")?;
+        .context(SessionCapsuleVerificationStage::EffectiveDefinition)?;
     if observed_digest.as_str() != exact.effective_definition_digest {
-        bail!("session-capsule/effective-definition-digest: exact effective-definition digest changed");
+        return Err(anyhow!("exact effective-definition digest changed"))
+            .context(SessionCapsuleVerificationStage::EffectiveDefinitionDigest);
     }
     validate_capsule_current_trust(engine, &capsule)
-        .with_context(|| "session-capsule/current-trust stage")?;
+        .context(SessionCapsuleVerificationStage::CurrentTrust)?;
     let (protocol_ref, protocol_digest) = capsule_protocol_identity(&capsule)
-        .with_context(|| "session-capsule/protocol-identity stage")?;
+        .context(SessionCapsuleVerificationStage::ProtocolIdentity)?;
     let resolution = exact.resolution_output.restore();
     ryeos_app::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)
-        .with_context(|| "session-capsule/source-closure stage")?;
+        .context(SessionCapsuleVerificationStage::SourceClosure)?;
     ryeos_app::external_content_admission::recover_external_realizations(state, &resolution)
-        .with_context(|| "session-capsule/external-realizations stage")?;
+        .context(SessionCapsuleVerificationStage::ExternalRealizations)?;
     if let Some(contract) = content_target_contract {
         validate_captured_target_content(state, &resolution, contract, evidence_attachments)
-            .with_context(|| "session-capsule/target-content stage")?;
+            .context(SessionCapsuleVerificationStage::TargetContent)?;
     }
     super::execution_realization::verify_persistent_session(
         state,
@@ -2121,7 +2216,7 @@ fn verify_session_capsule(
         protocol_ref,
         protocol_digest,
     )
-    .with_context(|| "session-capsule/persistent-session-realization stage")?;
+    .context(SessionCapsuleVerificationStage::PersistentSessionRealization)?;
     Ok(capsule)
 }
 
@@ -3265,6 +3360,39 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_capsule_verification_stages_have_closed_stable_labels() {
+        let labels =
+            SessionCapsuleVerificationStage::ALL.map(SessionCapsuleVerificationStage::stable_label);
+        assert_eq!(
+            labels,
+            [
+                "session-capsule/load",
+                "session-capsule/retained-protocol",
+                "session-capsule/process-control",
+                "session-capsule/exact-program",
+                "session-capsule/captured-dependency",
+                "session-capsule/executable-search",
+                "session-capsule/process-environment",
+                "session-capsule/evidence-attachments",
+                "session-capsule/evidence-validation",
+                "session-capsule/effective-definition",
+                "session-capsule/effective-definition-digest",
+                "session-capsule/current-trust",
+                "session-capsule/protocol-identity",
+                "session-capsule/source-closure",
+                "session-capsule/external-realizations",
+                "session-capsule/target-content",
+                "session-capsule/persistent-session-realization",
+            ]
+        );
+        for (stage, label) in SessionCapsuleVerificationStage::ALL.into_iter().zip(labels) {
+            assert_eq!(stage.to_string(), label);
+        }
+        let unique = labels.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), SessionCapsuleVerificationStage::ALL.len());
+    }
 
     #[test]
     fn transferred_content_keeps_project_generation_without_overlaying_bundle_dependencies() {

@@ -354,6 +354,54 @@ impl BuildAndLaunchError {
     }
 }
 
+const MAX_RETAINED_LAUNCH_ERROR_BYTES: usize = 2048;
+
+/// Project an unexpected launch failure into the closed durable diagnostic
+/// contract. Arbitrary error text remains available to bounded local tracing;
+/// only explicitly typed, reviewed stage labels may enter root testimony.
+fn retained_launch_preparation_error(error: &BuildAndLaunchError) -> Value {
+    let mut stages = Vec::new();
+    if let BuildAndLaunchError::Internal(internal) = error
+        && let Some(stage) =
+            internal.downcast_ref::<super::persistent_session::SessionCapsuleVerificationStage>()
+    {
+        stages.push(stage.stable_label());
+    }
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = current {
+        if let Some(stage) =
+            cause.downcast_ref::<super::persistent_session::SessionCapsuleVerificationStage>()
+        {
+            let label = stage.stable_label();
+            if !stages.contains(&label) {
+                stages.push(label);
+            }
+        }
+        current = cause.source();
+    }
+    let mut retained = json!({
+        "code": "launch_preparation_failed",
+        "retryable": error.retryable_launch_interruption(),
+    });
+    if !stages.is_empty() {
+        retained["stages"] = json!(stages);
+    }
+    if lillux::canonical_json(&retained)
+        .map(|encoded| encoded.len() > MAX_RETAINED_LAUNCH_ERROR_BYTES)
+        .unwrap_or(true)
+    {
+        retained = json!({
+            "code": "launch_preparation_failed",
+            "retryable": error.retryable_launch_interruption(),
+        });
+    }
+    debug_assert!(
+        lillux::canonical_json(&retained)
+            .is_ok_and(|encoded| encoded.len() <= MAX_RETAINED_LAUNCH_ERROR_BYTES)
+    );
+    retained
+}
+
 impl From<serde_json::Error> for BuildAndLaunchError {
     fn from(e: serde_json::Error) -> Self {
         Self::Internal(anyhow::anyhow!(e))
@@ -5861,38 +5909,7 @@ async fn run_claimed_thread_row(
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
                     crate::structured_error::dispatch_error_value(dispatch_error.as_ref())
                 }
-                other => {
-                    let mut terminal_error = json!({
-                        "code": "launch_preparation_failed",
-                        "message": format!("{other}"),
-                        "retryable": other.retryable_launch_interruption(),
-                    });
-                    // Retain a bounded, sanitized cause chain. Stage labels
-                    // and digests are static diagnostics; environment values
-                    // and secrets never enter this chain by construction.
-                    const MAX_CAUSE_CHAIN_BYTES: usize = 2048;
-                    let mut chain = Vec::new();
-                    let mut total = 0usize;
-                    let mut current: Option<&(dyn std::error::Error + 'static)> =
-                        Some(other as &(dyn std::error::Error + 'static));
-                    while let Some(cause) = current {
-                        if chain.len() >= 16 {
-                            break;
-                        }
-                        let text = cause.to_string();
-                        total = total.saturating_add(text.len());
-                        if total > MAX_CAUSE_CHAIN_BYTES && !chain.is_empty() {
-                            break;
-                        }
-                        chain.push(text);
-                        if total > MAX_CAUSE_CHAIN_BYTES {
-                            break;
-                        }
-                        current = cause.source();
-                    }
-                    terminal_error["cause_chain"] = json!(chain);
-                    terminal_error
-                }
+                other => retained_launch_preparation_error(other),
             };
             if let Err(cleanup_error) = crate::dispatch::finalize_method_thread_if_needed(
                 params.state,
@@ -11320,6 +11337,50 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::execution::limits::{LimitCaps, LimitValues};
+
+    #[test]
+    fn retained_launch_error_keeps_only_typed_bounded_stage_diagnostics() {
+        let secret = format!(
+            "sentinel-secret Authorization: Bearer token /private/path ENV_VALUE={} ",
+            "x".repeat(MAX_RETAINED_LAUNCH_ERROR_BYTES * 2)
+        );
+        let internal = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            secret.clone(),
+        ))
+        .context("unreviewed dynamic recovery detail")
+        .context(
+            crate::execution::persistent_session::SessionCapsuleVerificationStage::SourceClosure,
+        );
+        let error = BuildAndLaunchError::Internal(internal);
+        let retained = retained_launch_preparation_error(&error);
+        let encoded = lillux::canonical_json(&retained).unwrap();
+
+        assert_eq!(retained["code"], "launch_preparation_failed");
+        assert_eq!(retained["retryable"], true);
+        assert_eq!(
+            retained["stages"],
+            json!(["session-capsule/source-closure"])
+        );
+        assert!(encoded.len() <= MAX_RETAINED_LAUNCH_ERROR_BYTES);
+        assert!(!encoded.contains("sentinel-secret"));
+        assert!(!encoded.contains("Authorization"));
+        assert!(!encoded.contains("/private/path"));
+        assert!(!encoded.contains("ENV_VALUE"));
+        assert!(!encoded.contains("unreviewed dynamic recovery detail"));
+
+        let nonretryable = retained_launch_preparation_error(&BuildAndLaunchError::Internal(
+            anyhow::anyhow!("another sentinel secret"),
+        ));
+        assert_eq!(nonretryable["code"], "launch_preparation_failed");
+        assert_eq!(nonretryable["retryable"], false);
+        assert!(nonretryable.get("stages").is_none());
+        assert!(
+            !lillux::canonical_json(&nonretryable)
+                .unwrap()
+                .contains("another sentinel secret")
+        );
+    }
 
     #[test]
     fn post_wait_failure_is_persisted_before_lifecycle_cleanup() {
