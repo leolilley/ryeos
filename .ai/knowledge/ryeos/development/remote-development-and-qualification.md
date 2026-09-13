@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T04:43:49Z:e17b4826649ed2e71c98628c7ce1f85bc224fb6c2dfd5b91fe5b18e2ecb28c40:C/UOrH48Wfn+SzP6mWZkUE/jJnYMXBlbd6JE8q8AGJO4hkODpSI0ft5MhdLRaQJ21z/+2nG301FhAA3L7CUuBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:58:17Z:86ba333afd9f6b73edd55e4bbb3552d1c581de42b452fc91c76633ee85fec030:S5vKkALE66x+A7nwteTa6DJ5wEuV96o9TzE3tV96o+mCWCATWPloyUTYH9IUU8Mm2y9i37PI8qacI7u08X8VCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -131,8 +131,9 @@ operations. Nothing inherits selections from the Graph parent.
 
 Produce the batch on the destination with the existing
 `external-content compose-product` authority for each exact consumer and
-project generation. Lift the returned `selections` into typed `root` or
-`workload_execution` targets and sort by target/declaration identity. Do not
+project generation. Lift the returned `selections` into typed
+`content_dependency` or `workload_execution` targets and sort by
+target/declaration identity. Do not
 type witness or qualification hashes from memory and do not reuse a source-node
 composition response. This first seam deliberately has no named profile or
 automatic binding lookup.

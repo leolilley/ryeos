@@ -1753,7 +1753,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 32 requires exact product receipt authority and semantic definition v3.
 // Epoch 33 combines product/capture authority with exact workload invocation
 // and retained process-scope authority. Neither branch epoch grants this union.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 34;
+// Epoch 35 makes a followed child's exact product-selection batch part of its
+// durable specification and recovery resume authority. Epoch 34 rows cannot
+// prove that newly required child authority and are never reinterpreted.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 35;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -25727,6 +25730,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn follow_product_authority_cut_refuses_then_explicitly_resets_predecessor_epoch() {
+        let (tmp, db) = fresh_db();
+        let path = tmp.path().join("runtime.db");
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("predecessor follow authority must fail closed");
+        assert!(format!("{error:#}").contains("explicit no-backcompat reset"));
+
+        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+        assert!(reset.requires_explicit_history_reset());
+        reset.apply_explicit_history_reset(&path).unwrap();
+        assert!(!reset.requires_explicit_history_reset());
     }
 
     #[test]

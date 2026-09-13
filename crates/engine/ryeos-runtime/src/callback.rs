@@ -494,7 +494,9 @@ pub struct ActionPayload {
     pub launch_window: Option<LaunchWindow>,
 }
 
-pub use ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs;
+pub use ryeos_state::external_content::products::composition::{
+    ProductSelectionInputs, canonicalize_product_selection_inputs,
+};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]

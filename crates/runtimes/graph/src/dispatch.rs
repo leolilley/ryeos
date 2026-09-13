@@ -224,7 +224,7 @@ fn build_action_payload(
 /// detached actions.
 pub(crate) fn product_selections_from_action(
     action: &Value,
-) -> anyhow::Result<ryeos_state::external_content::products::composition::ProductSelectionInputs> {
+) -> anyhow::Result<ryeos_runtime::callback::ProductSelectionInputs> {
     ryeos_runtime::callback::canonicalize_product_selection_inputs(
         action
             .get("product_selections")

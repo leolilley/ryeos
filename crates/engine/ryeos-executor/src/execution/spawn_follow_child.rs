@@ -1286,7 +1286,7 @@ async fn prepare_follow_children(
                     kind: child_execution.kind.clone(),
                     item_ref: child.item_ref.clone(),
                     ref_bindings: child.ref_bindings.clone(),
-                    product_selections: Vec::new(),
+                    product_selections: child.product_selections.clone(),
                     launch_mode: "detached".to_string(),
                     parameters: child.parameters.clone(),
                     project_context: seed_project_context,

@@ -264,7 +264,7 @@ impl Walker {
                 }
             };
             return StepOutcome::FollowSuspend(FollowSuspendOutcome {
-                item_id: dispatched_item_id,
+                item_id: dispatched_item_id.clone(),
                 ref_bindings,
                 product_selections: match dispatch::product_selections_from_action(&rendered_action)
                 {

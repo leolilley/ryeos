@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-12T01:05:15Z:784f07e2ea783f639bbe4f6b769b01452bf1ea47f5aa16c02402337cf910ea35:lRUwBwS4MPpmJ3P8QGtf3yD1SejRdwTMMLIMaZ4EfP2Ey+moG20sYZS/02dkUHfyQubJZC9BNv4I36eWYRlUCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:58:17Z:6fb7e2d89f6b1a0eaaa8c1be76ea8ad2456cecdf12f8a5b76f3e2e42a10f47a0:BZpt5a2KV6iF+Qv568f+QJbm3Uv7t4jsMpwWQdM4FSly0IIP3uavyzctORQCYR28H0t7ly/h5iYxLTnCHMDuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "2.3.1"
+version: "2.3.2"
 ```
 
 # Persistence Schema Evolution
@@ -37,7 +37,7 @@ The current clean-cut execution formats include:
   never a project mountpoint; predecessor capsules are not reinterpreted);
 - runtime launch metadata epoch 36;
 - the standalone runtime project-authority envelope epoch 5; and
-- the owned runtime SQLite operator schema epoch 34 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 35 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 Hosted command-outbox startup replay preserves an exact predecessor session
@@ -51,7 +51,11 @@ cleanup-unproved placements. No reset or rewrite of retained history is part
 of this terminal-history classification.
 
 The combined workload-invocation and environment-product cut uses launch
-metadata 35 and runtime epoch 34. It preserves invocation ingress provenance
+metadata 35 and runtime epoch 34. The subsequent Graph-follow product cut uses
+runtime epoch 35 because the follow child specification and recovery resume
+authority now retain the exact product-selection batch. Epoch 34 rows cannot
+prove that authority and require explicit execution-history retirement. The
+combined cut preserves invocation ingress provenance
 and product selection/retention together; neither branch's earlier epoch may be
 reinterpreted as the combined authority. The existing
 runtime-action row now retains trusted ingress provenance; a partial unique
