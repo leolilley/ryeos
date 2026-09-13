@@ -117,6 +117,7 @@ mod tests {
         AuthoritativeThreadSubject {
             thread_id: "T-subject".to_string(),
             chain_root_id: "T-subject".to_string(),
+            item_ref: "tool:test/subject".to_string(),
             status: ThreadStatus::Running,
             requested_by: requested_by.map(str::to_string),
             project_authority,

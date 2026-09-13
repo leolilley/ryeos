@@ -710,6 +710,26 @@ impl RemoteClient {
         .await
     }
 
+    /// Fetch ordinary inline CAS objects under the transport's established
+    /// JSON response bound and an explicit caller-owned total deadline. The
+    /// transport owns this limit because it must admit every valid inline
+    /// object plus its response envelope; protocol handlers must not invent a
+    /// smaller content limit for an already-admitted object type.
+    pub async fn objects_get_with_total_timeout(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+        total_timeout: lillux::time::Duration,
+    ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit_and_total_timeout(
+            object_hashes,
+            blob_hashes,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            total_timeout,
+        )
+        .await
+    }
+
     /// Fetch one or more bounded object batches for bundle transfer. Every
     /// underlying HTTP request has both a response-byte limit and a total
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
@@ -1085,6 +1105,19 @@ impl RemoteClient {
         self.signed_post("/project/status", &body).await
     }
 
+    /// Bounded project-status read for recovery decisions that hold a durable
+    /// operation attempt. Bulk project transfer remains separately bounded.
+    pub async fn project_status_bounded(&self, project_path: &str) -> Result<Value> {
+        let body = serde_json::json!({ "project_path": project_path });
+        self.signed_post_with_response_limit_and_timeout(
+            "/project/status",
+            &body,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            CONTROL_PLANE_TIMEOUT,
+        )
+        .await
+    }
+
     /// POST `/execute` for wait mode or `/execute/launch` for accepted mode
     /// (authenticated).
     /// Product selections name the destination's retained witnesses, not
@@ -1125,6 +1158,45 @@ impl RemoteClient {
         let response = self.signed_post(path, &body).await?;
         validate_remote_execute_response(&response, launch_id)?;
         Ok(response)
+    }
+
+    /// Submit one accepted launch under an explicit caller-owned total
+    /// deadline. Generic `/execute` remains deliberately unbounded; durable
+    /// orchestration uses this narrow boundary so an admitted operation
+    /// attempt cannot be held forever by a peer that stops producing bytes.
+    pub async fn execute_accepted_with_total_timeout(
+        &self,
+        item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
+        product_selections: &[ryeos_state::external_content::products::composition::ProductSelectionInput],
+        project_path: Option<&str>,
+        parameters: &Value,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        launch_id: &str,
+        total_timeout: lillux::time::Duration,
+    ) -> Result<Value> {
+        if execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Accepted {
+            anyhow::bail!("bounded accepted execution requires accepted response mode");
+        }
+        tokio::time::timeout(
+            total_timeout,
+            self.execute(
+                item_ref,
+                ref_bindings,
+                product_selections,
+                project_path,
+                parameters,
+                execution_policy,
+                Some(launch_id),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "remote accepted launch `{launch_id}` exceeded total timeout of {} seconds",
+                total_timeout.as_secs()
+            )
+        })?
     }
 
     /// Execute one wait-mode service and return its typed service value rather
@@ -3469,6 +3541,8 @@ mod tests {
 
         let app = axum::Router::new()
             .route("/execute", axum::routing::post(never_finishes))
+            .route("/execute/launch", axum::routing::post(never_finishes))
+            .route("/objects/get", axum::routing::post(never_finishes))
             .route("/objects/closure/get", axum::routing::post(never_finishes));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3496,6 +3570,33 @@ mod tests {
             .unwrap_err();
         assert!(execute_error.to_string().contains("exceeded total timeout"));
 
+        let accepted_error = client
+            .execute_accepted_with_total_timeout(
+                "graph:test/never-finishes",
+                &BTreeMap::new(),
+                &[],
+                Some("/target"),
+                &serde_json::json!({}),
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Accepted,
+                ),
+                "L-0123456789abcdef0123456789abcdef",
+                timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            accepted_error
+                .to_string()
+                .contains("exceeded total timeout")
+        );
+
+        let object_error = client
+            .objects_get_with_total_timeout(&["b".repeat(64)], &[], timeout)
+            .await
+            .unwrap_err();
+        assert!(object_error.to_string().contains("exceeded total timeout"));
+
         let closure_error = client
             .objects_closure_get_with_total_timeout(
                 &["a".repeat(64)],
@@ -3510,6 +3611,13 @@ mod tests {
             .unwrap_err();
         assert!(closure_error.to_string().contains("exceeded total timeout"));
         server.abort();
+    }
+
+    #[test]
+    fn default_json_bound_admits_a_maximum_inline_object_and_envelope() {
+        let inline = usize::try_from(crate::handlers::objects_get::MAX_INLINE_OBJECT_BYTES)
+            .expect("inline object limit fits usize");
+        assert!(DEFAULT_JSON_RESPONSE_MAX_BYTES >= inline.saturating_mul(2));
     }
 
     fn public_key_response(seed: u8) -> PublicKeyResponse {

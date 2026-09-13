@@ -892,6 +892,42 @@ fn resolve_pinned_snapshot_context_admitted(
     })
 }
 
+/// Materialize one exact CAS project generation for a read-only consumer.
+///
+/// This is the narrow non-launching entry point for consumers such as a
+/// domain Config compiler that must observe the same pinned content and
+/// snapshot-derived Engine as execution would. The returned path is only a
+/// locator within the retained typed context: callers must use
+/// `pinned_materialization` as project-content authority and keep the complete
+/// context alive for the duration of resolution.
+pub fn resolve_read_only_snapshot_context(
+    state: &AppState,
+    snapshot_hash: &str,
+    original_path: PathBuf,
+    checkout_id: &str,
+) -> Result<ResolvedProjectContext, ProjectSourceError> {
+    let authority = state
+        .state_store
+        .pinned_state_authority()
+        .map_err(ProjectSourceError::from)?;
+    let guard = authority
+        .acquire_shared_guard()
+        .map_err(ProjectSourceError::from)?;
+    resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
+        state,
+        authority: &authority,
+        cas_mutation_guard: &guard,
+        snapshot_hash,
+        original_path: Some(original_path),
+        checkout_id,
+        source: ProjectSource::Snapshot {
+            hash: snapshot_hash.to_owned(),
+        },
+        captured_generation: None,
+        realization: PinnedContextRealization::ReadOnly,
+    })
+}
+
 /// Sentinel value for `--no-project` mode: the caller has chosen to
 /// run a tool/system item without pushing project content. The ref
 /// is still per-principal so two different operators don't share

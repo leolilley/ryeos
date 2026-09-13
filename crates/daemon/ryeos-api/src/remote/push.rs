@@ -65,6 +65,25 @@ pub async fn push_snapshot_generation(
     };
 
     let operation = async {
+        // A lost acknowledgement may leave the exact generation already
+        // published. Check the owner-bound HEAD before opening a staging
+        // session so idempotent recovery cannot leak upload reservations.
+        let status = client.project_status_bounded(project_path_for_ref).await?;
+        if status.get("deployed").and_then(serde_json::Value::as_bool) == Some(true)
+            && status
+                .get("deployed_snapshot_hash")
+                .and_then(serde_json::Value::as_str)
+                == Some(snapshot_hash)
+        {
+            return Ok(PushResult {
+                snapshot_hash: snapshot_hash.to_string(),
+                tree_hash: snapshot.project_tree_hash,
+                tree_entries: tree.files.len(),
+                tree,
+                blobs_uploaded: 0,
+                blobs_skipped: 0,
+            });
+        }
         let upload_session = client
             .objects_put(None, project_path_for_ref, &[], &[])
             .await?;
@@ -316,6 +335,7 @@ pub async fn push_project_ai_only(
             )?;
             (snapshot_hash, upload_closure)
         };
+
         let upload = upload_missing(
             client,
             &local_cas,
@@ -460,7 +480,6 @@ pub async fn push_project(
             )?;
             (snapshot_hash, upload_closure)
         };
-
         let upload = upload_missing(
             client,
             &local_cas,

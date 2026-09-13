@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-13T02:16:11Z:64ba08810abf79320c4239ba09ffe8e16436a7890dc9d967ffda449b3f748eb3:nm3hVaS9x8Vt/bJtFTDiKVKDgGZpFoEyN96Dq0o0FjGAN/q0AJgR9MUonpeiGgMHF6tQKPBAUYORUUL438tsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote-worker-workflows.resume
+availability: daemon_only
+record_thread: true
+result_retention: full
+required_caps: ["ryeos.execute.service.remote/admin"]
+schema:
+  source_work_id: string
+description: "Explicitly resume the retained recovery projection of one interrupted operator-owned remote-worker workflow. The resume occurrence is separately recorded and cannot replace the original source work identity."

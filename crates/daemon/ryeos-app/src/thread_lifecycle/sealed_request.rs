@@ -844,6 +844,13 @@ impl SealedRootExecutionRequest {
         &self.item_ref
     }
 
+    /// Exact caller-authored reference bindings sealed at admission. Recovery
+    /// consumers use this typed projection rather than reaching into capsule
+    /// JSON and thereby becoming coupled to the sealed wire layout.
+    pub fn ref_bindings(&self) -> &BTreeMap<String, String> {
+        &self.ref_bindings
+    }
+
     pub fn product_selections(
         &self,
     ) -> &ryeos_state::external_content::products::composition::ProductSelectionInputs {

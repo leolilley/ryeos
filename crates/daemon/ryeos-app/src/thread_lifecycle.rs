@@ -59,6 +59,9 @@ pub use direct_execution::{
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
 pub use sealed_request::{AdmittedProgramSubject, SealedRootExecutionRequest};
 
+const RECORDED_SERVICE_ADMISSION_SCHEMA: u64 = 1;
+const RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD: &str = "admitted_parameters_digest";
+
 use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
 };
@@ -3003,11 +3006,16 @@ impl RootExecutionAdmission {
 pub struct RecordedServiceAdmission {
     root: RootExecutionAdmission,
     executor_ref: String,
+    parameters_digest: String,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
 }
 
 impl RecordedServiceAdmission {
-    pub fn new(root: RootExecutionAdmission, executor_ref: String) -> Result<Self> {
+    pub fn new(
+        root: RootExecutionAdmission,
+        executor_ref: String,
+        parameters: &Value,
+    ) -> Result<Self> {
         root.validate()?;
         let lifecycle_authority =
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
@@ -3039,6 +3047,7 @@ impl RecordedServiceAdmission {
         Ok(Self {
             root,
             executor_ref,
+            parameters_digest: ryeos_state::objects::canonical_value_digest(parameters)?,
             lifecycle_authority,
         })
     }
@@ -4051,13 +4060,48 @@ impl ThreadLifecycleService {
                 vec![NewEventRecord {
                     event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
                     storage_class: "indexed".to_string(),
-                    payload: json!({}),
+                    payload: json!({
+                        "schema": RECORDED_SERVICE_ADMISSION_SCHEMA,
+                        (RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD): admission.parameters_digest,
+                    }),
                 }],
                 launch_metadata,
                 owner,
             )?;
         self.publish_records(&persisted);
         Ok(())
+    }
+
+    /// Read the canonical parameters digest committed atomically with a
+    /// recorded in-process service root. The first two root events are a
+    /// closed birth record, so this never scans a long-lived chain or exposes
+    /// the admitted parameter values.
+    pub fn recorded_service_parameters_digest(&self, thread_id: &str) -> Result<String> {
+        let page =
+            self.state_store
+                .replay_events(thread_id, Some(thread_id), None, 2, 32 * 1024)?;
+        if page.events.len() != 2
+            || page.events[0].event_type != ryeos_state::event_types::THREAD_CREATED
+            || page.events[1].event_type != ryeos_state::event_types::THREAD_STARTED
+            || page.events[0].chain_seq != 1
+            || page.events[1].chain_seq != 2
+            || page.events[0].thread_seq != 1
+            || page.events[1].thread_seq != 2
+            || page.events[1].payload.as_object().map(|value| value.len()) != Some(2)
+            || page.events[1].payload.get("schema").and_then(Value::as_u64)
+                != Some(RECORDED_SERVICE_ADMISSION_SCHEMA)
+        {
+            bail!("recorded service root has no exact current parameter testimony");
+        }
+        let digest = page.events[1]
+            .payload
+            .get(RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD)
+            .and_then(Value::as_str)
+            .context("recorded service root omitted admitted parameter digest")?;
+        if !lillux::valid_hash(digest) {
+            bail!("recorded service root admitted parameter digest is invalid");
+        }
+        Ok(digest.to_owned())
     }
 
     fn admitted_root_create_params(
