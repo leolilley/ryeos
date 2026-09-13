@@ -3345,7 +3345,6 @@ mod tests {
                     "codex-main",
                     "--input",
                     r#"{"task":{"goal":"fix the tests"}}"#,
-                    "--async",
                 ]),
                 "production",
             ),
@@ -3358,7 +3357,6 @@ mod tests {
                     "codex-main",
                     "--input",
                     r#"{"task":{"goal":"fix the tests"}}"#,
-                    "--async",
                 ]),
                 "default",
             ),
@@ -3382,7 +3380,7 @@ mod tests {
                 resolved.parameters["task"],
                 serde_json::json!({"goal": "fix the tests"})
             );
-            assert!(resolved.async_launch);
+            assert!(!resolved.async_launch);
             assert_eq!(
                 resolved.project_path.as_deref(),
                 Some(project.path().canonicalize().unwrap().as_path())
@@ -3392,18 +3390,16 @@ mod tests {
 
     #[test]
     fn signed_remote_worker_recovery_commands_accept_only_source_work_id() {
-        for (file, tokens, service_ref, async_launch) in [
+        for (file, tokens, service_ref) in [
             (
                 "remote-worker-resume.yaml",
                 s(&["remote", "worker", "resume"]),
                 "service:remote-worker-workflows/resume",
-                true,
             ),
             (
                 "remote-worker-status.yaml",
                 s(&["remote", "worker", "status"]),
                 "service:remote-worker-workflows/query",
-                false,
             ),
         ] {
             let source = std::fs::read_to_string(
@@ -3416,9 +3412,6 @@ mod tests {
             command.name = file.to_string();
             let mut argv = tokens;
             argv.push("T-source-work".to_string());
-            if async_launch {
-                argv.push("--async".to_string());
-            }
 
             let resolved = resolve_command_for_daemon_with_commands(
                 &argv,
@@ -3434,7 +3427,7 @@ mod tests {
                     "source_work_id": "T-source-work"
                 })
             );
-            assert_eq!(resolved.async_launch, async_launch);
+            assert!(!resolved.async_launch);
             assert!(resolved.project_path.is_none());
         }
     }

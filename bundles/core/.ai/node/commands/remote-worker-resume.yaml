@@ -1,13 +1,9 @@
-# ryeos:signed:2026-09-13T02:26:37Z:ac3b54ec27de65867f000604ee2abb809e2b51c2cec081628e5432848db23e52:ElMy2MMtYMoM6BocRfpy4zYwm3SsWQnwqM/+QYv3w92i4QmPWc4jh9drn6KD5swNeU6yF9rW33FPaJImWXuCDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T02:32:05Z:d3c57a43580029cc3e84e1b545f3328cc570ca8020330f1a3b8f17be7be86f31:3xwLuBVjtbweD/nN6JfsIKO2RNnYSZeejCfc4lRJtLsekwzV0C+ENQHoXcCK2gsiGzmqM5GHZou0vhKOsQo0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [remote, worker, resume]
 description: "Resume source orchestration for one interrupted remote-worker workflow using only its source_work_id"
 forms:
   - slots:
       - field: source_work_id
-control_flags:
-  - flag: async
-    help: "Return after the recovery drive is durably accepted"
-    binding: launch_mode_accepted
 dispatch:
   kind: execute_ref
   execute: service:remote-worker-workflows/resume

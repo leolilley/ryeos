@@ -100,9 +100,7 @@ mod tests {
         assert_eq!(projected["defaults"]["remote"], "default");
         assert_eq!(projected["parameter_binding"]["input_flag"], "input");
         assert_eq!(projected["project"]["default"], "discover_upward_ai");
-        assert_eq!(
-            projected["control_flags"][0]["binding"],
-            "launch_mode_accepted"
-        );
+        assert_eq!(projected["project"]["request_project_path"], true);
+        assert!(projected["control_flags"].as_array().unwrap().is_empty());
     }
 }
