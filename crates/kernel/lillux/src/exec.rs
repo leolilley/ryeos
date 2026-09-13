@@ -352,7 +352,7 @@ fn sealed_memfd_with_flags(
     flags: libc::c_uint,
     mode: Option<libc::mode_t>,
 ) -> Result<InheritedDescriptorAuthority, String> {
-    use std::io::{Seek as _, Write as _};
+    use std::io::Seek as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
     let lease = retain_fork_sensitive_descriptors();
@@ -554,6 +554,222 @@ pub struct InheritedDescriptorAuthority {
     path: std::path::PathBuf,
     #[cfg(unix)]
     handle: Arc<ForkChildCloseFile>,
+}
+
+/// One immutable document retained across an exact controller credential
+/// transition. The privileged opener snapshots a protected administrator file
+/// into a sealed anonymous descriptor; the unprivileged child receives only
+/// that descriptor and cannot substitute or mutate its contents.
+#[derive(Debug)]
+pub struct InheritedReadonlyDocument {
+    authority: InheritedDescriptorAuthority,
+}
+
+impl InheritedReadonlyDocument {
+    /// Snapshot an already pinned administrator document into immutable
+    /// inherited launch authority. The containing namespace must have been
+    /// protected by the caller's descriptor-rooted traversal before this
+    /// conversion. The sealed snapshot also prevents an administrator update
+    /// racing the parent/child interpretations of one launch.
+    pub fn from_administrator_file(
+        file: &crate::PinnedRegularFile,
+        maximum_bytes: u64,
+    ) -> anyhow::Result<Self> {
+        file.require_owner(0)?;
+        let observation = file.observation()?;
+        let bytes = file.read_stable_bounded(&observation, maximum_bytes)?;
+        Ok(Self {
+            authority: sealed_memfd(c"lillux-protected-document", &bytes)
+                .map_err(anyhow::Error::msg)?,
+        })
+    }
+
+    /// Read the exact retained document while proving it stayed unchanged.
+    pub fn read_stable_bounded(&self, maximum_bytes: u64) -> anyhow::Result<Vec<u8>> {
+        let (bytes, _) = self
+            .authority
+            .read_regular_file_stable_bounded(maximum_bytes)?;
+        Ok(bytes)
+    }
+
+    /// Retain this exact document through one child exec and publish only its
+    /// numeric coordinate in the named environment slot. The environment is
+    /// transport, not authority: the descriptor and its root-owned metadata
+    /// are validated again by the child.
+    pub fn bind_to_command(
+        self,
+        command: &mut process::Command,
+        descriptor_env_name: &str,
+    ) -> Result<(), String> {
+        if descriptor_env_name.is_empty() || descriptor_env_name.contains(['=', '\0']) {
+            return Err("inherited document environment name is invalid".to_owned());
+        }
+        let descriptor = self.authority.inherited_descriptor()?;
+        configure_inherited_fds(command, std::slice::from_ref(&self.authority))?;
+        command.env(descriptor_env_name, descriptor.to_string());
+        Ok(())
+    }
+
+    /// Adopt the unique descriptor installed by the trusted parent launch.
+    /// Absence is distinct from a malformed coordinate. The variable is
+    /// consumed before returning so unrelated descendants cannot mistake it
+    /// for newly granted authority.
+    pub fn take_from_environment(descriptor_env_name: &str) -> Result<Option<Self>, String> {
+        if descriptor_env_name.is_empty() || descriptor_env_name.contains(['=', '\0']) {
+            return Err("inherited document environment name is invalid".to_owned());
+        }
+        let Some(raw) = std::env::var_os(descriptor_env_name) else {
+            return Ok(None);
+        };
+        // SAFETY: daemon bootstrap is single-threaded before any runtime or
+        // application thread exists. This consumes launch transport state.
+        unsafe { std::env::remove_var(descriptor_env_name) };
+        let raw = raw
+            .to_str()
+            .ok_or("inherited document descriptor coordinate is not UTF-8")?;
+        let descriptor: i32 = raw
+            .parse()
+            .map_err(|_| "inherited document descriptor coordinate is invalid")?;
+        if descriptor <= libc::STDERR_FILENO {
+            return Err("inherited document descriptor overlaps standard I/O".to_owned());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::FromRawFd as _;
+            let lease = retain_fork_sensitive_descriptors();
+            // Duplicate before constructing an owned File. An inherited raw
+            // coordinate can be repeated in hostile process environment; the
+            // successful duplicate gives this call unique ownership and
+            // closing the transport coordinate makes any repeated adoption
+            // fail without creating aliased File owners.
+            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            if duplicate < 0 {
+                return Err(format!(
+                    "adopt inherited document descriptor: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            unsafe {
+                libc::close(descriptor);
+            }
+            // SAFETY: F_DUPFD_CLOEXEC returned this uniquely owned descriptor.
+            let file = unsafe { std::fs::File::from_raw_fd(duplicate) };
+            let authority = InheritedDescriptorAuthority::from_owned_file(file, &lease)?;
+            let document = Self { authority };
+            document
+                .authority
+                .regular_file_observation()
+                .map_err(|error| error.to_string())?;
+            let identity = document
+                .authority
+                .file_identity()
+                .map_err(|error| error.to_string())?;
+            if identity.owner() != 0 {
+                return Err("inherited document was not created by the administrator".to_owned());
+            }
+            let required_seals =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            let observed_seals =
+                unsafe { libc::fcntl(document.authority.file().as_raw_fd(), libc::F_GET_SEALS) };
+            if observed_seals < 0 || observed_seals & required_seals != required_seals {
+                return Err("inherited document is not sealed against mutation".to_owned());
+            }
+            Ok(Some(document))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = descriptor;
+            Err("inherited documents are unavailable on this platform".to_owned())
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod inherited_readonly_document_tests {
+    use super::*;
+    use std::io::Seek as _;
+    use std::os::fd::IntoRawFd as _;
+
+    fn document_memfd(bytes: &[u8], seal: bool) -> i32 {
+        let fd = unsafe {
+            libc::memfd_create(
+                c"lillux-inherited-document-test".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        assert!(fd >= 0);
+        // SAFETY: memfd_create returned this uniquely owned descriptor.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(bytes).unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        if seal {
+            let seals =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) }, 0);
+        }
+        file.into_raw_fd()
+    }
+
+    #[test]
+    fn inherited_document_refuses_stdio_and_malformed_coordinates() {
+        for value in ["not-a-descriptor", "0", "1", "2"] {
+            let name = format!("LILLUX_TEST_INHERITED_DOCUMENT_{}", std::process::id());
+            // SAFETY: this test uses a process-unique name and consumes it in
+            // the same thread before returning.
+            unsafe { std::env::set_var(&name, value) };
+            assert!(InheritedReadonlyDocument::take_from_environment(&name).is_err());
+            assert!(std::env::var_os(&name).is_none());
+        }
+    }
+
+    #[test]
+    fn inherited_document_refuses_non_regular_authority() {
+        let mut descriptors = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: pipe2 returned two uniquely owned descriptors.
+        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+        let _writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+        let coordinate = reader.into_raw_fd();
+        let name = format!("LILLUX_TEST_INHERITED_DOCUMENT_PIPE_{}", std::process::id());
+        // SAFETY: this test uses a process-unique name and transfers the exact
+        // raw descriptor to the adoption method.
+        unsafe { std::env::set_var(&name, coordinate.to_string()) };
+        assert!(InheritedReadonlyDocument::take_from_environment(&name).is_err());
+        assert!(std::env::var_os(&name).is_none());
+    }
+
+    #[test]
+    fn inherited_document_requires_seals_and_uniquely_consumes_coordinate() {
+        let name = format!(
+            "LILLUX_TEST_INHERITED_DOCUMENT_SEALS_{}",
+            std::process::id()
+        );
+        let unsealed = document_memfd(b"mutable", false);
+        // SAFETY: this test uses a process-unique name and transfers the exact
+        // raw descriptor to the adoption method.
+        unsafe { std::env::set_var(&name, unsealed.to_string()) };
+        assert!(InheritedReadonlyDocument::take_from_environment(&name).is_err());
+
+        let sealed = document_memfd(b"immutable", true);
+        // SAFETY: same process-local transport contract as above.
+        unsafe { std::env::set_var(&name, sealed.to_string()) };
+        let adopted = InheritedReadonlyDocument::take_from_environment(&name);
+        if unsafe { libc::geteuid() } == 0 {
+            let document = adopted.unwrap().unwrap();
+            assert_eq!(document.read_stable_bounded(32).unwrap(), b"immutable");
+        } else {
+            assert!(adopted.is_err());
+        }
+
+        // Repeating the consumed coordinate cannot manufacture a second File
+        // owner or revive the inherited authority.
+        unsafe { std::env::set_var(&name, sealed.to_string()) };
+        assert!(InheritedReadonlyDocument::take_from_environment(&name).is_err());
+        assert!(std::env::var_os(&name).is_none());
+    }
 }
 
 /// Return the validated numeric coordinate for an exact, CLOEXEC-protected

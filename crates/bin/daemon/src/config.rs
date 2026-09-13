@@ -114,6 +114,14 @@ pub enum DaemonCommand {
         #[arg(long)]
         app_root: PathBuf,
     },
+    /// Administrator-selected external-supervisor entry. The binding pathname
+    /// is consumed only by the privileged bootstrap; the daemon receives an
+    /// exact inherited descriptor after Lillux drops credentials.
+    #[command(hide = true)]
+    HostRuntime {
+        #[arg(long)]
+        binding: PathBuf,
+    },
     /// Print build provenance and exit without loading daemon state.
     BuildInfo {
         /// Print only the baked git revision.
@@ -207,6 +215,23 @@ mod tests {
             matches!(cli.command, Some(DaemonCommand::HostService { app_root })
             if app_root == PathBuf::from("/home/example/.local/share/ryeos"))
         );
+    }
+
+    #[test]
+    fn external_host_runtime_requires_an_explicit_protected_binding() {
+        assert!(Cli::try_parse_from(["ryeosd", "host-runtime"]).is_err());
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "host-runtime",
+            "--binding",
+            "/run/ryeos/host-runtime.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::HostRuntime { binding })
+                if binding == PathBuf::from("/run/ryeos/host-runtime.json")
+        ));
     }
 
     #[test]

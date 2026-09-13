@@ -608,7 +608,22 @@ pub fn load_node_config_two_phase(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path))
+    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), None)
+}
+
+/// Running-daemon bootstrap with one already selected protected host runtime.
+/// Native service and external-supervisor transports converge here; this layer
+/// never discovers a lifecycle provider or decodes an OS backend.
+pub fn load_node_config_two_phase_with_host_runtime(
+    config: &Config,
+    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+) -> Result<(
+    Arc<Engine>,
+    Arc<NodeConfigSnapshot>,
+    Arc<NodePolicySnapshot>,
+    Arc<ryeos_engine::isolation::IsolationRuntime>,
+)> {
+    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), host_runtime)
 }
 
 /// Standalone service execution has no daemon callback listener to capture.
@@ -625,12 +640,13 @@ pub fn load_node_config_two_phase_standalone(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, None)
+    load_node_config_two_phase_with_socket(config, None, None)
 }
 
 fn load_node_config_two_phase_with_socket(
     config: &Config,
     daemon_socket: Option<&Path>,
+    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
@@ -742,10 +758,10 @@ fn load_node_config_two_phase_with_socket(
                 .process_scopes,
             ryeos_engine::isolation::IsolationProcessScopePolicy::Required { .. }
         ) {
-        match ryeos_node::supervision::InstalledService::discover_app_root(app_root)? {
-            Some(service) => {
-                service.verify_loaded_node_identity(&node_identity)?;
-                Some(service.open_process_scope_provider()?)
+        match host_runtime {
+            Some(runtime) => {
+                runtime.verify_loaded_node_identity(&node_identity)?;
+                Some(runtime.open_process_scope_provider()?)
             }
             // Direct nodes remain valid for non-scope-backed work. The
             // isolation runtime records no capability, and dedicated workers
