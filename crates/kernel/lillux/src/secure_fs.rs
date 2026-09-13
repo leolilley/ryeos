@@ -6031,6 +6031,18 @@ where
     P: FnMut(&Path, bool) -> Result<bool>,
     V: FnMut(&Path, File) -> Result<()>,
 {
+    // Keep traversal depth in an explicit descriptor-retaining stack. A
+    // policy-bounded tree is not necessarily call-stack bounded, and this
+    // primitive is used while recovering large admitted project snapshots on
+    // runtime threads with deliberately finite stacks. Higher layers must not
+    // need OS- or executor-specific stack sizing to walk filesystem authority.
+    struct DirectoryFrame {
+        relative: PathBuf,
+        directory: File,
+        names: std::vec::IntoIter<std::ffi::OsString>,
+        depth: usize,
+    }
+
     let names = if let Some(state) = budget.as_deref_mut() {
         let names = directory_names_with_limit(directory, state.remaining_entries)?;
         state.remaining_entries = state.remaining_entries.saturating_sub(names.len());
@@ -6038,14 +6050,25 @@ where
     } else {
         directory_names(directory)?
     };
-    for name in names {
-        let relative = relative_directory.join(&name);
+    let mut frames = vec![DirectoryFrame {
+        relative: relative_directory.to_path_buf(),
+        directory: directory.try_clone()?,
+        names: names.into_iter(),
+        depth,
+    }];
+
+    while let Some(frame) = frames.last_mut() {
+        let Some(name) = frame.names.next() else {
+            frames.pop();
+            continue;
+        };
+        let relative = frame.relative.join(&name);
         let display = root.join(&relative);
         let name_c = std::ffi::CString::new(name.as_bytes())?;
-        if let Some(child_directory) = open_child_directory(directory, &name_c, &display)? {
+        if let Some(child_directory) = open_child_directory(&frame.directory, &name_c, &display)? {
             if !prune(&relative, true)? {
                 if let Some(state) = budget.as_ref()
-                    && depth >= state.max_depth
+                    && frame.depth >= state.max_depth
                 {
                     anyhow::bail!(
                         "secure directory traversal exceeds maximum depth {} at {}",
@@ -6053,19 +6076,25 @@ where
                         display.display()
                     );
                 }
-                visit_from_open_directory(
-                    root,
-                    &relative,
-                    &child_directory,
-                    budget.as_deref_mut(),
-                    depth.saturating_add(1),
-                    prune,
-                    visit,
-                )?;
+                let child_names = if let Some(state) = budget.as_deref_mut() {
+                    let names =
+                        directory_names_with_limit(&child_directory, state.remaining_entries)?;
+                    state.remaining_entries = state.remaining_entries.saturating_sub(names.len());
+                    names
+                } else {
+                    directory_names(&child_directory)?
+                };
+                let child_depth = frame.depth.saturating_add(1);
+                frames.push(DirectoryFrame {
+                    relative,
+                    directory: child_directory,
+                    names: child_names.into_iter(),
+                    depth: child_depth,
+                });
             }
             continue;
         }
-        let file = open_regular_at(directory, &name_c, &display)?.ok_or_else(|| {
+        let file = open_regular_at(&frame.directory, &name_c, &display)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "secure project walk encountered a symlink, special file, or disappearing entry: {}",
                 display.display()
@@ -7505,6 +7534,46 @@ mod tests {
         assert_eq!(
             visited,
             vec![PathBuf::from("nested/leaf"), PathBuf::from("root")]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_regular_file_walk_retains_deep_authority_without_call_stack_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut current = dir.path().to_path_buf();
+        for index in 0..64 {
+            current.push(format!("d{index}"));
+            std::fs::create_dir(&current).unwrap();
+        }
+        std::fs::write(current.join("leaf"), b"leaf").unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+
+        let visited = std::thread::Builder::new()
+            .name("bounded-descriptor-walk".to_owned())
+            .stack_size(32 * 1024)
+            .spawn(move || {
+                let mut visited = Vec::new();
+                pinned
+                    .visit_regular_files_bounded(
+                        DirectoryTraversalBudget::new(65, 64),
+                        |_relative, _directory| Ok(false),
+                        |relative, _file| {
+                            visited.push(relative.to_path_buf());
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                visited
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(visited.len(), 1);
+        assert_eq!(
+            visited[0],
+            current.strip_prefix(dir.path()).unwrap().join("leaf")
         );
     }
 
