@@ -14,8 +14,8 @@ use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_runtime::CommandDispatch;
 use ryeos_runtime::authorizer::AuthorizationPolicy;
+use ryeos_runtime::{CommandDef, CommandDispatch};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,21 +42,32 @@ pub async fn handle(
                 }
                 CommandDispatch::DirectExecuteItemRef { .. } => true,
             };
-            json!({
-                "name": c.name,
-                "tokens": c.tokens,
-                "description": c.description,
-                "arguments": c.arguments.iter().map(|a| json!({
-                    "name": a.name,
-                    "kind": format!("{:?}", a.kind),
-                    "required": a.required,
-                    "description": a.description,
-                })).collect::<Vec<_>>(),
-                "invocable": invocable,
-            })
+            command_projection(c, invocable)
         })
         .collect();
     Ok(json!({ "commands": commands }))
+}
+
+fn command_projection(command: &CommandDef, invocable: bool) -> Value {
+    json!({
+        "name": command.name,
+        "tokens": command.tokens,
+        "description": command.description,
+        "arguments": command.arguments.iter().map(|argument| json!({
+            "name": argument.name,
+            "kind": argument.kind,
+            "positional": argument.positional,
+            "required": argument.required,
+            "arity": argument.arity,
+            "description": argument.description,
+        })).collect::<Vec<_>>(),
+        "forms": command.forms,
+        "defaults": command.defaults,
+        "parameter_binding": command.parameter_binding,
+        "control_flags": command.control_flags,
+        "project": command.project,
+        "invocable": invocable,
+    })
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -71,3 +82,27 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_exposes_complete_signed_command_grammar() {
+        let command: CommandDef = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/remote-worker-run.yaml"
+        )))
+        .unwrap();
+        let projected = command_projection(&command, true);
+
+        assert_eq!(projected["forms"].as_array().unwrap().len(), 2);
+        assert_eq!(projected["defaults"]["remote"], "default");
+        assert_eq!(projected["parameter_binding"]["input_flag"], "input");
+        assert_eq!(projected["project"]["default"], "discover_upward_ai");
+        assert_eq!(
+            projected["control_flags"][0]["binding"],
+            "launch_mode_accepted"
+        );
+    }
+}

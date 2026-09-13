@@ -1,0 +1,31 @@
+# ryeos:signed:2026-09-13T02:26:37Z:07e3147cb3cc96cd1535a4973f04b2532af263bb2559db720f2e532337217614:H2Ed++ZgIxOXP7ufoqhGLDEIv2LOyDlh+XyYi4ZpJgdcYjrtowuS5k52t8HhgEbkquXCADIg6jVFoIrLPKuUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [remote, worker, run]
+description: "Start one source-owned remote-worker workflow and return its source_work_id after durable acceptance"
+forms:
+  - slots:
+      - field: remote
+      - field: workflow_ref
+        matcher: canonical_ref
+      - field: credential_profile_id
+  - slots:
+      - field: workflow_ref
+        matcher: canonical_ref
+      - field: credential_profile_id
+defaults:
+  remote: default
+project:
+  resolution: required
+  default: discover_upward_ai
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+control_flags:
+  - flag: async
+    help: "Return after durable accepted launch with the authoritative source_work_id"
+    binding: launch_mode_accepted
+dispatch:
+  kind: execute_ref
+  execute: service:remote-worker-workflows/start
+  availability: daemon

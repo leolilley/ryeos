@@ -3325,6 +3325,121 @@ mod tests {
     }
 
     #[test]
+    fn signed_remote_worker_run_binds_both_forms_and_task_envelope() {
+        let mut command: CommandDef = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/remote-worker-run.yaml"
+        )))
+        .expect("signed remote-worker run command descriptor");
+        command.name = "remote-worker-run".to_string();
+        let project = tempfile::tempdir().unwrap();
+
+        for (argv, expected_remote) in [
+            (
+                s(&[
+                    "remote",
+                    "worker",
+                    "run",
+                    "production",
+                    "config:development/remote-worker",
+                    "codex-main",
+                    "--input",
+                    r#"{"task":{"goal":"fix the tests"}}"#,
+                    "--async",
+                ]),
+                "production",
+            ),
+            (
+                s(&[
+                    "remote",
+                    "worker",
+                    "run",
+                    "config:development/remote-worker",
+                    "codex-main",
+                    "--input",
+                    r#"{"task":{"goal":"fix the tests"}}"#,
+                    "--async",
+                ]),
+                "default",
+            ),
+        ] {
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                std::slice::from_ref(&command),
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                Some(project.path()),
+            )
+            .unwrap();
+
+            assert_eq!(resolved.item_ref, "service:remote-worker-workflows/start");
+            assert_eq!(resolved.parameters["remote"], expected_remote);
+            assert_eq!(
+                resolved.parameters["workflow_ref"],
+                "config:development/remote-worker"
+            );
+            assert_eq!(resolved.parameters["credential_profile_id"], "codex-main");
+            assert_eq!(
+                resolved.parameters["task"],
+                serde_json::json!({"goal": "fix the tests"})
+            );
+            assert!(resolved.async_launch);
+            assert_eq!(
+                resolved.project_path.as_deref(),
+                Some(project.path().canonicalize().unwrap().as_path())
+            );
+        }
+    }
+
+    #[test]
+    fn signed_remote_worker_recovery_commands_accept_only_source_work_id() {
+        for (file, tokens, service_ref, async_launch) in [
+            (
+                "remote-worker-resume.yaml",
+                s(&["remote", "worker", "resume"]),
+                "service:remote-worker-workflows/resume",
+                true,
+            ),
+            (
+                "remote-worker-status.yaml",
+                s(&["remote", "worker", "status"]),
+                "service:remote-worker-workflows/query",
+                false,
+            ),
+        ] {
+            let source = std::fs::read_to_string(
+                ryeos_engine::test_support::workspace_root()
+                    .join("bundles/core/.ai/node/commands")
+                    .join(file),
+            )
+            .unwrap();
+            let mut command: CommandDef = serde_yaml::from_str(&source).unwrap();
+            command.name = file.to_string();
+            let mut argv = tokens;
+            argv.push("T-source-work".to_string());
+            if async_launch {
+                argv.push("--async".to_string());
+            }
+
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                &[command],
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(resolved.item_ref, service_ref);
+            assert_eq!(
+                resolved.parameters,
+                serde_json::json!({
+                    "source_work_id": "T-source-work"
+                })
+            );
+            assert_eq!(resolved.async_launch, async_launch);
+            assert!(resolved.project_path.is_none());
+        }
+    }
+
+    #[test]
     fn project_aware_aliases_preserve_typed_defaults_and_explicit_selectors() {
         let project = tempfile::tempdir().unwrap();
         let explicit = tempfile::tempdir().unwrap();

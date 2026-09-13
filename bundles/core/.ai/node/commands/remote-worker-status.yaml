@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-13T02:26:37Z:0e6ef7c0f084fba22dd133bdab2968a5f2cb9c7db338e3a17cadb420bbecd1c4:pVFCWjhGPy80WyW8gUqaOxG8El/im8/hoN+VzER14++bd3Ed1rO/1ffC1ckl4+Q7sG5QoaPGOpUFMyXD1mt+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [remote, worker, status]
+description: "Read source orchestration and target-launch acceptance status for one remote-worker workflow; this is not live worker lifecycle status"
+forms:
+  - slots:
+      - field: source_work_id
+dispatch:
+  kind: execute_ref
+  execute: service:remote-worker-workflows/query
+  availability: daemon
