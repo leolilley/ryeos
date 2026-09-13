@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lillux::{PinnedDirectory, PinnedDirectoryLock};
+use lillux::{PinnedDirectory, PinnedDirectoryIdentity, PinnedDirectoryLock};
 use serde::{Deserialize, Serialize};
 
 use crate::NodeConfig;
@@ -35,6 +35,26 @@ pub struct HostServiceBinding {
     pub schema_version: u32,
     pub runtime: crate::host_runtime::HostRuntimeBinding,
     pub daemon_executable: PathBuf,
+}
+
+/// Exact predecessor accepted only by the administrator-confirmed host setup
+/// cutover. Runtime discovery never decodes this shape as current authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PredecessorHostServiceBindingV2 {
+    schema_version: u32,
+    app_root: PathBuf,
+    app_root_identity: PinnedDirectoryIdentity,
+    node_fingerprint: String,
+    account: lillux::ControllerAccount,
+    daemon_executable: PathBuf,
+    process_scopes: lillux::ProcessScopeConfiguration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingBindingDisposition {
+    Current,
+    ReplacePredecessor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,25 +298,44 @@ pub fn provision_host_service(
 fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBinding) -> Result<()> {
     directory.require_owner(0)?;
     let expected = lillux::canonical_json(&serde_json::to_value(binding)?)?.into_bytes();
-    match directory.open_pinned_regular(OsStr::new(DESCRIPTION), false)? {
+    let existing_description = directory.open_pinned_regular(OsStr::new(DESCRIPTION), false)?;
+    let disposition = match &existing_description {
         Some(existing) => {
             existing.require_owner(0)?;
             let current =
                 existing.read_stable_bounded(&existing.observation()?, MAX_HOST_DOCUMENT_BYTES)?;
-            if current != expected {
-                bail!("existing host association conflicts with this exact application binding");
-            }
+            Some(classify_existing_binding(&current, binding)?)
         }
-        None => directory.atomic_write_pinned_if_same(
-            OsStr::new(DESCRIPTION),
-            None,
-            &expected,
-            0o644,
-        )?,
+        None => None,
+    };
+
+    // Validate and preserve predecessor lifecycle intent before replacing its
+    // binding. A malformed/missing control record must not be hidden by a
+    // successful description cutover.
+    let existing_control = directory.open_child_directory(OsStr::new(CONTROL))?;
+    if disposition == Some(ExistingBindingDisposition::ReplacePredecessor)
+        && existing_control.is_none()
+    {
+        bail!("predecessor host association has no lifecycle control state");
     }
-    let control = directory.open_or_create_child(OsStr::new(CONTROL), 0o700)?;
-    binding.runtime.account.grant_private_directory(&control)?;
-    match control.open_pinned_regular(OsStr::new(DESIRED), false)? {
+    let control = match existing_control {
+        Some(control) => {
+            binding.runtime.account.require_directory_owner(&control)?;
+            control
+        }
+        None => {
+            let control = directory.open_or_create_child(OsStr::new(CONTROL), 0o700)?;
+            binding.runtime.account.grant_private_directory(&control)?;
+            control
+        }
+    };
+    let existing_desired = control.open_pinned_regular(OsStr::new(DESIRED), false)?;
+    if disposition == Some(ExistingBindingDisposition::ReplacePredecessor)
+        && existing_desired.is_none()
+    {
+        bail!("predecessor host association has no desired-state testimony");
+    }
+    match existing_desired {
         Some(existing) => {
             binding.runtime.account.grant_private_file(&existing)?;
             let _: DesiredState = serde_json::from_slice(
@@ -317,7 +356,48 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
             binding.runtime.account.grant_private_file(&desired)?;
         }
     }
+
+    match disposition {
+        Some(ExistingBindingDisposition::Current) => {}
+        Some(ExistingBindingDisposition::ReplacePredecessor) => {
+            directory.atomic_write_pinned_if_same(
+                OsStr::new(DESCRIPTION),
+                existing_description.as_ref(),
+                &expected,
+                0o644,
+            )?;
+        }
+        None => directory.atomic_write_pinned_if_same(
+            OsStr::new(DESCRIPTION),
+            None,
+            &expected,
+            0o644,
+        )?,
+    }
     Ok(())
+}
+
+fn classify_existing_binding(
+    bytes: &[u8],
+    expected: &HostServiceBinding,
+) -> Result<ExistingBindingDisposition> {
+    let canonical_expected = lillux::canonical_json(&serde_json::to_value(expected)?)?;
+    if bytes == canonical_expected.as_bytes() {
+        return Ok(ExistingBindingDisposition::Current);
+    }
+    let predecessor: PredecessorHostServiceBindingV2 = serde_json::from_slice(bytes)
+        .context("existing host association is neither current nor the exact predecessor")?;
+    if predecessor.schema_version != 2
+        || predecessor.app_root != expected.runtime.app_root
+        || predecessor.app_root_identity != expected.runtime.app_root_identity
+        || predecessor.node_fingerprint != expected.runtime.node_fingerprint
+        || predecessor.account != expected.runtime.account
+        || predecessor.daemon_executable != expected.daemon_executable
+        || predecessor.process_scopes != expected.runtime.process_scopes
+    {
+        bail!("predecessor host association does not belong to this exact node binding");
+    }
+    Ok(ExistingBindingDisposition::ReplacePredecessor)
 }
 
 fn expected_native_launch(binding: &HostServiceBinding) -> lillux::HostServiceLaunch {
@@ -1079,6 +1159,86 @@ mod tests {
             }
         });
         assert!(serde_json::from_value::<HostServiceBinding>(predecessor).is_err());
+    }
+
+    fn current_host_binding() -> HostServiceBinding {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": HOST_SERVICE_BINDING_SCHEMA_VERSION,
+            "runtime": {
+                "schema_version": crate::host_runtime::HOST_RUNTIME_BINDING_SCHEMA_VERSION,
+                "app_root": "/node",
+                "app_root_identity": {"containing_device": 1, "inode": 2},
+                "node_fingerprint": "a".repeat(64),
+                "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+                "process_scopes": {
+                    "version": 3,
+                    "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
+                }
+            },
+            "daemon_executable": "/usr/bin/ryeosd"
+        }))
+        .unwrap()
+    }
+
+    fn predecessor_binding_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "app_root": "/node",
+            "app_root_identity": {"containing_device": 1, "inode": 2},
+            "node_fingerprint": "a".repeat(64),
+            "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+            "daemon_executable": "/usr/bin/ryeosd",
+            "process_scopes": {
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
+            }
+        })
+    }
+
+    #[test]
+    fn confirmed_host_setup_classifies_only_exact_predecessor_and_is_idempotent() {
+        let current = current_host_binding();
+        let current_bytes =
+            lillux::canonical_json(&serde_json::to_value(&current).unwrap()).unwrap();
+        assert_eq!(
+            classify_existing_binding(current_bytes.as_bytes(), &current).unwrap(),
+            ExistingBindingDisposition::Current
+        );
+
+        let predecessor = lillux::canonical_json(&predecessor_binding_value()).unwrap();
+        assert_eq!(
+            classify_existing_binding(predecessor.as_bytes(), &current).unwrap(),
+            ExistingBindingDisposition::ReplacePredecessor
+        );
+    }
+
+    #[test]
+    fn confirmed_host_setup_refuses_forged_or_unknown_predecessor() {
+        let current = current_host_binding();
+        for (field, value) in [
+            ("app_root", serde_json::json!("/other")),
+            ("node_fingerprint", serde_json::json!("b".repeat(64))),
+            (
+                "account",
+                serde_json::json!({"implementation": "unix", "uid": 1001, "gid": 1000}),
+            ),
+            ("daemon_executable", serde_json::json!("/usr/bin/other")),
+        ] {
+            let mut forged = predecessor_binding_value();
+            forged[field] = value;
+            let bytes = lillux::canonical_json(&forged).unwrap();
+            assert!(classify_existing_binding(bytes.as_bytes(), &current).is_err());
+        }
+
+        let mut unknown = predecessor_binding_value();
+        unknown["replacement_hint"] = serde_json::json!(true);
+        let bytes = lillux::canonical_json(&unknown).unwrap();
+        assert!(classify_existing_binding(bytes.as_bytes(), &current).is_err());
+
+        let mut wrong_epoch = predecessor_binding_value();
+        wrong_epoch["schema_version"] = serde_json::json!(1);
+        let bytes = lillux::canonical_json(&wrong_epoch).unwrap();
+        assert!(classify_existing_binding(bytes.as_bytes(), &current).is_err());
     }
 
     #[test]
