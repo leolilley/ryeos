@@ -478,9 +478,31 @@ async fn query_candidate_result(
     ctx: &HandlerContext,
 ) -> Result<HostedCandidateResultResponse> {
     let client = RemoteClient::from_remote_cfg_as_configured_operator(state, remote, ctx)?;
+    query_candidate_result_with_client(
+        &client,
+        &intent.chain_root_id,
+        &intent.source_site_id,
+        &intent.owner_principal(),
+        &intent.target_site_id,
+        &remote.pinned_signing_key()?,
+    )
+    .await
+}
+
+/// Query and verify the target-owned candidate testimony without applying or
+/// publishing it. Remote workflow completion reuses this boundary so the
+/// candidate-result service remains the sole owner of hosted candidate proof.
+pub(crate) async fn query_candidate_result_with_client(
+    client: &RemoteClient,
+    chain_root_id: &str,
+    source_site_id: &str,
+    expected_owner_principal: &str,
+    expected_target_site_id: &str,
+    target_signing_key: &lillux::crypto::VerifyingKey,
+) -> Result<HostedCandidateResultResponse> {
     let request = HostedCandidateResultRequest {
-        chain_root_id: intent.chain_root_id.clone(),
-        source_site_id: intent.source_site_id.clone(),
+        chain_root_id: chain_root_id.to_owned(),
+        source_site_id: source_site_id.to_owned(),
     };
     let value = client
         .execute_service_result_with_total_timeout(
@@ -499,9 +521,9 @@ async fn query_candidate_result(
         .context("decode hosted candidate testimony")?;
     response.validate_against(
         &request,
-        &intent.owner_principal(),
-        &intent.target_site_id,
-        &remote.pinned_signing_key()?,
+        expected_owner_principal,
+        expected_target_site_id,
+        target_signing_key,
     )?;
     Ok(response)
 }

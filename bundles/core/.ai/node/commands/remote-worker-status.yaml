@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-13T02:26:37Z:0e6ef7c0f084fba22dd133bdab2968a5f2cb9c7db338e3a17cadb420bbecd1c4:pVFCWjhGPy80WyW8gUqaOxG8El/im8/hoN+VzER14++bd3Ed1rO/1ffC1ckl4+Q7sG5QoaPGOpUFMyXD1mt+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T03:32:01Z:9145f9f63ab533923570dd7e624768b4f693f461e28c77e4024cacf34c86bc8f:s4e7rfkRAixxPR5OlqWb9nIhRRl+Hg/VIJ8eWdalRky4Y0e4azjfP69VLa/h9v3gDI7T/H2pYiCnv+/EhR3kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [remote, worker, status]
-description: "Read source orchestration and target-launch acceptance status for one remote-worker workflow; this is not live worker lifecycle status"
+description: "Read local source orchestration state and its allowed next action; this never contacts the target or advances recovery"
 forms:
   - slots:
       - field: source_work_id

@@ -31,6 +31,7 @@ rmp-serde = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-graph-definition = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
