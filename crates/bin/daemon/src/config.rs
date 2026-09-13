@@ -100,6 +100,11 @@ pub enum DaemonCommand {
     HostUpgrade {
         #[arg(long)]
         app_root: PathBuf,
+        /// Exact package-owned daemon path that this installer replaces.
+        /// A differently pinned service belongs to another host installation
+        /// authority and must be refused before the node is stopped.
+        #[arg(long)]
+        expected_daemon_path: PathBuf,
         #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
         expected_daemon_sha256: Option<String>,
         #[arg(long, conflicts_with = "action")]
@@ -184,14 +189,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_upgrade_requires_an_exact_action_and_digest_except_for_inspection() {
+    fn host_upgrade_requires_package_path_and_exact_action_digest_except_for_inspection() {
         let base = ["ryeosd", "host-upgrade", "--app-root", "/home/example/node"];
         assert!(Cli::try_parse_from(base).is_err());
-        assert!(Cli::try_parse_from(base.into_iter().chain(["--inspect"])).is_ok());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--expected-daemon-path",
+                "/usr/bin/ryeosd",
+                "--inspect",
+            ]))
+            .is_ok()
+        );
         assert!(Cli::try_parse_from(base.into_iter().chain(["begin"])).is_err());
         let digest = "a".repeat(64);
         assert!(
             Cli::try_parse_from(base.into_iter().chain([
+                "--expected-daemon-path",
+                "/usr/bin/ryeosd",
                 "--expected-daemon-sha256",
                 &digest,
                 "begin",

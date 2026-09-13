@@ -485,6 +485,22 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
 }
 
 impl InstalledService {
+    /// Prove that this package transaction replaces the executable selected
+    /// by the administrator-owned host association. Package installation and
+    /// service selection are separate authorities: an installer for
+    /// `/usr/bin/ryeosd` must not stop a service pinned to another prefix and
+    /// then claim that service has received the staged generation.
+    pub fn require_package_daemon_path(&self, expected: &Path) -> Result<()> {
+        if !expected.is_absolute() || self.binding.daemon_executable != expected {
+            bail!(
+                "configured host daemon {} is not the package daemon {}",
+                self.binding.daemon_executable.display(),
+                expected.display()
+            );
+        }
+        Ok(())
+    }
+
     fn clear_launch_failure(&self) -> Result<()> {
         lillux::require_administrator()?;
         self.check_binding()?;
@@ -891,6 +907,11 @@ impl InstalledService {
                     "host-upgrade".to_owned(),
                     "--app-root".to_owned(),
                     root.to_owned(),
+                    "--expected-daemon-path".to_owned(),
+                    self.binding
+                        .daemon_executable
+                        .to_string_lossy()
+                        .into_owned(),
                     "--expected-daemon-sha256".to_owned(),
                     expected_daemon_sha256.to_owned(),
                     "observe".to_owned(),

@@ -306,12 +306,16 @@ fn main() -> Result<()> {
     }
     if let Some(config::DaemonCommand::HostUpgrade {
         app_root,
+        expected_daemon_path,
         expected_daemon_sha256,
         inspect,
         action,
     }) = &cli.command
     {
         let service = ryeos_node::supervision::InstalledService::discover_app_root(app_root)?;
+        if let Some(service) = &service {
+            service.require_package_daemon_path(expected_daemon_path)?;
+        }
         if *inspect {
             println!(
                 "{}",

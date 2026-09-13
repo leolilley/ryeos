@@ -461,9 +461,11 @@ host_upgrade_command() {
         --transaction-fd "$RYEOS_INSTALL_TRANSACTION_FD" || \
         die "host upgrade lost its exact package installation transaction"
     if [[ $(id -u) -eq 0 ]]; then
-        "$target_dir/ryeosd" host-upgrade --app-root "$state_root" "$@"
+        "$target_dir/ryeosd" host-upgrade --app-root "$state_root" \
+            --expected-daemon-path "$bin_dir/ryeosd" "$@"
     else
-        sudo "$target_dir/ryeosd" host-upgrade --app-root "$state_root" "$@"
+        sudo "$target_dir/ryeosd" host-upgrade --app-root "$state_root" \
+            --expected-daemon-path "$bin_dir/ryeosd" "$@"
     fi
 }
 
