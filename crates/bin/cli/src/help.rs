@@ -810,12 +810,10 @@ fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>
                 .map(|slot| {
                     let field = slot.field.replace('_', "-");
                     form_fields.insert(field.clone());
-                    let required = !command.command.defaults.contains_key(&slot.field)
-                        && !command.command.defaults.contains_key(&field);
-                    if required {
-                        format!("<{field}>")
-                    } else {
+                    if command_form_slot_is_optional(&command.command, &slot.field) {
                         format!("[<{field}>]")
+                    } else {
+                        format!("<{field}>")
                     }
                 })
                 .collect::<Vec<_>>()
@@ -855,6 +853,27 @@ fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>
     } else {
         format!(" {}", parts.join(" "))
     }
+}
+
+pub(crate) fn command_form_slot_is_optional(
+    command: &ryeos_runtime::CommandDef,
+    slot_field: &str,
+) -> bool {
+    let normalized = slot_field.replace('_', "-");
+    let defaulted =
+        command.defaults.contains_key(slot_field) || command.defaults.contains_key(&normalized);
+    // A separate form that omits this field is the unambiguous spelling which
+    // consumes its default. Within a form that explicitly includes the field,
+    // keep the slot required; rendering it optional would describe an argv
+    // shape the form matcher does not actually accept.
+    let omitted_by_alternative = command.forms.len() > 1
+        && command.forms.iter().any(|candidate| {
+            candidate
+                .slots
+                .iter()
+                .all(|slot| slot.field.replace('_', "-") != normalized)
+        });
+    defaulted && !omitted_by_alternative
 }
 
 fn installed_usage_line(
@@ -1304,7 +1323,7 @@ mod tests {
 
         assert_eq!(
             installed_usage_line(&command, None),
-            "ryeos remote worker run ([<remote>] <workflow-ref> | <workflow-ref>)"
+            "ryeos remote worker run (<remote> <workflow-ref> | <workflow-ref>)"
         );
     }
 }

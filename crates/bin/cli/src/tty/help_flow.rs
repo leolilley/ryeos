@@ -734,7 +734,7 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
                 .iter()
                 .map(|slot| {
                     let name = slot.field.replace('_', "-");
-                    if command.defaults.contains_key(&slot.field) {
+                    if crate::help::command_form_slot_is_optional(command, &slot.field) {
                         format!("[<{name}>]")
                     } else {
                         format!("<{name}>")
