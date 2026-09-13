@@ -4245,8 +4245,12 @@ pub fn command_observation(
         "completion_operation_id":completion_operation_id.clone(),
         "completion_source":completion_source,
     });
-    let child_executions = workload_child_execution_facts(state, &session)?;
     if let Some(completion_operation_id) = completion_operation_id {
+        let upstream_session_id = session.remote_thread_id.as_deref().ok_or_else(|| {
+            anyhow!("completed command-started turn has no retained upstream session")
+        })?;
+        let child_executions =
+            workload_child_execution_facts(state, &session, upstream_session_id, &turn_id)?;
         result["completion_fence"] = serde_json::to_value(HostedCommandCompletionFence {
             placement_thread_id: session.placement_thread_id,
             admitted_capsule_hash: session.admitted_capsule_hash,
@@ -4256,14 +4260,14 @@ pub fn command_observation(
             turn_id,
             completion_operation_id,
         })?;
+        result["child_executions"] = child_executions;
     }
-    result["child_executions"] = child_executions;
     Ok(result)
 }
 
-/// Project every retained workload-client child execution of this placement
-/// from existing state: the placement's runtime action dispatches joined to
-/// each child thread's authoritative terminal snapshot. This is an
+/// Project every retained workload-client child execution of one exact
+/// structured-session turn from existing state: typed runtime action intents
+/// joined to each child thread's authoritative terminal snapshot. This is an
 /// observation read for the hosted operator, who cannot reach the generic
 /// thread-children listing surface; it re-executes nothing and grants
 /// nothing. A dispatch whose child snapshot contradicts the placement's
@@ -4271,10 +4275,14 @@ pub fn command_observation(
 fn workload_child_execution_facts(
     state: &AppState,
     session: &DedicatedSessionRecord,
+    upstream_session_id: &str,
+    upstream_operation_id: &str,
 ) -> Result<Value> {
-    let dispatches = state
-        .state_store
-        .workload_child_dispatches(&session.placement_thread_id)?;
+    let dispatches = state.state_store.workload_child_dispatches(
+        &session.placement_thread_id,
+        upstream_session_id,
+        upstream_operation_id,
+    )?;
     let owner = session.owner_principal.as_str();
     let mut children = Vec::with_capacity(dispatches.len());
     for dispatch in dispatches {
@@ -4287,11 +4295,13 @@ fn workload_child_execution_facts(
                     dispatch.operation_id
                 )
             })?;
-        if child.chain_root_id != session.chain_root_id
-            || child.requested_by.as_deref().unwrap_or_default() != owner
-        {
-            bail!("workload child dispatch contradicts its placement ownership");
-        }
+        validate_workload_child_identity(
+            owner,
+            &dispatch.child_thread_id,
+            &child.thread_id,
+            &child.chain_root_id,
+            child.requested_by.as_deref(),
+        )?;
         children.push(json!({
             "operation_id": dispatch.operation_id,
             "mode": dispatch.mode.as_str(),
@@ -4308,6 +4318,22 @@ fn workload_child_execution_facts(
         }));
     }
     Ok(Value::Array(children))
+}
+
+fn validate_workload_child_identity(
+    owner: &str,
+    dispatched_child_thread_id: &str,
+    child_thread_id: &str,
+    child_chain_root_id: &str,
+    child_requested_by: Option<&str>,
+) -> Result<()> {
+    if child_thread_id != dispatched_child_thread_id
+        || child_chain_root_id != dispatched_child_thread_id
+        || child_requested_by != Some(owner)
+    {
+        bail!("workload child dispatch contradicts its placement ownership");
+    }
+    Ok(())
 }
 
 fn bounded_attempt_key(
@@ -5753,6 +5779,31 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workload_child_identity_refuses_thread_root_and_owner_contradictions() {
+        assert!(
+            validate_workload_child_identity(
+                "fp:owner",
+                "T-child",
+                "T-child",
+                "T-child",
+                Some("fp:owner")
+            )
+            .is_ok()
+        );
+        for (thread, root, owner) in [
+            ("T-other", "T-child", Some("fp:owner")),
+            ("T-child", "T-parent", Some("fp:owner")),
+            ("T-child", "T-child", Some("fp:other")),
+            ("T-child", "T-child", None),
+        ] {
+            assert!(
+                validate_workload_child_identity("fp:owner", "T-child", thread, root, owner)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn public_command_surface_uses_only_frozen_selected_public_routes() {

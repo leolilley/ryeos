@@ -16,15 +16,27 @@ use ryeos_engine::kind_registry::KindRegistry;
 /// need to distinguish a known-but-missing item use
 /// [`build_test_state_with_bundles`].
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
-    let engine = Arc::new(ryeos_engine::engine::Engine::new(
+    let engine = empty_engine();
+    build_test_state_with_engine(engine)
+}
+
+fn empty_engine() -> Arc<ryeos_engine::engine::Engine> {
+    Arc::new(ryeos_engine::engine::Engine::new(
         KindRegistry::empty(),
         ryeos_engine::parsers::ParserDispatcher::new(
             ryeos_engine::parsers::ParserRegistry::empty(),
             Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
         ),
         Vec::new(),
-    ));
-    build_test_state_with_engine(engine)
+    ))
+}
+
+/// Reopen the complete state-store projection over an existing test root.
+/// This deliberately reconstructs the service owners instead of reusing any
+/// process-local AppState maps, matching the daemon-restart observation gate.
+#[allow(dead_code)]
+pub fn reopen_test_state(tmpdir: &tempfile::TempDir) -> AppState {
+    build_test_state_at(tmpdir.path(), empty_engine(), false)
 }
 
 /// Build an AppState backed by the live workspace bundles.
@@ -39,24 +51,39 @@ fn build_test_state_with_engine(
     engine: Arc<ryeos_engine::engine::Engine>,
 ) -> (tempfile::TempDir, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
-    let key_path = tmpdir.path().join("identity").join("node-key.pem");
+    let state = build_test_state_at(tmpdir.path(), engine, true);
+    (tmpdir, state)
+}
+
+fn build_test_state_at(
+    root: &std::path::Path,
+    engine: Arc<ryeos_engine::engine::Engine>,
+    create_identity: bool,
+) -> AppState {
+    let runtime_state_dir = root.join(".ai").join("state");
+    let runtime_db_path = root.join("runtime.sqlite3");
+    let key_path = root.join("identity").join("node-key.pem");
     let config = ryeos_app::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
-        uds_path: tmpdir.path().join("test.sock"),
-        app_root: tmpdir.path().to_path_buf(),
+        uds_path: root.join("test.sock"),
+        app_root: root.to_path_buf(),
         node_signing_key_path: key_path.clone(),
-        operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-        authorized_keys_dir: tmpdir.path().join("auth"),
+        operator_signing_key_path: root.join("user-key.pem"),
+        authorized_keys_dir: root.join("auth"),
     };
-    let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    let identity = if create_identity {
+        ryeos_app::identity::NodeIdentity::create(&key_path).unwrap()
+    } else {
+        ryeos_app::identity::NodeIdentity::load(&key_path).unwrap()
+    };
     // Admission classifies the configured operator separately from remote
     // node claimants. Keep that authority real in the shared fixture so tests
     // exercise the production identity check instead of failing before the
     // claim contract is reached.
-    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
+    if create_identity {
+        ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
+    }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -68,7 +95,7 @@ fn build_test_state_with_engine(
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
         ryeos_app::state_store::StateStore::new_with_head_trust(
-            tmpdir.path().to_path_buf(),
+            root.to_path_buf(),
             runtime_state_dir,
             runtime_db_path,
             signer,
@@ -100,7 +127,6 @@ fn build_test_state_with_engine(
     ));
 
     build_app_state(
-        tmpdir,
         config,
         identity,
         state_store,
@@ -177,7 +203,6 @@ fn build_test_state_with_hosted_policy_choices(
 // Test fixture: one argument per AppState component under test.
 #[allow(clippy::too_many_arguments)]
 fn build_app_state(
-    tmpdir: tempfile::TempDir,
     config: ryeos_app::config::Config,
     identity: ryeos_app::identity::NodeIdentity,
     state_store: Arc<ryeos_app::state_store::StateStore>,
@@ -187,7 +212,7 @@ fn build_app_state(
     commands: Arc<ryeos_app::command_service::CommandService>,
     write_barrier: ryeos_app::write_barrier::WriteBarrier,
     event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
-) -> (tempfile::TempDir, AppState) {
+) -> AppState {
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         bundles: vec![],
         routes: vec![],
@@ -253,7 +278,7 @@ fn build_app_state(
         persistent_sessions: Arc::new(ryeos_app::persistent_session::PersistentSessionPool::new()),
     };
 
-    (tmpdir, state)
+    state
 }
 
 fn test_object_closure_policy()

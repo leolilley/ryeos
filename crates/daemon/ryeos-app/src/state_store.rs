@@ -15569,15 +15569,20 @@ impl StateStore {
         self.lock()?.runtime_db.runtime_action_intents()
     }
 
-    /// Retained workload-client dispatch summaries for one placement caller.
-    /// Observation projection only: reads existing intents, mints nothing.
+    /// Retained workload-client dispatch summaries for one exact
+    /// structured-session turn. Observation projection only: reads existing
+    /// typed intents, mints nothing.
     pub fn workload_child_dispatches(
         &self,
         first_caller_thread_id: &str,
+        upstream_session_id: &str,
+        upstream_operation_id: &str,
     ) -> Result<Vec<runtime_db::WorkloadChildDispatch>> {
-        self.lock()?
-            .runtime_db
-            .workload_child_dispatches(first_caller_thread_id)
+        self.lock()?.runtime_db.workload_child_dispatches(
+            first_caller_thread_id,
+            upstream_session_id,
+            upstream_operation_id,
+        )
     }
 
     /// Durable, non-released shared-workspace operations for one hosted root.

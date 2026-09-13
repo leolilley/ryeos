@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-12T07:36:30Z:1f888e8720da3d2b75804e2a1244ef80f14456b7011a027da01bb18efe76a2d1:8+WmjbfyIKXFw8i84HP8u3bf+ECBQrGDC9SfPzPjUinMp8Tu7gIg9o3AjpKnXq3xq6L0H99B2lyJVY/X9kKBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T00:23:34Z:f7bb1b919a4255d7a2e27777bc9156a17b32fd219b3028f4dc31a7f77f2c1c3f:a45Ub1db47Bk1HlcE4teSSSOgxuO1oXpMnL/tvNG59y0QqUAGteUyAF2d1e6Du1uawhqYuG+cnB7bkzwaTpjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.8.0"
+version: "1.8.1"
 ```
 
 # Worker-Hosted Execution
@@ -1066,17 +1066,23 @@ death, and history is not implicitly reset.
 
 ## Child-execution observation
 
-A hosted operator proves the tool operations a worker invoked through the
-placement's settled command observation. For every workload-client dispatch
-the daemon retains one runtime action intent binding the ingress provenance
-to exactly one daemon-minted child execution; the command observation
-projects each retained dispatch together with its child's authoritative
-terminal snapshot and replayable result. The projection reads existing
-state only: it never re-executes a child, never widens thread-children
-listing authority, and fails closed when a child snapshot contradicts its
-placement's ownership. Worker prose about child outcomes is orientation;
-the projected dispatch, capsule, terminal, and result facts are the
-acceptance evidence.
+A hosted operator proves the tool operations a worker invoked through one
+exact settled command observation. After the immutable command, turn-start,
+and turn-completion facts prove that command's upstream session and turn, the
+projection selects only runtime action intents whose typed structured-session
+provenance matches both coordinates. Distinct call IDs identify the individual
+calls. A later turn on the same placement, another upstream session, CLI
+ingress, and non-workload runtime children are excluded.
+
+For every matching workload-client dispatch the daemon retains one runtime
+action intent binding the ingress provenance to exactly one daemon-minted child
+execution; the command observation joins that retained dispatch to its child's
+authoritative terminal snapshot and replayable result. The projection reads
+existing state only: it never re-executes a child, never widens thread-children
+listing authority, and fails closed when the child thread, independent child
+root, or requested owner contradicts the retained dispatch and placement.
+Worker prose about child outcomes is orientation; the projected dispatch,
+capsule, terminal, and result facts are the acceptance evidence.
 
 ## Explicit non-claims
 

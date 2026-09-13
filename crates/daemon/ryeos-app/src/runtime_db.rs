@@ -440,7 +440,7 @@ pub struct WorkloadChildDispatch {
     pub mode: RuntimeActionMode,
     pub child_thread_id: String,
     pub created_at_ms: i64,
-    pub workload_invocation: Option<serde_json::Value>,
+    pub workload_invocation: ryeos_runtime::workload_client::WorkloadInvocationSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12199,51 +12199,59 @@ impl RuntimeDb {
         Ok(intents)
     }
 
-    /// Operator-facing dispatch summary for one workload-client child of a
-    /// placement. This reads retained rows only; it mints no authority and
-    /// exists so hosted placement observation can prove child executions
-    /// without the generic thread-children listing surface.
+    /// Operator-facing dispatch summaries for workload-client children of one
+    /// exact structured-session turn. This reads and validates the existing
+    /// RuntimeActionIntent owner; it mints no authority and does not create a
+    /// second child or invocation ledger.
     pub fn workload_child_dispatches(
         &self,
         first_caller_thread_id: &str,
+        upstream_session_id: &str,
+        upstream_operation_id: &str,
     ) -> Result<Vec<WorkloadChildDispatch>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id, mode, child_thread_id, created_at_ms, workload_invocation
+            "SELECT operation_id, created_at_ms
                FROM runtime_action_intent
               WHERE first_caller_thread_id=?1 AND workload_invocation IS NOT NULL
               ORDER BY created_at_ms, operation_id",
         )?;
-        let dispatches = statement
+        let operations = statement
             .query_map([first_caller_thread_id], |row| {
-                let mode = RuntimeActionMode::parse(row.get::<_, String>(1)?.as_str())
-                    .map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            error.into(),
-                        )
-                    })?;
-                let invocation = row
-                    .get::<_, Option<String>>(4)?
-                    .map(|value| serde_json::from_str(&value))
-                    .transpose()
-                    .map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Text,
-                            error.into(),
-                        )
-                    })?;
-                Ok(WorkloadChildDispatch {
-                    operation_id: row.get(0)?,
-                    mode,
-                    child_thread_id: row.get(2)?,
-                    created_at_ms: row.get(3)?,
-                    workload_invocation: invocation,
-                })
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(anyhow::Error::from)?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut dispatches = Vec::new();
+        for (operation_id, created_at_ms) in operations {
+            let intent = self
+                .get_runtime_action_intent(&operation_id)?
+                .ok_or_else(|| anyhow!("runtime action intent disappeared during observation"))?;
+            if intent.first_caller_thread_id != first_caller_thread_id {
+                bail!("workload child dispatch contradicts its placement caller");
+            }
+            let Some(workspace_operation) = intent.workspace_operation.as_ref() else {
+                continue;
+            };
+            let ryeos_runtime::workload_client::WorkloadInvocationSource::StructuredSession {
+                upstream_session_id: retained_session_id,
+                operation_id: retained_operation_id,
+                ..
+            } = &workspace_operation.invocation
+            else {
+                continue;
+            };
+            if retained_session_id != upstream_session_id
+                || retained_operation_id != upstream_operation_id
+            {
+                continue;
+            }
+            dispatches.push(WorkloadChildDispatch {
+                operation_id: intent.operation_id,
+                mode: intent.mode,
+                child_thread_id: intent.child_thread_id,
+                created_at_ms,
+                workload_invocation: workspace_operation.invocation.clone(),
+            });
+        }
         Ok(dispatches)
     }
 
@@ -22579,7 +22587,6 @@ mod tests {
             None,
         )
         .unwrap();
-
         let authority = output_bearing_project_authority("9".repeat(64), "a".repeat(64));
         db.bind_root_action_project_authority(&operation_id, &authority)
             .unwrap();
@@ -22824,6 +22831,45 @@ mod tests {
             None,
         )
         .unwrap();
+        let mut later_turn = seed.clone();
+        later_turn.workspace_id = "workspace-later-turn";
+        later_turn.invocation = WorkloadInvocationSource::StructuredSession {
+            upstream_session_id: "session-one".to_owned(),
+            operation_id: "turn-two".to_owned(),
+            call_id: "call-later".to_owned(),
+        };
+        let mut other_session = seed.clone();
+        other_session.workspace_id = "workspace-other-session";
+        other_session.invocation = WorkloadInvocationSource::StructuredSession {
+            upstream_session_id: "session-two".to_owned(),
+            operation_id: "turn-one".to_owned(),
+            call_id: "call-other-session".to_owned(),
+        };
+        let mut cli = seed.clone();
+        cli.workspace_id = "workspace-cli";
+        cli.invocation = WorkloadInvocationSource::Cli {
+            external_request_id: "cli-request".to_owned(),
+        };
+        for (workspace, request_hash, child) in [
+            (&later_turn, "7".repeat(64), "T-child-later-turn"),
+            (&other_session, "6".repeat(64), "T-child-other-session"),
+            (&cli, "5".repeat(64), "T-child-cli"),
+        ] {
+            db.reserve_runtime_action_intent_with_workspace(
+                &workspace
+                    .invocation
+                    .runtime_operation_id(workspace.workload_client_grant_digest)
+                    .unwrap(),
+                "T-chain",
+                "T-parent",
+                RuntimeActionMode::Inline,
+                &request_hash,
+                child,
+                None,
+                Some(workspace),
+            )
+            .unwrap();
+        }
         let mut unrelated = seed.clone();
         unrelated.workspace_id = "workspace-other";
         unrelated.invocation = WorkloadInvocationSource::StructuredSession {
@@ -22846,17 +22892,30 @@ mod tests {
         )
         .unwrap();
 
-        let dispatches = db.workload_child_dispatches("T-parent").unwrap();
+        let dispatches = db
+            .workload_child_dispatches("T-parent", "session-one", "turn-one")
+            .unwrap();
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0].child_thread_id, "T-child-workload");
         assert_eq!(dispatches[0].mode, RuntimeActionMode::Inline);
-        assert!(dispatches[0].workload_invocation.is_some());
+        assert_eq!(dispatches[0].workload_invocation, seed.invocation);
 
-        let unrelated = db.workload_child_dispatches("T-unrelated").unwrap();
+        let unrelated = db
+            .workload_child_dispatches("T-unrelated", "session-two", "turn-two")
+            .unwrap();
         assert_eq!(unrelated.len(), 1);
         assert_eq!(unrelated[0].child_thread_id, "T-child-other-workload");
 
-        assert!(db.workload_child_dispatches("T-absent").unwrap().is_empty());
+        assert!(
+            db.workload_child_dispatches("T-parent", "session-two", "turn-two")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.workload_child_dispatches("T-absent", "session-one", "turn-one")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
