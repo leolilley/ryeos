@@ -318,6 +318,36 @@ fn ensure_root_regular(
     Ok(())
 }
 
+fn decode_matching_launch(bytes: &[u8], expected: &HostServiceLaunch) -> Result<HostServiceLaunch> {
+    let actual: HostServiceLaunch = serde_json::from_slice(bytes)
+        .context("existing native service launch record is invalid")?;
+    if &actual != expected {
+        bail!("existing native service record `launch.json` conflicts with this host association");
+    }
+    Ok(actual)
+}
+
+fn require_matching_launch_record(
+    directory: &PinnedDirectory,
+    expected: &HostServiceLaunch,
+) -> Result<()> {
+    let file = directory
+        .open_pinned_regular(OsStr::new(LAUNCH_RECORD), false)?
+        .context("configured native service launch record is absent")?;
+    file.require_owner(0)?;
+    let actual = decode_matching_launch(
+        &file.read_stable_bounded(&file.observation()?, 64 * 1024)?,
+        expected,
+    )?;
+    // The launch record is a typed, root-owned host configuration document,
+    // not a CAS object or a signed byte identity. New records are canonical,
+    // while idempotent provisioning compares the complete closed value. The
+    // separately derived run program remains byte-exact, so formatting cannot
+    // change what the native supervisor executes.
+    let _ = canonical_launch(&actual)?;
+    Ok(())
+}
+
 fn require_root_regular(directory: &PinnedDirectory, name: &str, expected: &[u8]) -> Result<()> {
     let file = directory
         .open_pinned_regular(OsStr::new(name), false)?
@@ -346,7 +376,8 @@ fn require_published_service(
 ) -> Result<()> {
     directory.require_owner(0)?;
     let records = records(directory)?;
-    ensure_root_regular(&records, LAUNCH_RECORD, &canonical_launch(launch)?, 0o644)?;
+    let _ = canonical_launch(launch)?;
+    require_matching_launch_record(&records, launch)?;
     ensure_root_regular(&records, MANAGER_RECORD, &manager_bytes()?, 0o644)?;
     ensure_root_regular(directory, RUN_PROGRAM, &run_program(launch)?, 0o755)?;
     // `down` is native desired state, not realization content. Recreating it
@@ -547,6 +578,47 @@ mod tests {
     fn run_program_rejects_invalid_environment_syntax_and_control_values() {
         assert!(run_program(&launch(serde_json::json!({"BAD-NAME": "value"}))).is_err());
         assert!(run_program(&launch(serde_json::json!({"HOME": "line\nbreak"}))).is_err());
+    }
+
+    #[test]
+    fn idempotent_provision_compares_the_complete_typed_launch_not_json_whitespace() {
+        let expected = launch(serde_json::json!({}));
+        let pretty = serde_json::to_vec_pretty(&expected).unwrap();
+        assert_eq!(
+            decode_matching_launch(&pretty, &expected).unwrap(),
+            expected
+        );
+
+        let mut different = serde_json::to_value(&expected).unwrap();
+        different["arguments"][2] = "/another/node".into();
+        assert!(
+            decode_matching_launch(&serde_json::to_vec(&different).unwrap(), &expected).is_err()
+        );
+
+        let mut unknown = serde_json::to_value(&expected).unwrap();
+        unknown["ambient_path"] = "/usr/bin".into();
+        assert!(decode_matching_launch(&serde_json::to_vec(&unknown).unwrap(), &expected).is_err());
+
+        let mut wrong_schema = serde_json::to_value(&expected).unwrap();
+        wrong_schema["schema_version"] = 0.into();
+        assert!(
+            decode_matching_launch(&serde_json::to_vec(&wrong_schema).unwrap(), &expected).is_err()
+        );
+
+        let mut wrong_account = serde_json::to_value(&expected).unwrap();
+        wrong_account["account"]["uid"] = 1001.into();
+        assert!(
+            decode_matching_launch(&serde_json::to_vec(&wrong_account).unwrap(), &expected)
+                .is_err()
+        );
+
+        let mut wrong_environment = serde_json::to_value(&expected).unwrap();
+        wrong_environment["environment"]["PATH"] = "/ambient".into();
+        assert!(
+            decode_matching_launch(&serde_json::to_vec(&wrong_environment).unwrap(), &expected)
+                .is_err()
+        );
+        assert!(decode_matching_launch(b"{", &expected).is_err());
     }
 
     #[test]
