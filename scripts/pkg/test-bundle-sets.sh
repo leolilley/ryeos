@@ -63,8 +63,8 @@ for set_name in "${bundle_set_ids[@]}"; do
   contains central-auth "${members[@]}"
 done
 
-[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex" ]]
-[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex local-inference tv-tracker-authoring" ]]
+[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex opencode" ]]
+[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
 done

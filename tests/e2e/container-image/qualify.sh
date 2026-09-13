@@ -40,10 +40,12 @@ PROJECT_DIR="$WORK/project"
 DAEMON_PORT=18081
 SHUTDOWN_SMOKE_PID=""
 
-# The production image uses the unconfined-host isolation backend, which
-# cannot truthfully enforce read-only live filesystem access. Declare the
-# required read-write authority explicitly instead of hiding it in the generic
-# SSE helper.
+# This is the cross-variant control-plane qualification. The current image
+# profiles deliberately disable per-workload isolation, so this request names
+# its live read-write project authority explicitly instead of hiding it in the
+# generic SSE helper. Passing this test does not qualify hosted-worker process
+# scopes or confinement; hosted-workflow needs a separate enforced-worker OCI
+# gate before it may make that claim.
 LIVE_POLICY='{
   "schema_version": 2,
   "ownership": "daemon_owned",
@@ -336,4 +338,4 @@ docker logs "$CONTAINER" 2>&1 | grep -Eq 'daemon exiting.*signal|reason.?=.?sign
   exit 1
 }
 
-echo "$VARIANT image qualification passed: $IMAGE_REF"
+echo "$VARIANT control-plane image qualification passed: $IMAGE_REF"

@@ -173,6 +173,7 @@ COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=published /build/bundles/standard     /opt/ryeos/standard
 COPY --from=published /build/bundles/hosted-node  /opt/ryeos/hosted-node
 COPY --from=published /build/bundles/codex        /opt/ryeos/codex
+COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
