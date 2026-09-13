@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T07:15:52Z:c2265b320ab69cd12753a92f2ed134b232111917910da71261a45edcdd0021ed:tv5fvTiTatE8cuChBbCt8ulU8a9l1we+Dje7djpeNL11qUsgh3hqtr2gNNntpyzHbgvG+2qHL0YVNlO7Zk4yDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T09:38:49Z:5c47818dfc08f22f4748f6c502a21681343cf2ace9ac8c701d754f077ed7d52b:2b7b4DRvaEmjsTAwlgX/mG0dhv+IHv5g747sR0VANSQzUoDmVIyYrA+LjAgXNjvK82+e5PnXLzZeUj8w4u/qAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -140,6 +140,11 @@ host reboot side effect.
 Nodes without this explicit association remain supported direct nodes. If an
 association exists but its native service is absent, unhealthy or mismatched,
 lifecycle commands fail closed rather than start an un-supervised replacement.
+Package upgrades likewise require the association's pinned daemon executable
+to equal the package-owned daemon path before creating an upgrade journal or
+stopping the node. A service intentionally pinned to another prefix must be
+upgraded by that prefix's owning installation mechanism; the ordinary package
+installer never writes there or silently changes the association.
 
 ### `ryeos node status`
 
