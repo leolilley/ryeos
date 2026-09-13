@@ -21,8 +21,10 @@ The same cases must later pass through admitted project Tools and the actual
 target-local binding before hosted development is qualified. Do not install
 this probe as a worker-side command dispatcher or add it to release test gates.
 
-The adjacent `test-runtime.sh` and `test-artifact.sh` own focused source and
-artifact qualification. They call the canonical runtime verifier at
+The adjacent `test-ownership.sh`, `test-runtime.sh` and `test-artifact.sh` own
+focused source and artifact qualification. The ownership test proves that only
+the external acquisition entry contains network transport and that the
+publisher calls the Tool-adjacent offline producer. The other tests call the canonical runtime verifier at
 `.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh` and the
 bootstrap-artifact verifier in that same library. Tests live here; reusable
 verification behavior does not.

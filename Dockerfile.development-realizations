@@ -10,14 +10,20 @@ FROM --platform=linux/amd64 docker.io/library/rust@sha256:443dd9a3260cf23c22fc05
 WORKDIR /publisher
 ENV RYEOS_STAGE0_PUBLISHER_IMAGE=docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c
 COPY .ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml /publisher/inputs.yaml
-COPY scripts/release/produce-development-toolchain-stage0.sh /publisher/scripts/release/produce-development-toolchain-stage0.sh
+COPY scripts/release/acquire-development-toolchain-stage0.sh /publisher/scripts/release/acquire-development-toolchain-stage0.sh
+COPY .ai/tools/ryeos/development/stage0-platform-production/produce.sh /publisher/.ai/tools/ryeos/development/stage0-platform-production/produce.sh
+COPY .ai/tools/ryeos/development/stage0-platform-production/lib/contract.sh /publisher/.ai/tools/ryeos/development/stage0-platform-production/lib/contract.sh
 COPY .ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh /publisher/.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh
 
 RUN --mount=type=cache,id=ryeos-development-stage0-downloads,target=/publisher/downloads,sharing=locked \
     mkdir /publisher/out && \
-    /publisher/scripts/release/produce-development-toolchain-stage0.sh \
+    /publisher/scripts/release/acquire-development-toolchain-stage0.sh \
       --inputs /publisher/inputs.yaml \
       --cache /publisher/downloads \
+      --output /publisher/acquired && \
+    /publisher/.ai/tools/ryeos/development/stage0-platform-production/produce.sh \
+      --inputs /publisher/inputs.yaml \
+      --input-root /publisher/acquired \
       --output /publisher/out/ryeos-development-toolchain-stage0-rust-1.95.0-zig-0.15.2-x86_64-unknown-linux-gnu.tar.gz
 
 FROM scratch AS development-toolchain-stage0-artifact

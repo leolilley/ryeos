@@ -132,3 +132,4 @@ __pycache__/
 !development-toolchain-stage0/macro/src/lib.rs
 !development-toolchain-stage0/test-artifact.sh
 !development-toolchain-stage0/test-runtime.sh
+!development-toolchain-stage0/test-ownership.sh

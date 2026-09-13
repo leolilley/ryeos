@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T00:19:08Z:78d3ed8d60ba32d866e4bfa8928211f57ca04f91ef3d9e9c2b3f2c7e01111c73:JHx0PwOzaYQgoqe4DT/uP+BFuqFd6lUk3Un8CfYIZPyDWFwZYZ3ph+HhXSmRKxicT1+vcO2psVRKv/OpvGA6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T00:56:27Z:683ee50a089ee56f0f04682c2f3fcf04048d5f83d11c4912d09c3d9ea33460e3:Wt/Y+tD3dVwwMoxtMNDxZ1fSxiyHH68BGGenidBoBUdl+h3rbo7XFMwzszpIHFWRMU/AcmuZC+ySwTCsY9snAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -544,11 +544,12 @@ catalog to replace a pinned archive. The old input schema is rejected, not
 silently interpreted under the new contract.
 
 `Dockerfile.development-realizations` runs the transparent publisher without a
-package-manager step. The producer downloads only the selected upstream
-archives, verifies exact sizes and digests, runs the upstream Rust component
-installers into a private tree, extracts Zig into that same platform payload,
-records the publisher/input/producer/program coordinates, inventories every
-file, normalizes timestamps and emits one deterministic archive. Its signed
+package-manager step. The external acquisition entry downloads only the selected
+upstream archives and captures exact selected publisher-image members. The
+offline producer verifies that complete input directory, runs the upstream Rust
+component installers into a private tree, extracts Zig into that same platform
+payload, records the publisher/input/producer/program coordinates, inventories
+every file, normalizes timestamps and emits one deterministic archive. Its signed
 `image_member_*` rows additionally name exact canonical members of the pinned
 publisher image: source path, destination member, mode, size and SHA-256.
 These are explicit authoring sources, not execution-host discovery. They supply
@@ -568,12 +569,21 @@ the produced tree.
 The official GNU Rust host executables are dynamically linked. The separately
 pinned upstream ELF authoring tool rewrites their interpreter and library paths
 to `/ryeos/realizations/platform`, with default-library search disabled. The
-shared runtime transformation/verifier helper and bootstrap-artifact verifier
-now live under
-`.ai/tools/ryeos/development/stage0-platform-production/`. Source ownership does
-not claim admitted execution: the current combined first-bootstrap producer
-still runs in the publisher boundary. Its replacement and admitted Stage1
-producer must reuse this canonical behavior, not fork it.
+Config parser, offline producer, runtime transformation/verifier helper and
+bootstrap-artifact verifier now live under
+`.ai/tools/ryeos/development/stage0-platform-production/`. The external
+`scripts/release/acquire-development-toolchain-stage0.sh` boundary only obtains
+the exact selected archives and publisher-image members, then atomically emits
+an acquisition directory. Bootstrap passes that directory to the canonical
+offline producer; a future admitted Stage1 run must call the same producer.
+Source ownership does not itself claim admitted execution.
+For durable input evidence, place the complete acquired directory at
+`stage0-acquisition` in the selected project generation and execute
+`graph:ryeos/development/stage0-acquisition-capture`. Its
+`config:development/ryeos/stage0-acquisition-products` recipe uses the existing
+`retained_project` source. The graph performs no action and authors no consumer
+relationship: it records the exact retained tree but does not call acquisition,
+produce a compiler, or grant later execution.
 It records every pre/post digest in `RYEOS-ELF-TRANSFORMS`, records selected image
 members in `RYEOS-RUNTIME-SOURCES`, and inventories final interpreter/DT_NEEDED
 edges in `RYEOS-RUNTIME-DEPENDENCIES`. The verifier resolves every such edge
@@ -605,7 +615,7 @@ directory. It does not clear the execution gate:
 ```bash
 bash .ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh \
   --inputs .ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml \
-  --producer scripts/release/produce-development-toolchain-stage0.sh \
+  --producer .ai/tools/ryeos/development/stage0-platform-production/produce.sh \
   --archive "$stage0_archive" \
   --checksum "$stage0_archive.sha256" \
   --materialize "$named_root/stage0-toolchain"
@@ -620,6 +630,16 @@ does not build or acquire anything itself. The tracked artifact tests consume
 already-built archives, do not compile RyeOS, and never manufacture substitute
 binaries. Artifact production and those tests remain explicit qualification
 steps rather than release-time fallback logic.
+
+The offline producer requires an exact Bash/archive/helper process runtime.
+Current admitted authoring build support supplies Bash and most helpers but not
+`tar` or `gzip`. Until an existing environment-product owner supplies and
+qualifies those programs and their complete closure, do not expose a Stage1
+Tool/Graph, inherit host PATH, install packages during production, or substitute
+a general-purpose toolbox. The acquisition tree can already be retained by its
+return-only product Graph; the producer relationship remains intentionally
+absent until this finite dependency is present. No new executor or content
+authority is required.
 
 ## Import and target-local binding
 

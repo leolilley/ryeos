@@ -1,145 +1,50 @@
 #!/usr/bin/env bash
 
-# Produce the exact compiler payload for the first source-local development
-# realization. This remains the explicit pre-RyeOS bootstrap entry while its
-# upstream acquisition and publisher-image extraction are being split from the
-# canonical offline producer. It is not the final admitted production owner.
-# Every downloaded byte comes from the signed input contract. Image members are
-# individually pinned authoring inputs; execution-host library discovery is
-# never permitted. Reusable runtime transformation and verification already live
-# beside the future Stage0 Tool and must not be copied back into this script.
+# Canonical offline producer for the exact Stage0 compiler platform. This file
+# owns transformation and archive production for both the pre-RyeOS publisher
+# and a later admitted Stage1 Tool. It never downloads, inspects an execution
+# host, or resolves an executable outside its admitted process environment.
 
 set -euo pipefail
 export LC_ALL=C
 umask 022
 
 usage() {
-    echo "usage: $0 --inputs FILE --cache DIR --output FILE" >&2
+    echo "usage: $0 --inputs FILE --input-root DIR --output FILE" >&2
     exit 2
 }
 
 inputs=""
-cache=""
+input_root=""
 output=""
 while (($#)); do
     case "$1" in
         --inputs) inputs="${2:-}"; shift 2 ;;
-        --cache) cache="${2:-}"; shift 2 ;;
+        --input-root) input_root="${2:-}"; shift 2 ;;
         --output) output="${2:-}"; shift 2 ;;
         *) usage ;;
     esac
 done
-[[ -n "$inputs" && -n "$cache" && -n "$output" ]] || usage
-[[ -f "$inputs" && ! -L "$inputs" ]] || {
-    echo "Stage-0 input contract is missing, linked, or not regular: $inputs" >&2
-    exit 2
-}
+[[ -n "$inputs" && -n "$input_root" && -n "$output" ]] || usage
 
-for command in ar awk basename bash cat chmod cmp cp curl dirname find grep gzip \
+for command in ar awk basename bash cat chmod cmp cp dirname find grep gzip \
     install mkdir mktemp mv readelf readlink rm rmdir sed sha256sum sort stat \
     tar touch wc; do
     command -v "$command" >/dev/null 2>&1 || {
-        echo "Stage-0 publisher image is missing required program: $command" >&2
+        echo "Stage0 offline producer is missing admitted program: $command" >&2
         exit 2
     }
 done
 
-allowed_keys='category name version schema target source_date_epoch publisher_image rust_version rust_host rust_manifest_url rust_manifest_sha256 rust_manifest_bytes cargo_url cargo_sha256 cargo_bytes clippy_url clippy_sha256 clippy_bytes rust_std_url rust_std_sha256 rust_std_bytes rustc_url rustc_sha256 rustc_bytes rustfmt_url rustfmt_sha256 rustfmt_bytes zig_version zig_url zig_sha256 zig_bytes output_name maximum_output_bytes maximum_tree_bytes maximum_tree_entries execution_gate runtime_mount patchelf_url patchelf_sha256 patchelf_bytes patchelf_program_sha256'
-
-contract_value() {
-    local wanted="$1"
-    local value
-    value="$(awk -v wanted="$wanted" '
-        $0 ~ "^" wanted ": \"[^\"]*\"$" {
-            line=$0
-            sub(/^[^:]+: "/, "", line)
-            sub(/"$/, "", line)
-            print line
-            count++
-        }
-        END { if (count != 1) exit 17 }
-    ' "$inputs")" || {
-        echo "Stage-0 input contract must contain exactly one quoted $wanted field" >&2
-        exit 2
-    }
-    printf '%s' "$value"
-}
-
-while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ -z "$line" || "$line" == \#* ]] && continue
-    [[ ! "$line" =~ [[:cntrl:]] ]] || {
-        echo "Stage-0 input contract contains a control character" >&2
-        exit 2
-    }
-    [[ "$line" =~ ^([a-z][a-z0-9_]*)\:\ \"[^\"]*\"$ ]] || {
-        echo "Stage-0 input contract is not a flat quoted-scalar mapping" >&2
-        exit 2
-    }
-    key="${BASH_REMATCH[1]}"
-    if [[ "$key" =~ ^(image_member|runtime_alias)_[a-z_]+$ ]]; then
-        contract_value "$key" >/dev/null
-        continue
-    fi
-    case " $allowed_keys " in
-        *" $key "*) ;;
-        *) echo "Stage-0 input contract contains unknown field: $key" >&2; exit 2 ;;
-    esac
-done < "$inputs"
-for key in $allowed_keys; do
-    contract_value "$key" >/dev/null
-done
-
-schema="$(contract_value schema)"
-target="$(contract_value target)"
-epoch="$(contract_value source_date_epoch)"
-publisher_image="$(contract_value publisher_image)"
-rust_version="$(contract_value rust_version)"
-rust_host="$(contract_value rust_host)"
-zig_version="$(contract_value zig_version)"
-output_name="$(contract_value output_name)"
-maximum_output_bytes="$(contract_value maximum_output_bytes)"
-maximum_tree_bytes="$(contract_value maximum_tree_bytes)"
-maximum_tree_entries="$(contract_value maximum_tree_entries)"
-execution_gate="$(contract_value execution_gate)"
-
-[[ "$schema" == ryeos.development.stage0-platform-inputs.v3 ]]
-[[ "$(contract_value category)" == development/ryeos ]]
-[[ "$(contract_value name)" == stage0-platform-x86_64-linux ]]
-[[ "$(contract_value version)" == 3.0.0 ]]
-[[ "$target" == x86_64-unknown-linux-gnu && "$rust_host" == "$target" ]]
-[[ "$rust_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-[[ "$zig_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-[[ "$epoch" =~ ^[0-9]+$ ]]
-[[ "$publisher_image" =~ ^docker\.io/library/rust@sha256:[0-9a-f]{64}$ ]]
-rust_manifest_url="$(contract_value rust_manifest_url)"
-rust_dist_base="${rust_manifest_url%/*}"
-[[ "$rust_manifest_url" == https://static.rust-lang.org/dist/*/channel-rust-${rust_version}.toml \
-    && "$(contract_value cargo_url)" == "$rust_dist_base/cargo-${rust_version}-${rust_host}.tar.xz" \
-    && "$(contract_value clippy_url)" == "$rust_dist_base/clippy-${rust_version}-${rust_host}.tar.xz" \
-    && "$(contract_value rust_std_url)" == "$rust_dist_base/rust-std-${rust_version}-${rust_host}.tar.xz" \
-    && "$(contract_value rustc_url)" == "$rust_dist_base/rustc-${rust_version}-${rust_host}.tar.xz" \
-    && "$(contract_value rustfmt_url)" == "$rust_dist_base/rustfmt-${rust_version}-${rust_host}.tar.xz" ]] || {
-    echo "Stage-0 Rust inputs do not match their exact version/host manifest coordinate" >&2
-    exit 2
-}
-# Discovery catalogs are mutable. Only the versioned archive selected by the
-# authored URL/size/digest contract belongs in a reproducible acquisition.
-[[ "$(contract_value zig_url)" == "https://ziglang.org/download/${zig_version}/zig-x86_64-linux-${zig_version}.tar.xz" ]] || {
-    echo "Stage-0 Zig input does not match its exact version/target coordinate" >&2
-    exit 2
-}
-[[ "${RYEOS_STAGE0_PUBLISHER_IMAGE:-}" == "$publisher_image" ]] || {
-    echo "Stage-0 producer must run in the exact publisher image selected by its input contract" >&2
-    exit 2
-}
-[[ "$maximum_output_bytes" =~ ^[1-9][0-9]*$ ]]
-[[ "$maximum_tree_bytes" =~ ^[1-9][0-9]*$ ]]
-[[ "$maximum_tree_entries" =~ ^[1-9][0-9]*$ ]]
-[[ "$execution_gate" == target_local_binding_and_isolated_acceptance_required ]]
-repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
-runtime_helper="$repo_root/.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh"
+producer_dir="$(cd "$(dirname "$0")" && pwd)"
+contract_helper="$producer_dir/lib/contract.sh"
+runtime_helper="$producer_dir/lib/runtime.sh"
+[[ -f "$contract_helper" && ! -L "$contract_helper" ]]
 [[ -f "$runtime_helper" && ! -L "$runtime_helper" ]]
-# shellcheck source=../../.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh
+# shellcheck source=lib/contract.sh
+source "$contract_helper"
+stage0_contract_load
+# shellcheck source=lib/runtime.sh
 source "$runtime_helper"
 runtime_contract_validate
 expected_output_name="ryeos-development-toolchain-stage0-rust-${rust_version}-zig-${zig_version}-${target}.tar.gz"
@@ -151,11 +56,13 @@ expected_output_name="ryeos-development-toolchain-stage0-rust-${rust_version}-zi
     echo "Stage-0 output must be named $output_name" >&2
     exit 2
 }
-mkdir -p "$cache" "$(dirname "$output")"
-[[ -d "$cache" && ! -L "$cache" ]] || {
-    echo "Stage-0 download cache must be a real directory" >&2
+[[ -d "$input_root" && ! -L "$input_root" \
+    && -d "$input_root/archives" && ! -L "$input_root/archives" \
+    && -d "$input_root/image" && ! -L "$input_root/image" ]] || {
+    echo "Stage0 offline producer requires one ordinary acquisition input root" >&2
     exit 2
 }
+mkdir -p "$(dirname "$output")"
 
 output_lock="${output}.publish-lock"
 mkdir "$output_lock" 2>/dev/null || {
@@ -175,13 +82,9 @@ tmp="$(mktemp -d)" || {
 archive_tmp="$output.tmp.$$"
 checksum_tmp="$output.sha256.tmp.$$"
 completed=0
-download_temps=()
 cleanup() {
     local status="$1"
     rm -rf "$tmp"
-    if (( ${#download_temps[@]} > 0 )); then
-        rm -f "${download_temps[@]}"
-    fi
     rm -f "$archive_tmp" "$checksum_tmp"
     if [[ "$completed" -ne 1 ]]; then
         rm -f "$output" "$output.sha256"
@@ -191,51 +94,54 @@ cleanup() {
 }
 trap 'cleanup "$?"' EXIT
 
-fetch_input() {
-    local id="$1"
-    local url sha bytes destination download
-    url="$(contract_value "${id}_url")"
+expected_members="$tmp/acquisition-members.expected"
+actual_members="$tmp/acquisition-members.actual"
+printf 'd\tarchives\nd\timage\nf\tRYEOS-STAGE0-ACQUISITION\n' > "$expected_members"
+for id in rust_manifest cargo clippy rust_std rustc rustfmt zig patchelf; do
+    member="$input_root/archives/${id}.input"
     sha="$(contract_value "${id}_sha256")"
     bytes="$(contract_value "${id}_bytes")"
-    case "$url" in
-        https://static.rust-lang.org/*|https://ziglang.org/*|https://deb.debian.org/debian/pool/main/p/patchelf/*) ;;
-        *) echo "Stage-0 input uses an unauthorized HTTPS origin: $id" >&2; exit 2 ;;
-    esac
-    [[ "$sha" =~ ^[0-9a-f]{64}$ && "$bytes" =~ ^[1-9][0-9]*$ ]]
-    destination="$cache/${sha}-${url##*/}"
-    if [[ -e "$destination" ]]; then
-        [[ -f "$destination" && ! -L "$destination" \
-            && "$(stat -c '%s' "$destination")" == "$bytes" \
-            && "$(sha256sum "$destination" | awk '{print $1}')" == "$sha" ]] || {
-            echo "cached Stage-0 input contradicts $id" >&2
-            exit 2
-        }
-    else
-        download="$cache/.${sha}.download.$$"
-        download_temps+=("$download")
-        rm -f "$download"
-        # The signed contract names the exact origin as well as the digest.
-        # Redirects would silently add an undeclared network destination.
-        curl --fail --max-redirs 0 --proto '=https' --tlsv1.2 \
-            --max-filesize "$bytes" --output "$download" "$url"
-        [[ -f "$download" && ! -L "$download" \
-            && "$(stat -c '%s' "$download")" == "$bytes" \
-            && "$(sha256sum "$download" | awk '{print $1}')" == "$sha" ]] || {
-            echo "downloaded Stage-0 input contradicts $id" >&2
-            exit 2
-        }
-        mv "$download" "$destination"
-    fi
-    cp "$destination" "$tmp/${id}.input"
+    [[ -f "$member" && ! -L "$member" \
+        && "$(stat -c '%a' "$member")" == 644 \
+        && "$(stat -c '%s' "$member")" == "$bytes" \
+        && "$(sha256sum "$member" | awk '{print $1}')" == "$sha" ]] || {
+        echo "Stage0 acquisition archive contradicts $id" >&2
+        exit 2
+    }
+    printf 'f\tarchives/%s.input\n' "$id" >> "$expected_members"
+done
+mapfile -t image_member_keys < <(sed -n 's/^\(image_member_[a-z_]*\): .*/\1/p' "$inputs" | sort)
+for key in "${image_member_keys[@]}"; do
+    read -r source destination mode bytes sha extra <<< "$(contract_value "$key")"
+    member="$input_root/image/$key"
+    [[ -z "$extra" && -f "$member" && ! -L "$member" \
+        && "$(stat -c '%a' "$member")" == "$mode" \
+        && "$(stat -c '%s' "$member")" == "$bytes" \
+        && "$(sha256sum "$member" | awk '{print $1}')" == "$sha" ]] || {
+        echo "Stage0 acquisition image member contradicts $key" >&2
+        exit 2
+    }
+    printf 'f\timage/%s\n' "$key" >> "$expected_members"
+done
+find "$input_root" -mindepth 1 -printf '%y\t%P\n' | sort > "$actual_members"
+sort -o "$expected_members" "$expected_members"
+cmp "$expected_members" "$actual_members" || {
+    echo "Stage0 acquisition root contains a missing, extra, linked, or special member" >&2
+    exit 2
+}
+cat > "$tmp/acquisition-receipt.expected" <<EOF
+schema=ryeos.development.stage0-acquisition.v1
+publisher_image=$publisher_image
+input_contract_body_sha256=$input_contract_body_sha256
+EOF
+cmp "$tmp/acquisition-receipt.expected" "$input_root/RYEOS-STAGE0-ACQUISITION" || {
+    echo "Stage0 acquisition receipt does not name the exact Config and publisher image" >&2
+    exit 2
 }
 
-for id in rust_manifest cargo clippy rust_std rustc rustfmt zig patchelf; do
-    fetch_input "$id"
-done
-
 for id in cargo clippy rust_std rustc rustfmt; do
-    grep -Fq "$(contract_value "${id}_url")" "$tmp/rust_manifest.input"
-    grep -Fq "$(contract_value "${id}_sha256")" "$tmp/rust_manifest.input"
+    grep -Fq "$(contract_value "${id}_url")" "$input_root/archives/rust_manifest.input"
+    grep -Fq "$(contract_value "${id}_sha256")" "$input_root/archives/rust_manifest.input"
 done
 
 stage="$tmp/tree"
@@ -243,7 +149,7 @@ mkdir "$stage"
 for id in cargo clippy rust_std rustc rustfmt; do
     component="$tmp/component-$id"
     mkdir "$component"
-    tar -xJf "$tmp/${id}.input" --no-same-owner -C "$component"
+    tar -xJf "$input_root/archives/${id}.input" --no-same-owner -C "$component"
     mapfile -t roots < <(find "$component" -mindepth 1 -maxdepth 1 -type d -print | sort)
     [[ "${#roots[@]}" -eq 1 && -x "${roots[0]}/install.sh" ]] || {
         echo "Rust component $id does not contain one installer root" >&2
@@ -282,16 +188,16 @@ done
 
 zig_extract="$tmp/zig-extract"
 mkdir "$zig_extract"
-tar -xJf "$tmp/zig.input" --no-same-owner -C "$zig_extract"
+tar -xJf "$input_root/archives/zig.input" --no-same-owner -C "$zig_extract"
 zig_root="$zig_extract/zig-x86_64-linux-$zig_version"
 [[ -d "$zig_root" && ! -L "$zig_root" && -x "$zig_root/zig" ]]
 [[ "$(find "$zig_extract" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]]
 mv "$zig_root" "$stage/zig"
 
-runtime_assemble "$stage" "$tmp" "$tmp/patchelf.input"
+runtime_assemble "$stage" "$tmp" "$input_root/archives/patchelf.input" "$input_root/image"
 
-cp "$tmp/rust_manifest.input" "$stage/UPSTREAM-RUST-MANIFEST.toml"
-inputs_sha="$(awk 'NF && $0 !~ /^#/' "$inputs" | sha256sum | awk '{print $1}')"
+cp "$input_root/archives/rust_manifest.input" "$stage/UPSTREAM-RUST-MANIFEST.toml"
+inputs_sha="$input_contract_body_sha256"
 producer_sha="$(sha256sum "$0" | awk '{print $1}')"
 cat > "$stage/RYEOS-BOOTSTRAP" <<EOF
 schema=ryeos.development-toolchain-bootstrap.v2
@@ -310,7 +216,7 @@ EOF
 
 programs="$stage/RYEOS-AUTHORING-PROGRAMS"
 : > "$programs"
-for command in ar awk basename bash cat chmod cmp cp curl dirname find grep gzip \
+for command in ar awk basename bash cat chmod cmp cp dirname find grep gzip \
     install mkdir mktemp mv readelf readlink rm rmdir sed sha256sum sort stat \
     tar touch wc; do
     path="$(command -v "$command")"
