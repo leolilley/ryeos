@@ -431,6 +431,14 @@ impl LifecycleStartLock {
         }
         Ok(())
     }
+
+    /// During administrator host association, transfer the already-pinned
+    /// lifecycle-operation directory to the selected ordinary controller.
+    /// The host association itself remains administrator-owned; this is only
+    /// the per-node lock ordinary `start` and `stop` must later acquire.
+    pub(crate) fn grant_controller(&self, account: &lillux::ControllerAccount) -> Result<()> {
+        account.grant_private_directory(&self.state_directory)
+    }
 }
 
 fn resolve_ryeosd() -> PathBuf {

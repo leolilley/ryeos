@@ -232,6 +232,11 @@ pub fn provision_host_service(
         "another node lifecycle operation is active; host setup requires a stopped node",
     )?;
     lifecycle.ensure_protects_app_root(app_root)?;
+    // Provisioning temporarily acquires the same lifecycle lock as ordinary
+    // start/stop. Hand the pinned lock directory back to the selected
+    // controller before returning, otherwise this root-only setup would leave
+    // the node unable to perform its normal unprivileged lifecycle.
+    lifecycle.grant_controller(&account)?;
     let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
         &ryeos_app::state_lock::default_lock_path(app_root),
         lillux::time::Duration::from_secs(5),
