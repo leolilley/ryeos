@@ -205,13 +205,7 @@ fn build_action_payload(
             .map(str::to_owned),
         item_id: item_id.to_owned(),
         ref_bindings,
-        product_selections: ryeos_runtime::callback::canonicalize_product_selection_inputs(
-            action
-                .get("product_selections")
-                .map(|value| serde_json::from_value(value.clone()).map_err(anyhow::Error::from))
-                .transpose()?
-                .unwrap_or_default(),
-        )?,
+        product_selections: product_selections_from_action(action)?,
         params: action.get("params").cloned().unwrap_or_else(|| json!({})),
         thread: action
             .get("thread")
@@ -222,6 +216,22 @@ fn build_action_payload(
         facets: action.get("facets").cloned(),
         launch_window,
     })
+}
+
+/// Parse the ordinary action product-selection contract for every Graph
+/// dispatch shape. Follow is a lifecycle choice, not a second selection
+/// authority, so it must use the same typed canonicalization as inline and
+/// detached actions.
+pub(crate) fn product_selections_from_action(
+    action: &Value,
+) -> anyhow::Result<ryeos_runtime::callback::ProductSelectionInputs> {
+    ryeos_runtime::callback::canonicalize_product_selection_inputs(
+        action
+            .get("product_selections")
+            .map(|value| serde_json::from_value(value.clone()).map_err(anyhow::Error::from))
+            .transpose()?
+            .unwrap_or_default(),
+    )
 }
 
 pub(crate) fn rendered_action_digest(action: &Value) -> Result<String, ActionDispatchError> {

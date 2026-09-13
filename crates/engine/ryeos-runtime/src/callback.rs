@@ -280,6 +280,10 @@ pub enum FollowResultShape {
 pub struct FollowChildSpec {
     pub item_ref: String,
     pub ref_bindings: BTreeMap<String, String>,
+    /// Exact selections for this child only. They are sealed by ordinary child
+    /// admission and never inherited from the follow parent.
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     #[serde(default)]
     pub parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,7 +494,9 @@ pub struct ActionPayload {
     pub launch_window: Option<LaunchWindow>,
 }
 
-pub use ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs;
+pub use ryeos_state::external_content::products::composition::{
+    ProductSelectionInputs, canonicalize_product_selection_inputs,
+};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1516,6 +1522,24 @@ mod tests {
             }
         });
         assert!(serde_json::from_value::<SpawnFollowChildRequest>(follow).is_err());
+    }
+
+    #[test]
+    fn follow_child_wire_requires_explicit_product_selections() {
+        let child = json!({
+            "item_ref": "graph:test/child",
+            "ref_bindings": {},
+            "parameters": {}
+        });
+        assert!(serde_json::from_value::<FollowChildSpec>(child).is_err());
+
+        let child = json!({
+            "item_ref": "graph:test/child",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": {}
+        });
+        assert!(serde_json::from_value::<FollowChildSpec>(child).is_ok());
     }
 
     #[test]

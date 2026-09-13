@@ -185,6 +185,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             follow_child_spec_hash(
                 &child.item_ref,
                 &child.ref_bindings,
+                &child.product_selections,
                 &child.parameters,
                 child.facets.as_ref(),
             )
@@ -1117,7 +1118,7 @@ fn admit_follow_child_requests(
                         launch_mode: "detached",
                         parameters: child.parameters.clone(),
                         ref_bindings: child.ref_bindings.clone(),
-                        product_selections: Vec::new(),
+                        product_selections: child.product_selections.clone(),
                         usage_subject: None,
                         usage_subject_asserted_by: None,
                         creates_chain_root: true,
@@ -1139,6 +1140,7 @@ fn admit_follow_child_requests(
             )?;
             if child_execution.item_ref != child.item_ref
                 || child_execution.ref_bindings != child.ref_bindings
+                || child_execution.product_selections != child.product_selections
                 || child_execution.parameters != child.parameters
                 || child_execution.launch_mode != "detached"
                 || child_execution.current_site_id != parent_current_site_id
@@ -1284,7 +1286,7 @@ async fn prepare_follow_children(
                     kind: child_execution.kind.clone(),
                     item_ref: child.item_ref.clone(),
                     ref_bindings: child.ref_bindings.clone(),
-                    product_selections: Vec::new(),
+                    product_selections: child.product_selections.clone(),
                     launch_mode: "detached".to_string(),
                     parameters: child.parameters.clone(),
                     project_context: seed_project_context,
@@ -1482,7 +1484,7 @@ fn readmit_fresh_follow_child_for_launch(
             launch_mode: "detached",
             parameters: child.parameters.clone(),
             ref_bindings: child.ref_bindings.clone(),
-            product_selections: Vec::new(),
+            product_selections: child.product_selections.clone(),
             usage_subject: None,
             usage_subject_asserted_by: None,
             creates_chain_root: true,
@@ -1507,6 +1509,7 @@ fn ensure_follow_admission_semantics_match(
     cohort: &ResolvedExecutionRequest,
     launch: &ResolvedExecutionRequest,
 ) -> Result<()> {
+    ensure_follow_product_selections_match(&cohort.product_selections, &launch.product_selections)?;
     if cohort.kind != launch.kind
         || cohort.item_ref != launch.item_ref
         || cohort.executor_ref != launch.executor_ref
@@ -1549,6 +1552,18 @@ fn ensure_follow_admission_semantics_match(
     {
         bail!(
             "follow: child admitted semantics changed between cohort admission and launch materialization"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_follow_product_selections_match(
+    cohort: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    launch: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+) -> Result<()> {
+    if cohort != launch {
+        bail!(
+            "follow: child product selections changed between cohort admission and launch materialization"
         );
     }
     Ok(())
@@ -1874,8 +1889,32 @@ fn durable_follow_child_seed_project_identity(
 #[cfg(test)]
 mod tests {
     use super::{
-        durable_follow_child_seed_project_identity, parent_successor_operational_generation,
+        durable_follow_child_seed_project_identity, ensure_follow_product_selections_match,
+        parent_successor_operational_generation,
     };
+
+    fn product_selection(
+        declaration_id: &str,
+    ) -> ryeos_state::external_content::products::composition::ProductSelectionInput {
+        serde_json::from_value(serde_json::json!({
+            "target": {"kind": "root"},
+            "selection": {
+                "declaration_id": declaration_id,
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "qualification_hash": null,
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn follow_launch_materialization_cannot_substitute_child_products() {
+        let admitted = vec![product_selection("authoring-tools")];
+        assert!(ensure_follow_product_selections_match(&admitted, &admitted).is_ok());
+        let changed = vec![product_selection("another-product")];
+        assert!(ensure_follow_product_selections_match(&admitted, &changed).is_err());
+    }
     use ryeos_engine::contracts::ProjectContext;
     use ryeos_state::objects::{
         EnvironmentAuthority, ExecutionProjectAuthority, LiveProjectAccess,

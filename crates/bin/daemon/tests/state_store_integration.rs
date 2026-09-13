@@ -143,6 +143,7 @@ mod integration_tests {
         let spec_hash = ryeos_app::runtime_db::follow_child_spec_hash(
             item_ref,
             &std::collections::BTreeMap::new(),
+            &Vec::new(),
             &serde_json::json!({}),
             None,
         )
@@ -203,6 +204,7 @@ mod integration_tests {
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(
             item_ref,
             &std::collections::BTreeMap::new(),
+            &Vec::new(),
             &serde_json::json!({}),
             None,
         )

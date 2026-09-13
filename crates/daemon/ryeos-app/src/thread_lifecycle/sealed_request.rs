@@ -2020,6 +2020,65 @@ mod authority_tests {
     }
 
     #[test]
+    fn recovered_invocation_retains_exact_nonempty_product_selections() {
+        let selections: ryeos_state::external_content::products::composition::ProductSelectionInputs =
+            serde_json::from_value(serde_json::json!([{
+            "target": {"kind": "root"},
+            "selection": {
+                "declaration_id": "runtime",
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "qualification_hash": null,
+            }
+            }]))
+            .unwrap();
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
+        sealed.product_selections = selections.clone();
+        let mut resume = continuation_resume(
+            "/unused",
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        );
+        resume.parameters = sealed.parameters.clone();
+        resume.project_context = sealed.project_context.clone();
+        resume.project_authority = sealed.project_authority.clone();
+        resume.product_selections = selections;
+
+        sealed.validate_invocation_against_resume(&resume).unwrap();
+        let recovered: SealedRootExecutionRequest =
+            serde_json::from_value(serde_json::to_value(&sealed).unwrap()).unwrap();
+        recovered
+            .validate_invocation_against_resume(&resume)
+            .unwrap();
+        let matching_metadata = crate::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_resume_context(resume.clone())
+            .with_sealed_root_request(recovered.clone());
+        let exact_error = matching_metadata.admitted_launch_capsule().unwrap_err();
+        assert!(
+            !exact_error
+                .to_string()
+                .contains("invocation/resume validation"),
+            "the actual capsule boundary must accept the exact recovered selections"
+        );
+
+        resume.product_selections.clear();
+        assert!(
+            recovered
+                .validate_invocation_against_resume(&resume)
+                .is_err()
+        );
+        let mismatched_metadata = crate::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_resume_context(resume)
+            .with_sealed_root_request(recovered);
+        assert!(
+            mismatched_metadata
+                .admitted_launch_capsule()
+                .unwrap_err()
+                .to_string()
+                .contains("product_selections")
+        );
+    }
+
+    #[test]
     fn sealed_remote_operator_handler_authority_round_trips_exactly() {
         let mut fixture = SealedRootExecutionRequest::storage_test_fixture();
         fixture.current_site_id = "site:target".to_string();

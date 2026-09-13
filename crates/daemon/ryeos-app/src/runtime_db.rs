@@ -1041,12 +1041,14 @@ pub struct FollowWaiterChild {
 pub fn follow_child_spec_hash(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
+    product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
     parameters: &Value,
     facets: Option<&Value>,
 ) -> Result<String> {
     let spec = serde_json::json!({
         "item_ref": item_ref,
         "ref_bindings": ref_bindings,
+        "product_selections": product_selections,
         "parameters": parameters,
         "facets": facets.cloned().unwrap_or(Value::Null),
     });
@@ -1751,7 +1753,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 32 requires exact product receipt authority and semantic definition v3.
 // Epoch 33 combines product/capture authority with exact workload invocation
 // and retained process-scope authority. Neither branch epoch grants this union.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 34;
+// Epoch 35 makes a followed child's exact product-selection batch part of its
+// durable specification and recovery resume authority. Epoch 34 rows cannot
+// prove that newly required child authority and are never reinterpreted.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 35;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -25552,7 +25557,8 @@ mod tests {
             follow_key,
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &parameters, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &parameters, None)
+                .unwrap(),
             child_thread_id,
             child_chain_root_id,
             &sealed,
@@ -25627,7 +25633,8 @@ mod tests {
             "fk-cohort",
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &params_0, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &params_0, None)
+                .unwrap(),
             "child-0",
             "chain-0",
             &sealed,
@@ -25641,7 +25648,8 @@ mod tests {
             "fk-cohort",
             1,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &params_1, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &params_1, None)
+                .unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -25683,11 +25691,27 @@ mod tests {
         let changed = serde_json::json!({"episode": 2});
         let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let item_ref = sealed.item_ref();
+        let selected: ryeos_state::external_content::products::composition::ProductSelectionInputs =
+            serde_json::from_value(serde_json::json!([{
+                "target": {"kind": "root"},
+                "selection": {
+                    "declaration_id": "authoring-tools",
+                    "witness_hash": "a".repeat(64),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": null,
+                }
+            }]))
+            .unwrap();
+        assert_ne!(
+            follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &first, None).unwrap(),
+            follow_child_spec_hash(item_ref, &BTreeMap::new(), &selected, &first, None).unwrap(),
+            "follow replay identity must bind the exact child product authority"
+        );
         db.set_follow_child(
             "fk1",
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &first, None).unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &first, None).unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -25698,13 +25722,38 @@ mod tests {
                 "fk1",
                 0,
                 item_ref,
-                &follow_child_spec_hash(item_ref, &BTreeMap::new(), &changed, None,).unwrap(),
+                &follow_child_spec_hash(item_ref, &BTreeMap::new(), &Vec::new(), &changed, None,)
+                    .unwrap(),
                 "child-1",
                 "chain-1",
                 &sealed,
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn follow_product_authority_cut_refuses_then_explicitly_resets_predecessor_epoch() {
+        let (tmp, db) = fresh_db();
+        let path = tmp.path().join("runtime.db");
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("predecessor follow authority must fail closed");
+        assert!(format!("{error:#}").contains("explicit no-backcompat reset"));
+
+        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+        assert!(reset.requires_explicit_history_reset());
+        reset.apply_explicit_history_reset(&path).unwrap();
+        assert!(!reset.requires_explicit_history_reset());
     }
 
     #[test]

@@ -456,6 +456,7 @@ impl ExpressionFailureEffects {
 pub(super) struct FollowSuspendOutcome {
     pub(super) item_id: String,
     pub(super) ref_bindings: BTreeMap<String, String>,
+    pub(super) product_selections: ryeos_runtime::callback::ProductSelectionInputs,
     pub(super) params: Value,
 }
 

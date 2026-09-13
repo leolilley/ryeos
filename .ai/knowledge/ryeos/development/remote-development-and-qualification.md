@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-13T03:54:51Z:809ac9edb90be17ed1447562275e9f73259ea7410a0ee15842dd717d57f08819:5XXhWqHB+6hQxkrsq5ljrgbFRU/efr4c/Xffq8xEJ69IzJDloWswwzrL+MsLeDFMWlEXshlEe2dX+mQAfhV4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:58:17Z:86ba333afd9f6b73edd55e4bbb3552d1c581de42b452fc91c76633ee85fec030:S5vKkALE66x+A7nwteTa6DJ5wEuV96o9TzE3tV96o+mCWCATWPloyUTYH9IUU8Mm2y9i37PI8qacI7u08X8VCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -90,9 +90,12 @@ caller-known typed object/blob hashes and is not this authority flow.
 
 For a project-owned long worker workflow, use `remote worker run` with a signed
 project Config using `ryeos.remote_worker_workflow.v1`. The Config selects one
-signed project Graph and maps only the task and credential-profile inputs. The
-Graph owns provider selection and its exact worker environment; Core contains
-no Codex, model, or project-product branch.
+signed project Graph and maps the task, credential profile, and one explicit
+canonical `target_product_selections` batch. The selectors name
+destination-local witnesses: they are not source-admitted products, transferred
+bytes, or permission to find the latest target binding. The Graph owns provider
+selection and its exact worker environment; Core contains no Codex, model, or
+project-product branch.
 
 The v1 lifecycle is explicit and finite:
 
@@ -119,31 +122,56 @@ strictly a local read of the source recovery projection and never contacts the
 target or advances recovery.
 
 The project Config maps its `task` input directly to the bounded worker's
-closed goal envelope. For the current Codex App Server profile, the bridge
-injects the workspace `cwd`, immutable approval policy, and bound `threadId`;
-the caller must not supply those fields. A complete low-cost qualification
-launch therefore has this shape (replace only the named remote, credential
-profile, and task text):
+closed goal envelope. It maps `target_product_selections` only into the
+followed worker action; the outer Graph remains product-empty. Ordinary child
+admission resolves and seals the exact target-local batch, including a
+`content_dependency` selection targeting the worker's `environment` ref
+binding and any `workload_execution` selections needed by admitted child
+operations. Nothing inherits selections from the Graph parent.
+
+Produce the batch on the destination with the existing
+`external-content compose-product` authority for each exact consumer and
+project generation. Lift the returned `selections` into typed
+`content_dependency` or `workload_execution` targets and sort by
+target/declaration identity. Do not
+type witness or qualification hashes from memory and do not reuse a source-node
+composition response. This first seam deliberately has no named profile or
+automatic binding lookup.
+
+For the current Codex App Server profile, the bridge injects the workspace
+`cwd`, immutable approval policy, and bound `threadId`; the caller must not
+supply those fields. Put the complete request in a file so its selection batch
+is reviewable and reusable for exact replay:
+
+```yaml
+# .tmp/remote-worker-request.yaml
+task:
+  session_start_payload: {model: gpt-5.3-codex-spark}
+  turn_start_payload:
+    effort: low
+    input:
+      - type: text
+        text: Make the requested bounded change and use only the admitted verification operations.
+target_product_selections:
+  # Exact canonical ProductSelectionInput objects derived from this
+  # destination's compose-product responses belong here.
+  - target: {kind: content_dependency, binding: environment}
+    selection:
+      declaration_id: authoring-tools
+      witness_hash: <destination-compose-product-witness-hash>
+      witness_source: {kind: local_capture}
+      qualification_hash: <destination-qualification-hash-or-null>
+```
+
+The RyeOS development worker also requires exact `workload_execution` entries
+for each selected Cargo/format/platform operation; the abbreviated file above
+illustrates shape, not a complete development product batch. Launch the
+reviewed file through the command-owned input-file path:
 
 ```bash
 ryeos --project . remote worker run qualification \
   config:development/ryeos/remote-worker personal \
-  --input '{
-    "task": {
-      "session_start_payload": {
-        "model": "gpt-5.3-codex-spark"
-      },
-      "turn_start_payload": {
-        "effort": "low",
-        "input": [
-          {
-            "type": "text",
-            "text": "Make the requested bounded change and use only the admitted verification operations."
-          }
-        ]
-      }
-    }
-  }'
+  --input .tmp/remote-worker-request.yaml
 ```
 
 Retain the returned `source_work_id`. Drive and inspect only through that
