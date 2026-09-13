@@ -38,7 +38,6 @@ const DRIVE_FACT_SCHEMA: &str = "ryeos.remote_worker_workflow_drive_fact.v1";
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 const LAUNCH_CONTACT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
-const MAX_ADMITTED_CAPSULE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 #[error("target launch contact is accepted but not yet bound")]
@@ -767,12 +766,7 @@ async fn verify_target_launch(
         bail!("bound target launch capsule identity is invalid");
     }
     let fetched = client
-        .objects_get_with_response_limit_and_total_timeout(
-            &[capsule_hash.to_owned()],
-            &[],
-            MAX_ADMITTED_CAPSULE_RESPONSE_BYTES,
-            STATUS_TIMEOUT,
-        )
+        .objects_get_with_total_timeout(&[capsule_hash.to_owned()], &[], STATUS_TIMEOUT)
         .await?;
     let capsule_value = fetched
         .entries

@@ -710,6 +710,26 @@ impl RemoteClient {
         .await
     }
 
+    /// Fetch ordinary inline CAS objects under the transport's established
+    /// JSON response bound and an explicit caller-owned total deadline. The
+    /// transport owns this limit because it must admit every valid inline
+    /// object plus its response envelope; protocol handlers must not invent a
+    /// smaller content limit for an already-admitted object type.
+    pub async fn objects_get_with_total_timeout(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+        total_timeout: lillux::time::Duration,
+    ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit_and_total_timeout(
+            object_hashes,
+            blob_hashes,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            total_timeout,
+        )
+        .await
+    }
+
     /// Fetch one or more bounded object batches for bundle transfer. Every
     /// underlying HTTP request has both a response-byte limit and a total
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
@@ -3572,12 +3592,7 @@ mod tests {
         );
 
         let object_error = client
-            .objects_get_with_response_limit_and_total_timeout(
-                &["b".repeat(64)],
-                &[],
-                1024,
-                timeout,
-            )
+            .objects_get_with_total_timeout(&["b".repeat(64)], &[], timeout)
             .await
             .unwrap_err();
         assert!(object_error.to_string().contains("exceeded total timeout"));
@@ -3596,6 +3611,13 @@ mod tests {
             .unwrap_err();
         assert!(closure_error.to_string().contains("exceeded total timeout"));
         server.abort();
+    }
+
+    #[test]
+    fn default_json_bound_admits_a_maximum_inline_object_and_envelope() {
+        let inline = usize::try_from(crate::handlers::objects_get::MAX_INLINE_OBJECT_BYTES)
+            .expect("inline object limit fits usize");
+        assert!(DEFAULT_JSON_RESPONSE_MAX_BYTES >= inline.saturating_mul(2));
     }
 
     fn public_key_response(seed: u8) -> PublicKeyResponse {
