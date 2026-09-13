@@ -737,8 +737,8 @@ fn build_installed_command_help(
         let mut section = crate::tty::Section::named("parameters");
         if let Some(input_flag) = &binding.input_flag {
             section.rows.push(crate::tty::Row::key_value(
-                format!("--{input_flag} <file>"),
-                "Read JSON parameters from a file (or - for stdin)",
+                format!("--{input_flag} <file|json|->"),
+                "Read JSON/YAML parameters from a file or stdin, or an inline JSON object/array",
             ));
         }
         section.rows.push(crate::tty::Row::key_value(
@@ -800,13 +800,16 @@ fn build_installed_command_help(
 
 fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>) -> String {
     let mut parts = Vec::new();
+    let mut form_fields = std::collections::BTreeSet::new();
     if !command.command.forms.is_empty() {
+        let mut form_shapes = Vec::new();
         for form in &command.command.forms {
             let shape = form
                 .slots
                 .iter()
                 .map(|slot| {
                     let field = slot.field.replace('_', "-");
+                    form_fields.insert(field.clone());
                     let required = !command.command.defaults.contains_key(&slot.field)
                         && !command.command.defaults.contains_key(&field);
                     if required {
@@ -818,15 +821,20 @@ fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>
                 .collect::<Vec<_>>()
                 .join(" ");
             if !shape.is_empty() {
-                parts.push(shape);
+                form_shapes.push(shape);
             }
+        }
+        if form_shapes.len() == 1 {
+            parts.extend(form_shapes);
+        } else if !form_shapes.is_empty() {
+            parts.push(format!("({})", form_shapes.join(" | ")));
         }
     }
 
     if let Some(item) = item {
         for (field, ty) in &item.schema {
             let required = !ty.ends_with('?');
-            if field == "project" || parts.iter().any(|p| p.contains(&field.replace('_', "-"))) {
+            if field == "project" || form_fields.contains(&field.replace('_', "-")) {
                 continue;
             }
             let flag = format!(
@@ -1241,6 +1249,62 @@ mod tests {
         assert_eq!(
             installed_usage_line(&command, None),
             "ryeos web [<surface>]"
+        );
+    }
+
+    #[test]
+    fn installed_help_renders_positional_forms_as_alternatives() {
+        let mut command = LoadedCommandDescriptor {
+            command: ryeos_runtime::CommandDef {
+                name: "remote-worker-run".into(),
+                tokens: vec!["remote".into(), "worker".into(), "run".into()],
+                description: "Run a remote worker".into(),
+                aliases: vec![],
+                help: None,
+                arguments: vec![],
+                forms: vec![
+                    ryeos_runtime::CommandArgumentForm {
+                        slots: vec![
+                            ryeos_runtime::CommandArgumentSlot {
+                                field: "remote".into(),
+                                matcher: ryeos_runtime::CommandArgumentKind::String,
+                            },
+                            ryeos_runtime::CommandArgumentSlot {
+                                field: "workflow_ref".into(),
+                                matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                            },
+                        ],
+                    },
+                    ryeos_runtime::CommandArgumentForm {
+                        slots: vec![ryeos_runtime::CommandArgumentSlot {
+                            field: "workflow_ref".into(),
+                            matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                        }],
+                    },
+                ],
+                sensitive_fields: Vec::new(),
+                defaults: Default::default(),
+                parameter_binding: None,
+                control_flags: Vec::new(),
+                project: None,
+                dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
+                    execute: "service:remote-worker-workflows/start".into(),
+                    availability: ryeos_runtime::CommandAvailability::Daemon,
+                },
+                source_file: PathBuf::from("/tmp/remote-worker-run.yaml"),
+                provenance: ryeos_runtime::CommandProvenance::default(),
+            },
+            tokens: vec!["remote".into(), "worker".into(), "run".into()],
+            description: "Run a remote worker".into(),
+        };
+        command
+            .command
+            .defaults
+            .insert("remote".into(), serde_json::Value::String("default".into()));
+
+        assert_eq!(
+            installed_usage_line(&command, None),
+            "ryeos remote worker run ([<remote>] <workflow-ref> | <workflow-ref>)"
         );
     }
 }
