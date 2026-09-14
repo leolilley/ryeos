@@ -21,10 +21,17 @@ fn mint_session(
     state: &ryeos_app::state::AppState,
     project_path: Option<String>,
 ) -> HandlerContext {
-    let (session_id, _token) = get_ui_state(state)
+    let (session_id, token) = get_ui_state(state)
         .unwrap()
         .browser_sessions
         .mint_token(session_launch_context(project_path));
+    assert_eq!(
+        get_ui_state(state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
     HandlerContext::new(
         format!("session:{session_id}"),
         vec!["ui.read".into()],

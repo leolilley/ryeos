@@ -59,7 +59,10 @@ async fn run_effect(client: &DaemonClient, effect: &RyeOsEffect) -> RyeOsEffectR
 }
 
 fn effect_error(kind: &RyeOsEffectKind, error: ClientError) -> ryeos_client_base::ui::RyeOsUiError {
-    let mutation = matches!(kind, RyeOsEffectKind::InvokeBinding { .. });
+    let mutation = matches!(
+        kind,
+        RyeOsEffectKind::InvokeBinding { .. } | RyeOsEffectKind::ReplaceSession { .. }
+    );
     let contact_unknown = matches!(
         &error,
         ClientError::Transport(_)
@@ -68,9 +71,13 @@ fn effect_error(kind: &RyeOsEffectKind, error: ClientError) -> ryeos_client_base
             | ClientError::Json(_)
     );
     if mutation && contact_unknown {
+        let code = if matches!(kind, RyeOsEffectKind::ReplaceSession { .. }) {
+            "session_replacement_outcome_unknown"
+        } else {
+            "invocation_outcome_unknown"
+        };
         ryeos_client_base::ui::RyeOsUiError::outcome_unknown(
-            "invocation_outcome_unknown",
-            error.to_string(),
+            code, error.to_string(),
         )
     } else {
         ryeos_client_base::ui::RyeOsUiError::definite("platform_effect_failed", error.to_string())
@@ -131,7 +138,7 @@ async fn effect_data(
             session_id,
             launch_url,
         } => Ok(serde_json::to_value(
-            client.redeem_ui_replacement(session_id, launch_url).await?,
+            client.redeem_ui_session(session_id, launch_url).await?,
         )?),
     }
 }

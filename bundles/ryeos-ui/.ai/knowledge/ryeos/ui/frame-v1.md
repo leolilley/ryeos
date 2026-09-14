@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-14T10:16:29Z:29d7bc08ce00c473eb743b728db58c3b39f14244a3695bbbeba7dbe24dd00a77:MzGZoOxbOxerztAVnW/qrkTP5Eln2XZdKm8kbf7B9Lp8Bf1zszf1Z2z62x3viv4St9V8HTK/GSV22BwKjempAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-14T22:49:51Z:779edc08bc6c116cb5552c34e8b3d080129bf44bddff62d00ec8558f1cbdeec8:kp4jQAqeh1dqzbt09ak3SoVG+MEmnHsW8kn0MRmZMOjre4f+01X1/uGg7anwI6DetagCf9Q5oOpU7wkU4+qUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -242,7 +242,7 @@ renderer steps generation-keyed motion (v1: the backdrop particles
   come from the compiled node `ingest_ignore` policy; the UI owns no hidden
   filename or directory ignore list.
 - A project switch cannot mutate an existing compiled binding. It mints an
-  immutable successor session. Browsers redeem its one-shot same-tab launch;
+  immutable successor session. Browsers redeem its short-lived, replay-safe same-tab launch;
   native clients replace the whole session generation, including hint streams,
   live tails, and durable seat attachment. The predecessor remains bounded by
   session expiry so a lost replacement response cannot strand the operator.

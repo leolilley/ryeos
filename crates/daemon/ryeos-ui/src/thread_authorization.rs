@@ -37,9 +37,7 @@ impl ExactThreadCaller {
                         authority
                             .ensure_path_binding()
                             .map_err(|_| HandlerError::NotFound)?;
-                        authority
-                            .descriptor_path()
-                            .map_err(|_| HandlerError::NotFound)
+                        Ok::<_, HandlerError>(authority.path().to_path_buf())
                     })
                     .transpose()?,
                 principal_id: Some(session.compiled_binding.binding.principal_id.clone()),

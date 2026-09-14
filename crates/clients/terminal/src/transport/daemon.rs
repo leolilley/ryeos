@@ -169,7 +169,18 @@ impl DaemonClient {
                 url: format!("{}/ui/api/launch/mint", self.base_url.trim_end_matches('/')),
             });
         };
-        *self.ui_session_id.write().expect("session lock poisoned") = Some(session_id.to_string());
+        let Some(launch_url) = response.get("launch_url").and_then(|value| value.as_str()) else {
+            return Err(ClientError::DaemonDown {
+                url: format!("{}/ui/api/launch/mint", self.base_url.trim_end_matches('/')),
+            });
+        };
+        let origin = self.base_url.trim_end_matches('/');
+        let launch_path = launch_url.strip_prefix(origin).ok_or_else(|| {
+            ClientError::UiBindingRequest(
+                "minted UI launch URL does not retain the configured daemon origin".into(),
+            )
+        })?;
+        self.redeem_ui_session(session_id, launch_path).await?;
         Ok(())
     }
 
@@ -188,9 +199,10 @@ impl DaemonClient {
         Ok(())
     }
 
-    /// Redeem a daemon-minted immutable replacement while the predecessor
-    /// cookie is still active, then adopt only the authenticated successor.
-    pub async fn redeem_ui_replacement(
+    /// Activate a daemon-minted immutable session and adopt only the exact
+    /// authenticated result. Activation is replayable for response-loss
+    /// recovery; replacement keeps the predecessor cookie until commit.
+    pub async fn redeem_ui_session(
         &self,
         session_id: &str,
         launch_path: &str,
@@ -206,7 +218,7 @@ impl DaemonClient {
             });
         if !valid_launch_path {
             return Err(ClientError::UiBindingRequest(
-                "replacement UI launch path is not a local one-shot route".into(),
+                "UI activation path is not a local token route".into(),
             ));
         }
         let prior = self
@@ -231,13 +243,13 @@ impl DaemonClient {
             .await
             .map_err(|error| CliTransportError::Unreachable {
                 bind: url,
-                detail: format!("replacement redemption: {error}"),
+                detail: format!("UI session activation: {error}"),
             })?;
         if !(response.status().is_success() || response.status().is_redirection()) {
             return Err(ClientError::DaemonError {
                 path: launch_path.to_string(),
                 status: response.status().as_u16(),
-                message: "replacement redemption refused".into(),
+                message: "UI session activation refused".into(),
             });
         }
         self.adopt_ui_session(session_id)?;
@@ -246,7 +258,7 @@ impl DaemonClient {
             Ok(_) | Err(_) => {
                 *self.ui_session_id.write().expect("session lock poisoned") = prior;
                 Err(ClientError::UiBindingRequest(
-                    "replacement redemption did not authenticate the named successor".into(),
+                    "UI activation did not authenticate the named session".into(),
                 ))
             }
         }

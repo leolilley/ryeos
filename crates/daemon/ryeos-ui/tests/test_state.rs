@@ -86,6 +86,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -169,6 +170,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -225,6 +227,22 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         commands,
         write_barrier,
         event_streams,
+    )
+}
+
+#[allow(dead_code)]
+pub fn local_operator_context(
+    state: &AppState,
+    scopes: Vec<String>,
+) -> ryeos_app::handler_context::HandlerContext {
+    let operator = ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        .expect("load fixture operator");
+    ryeos_app::handler_context::HandlerContext::new_with_authority(
+        operator.principal_id(),
+        scopes,
+        true,
+        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        None,
     )
 }
 

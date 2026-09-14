@@ -79,7 +79,13 @@ impl RyeOsCore {
             };
             let viewport = self.runtime.viewport;
             let now_ms = self.runtime.now_ms;
+            // Effect results may arrive in multiple transport batches. Keep
+            // the sequence monotonic across immutable session replacement so
+            // a delayed predecessor result can never correlate with a newly
+            // emitted successor effect.
+            let next_effect_id = self.next_effect_id;
             *self = RyeOsCore::new(session, viewport, now_ms);
+            self.next_effect_id = next_effect_id;
             self.bump_generation();
             return self.initial_effects();
         }
@@ -687,6 +693,7 @@ mod tests {
     #[test]
     fn project_transition_replaces_the_complete_native_session_generation() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 41);
+        let delayed_predecessor = core.emit(test_fetch_source("delayed-predecessor".into()));
         let invocation = core.emit(RyeOsEffectKind::InvokeBinding {
             request: crate::ui::binding::UiBindingRequest {
                 binding_digest: "11".repeat(32),
@@ -768,6 +775,27 @@ mod tests {
         assert!(
             !initial.is_empty(),
             "successor must bootstrap its own sources"
+        );
+        assert!(
+            initial
+                .iter()
+                .all(|effect| effect.id > delayed_predecessor.id),
+            "successor effects must not reuse a predecessor correlation id"
+        );
+        let session_id = core.data.session.as_ref().unwrap().session_id.clone();
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: delayed_predecessor.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(serde_json::json!({"stale": true})),
+                error: None,
+            },
+        });
+        assert_eq!(
+            core.data.session.as_ref().unwrap().session_id,
+            session_id,
+            "a delayed predecessor result cannot affect the successor generation"
         );
     }
 

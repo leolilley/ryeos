@@ -4,7 +4,7 @@
 //! sessions and verified operators through `seat_auth::require_seat_caller`.
 
 mod test_state;
-use test_state::{build_test_state, build_test_state_with_live_bundles};
+use test_state::{build_test_state, build_test_state_with_live_bundles, local_operator_context};
 
 use ryeos_app::handler_context::HandlerContext;
 use serde_json::json;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn verified_operator_passes_projects_read_gate() {
     let (_tmp, state) = build_test_state();
-    let operator_ctx = HandlerContext::new("fp:local-trust".into(), vec!["*".into()], true);
+    let operator_ctx = local_operator_context(&state, vec!["*".into()]);
 
     let listed = ryeos_ui::handlers::ui_projects::handle_projects_list(
         json!(null),
@@ -33,8 +33,8 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let first = tempfile::TempDir::new().expect("first project");
     let second = tempfile::TempDir::new().expect("second project");
-    let principal = format!("fp:{}", "cd".repeat(32));
-    let operator_ctx = HandlerContext::new(principal.clone(), vec!["*".into()], true);
+    let operator_ctx = local_operator_context(&state, vec!["*".into()]);
+    let principal = operator_ctx.fingerprint.clone();
     let state = Arc::new(state);
 
     let mut project_ids = Vec::new();
@@ -67,6 +67,13 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     .await
     .expect("mint first project session");
     let first_session_id = minted["session_id"].as_str().unwrap();
+    assert_eq!(
+        ryeos_ui::state::get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(minted["token"].as_str().unwrap()),
+        Some(first_session_id.to_string())
+    );
     let first_session = ryeos_ui::state::get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -92,6 +99,16 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     assert_ne!(successor_id, first_session_id);
 
     let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
+    assert!(ui.browser_sessions.get_session(successor_id).is_none());
+    let successor_token = opened["ui_transition"]["launch_url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("/ui/launch/")
+        .unwrap();
+    assert_eq!(
+        ui.browser_sessions.consume_launch_token(successor_token),
+        Some(successor_id.to_string())
+    );
     let successor = ui
         .browser_sessions
         .get_session(successor_id)

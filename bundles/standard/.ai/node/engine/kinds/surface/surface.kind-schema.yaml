@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:10Z:64a4f197741d546d0337492b476a13cb882a5a3842fa45201696712ac2771017:huAZXLPj39bGyN7mqilV9W7Z806rB2CTyc60Can/1K1TOOgyhtP200LLs58PavhLO5/8HD7aprslWlq2xQeiAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T22:49:51Z:0ecaa2653ad6921aef6834719fa0cc57ae21fa3b3cce187ce02fffdad0bc9545:+zEkRumg5HtWMCk5utIYmuTz5esthpdqNN6BKJjsOztD124fXVC5TVMFhAz8D415zPM4G2TEVqUqEO9StaZkDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -176,7 +176,10 @@ composed_value_contract:
                 optional:
                   ref: { type: single, prim: string }
                   args: { type: single, prim: mapping }
-                  tokens: { type: sequence, prim: string }
+                  tokens:
+                    type: single
+                    prim: sequence
+                    elements: { type: single, prim: string }
                   facet: { type: single, prim: string }
                   value: { type: single, prim: any }
                   merge: { type: single, prim: mapping }

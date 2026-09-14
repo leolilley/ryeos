@@ -20,10 +20,17 @@ fn test_context() -> ryeos_ui::browser_session::LaunchContext {
 async fn session_current_returns_session_fields() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(test_context());
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
 
     // Create a handler context that looks like a browser_session principal.
     let ctx = HandlerContext::new(
@@ -96,10 +103,17 @@ async fn session_current_reports_observation_only_posture() {
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         None,
     );
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(ctx);
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
 
     let hctx = HandlerContext::new(format!("session:{session_id}"), vec![], false);
 
@@ -125,10 +139,17 @@ async fn session_current_returns_durable_user_principal_when_present() {
         ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
         Some(user_principal_id.clone()),
     );
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(ctx);
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
     let hctx = HandlerContext::new(format!("session:{session_id}"), vec![], false);
 
     let result = (ryeos_ui::handlers::ui_session_current::DESCRIPTOR.handler)(

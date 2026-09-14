@@ -555,14 +555,14 @@ fn compiled_user_principal_id() -> Option<String> {
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
-    if crate::seat_auth::compiled_ui_session().is_some()
-        && ctx.fingerprint != state.identity.fingerprint()
-    {
+    if crate::seat_auth::compiled_ui_session().is_some() {
         return Err(HandlerError::Forbidden(
             "hosted UI session has no retained user-principal store authority".into(),
         )
         .into());
     }
+    ryeos_app::operator_authority::require_admitted_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
     Ok(())
 }
 

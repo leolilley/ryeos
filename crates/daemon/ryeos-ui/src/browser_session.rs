@@ -10,9 +10,9 @@
 //! ## Lifecycle
 //!
 //! 1. `client:ryeos/web` launcher calls `ui.launch.mint` on the daemon.
-//! 2. Daemon creates a session record with the exact compiled surface/view
-//!    binding and a one-shot launch token.
-//! 3. Browser hits the daemon-returned launch URL, token is consumed,
+//! 2. Daemon retains a pending session with the exact compiled surface/view
+//!    binding behind a short-lived activation token.
+//! 3. Browser hits the daemon-returned launch URL, activation is committed,
 //!    session cookie is set, browser is redirected to `/ui`.
 //! 4. Session-authed routes validate the cookie against this store.
 
@@ -60,11 +60,12 @@ pub struct BrowserSession {
     pub project_authority: Option<Arc<lillux::PinnedDirectory>>,
 }
 
-/// Single-use launch token that redeems for a session.
+/// Short-lived, idempotent activation token for a pending session.
 #[derive(Debug)]
 struct LaunchToken {
-    session_id: String,
+    session: BrowserSession,
     predecessor_session_id: Option<String>,
+    activated: bool,
     #[allow(dead_code)]
     created_at: Instant,
     expires_at: Instant,
@@ -110,9 +111,8 @@ impl BrowserSessionStore {
         self.mint_token_inner(ctx, None)
     }
 
-    /// Mint an immutable successor. The predecessor stays usable if delivery
-    /// is lost; successful one-shot redemption retires it in the same store
-    /// operation that activates the successor.
+    /// Mint an immutable successor. The predecessor stays usable until exact
+    /// activation; replaying an activated token returns the same successor.
     pub fn mint_replacement_token(
         &self,
         predecessor_session_id: &str,
@@ -146,16 +146,13 @@ impl BrowserSessionStore {
         let token_bytes: [u8; 32] = rand::random();
         let token_hex = lillux::cas::sha256_hex(&token_bytes);
         let launch_token = LaunchToken {
-            session_id: session_id.clone(),
+            session,
             predecessor_session_id,
+            activated: false,
             created_at: now,
             expires_at: now + self.launch_token_ttl,
         };
 
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session_id.clone(), session);
         self.launch_tokens
             .lock()
             .unwrap()
@@ -164,18 +161,44 @@ impl BrowserSessionStore {
         (session_id, token_hex)
     }
 
-    /// Consume a launch token and return the session ID.
-    /// Returns `None` if the token doesn't exist, is expired, or already consumed.
+    /// Activate a pending session and return its ID. Successful activation is
+    /// replayable until token expiry so a committed-but-lost HTTP response can
+    /// be recovered without reviving the predecessor or minting a sibling.
     pub fn consume_launch_token(&self, token: &str) -> Option<String> {
         let mut tokens = self.launch_tokens.lock().unwrap();
-        let launch = tokens.remove(token)?;
+        let launch = tokens.get(token)?;
         if launch.expires_at < Instant::now() {
+            tokens.remove(token);
             return None;
         }
-        if let Some(predecessor) = launch.predecessor_session_id {
-            self.sessions.lock().unwrap().remove(&predecessor);
+        if launch.activated {
+            return Some(launch.session.session_id.clone());
         }
-        Some(launch.session_id)
+
+        let predecessor = launch.predecessor_session_id.clone();
+        let successor = launch.session.clone();
+        let successor_id = successor.session_id.clone();
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(predecessor_id) = predecessor.as_deref()
+            && !sessions.contains_key(predecessor_id)
+        {
+            return None;
+        }
+        sessions.insert(successor_id.clone(), successor);
+        if let Some(predecessor_id) = predecessor.as_deref() {
+            sessions.remove(predecessor_id);
+        }
+        tokens
+            .get_mut(token)
+            .expect("activation token retained")
+            .activated = true;
+        if let Some(predecessor_id) = predecessor.as_deref() {
+            tokens.retain(|candidate, pending| {
+                candidate == token
+                    || pending.predecessor_session_id.as_deref() != Some(predecessor_id)
+            });
+        }
+        Some(successor_id)
     }
 
     /// Look up a session by ID. Returns `None` if not found or expired.
@@ -302,7 +325,9 @@ mod tests {
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             project_authority: None,
         };
-        let (session_id, _token) = store.mint_token(ctx);
+        let (session_id, token) = store.mint_token(ctx);
+        assert!(store.get_session(&session_id).is_none());
+        assert_eq!(store.consume_launch_token(&token), Some(session_id.clone()));
 
         let session = store.get_session(&session_id).unwrap();
         assert_eq!(session.surface_ref, "surface:ryeos/test/ro");
@@ -318,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_token_consumed_once() {
+    fn activated_launch_token_replays_same_session() {
         let store = BrowserSessionStore::new();
         let (_, token) = store.mint_token(test_context());
 
@@ -326,19 +351,48 @@ mod tests {
         assert!(first.is_some());
 
         let second = store.consume_launch_token(&token);
-        assert!(second.is_none(), "token should not be reusable");
+        assert_eq!(
+            second, first,
+            "activation replay must recover one successor"
+        );
     }
 
     #[test]
     fn replacement_redemption_retires_predecessor_only_after_delivery() {
         let store = BrowserSessionStore::new();
-        let (predecessor, _) = store.mint_token(test_context());
+        let (predecessor, predecessor_token) = store.mint_token(test_context());
+        assert_eq!(
+            store.consume_launch_token(&predecessor_token),
+            Some(predecessor.clone())
+        );
         let (successor, token) = store.mint_replacement_token(&predecessor, test_context());
 
         assert!(store.get_session(&predecessor).is_some());
+        assert!(store.get_session(&successor).is_none());
+        assert_eq!(store.consume_launch_token(&token), Some(successor.clone()));
+        assert!(store.get_session(&predecessor).is_none());
         assert!(store.get_session(&successor).is_some());
         assert_eq!(store.consume_launch_token(&token), Some(successor));
-        assert!(store.get_session(&predecessor).is_none());
+    }
+
+    #[test]
+    fn replacement_activation_invalidates_pending_siblings() {
+        let store = BrowserSessionStore::new();
+        let (predecessor, predecessor_token) = store.mint_token(test_context());
+        assert_eq!(
+            store.consume_launch_token(&predecessor_token),
+            Some(predecessor.clone())
+        );
+        let (first, first_token) = store.mint_replacement_token(&predecessor, test_context());
+        let (second, second_token) = store.mint_replacement_token(&predecessor, test_context());
+
+        assert_eq!(
+            store.consume_launch_token(&first_token),
+            Some(first.clone())
+        );
+        assert!(store.consume_launch_token(&second_token).is_none());
+        assert!(store.get_session(&second).is_none());
+        assert!(store.get_session(&first).is_some());
     }
 
     #[test]

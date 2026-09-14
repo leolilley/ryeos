@@ -1,6 +1,6 @@
 //! `ui/launch` service — consumes a launch token and sets a session cookie.
 //!
-//! The configured `service:ui/launch` route consumes a single-use launch token
+//! The configured `service:ui/launch` route activates a short-lived launch token
 //! (minted by the web launcher binary), establishes a browser session,
 //! sets a `ryeos_session` cookie, and redirects to `/ui`.
 
@@ -35,7 +35,8 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
     let req: Request = serde_json::from_value(input)
         .map_err(|e| anyhow::anyhow!("invalid ui.launch request: {e}"))?;
 
-    // Consume the launch token (one-shot).
+    // Activation is idempotent until token expiry so delivery loss can replay
+    // the same transition without creating another successor.
     let session_id = get_ui_state(&state)
         .expect("UiState not set")
         .browser_sessions

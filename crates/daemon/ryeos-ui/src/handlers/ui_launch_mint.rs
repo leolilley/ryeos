@@ -2,7 +2,7 @@
 //!
 //! Called by the web launcher binary with a verified signed caller. Creates
 //! the exact signed surface/view closure into a session-bound binding and
-//! and returns a one-shot launch token + the URL the browser should open.
+//! and returns a short-lived idempotent activation token plus its local URL.
 
 use std::sync::Arc;
 
@@ -165,7 +165,7 @@ pub(crate) fn mint_project_replacement(
         );
     Ok(ProjectReplacement {
         // This response is consumed by an already loaded browser. A relative
-        // one-shot path preserves its authenticated origin through reverse
+        // Local activation path preserves its authenticated origin through reverse
         // proxies and remote node front doors; the node's listen address is
         // not browser routing authority. Native clients use `session_id`.
         launch_url: launch_path_for_token(state, &token)?,

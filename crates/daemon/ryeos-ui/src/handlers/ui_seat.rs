@@ -1,11 +1,8 @@
 //! Session-authenticated RyeOS UI seat services for browser renderers.
 //!
-//! The terminal renderer talks directly to `service:seat/*` as a verified
-//! operator. Browser renderers arrive through a `session:<id>` wrapper, so
-//! these services bind seat ownership to the session's durable principal
-//! when present, otherwise to the session id. The persisted object is still
-//! a normal `seat_session` thread and the event namespace/shape matches the
-//! substrate seat services.
+//! Renderers arrive through a `session:<id>` wrapper. Seat identity and its
+//! surface/project authority are derived from that exact immutable session;
+//! renderer parameters cannot select or reuse another session's seat.
 
 use std::sync::Arc;
 
@@ -29,11 +26,7 @@ const SEAT_EVENT_PREFIX: &str = "seat.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OpenRequest {
-    surface_ref: String,
-    #[serde(default)]
-    client_ref: Option<String>,
-}
+struct OpenRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,10 +78,7 @@ fn browser_session(ctx: &HandlerContext, state: &AppState) -> Result<BrowserSess
 }
 
 fn seat_owner(session: &BrowserSession) -> String {
-    session
-        .user_principal_id
-        .clone()
-        .unwrap_or_else(|| format!("session:{}", session.session_id))
+    format!("session:{}", session.session_id)
 }
 
 fn require_owned_seat(
@@ -121,10 +111,9 @@ pub async fn handle_open(
     let owner = seat_owner(&session);
     let req: OpenRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let surface_ref = req.surface_ref;
-    let client_ref = req
-        .client_ref
-        .unwrap_or_else(|| "client:ryeos/web".to_string());
+    let _ = req;
+    let surface_ref = session.surface_ref.clone();
+    let client_ref = "client:ryeos/ui-session".to_string();
 
     let existing = state
         .state_store

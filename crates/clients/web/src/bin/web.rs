@@ -28,7 +28,7 @@ struct Cli {
     #[arg(long = "project")]
     project: Option<PathBuf>,
 
-    /// Print the minted one-shot launch URL to stdout.
+    /// Print the minted short-lived activation URL to stdout.
     #[arg(long = "print-url")]
     print_url: bool,
 

@@ -41,13 +41,10 @@ pub async fn bootstrap_seat(
 /// Open the seat session thread.
 pub async fn open_seat_thread(
     client: &DaemonClient,
-    surface_ref: &str,
+    _surface_ref: &str,
     _project_path: &str,
 ) -> Option<String> {
-    let body = serde_json::json!({
-        "surface_ref": surface_ref,
-        "client_ref": "client:ryeos/tui",
-    });
+    let body = serde_json::json!({});
     let envelope = client
         .signed_post("/ui/api/session/seat/open", &body)
         .await
@@ -61,16 +58,13 @@ pub async fn open_seat_thread(
 
 async fn reattach_seat_thread(
     client: &DaemonClient,
-    surface_ref: &str,
+    _surface_ref: &str,
     _project_path: &str,
 ) -> Option<(String, Vec<SeatEvent>)> {
     // The session endpoint atomically reattaches the freshest owned seat or
     // creates one. Clients never enumerate seat-session threads or author the
     // execution policy that owns them.
-    let body = serde_json::json!({
-        "surface_ref": surface_ref,
-        "client_ref": "client:ryeos/tui",
-    });
+    let body = serde_json::json!({});
     let envelope = client
         .signed_post("/ui/api/session/seat/open", &body)
         .await

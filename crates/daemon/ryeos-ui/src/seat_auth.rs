@@ -91,14 +91,9 @@ pub fn require_seat_caller(
             "session expired or invalid".into()
         }));
     }
-    if ctx.verified && !ctx.fingerprint.is_empty() {
-        return Ok(SeatCaller::Operator {
-            fingerprint: ctx.fingerprint.clone(),
-        });
-    }
-    Err(HandlerError::Forbidden(
-        "browser session or verified operator required".into(),
-    ))
+    let fingerprint = ryeos_app::operator_authority::require_admitted_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
+    Ok(SeatCaller::Operator { fingerprint })
 }
 
 #[cfg(test)]

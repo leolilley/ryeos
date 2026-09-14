@@ -61,10 +61,10 @@ async fn valid_token_consumed_and_session_returned() {
 }
 
 #[tokio::test]
-async fn consumed_token_cannot_be_reused() {
+async fn committed_activation_replays_the_same_session() {
     let (_tmp, state) = build_test_state();
 
-    let (_, token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(test_context());
@@ -78,14 +78,15 @@ async fn consumed_token_cannot_be_reused() {
     .await;
     assert!(result1.is_ok(), "first consume should succeed");
 
-    // Second consume fails.
+    // A response-loss retry returns the exact same committed session.
     let result2 = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": token }),
         HandlerContext::anonymous(),
         Arc::new(state),
     )
     .await;
-    assert!(result2.is_err(), "reused token should fail");
+    let replay = result2.expect("activation replay should recover committed result");
+    assert_eq!(replay["session_id"], session_id);
 }
 
 #[tokio::test]

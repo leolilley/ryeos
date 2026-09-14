@@ -34,6 +34,14 @@ async fn mint_live_session(
         .as_str()
         .expect("minted session id")
         .to_string();
+    let token = response["token"].as_str().expect("minted activation token");
+    assert_eq!(
+        get_ui_state(state)
+            .expect("UI state")
+            .browser_sessions
+            .consume_launch_token(token),
+        Some(session_id.clone())
+    );
     let session = get_ui_state(state)
         .expect("UI state")
         .browser_sessions
@@ -101,10 +109,17 @@ fn dispatch_transport_is_unrecorded() {
 #[tokio::test]
 async fn arbitrary_event_targets_are_rejected() {
     let (_tmp, state) = build_test_state();
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(test_context());
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
@@ -133,10 +148,17 @@ async fn arbitrary_event_targets_are_rejected() {
 #[tokio::test]
 async fn legacy_client_authority_flags_are_rejected() {
     let (_tmp, state) = build_test_state();
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(observation_context());
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
@@ -246,7 +268,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
     let state = Arc::new(state);
 
     let opened = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        serde_json::json!({ "surface_ref": "surface:ryeos/ui/base" }),
+        serde_json::json!({}),
         ctx.clone(),
         state.clone(),
     )

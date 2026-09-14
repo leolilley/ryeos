@@ -151,7 +151,7 @@ compiled binding contains the exact eligible affordance.
 
 Project selection is an immutable authority transition. A successful signed
 `projects/open` affordance returns a generic `replace_session` effect with a
-same-origin one-shot launch path. The browser redeems it in the current tab so
+same-origin replay-safe activation path. The browser redeems it in the current tab so
 the node replaces the HttpOnly cookie before loading the successor's compiled
 surface. JavaScript never rewrites the project path, carries the predecessor's
 grant forward, or treats the node listen address as browser routing authority.

@@ -23,10 +23,17 @@ async fn field_sources_use_the_authenticated_ui_read_lane() {
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         None,
     );
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .expect("ui state registered")
         .browser_sessions
         .mint_token(launch_context);
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
         vec!["ui.read".to_string()],
