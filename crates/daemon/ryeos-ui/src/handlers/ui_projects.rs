@@ -319,8 +319,18 @@ pub async fn handle_projects_open(
             .get_session(session_id)
             .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
         if session.project_root.as_deref() != Some(root.as_str()) {
-            let replacement =
-                super::ui_launch_mint::mint_project_replacement(&session, &root, state.as_ref())?;
+            // The selected root came from the already resolved principal
+            // store. Pin it here and carry that exact authority forward;
+            // replacement must not reconstruct ingress authorization.
+            let project_authority = Arc::new(
+                lillux::PinnedDirectory::open(&canonical)?
+                    .context("selected UI project root disappeared")?,
+            );
+            let replacement = super::ui_launch_mint::mint_project_replacement(
+                &session,
+                project_authority,
+                state.as_ref(),
+            )?;
             let recent = if project.local_id == "current" {
                 RecentFile::default()
             } else {

@@ -108,13 +108,17 @@ fn require_owned_seat(
 /// harmless and finish any cleanup whose first response was lost.
 pub(crate) fn retire_session_seats(state: &AppState, session_id: &str) -> Result<()> {
     let owner = format!("session:{session_id}");
-    for detail in state
-        .state_store
-        .list_threads_filtered(100, Some(&owner))?
-        .into_iter()
-        .filter(|thread| thread.kind == SEAT_KIND)
-    {
-        if detail.status == "running" {
+    loop {
+        let running = state
+            .state_store
+            .list_threads_sorted(100, Some(&owner), ryeos_state::queries::ThreadSort::Watch)?
+            .into_iter()
+            .filter(|thread| thread.kind == SEAT_KIND && thread.status == "running")
+            .collect::<Vec<_>>();
+        if running.is_empty() {
+            break;
+        }
+        for detail in running {
             state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: detail.thread_id.clone(),
                 status: "completed".to_string(),
@@ -126,8 +130,8 @@ pub(crate) fn retire_session_seats(state: &AppState, session_id: &str) -> Result
                 final_cost: None,
                 summary_json: None,
             })?;
+            state.state_store.remove_seat_lease(&detail.thread_id)?;
         }
-        state.state_store.remove_seat_lease(&detail.thread_id)?;
     }
     Ok(())
 }
@@ -137,6 +141,10 @@ pub async fn handle_open(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    let ui_state = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
     let owner = seat_owner(&session);
     let req: OpenRequest = serde_json::from_value(params)

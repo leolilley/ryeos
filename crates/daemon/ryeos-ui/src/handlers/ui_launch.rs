@@ -37,8 +37,11 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
 
     // Activation is idempotent until token expiry so delivery loss can replay
     // the same transition without creating another successor.
-    let activation = get_ui_state(&state)
-        .expect("UiState not set")
+    let ui_state = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| anyhow::anyhow!("seat transition lock poisoned"))?;
+    let activation = ui_state
         .browser_sessions
         .activate_launch_token(&req.token)
         .ok_or_else(|| anyhow::anyhow!("invalid or expired launch token"))?;

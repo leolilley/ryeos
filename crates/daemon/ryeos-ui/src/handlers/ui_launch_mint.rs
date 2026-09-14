@@ -139,7 +139,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 /// grants retained by the server, never under browser-supplied authority.
 pub(crate) fn mint_project_replacement(
     session: &crate::browser_session::BrowserSession,
-    project_path: &str,
+    project_authority: Arc<lillux::PinnedDirectory>,
     state: &AppState,
 ) -> Result<ProjectReplacement> {
     let ctx = HandlerContext::new(
@@ -147,15 +147,12 @@ pub(crate) fn mint_project_replacement(
         session.granted_caps.clone(),
         true,
     );
-    let project_authority = Arc::new(super::ui_projects::authorize_launch_project(
-        &ctx,
-        state,
-        project_path,
-    )?);
+    project_authority.ensure_path_binding()?;
+    let project_path = project_authority.path().to_string_lossy().into_owned();
     let req = Request {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
         surface_ref: session.surface_ref.clone(),
-        project_path: Some(project_path.to_string()),
+        project_path: Some(project_path),
         user_principal_id: session.user_principal_id.clone(),
     };
     let (compiled_binding, effective_surface) =

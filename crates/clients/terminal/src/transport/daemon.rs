@@ -229,6 +229,16 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), launch_path);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(55);
         loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                *self.ui_session_id.write().expect("session lock poisoned") = prior;
+                return Err(ClientError::Transport(CliTransportError::Unreachable {
+                    bind: url,
+                    detail: "UI activation could not be observed before its recovery deadline"
+                        .into(),
+                }));
+            }
+            let attempt_timeout = remaining.min(std::time::Duration::from_secs(5));
             *self.ui_session_id.write().expect("session lock poisoned") = prior.clone();
             let headers = self.sign("GET", launch_path, b"")?;
             let mut request = self
@@ -241,23 +251,31 @@ impl DaemonClient {
             if let Some(cookie) = self.ui_cookie(launch_path) {
                 request = request.header("cookie", cookie);
             }
-            let unknown = match request.send().await {
-                Ok(response)
+            let unknown = match tokio::time::timeout(attempt_timeout, request.send()).await {
+                Err(_) => "activation request timed out before an outcome was observed".to_string(),
+                Ok(Ok(response))
                     if response.status().is_success() || response.status().is_redirection() =>
                 {
                     self.adopt_ui_session(session_id)?;
-                    match self.current_ui_session().await {
-                        Ok(session) if session.session_id == session_id => return Ok(session),
-                        Ok(_) => {
+                    let observation_timeout = deadline
+                        .saturating_duration_since(tokio::time::Instant::now())
+                        .min(std::time::Duration::from_secs(5));
+                    match tokio::time::timeout(observation_timeout, self.current_ui_session()).await
+                    {
+                        Ok(Ok(session)) if session.session_id == session_id => return Ok(session),
+                        Ok(Ok(_)) => {
                             *self.ui_session_id.write().expect("session lock poisoned") = prior;
                             return Err(ClientError::UiBindingRequest(
                                 "UI activation authenticated a different session".into(),
                             ));
                         }
-                        Err(error) => format!("activation committed; observation failed: {error}"),
+                        Ok(Err(error)) => {
+                            format!("activation committed; observation failed: {error}")
+                        }
+                        Err(_) => "activation committed; session observation timed out".to_string(),
                     }
                 }
-                Ok(response) => {
+                Ok(Ok(response)) if response.status().is_client_error() => {
                     *self.ui_session_id.write().expect("session lock poisoned") = prior;
                     return Err(ClientError::DaemonError {
                         path: launch_path.to_string(),
@@ -265,7 +283,11 @@ impl DaemonClient {
                         message: "UI session activation refused".into(),
                     });
                 }
-                Err(error) => format!("activation contact failed: {error}"),
+                Ok(Ok(response)) => format!(
+                    "activation server outcome was uncertain (HTTP {})",
+                    response.status().as_u16()
+                ),
+                Ok(Err(error)) => format!("activation contact failed: {error}"),
             };
             if tokio::time::Instant::now() >= deadline {
                 *self.ui_session_id.write().expect("session lock poisoned") = prior;

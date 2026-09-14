@@ -34,7 +34,6 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     let first = tempfile::TempDir::new().expect("first project");
     let second = tempfile::TempDir::new().expect("second project");
     let operator_ctx = local_operator_context(&state, vec!["*".into()]);
-    let principal = operator_ctx.fingerprint.clone();
     let state = Arc::new(state);
 
     let mut project_ids = Vec::new();
@@ -59,7 +58,7 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
             ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
             surface_ref: "surface:ryeos/ui/base".into(),
             project_path: Some(first.path().display().to_string()),
-            user_principal_id: Some(principal),
+            user_principal_id: None,
         },
         operator_ctx,
         state.clone(),
