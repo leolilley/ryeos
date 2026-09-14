@@ -17,6 +17,7 @@ use ryeos_app::state::AppState;
 use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
+const HASH_REQUEST_MAX_ENTRIES: usize = 1024;
 pub const DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION: u64 = 2;
 
 /// HTTP error from a remote-node call, carrying the status code and the **full
@@ -427,8 +428,9 @@ impl RemoteClient {
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
-        if typed_hashes_request_body_size(object_hashes, blob_hashes)
-            <= HASH_REQUEST_BODY_BUDGET_BYTES
+        if object_hashes.len().saturating_add(blob_hashes.len()) <= HASH_REQUEST_MAX_ENTRIES
+            && typed_hashes_request_body_size(object_hashes, blob_hashes)
+                <= HASH_REQUEST_BODY_BUDGET_BYTES
         {
             return self.objects_has_once(object_hashes, blob_hashes).await;
         }
@@ -1710,10 +1712,11 @@ fn chunk_typed_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) ->
             .len();
         let separator_size = usize::from(!current.is_empty());
         if !current.is_empty()
-            && current_size
-                .saturating_add(separator_size)
-                .saturating_add(encoded_hash_size)
-                > budget_bytes
+            && (current.len() == HASH_REQUEST_MAX_ENTRIES
+                || current_size
+                    .saturating_add(separator_size)
+                    .saturating_add(encoded_hash_size)
+                    > budget_bytes)
         {
             chunks.push(std::mem::take(&mut current));
             current_size = empty_body_size;
@@ -3851,6 +3854,18 @@ mod tests {
         for chunk in chunks {
             assert!(typed_hashes_request_body_size(&chunk, &[]) <= 512);
         }
+    }
+
+    #[test]
+    fn chunk_typed_hashes_caps_entry_count() {
+        let hashes: Vec<String> = (0..(HASH_REQUEST_MAX_ENTRIES + 1))
+            .map(|i| format!("{:064x}", i))
+            .collect();
+        let chunks = chunk_typed_hashes_for_body_budget(&hashes, usize::MAX);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), HASH_REQUEST_MAX_ENTRIES);
+        assert_eq!(chunks[1].len(), 1);
     }
 
     #[test]

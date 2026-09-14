@@ -632,11 +632,17 @@ pub(crate) async fn upload_missing(
     validate_upload_response(&upload_session.blob_hashes, &[], "initial blob")?;
     validate_upload_response(&upload_session.object_hashes, &[], "initial object")?;
 
-    // Stream each immutable blob through bounded, sequential, retry-idempotent
-    // chunks. Peak memory is independent of both blob size and generation
-    // size; the remote verifies the complete digest before admitting the blob
-    // to this publication capability.
-    for hash in &missing_blobs {
+    // Pack adjacent small immutable blobs into bounded requests. Sending every
+    // source file through an individual signed request makes ordinary project
+    // pushes scale with network round trips rather than bytes. Large blobs
+    // remain bounded, sequential and retry-idempotent chunks. Peak memory is
+    // independent of generation size, and the remote still verifies every
+    // complete digest before admitting it to this publication capability.
+    const INLINE_BLOB_BATCH_MAX_ENTRIES: usize = 128;
+
+    let mut blob_index = 0;
+    while blob_index < missing_blobs.len() {
+        let hash = &missing_blobs[blob_index];
         let (mut source, total_size) = local_cas
             .open_blob(hash)?
             .ok_or_else(|| anyhow::anyhow!("local CAS blob {hash} disappeared before upload"))?;
@@ -646,22 +652,57 @@ pub(crate) async fn upload_missing(
                 limits.max_blob_bytes
             );
         }
-        if total_size == 0 {
+
+        if inline_blob_request_size(total_size)? <= OBJECTS_PUT_BODY_BUDGET_BYTES {
+            let mut batch = Vec::new();
+            let mut expected = Vec::new();
+            let mut request_size = 256_usize;
+            while blob_index < missing_blobs.len() {
+                if batch.len() == INLINE_BLOB_BATCH_MAX_ENTRIES {
+                    break;
+                }
+                let candidate_hash = &missing_blobs[blob_index];
+                let (mut candidate, candidate_size) =
+                    local_cas.open_blob(candidate_hash)?.ok_or_else(|| {
+                        anyhow::anyhow!("local CAS blob {candidate_hash} disappeared before upload")
+                    })?;
+                if candidate_size > limits.max_blob_bytes {
+                    anyhow::bail!(
+                        "project blob {candidate_hash} exceeds transport limit: {candidate_size} > {}",
+                        limits.max_blob_bytes
+                    );
+                }
+                let encoded_size = inline_blob_request_size(candidate_size)?;
+                if encoded_size > OBJECTS_PUT_BODY_BUDGET_BYTES
+                    || (!batch.is_empty()
+                        && request_size.saturating_add(encoded_size)
+                            > OBJECTS_PUT_BODY_BUDGET_BYTES)
+                {
+                    break;
+                }
+                let candidate_size = usize::try_from(candidate_size)?;
+                let mut bytes = vec![0_u8; candidate_size];
+                candidate.read_exact(&mut bytes)?;
+                let mut trailing = [0_u8; 1];
+                if candidate.read(&mut trailing)? != 0 {
+                    anyhow::bail!("local CAS blob {candidate_hash} exceeds its declared size");
+                }
+                batch.push(BlobUpload {
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+                expected.push(candidate_hash.clone());
+                request_size = request_size.saturating_add(encoded_size);
+                blob_index += 1;
+            }
             let response = client
-                .objects_put(
-                    Some(&staging_id),
-                    project_path_for_ref,
-                    &[BlobUpload {
-                        data: String::new(),
-                    }],
-                    &[],
-                )
+                .objects_put(Some(&staging_id), project_path_for_ref, &batch, &[])
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
-            validate_upload_response(&response.blob_hashes, std::slice::from_ref(hash), "blob")?;
+            validate_upload_response(&response.blob_hashes, &expected, "blob")?;
             validate_upload_response(&response.object_hashes, &[], "object")?;
             continue;
         }
+
         let mut offset = 0_u64;
         let mut buffer = vec![0_u8; crate::handlers::objects_put::MAX_BLOB_CHUNK_BYTES];
         while offset < total_size {
@@ -691,6 +732,7 @@ pub(crate) async fn upload_missing(
             validate_upload_response(&response.object_hashes, &[], "object")?;
             offset = next;
         }
+        blob_index += 1;
     }
     for batch in chunk_object_uploads(&objects)? {
         let expected = batch
@@ -715,6 +757,16 @@ pub(crate) async fn upload_missing(
         uploaded,
         skipped,
     })
+}
+
+fn inline_blob_request_size(blob_size: u64) -> Result<usize> {
+    let blob_size = usize::try_from(blob_size)?;
+    Ok(blob_size
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4)
+        .saturating_add(64))
 }
 
 fn chunk_object_uploads(
@@ -941,6 +993,36 @@ mod refuse_walking_root_tests {
         assert!(
             msg.contains("filebundle root") || msg.contains("'/'"),
             "error must mention filebundle root, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod upload_batch_tests {
+    use super::{OBJECTS_PUT_BODY_BUDGET_BYTES, inline_blob_request_size};
+
+    #[test]
+    fn inline_blob_request_size_accounts_for_base64_and_entry_overhead() {
+        assert_eq!(inline_blob_request_size(0).unwrap(), 64);
+        assert_eq!(inline_blob_request_size(1).unwrap(), 68);
+        assert_eq!(inline_blob_request_size(3).unwrap(), 68);
+        assert_eq!(inline_blob_request_size(4).unwrap(), 72);
+    }
+
+    #[test]
+    fn inline_blob_batch_boundary_stays_below_route_budget() {
+        let largest_raw = (0..=OBJECTS_PUT_BODY_BUDGET_BYTES)
+            .rev()
+            .find(|size| {
+                inline_blob_request_size(*size as u64).unwrap() <= OBJECTS_PUT_BODY_BUDGET_BYTES
+            })
+            .unwrap();
+        assert!(
+            inline_blob_request_size(largest_raw as u64).unwrap() <= OBJECTS_PUT_BODY_BUDGET_BYTES
+        );
+        assert!(
+            inline_blob_request_size((largest_raw + 1) as u64).unwrap()
+                > OBJECTS_PUT_BODY_BUDGET_BYTES
         );
     }
 }
