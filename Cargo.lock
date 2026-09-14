@@ -3067,6 +3067,7 @@ dependencies = [
  "rand 0.8.6",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-client-base",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-runtime",

@@ -5,6 +5,7 @@
 
 pub mod assets;
 pub mod browser_session;
+pub mod compiled_binding;
 pub mod handlers;
 pub mod invokers;
 pub mod seat_auth;
@@ -20,7 +21,7 @@ pub use state::UiState;
 ///
 /// This intentionally has no compatibility range. Launchers must advertise
 /// the same revision before the daemon will create a browser session.
-pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v3";
+pub const UI_BINDING_CONTRACT_REVISION: &str = ryeos_client_base::UI_BINDING_CONTRACT_REVISION;
 
 /// Register UI extensions into the provided registries.
 ///
@@ -49,7 +50,11 @@ pub fn register_extensions(
     );
     response_modes.register_event_stream_source(
         "browser_chain_tail",
-        std::sync::Arc::new(invokers::browser_chain_tail_invocation::BrowserChainTailSourceFactory),
+        std::sync::Arc::new(
+            invokers::browser_chain_tail_invocation::BrowserChainTailSourceFactory {
+                ui: ui.clone(),
+            },
+        ),
     );
     response_modes.set_static_asset_provider(
         "embedded_asset",

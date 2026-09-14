@@ -1,12 +1,12 @@
-# ryeos:signed:2026-07-06T12:24:55Z:9a2663c3c31aa59f9c2becf1dbc052297a57166a74465db5dcf24f0ea342b684:iq80Gt3tITr14Eu+U0157kxcq9VujGHFnXbPxjrF1640MdmZIwhU5a+zmxtdrnM5uHaGp0qlPxuYKWU61TtzCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:08Z:907df24042b6a7990d4e57f47d32af2f53120f0505d5e67a09225c884b9e8580:yy5IGUJfAUvZ9Y43AORbY7ZxAWWIUhCg0U2Mk/WADy7LXOrbvhoY0PnQecJeY5kIu6+ddcuUVuz7Sg/sc8luCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - web
-description: Open the browser RyeOS UI. Defaults to the Atlas surface.
+description: Open the browser RyeOS UI. Defaults to the observation-only Atlas surface.
 forms:
 - slots:
   - field: surface
 defaults:
-  surface: surface:ryeos/ui/atlas
+  surface: surface:ryeos/ui/atlas-observe
 project:
   resolution: optional
   bind_parameter: project

@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-10T09:19:02Z:1d11bb5feb3883fe802d920787e0b8769800f82f809b7998a35e1e67193edd42:ayfxgOFsbZ69GedSiK5BnquVAPbnjGSaEU3AUpoohgJ7i5Dr0UMOQ2sIsZXNhzgb8TRHw6wBM9ICg974mjMvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:75ca07b32d35471c79c797795402eac3b6ade8abe68ced98658fff14433b9f84:czfP2qEqe0kFTmZg+DWm64EDvb+W9tobHLz2qLHL6RxlQxPKXWPTuh+kcY4t55LZo1zW17kfn06lgxrszMJjBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/field/comparison
 version: "1.0.0"
 description: Returns bounded exact-definition, execution-realization, and run-cost comparison facts for two authorized threads.
 endpoint: ui.ryeos.field.comparison
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

@@ -11,6 +11,7 @@ use ryeos_cli::transport::http::{resolve_daemon_url, signed_client};
 use ryeos_cli::transport::signing::{SignHeaders, Signer};
 
 use std::path::PathBuf;
+use std::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -48,6 +49,9 @@ pub enum ClientError {
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("UI binding request: {0}")]
+    UiBindingRequest(String),
 }
 
 /// Pull the daemon's `{code, error}` envelope into a readable line,
@@ -74,7 +78,7 @@ pub struct DaemonClient {
     base_url: String,
     audience: String,
     signer: Option<Signer>,
-    ui_session_id: Option<String>,
+    ui_session_id: RwLock<Option<String>>,
     /// One pooled connection for the client's lifetime. Every signed call
     /// rides this handle so requests reuse the kept-alive TCP/TLS session
     /// instead of paying a fresh connect per round trip.
@@ -107,7 +111,7 @@ impl DaemonClient {
             base_url,
             audience,
             signer,
-            ui_session_id: None,
+            ui_session_id: RwLock::new(None),
             http: signed_client()?,
         })
     }
@@ -130,24 +134,23 @@ impl DaemonClient {
     }
 
     pub async fn mint_ui_session(
-        &mut self,
+        &self,
         surface_ref: &str,
         project_path: Option<&str>,
-        read_only: bool,
     ) -> Result<(), ClientError> {
-        if self.ui_session_id.is_some() {
+        if self
+            .ui_session_id
+            .read()
+            .expect("session lock poisoned")
+            .is_some()
+        {
             return Ok(());
         }
         let user_principal_id = self
             .signer
             .as_ref()
             .map(|signer| format!("fp:{}", signer.fingerprint));
-        let body = ui_session_mint_body(
-            surface_ref,
-            project_path,
-            read_only,
-            user_principal_id.as_deref(),
-        );
+        let body = ui_session_mint_body(surface_ref, project_path, user_principal_id.as_deref());
         let response = self.signed_post("/ui/api/launch/mint", &body).await?;
         if response
             .get("ui_binding_contract_revision")
@@ -166,13 +169,104 @@ impl DaemonClient {
                 url: format!("{}/ui/api/launch/mint", self.base_url.trim_end_matches('/')),
             });
         };
-        self.ui_session_id = Some(session_id.to_string());
+        *self.ui_session_id.write().expect("session lock poisoned") = Some(session_id.to_string());
         Ok(())
+    }
+
+    pub fn adopt_ui_session(&self, session_id: &str) -> Result<(), ClientError> {
+        if session_id.is_empty()
+            || session_id.len() > 64
+            || !session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(ClientError::UiBindingRequest(
+                "replacement UI session id is not a bounded transport token".into(),
+            ));
+        }
+        *self.ui_session_id.write().expect("session lock poisoned") = Some(session_id.to_string());
+        Ok(())
+    }
+
+    /// Redeem a daemon-minted immutable replacement while the predecessor
+    /// cookie is still active, then adopt only the authenticated successor.
+    pub async fn redeem_ui_replacement(
+        &self,
+        session_id: &str,
+        launch_path: &str,
+    ) -> Result<ryeos_client_base::ui::BrowserSession, ClientError> {
+        let valid_launch_path = launch_path
+            .strip_prefix("/ui/launch/")
+            .is_some_and(|token| {
+                !token.is_empty()
+                    && token.len() <= 128
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            });
+        if !valid_launch_path {
+            return Err(ClientError::UiBindingRequest(
+                "replacement UI launch path is not a local one-shot route".into(),
+            ));
+        }
+        let prior = self
+            .ui_session_id
+            .read()
+            .expect("session lock poisoned")
+            .clone();
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), launch_path);
+        let headers = self.sign("GET", launch_path, b"")?;
+        let mut request = self
+            .http
+            .get(&url)
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature);
+        if let Some(cookie) = self.ui_cookie(launch_path) {
+            request = request.header("cookie", cookie);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| CliTransportError::Unreachable {
+                bind: url,
+                detail: format!("replacement redemption: {error}"),
+            })?;
+        if !(response.status().is_success() || response.status().is_redirection()) {
+            return Err(ClientError::DaemonError {
+                path: launch_path.to_string(),
+                status: response.status().as_u16(),
+                message: "replacement redemption refused".into(),
+            });
+        }
+        self.adopt_ui_session(session_id)?;
+        match self.current_ui_session().await {
+            Ok(session) if session.session_id == session_id => Ok(session),
+            Ok(_) | Err(_) => {
+                *self.ui_session_id.write().expect("session lock poisoned") = prior;
+                Err(ClientError::UiBindingRequest(
+                    "replacement redemption did not authenticate the named successor".into(),
+                ))
+            }
+        }
+    }
+
+    pub async fn current_ui_session(
+        &self,
+    ) -> Result<ryeos_client_base::ui::BrowserSession, ClientError> {
+        let value = self.get_json("/ui/api/session/current").await?;
+        serde_json::from_value(value).map_err(ClientError::Json)
     }
 
     fn ui_cookie(&self, path: &str) -> Option<String> {
         path.starts_with("/ui/")
-            .then_some(self.ui_session_id.as_ref())
+            .then(|| {
+                self.ui_session_id
+                    .read()
+                    .expect("session lock poisoned")
+                    .clone()
+            })
             .flatten()
             .map(|session_id| format!("ryeos_session={session_id}"))
     }
@@ -284,7 +378,12 @@ impl DaemonClient {
 
     /// Tail the UI session bus (transient hints — "look", never truth).
     pub async fn open_session_events(&self) -> Result<SseStream, ClientError> {
-        let session_id = self.ui_session_id.clone().ok_or(ClientError::NoIdentity)?;
+        let session_id = self
+            .ui_session_id
+            .read()
+            .expect("session lock poisoned")
+            .clone()
+            .ok_or(ClientError::NoIdentity)?;
         let path = format!("/ui/events/session/{session_id}");
         self.open_sse(&path).await
     }
@@ -306,47 +405,6 @@ impl DaemonClient {
         }
 
         let resp = req
-            .send()
-            .await
-            .map_err(|e| CliTransportError::Unreachable {
-                bind: url.clone(),
-                detail: format!("request send: {e}"),
-            })?;
-
-        Ok(SseStream::new(resp))
-    }
-
-    /// Execute an item via the daemon and return the SSE stream.
-    /// The stream yields SSE events as they arrive from the daemon.
-    #[allow(dead_code)]
-    pub async fn execute_stream(
-        &self,
-        item_ref: &str,
-        ref_bindings: &std::collections::BTreeMap<String, String>,
-        project_path: &str,
-        parameters: &serde_json::Value,
-    ) -> Result<SseStream, ClientError> {
-        let body = serde_json::json!({
-            "item_ref": item_ref,
-            "ref_bindings": ref_bindings,
-            "project_path": project_path,
-            "parameters": parameters,
-            "stream": true,
-        });
-        let url = format!("{}/execute", self.base_url.trim_end_matches('/'));
-        let body_bytes = serde_json::to_vec(&body)?;
-        let headers = self.sign("POST", "/execute", &body_bytes)?;
-
-        let resp = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("x-ryeos-key-id", &headers.key_id)
-            .header("x-ryeos-timestamp", &headers.timestamp)
-            .header("x-ryeos-nonce", &headers.nonce)
-            .header("x-ryeos-signature", &headers.signature)
-            .body(body_bytes)
             .send()
             .await
             .map_err(|e| CliTransportError::Unreachable {
@@ -404,14 +462,12 @@ impl DaemonClient {
 fn ui_session_mint_body(
     surface_ref: &str,
     project_path: Option<&str>,
-    read_only: bool,
     user_principal_id: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "ui_binding_contract_revision": ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
         "surface_ref": surface_ref,
         "project_path": project_path,
-        "read_only": read_only,
         "user_principal_id": user_principal_id,
     })
 }
@@ -501,7 +557,6 @@ mod tests {
         let body = ui_session_mint_body(
             "surface:ryeos/ui/lens",
             Some("/work/project"),
-            true,
             Some("fp:operator"),
         );
         assert_eq!(body["user_principal_id"], "fp:operator");

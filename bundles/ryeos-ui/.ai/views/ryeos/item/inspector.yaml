@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:dedde31cfcd45ba22ea5c6febb3d6557b4522014bdb4396e37ea9b4e62020202:hzbrQD9ihFxB+591eptxvB5RXJHQwe4NFvQREkp9Dudl9I1URNx+qoHW751JmnI8sN+HWkJu7NNpiMC34pn3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:8e302696b05d68e3f9bb107aa38e43c98dc90e38de002ec6f0a9409fc1091cd8:PDweNrwYCA8r5s/0qeGtWVcNIIw4jTQ+P6BQmPsnH/iKkRVo83PRuQTmCrkMpKv3G5DTe/4FdJJiZi6ltKhdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-inspector
 version: "1.0.0"
 description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
@@ -16,7 +16,8 @@ sources:
       canonical_ref: "@facet:selection.item"
       include_raw: false
       include_effective: true
-      project_path: ""
+      project_path: "@session:project_root"
+    requires_project: true
 projections:
   detail:
     - canonical_ref

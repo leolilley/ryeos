@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
+use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
 use super::scene_model::{RyeOsSceneModel, build_scene_model};
 use super::seat::InvokeTemplate;
@@ -44,6 +45,33 @@ pub struct RyeOsViewModel {
     pub workspace: RyeOsWorkspaceVm,
     pub overlays: Vec<RyeOsOverlayVm>,
     pub notices: Vec<RyeOsNoticeVm>,
+    pub transport: RyeOsTransportVm,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_failures: Vec<RyeOsEffectFailureVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTransportVm {
+    pub freshness: RyeOsTransportFreshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at_ms: Option<u64>,
+    pub channels: Vec<RyeOsTransportChannelVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTransportChannelVm {
+    pub channel: RyeOsTransportChannel,
+    pub freshness: RyeOsTransportFreshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<super::effect::RyeOsUiError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsEffectFailureVm {
+    pub effect_id: u64,
+    pub error: super::effect::RyeOsUiError,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -554,7 +582,39 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         workspace,
         overlays: overlays(core),
         notices: core.notices_vm(),
+        transport: transport_vm(core),
+        effect_failures: effect_failures_vm(core),
     }
+}
+
+fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {
+    RyeOsTransportVm {
+        freshness: core.runtime.transport.overall_freshness(),
+        last_observed_at_ms: core.runtime.transport.last_observed_at_ms(),
+        channels: core
+            .runtime
+            .transport
+            .channels
+            .iter()
+            .map(|(channel, state)| RyeOsTransportChannelVm {
+                channel: *channel,
+                freshness: state.freshness,
+                last_observed_at_ms: state.last_observed_at_ms,
+                error: state.error.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn effect_failures_vm(core: &RyeOsCore) -> Vec<RyeOsEffectFailureVm> {
+    core.ui
+        .effect_failures
+        .iter()
+        .map(|(effect_id, error)| RyeOsEffectFailureVm {
+            effect_id: *effect_id,
+            error: error.clone(),
+        })
+        .collect()
 }
 
 fn presentation_vm(
@@ -814,7 +874,11 @@ fn status_bar_vm(
             RyeOsStatusSegmentVm {
                 id: "mode".to_string(),
                 label: None,
-                value: if session.read_only { "ro" } else { "rw" }.to_string(),
+                value: match session.posture {
+                    crate::ui::binding::UiEffectivePosture::ObservationOnly => "observe",
+                    crate::ui::binding::UiEffectivePosture::Interactive => "operate",
+                }
+                .to_string(),
                 tone: RyeOsTone::Neutral,
                 grow: false,
             },
@@ -1297,6 +1361,7 @@ fn bound_view_vm_keyed(
                     source_key
                         .as_ref()
                         .and_then(|key| core.data.source_errors.get(key))
+                        .map(|error| &error.message)
                         .map(String::as_str)
                         .unwrap_or("source request failed")
                 ),
@@ -1672,7 +1737,11 @@ fn project_field_vm(
                     .map(String::as_str),
                 response: core.data.sources.get(&key),
                 parsed: core.data.field_sources.get(&key),
-                error: core.data.source_errors.get(&key).map(String::as_str),
+                error: core
+                    .data
+                    .source_errors
+                    .get(&key)
+                    .map(|error| error.message.as_str()),
                 refreshing,
             }
         })
@@ -2199,10 +2268,7 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
             .or_else(|| {
                 dimension.and_then(|dimension| dimension.session.user_principal_id.clone())
             }),
-        read_only: browser
-            .map(|session| session.read_only)
-            .or_else(|| dimension.map(|dimension| dimension.session.read_only))
-            .unwrap_or(true),
+        posture: browser.map(|session| session.posture).unwrap_or_default(),
     }
 }
 
@@ -3145,7 +3211,7 @@ mod tests {
         );
         core.data
             .source_errors
-            .insert(source_key, "metadata type mismatch".to_string());
+            .insert(source_key, "metadata type mismatch".into());
 
         let view = bound_view_vm_keyed(
             &core,
@@ -3800,7 +3866,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -3883,7 +3949,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -3930,7 +3996,7 @@ mod tests {
                 "tiles": ["view:ryeos/threads/history"],
                 "views": { "view:ryeos/threads/history": history }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -3979,7 +4045,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);

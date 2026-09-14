@@ -1,7 +1,53 @@
-# ryeos:signed:2026-07-15T02:11:39Z:366ad6a47a357cc18dba9335cbd8589c441bca1d42393b7d2e67ad58eabe004f:99Rw2jEKRrGKuOgMxxKEJpJDBI0//Pwsgpp4V589FMXiY0dv6Yi2yEFacUsjTKPBIDhPDGZKqjLjh3ZFiLyrCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:e38a8849845f37b6a7cf5bd3d56d1b526dfba4851419faf6bbcc326d714bc4b8:KSVRpd9aVrbk6PrJPxen1QWGs7xQVfRZbt4jmzE1S6PKnp5B1hDlfq9mMi8MZT0fP6aV6JYoPNmo0wOR3e7GBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 version: "1.0.0"
 description: RyeOS UI home space
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
+
+# Shell-wide observations are ordinary signed sources. Browser and terminal
+# clients address these coordinates through the compiled session binding.
+sources:
+  dimension:
+    ref: service:ui/ryeos-ui/dimension/get
+    role: dimension
+  projects:
+    ref: service:projects/list
+    role: projects
+  topology:
+    ref: service:ui/graph/topology
+    role: topology
+  items:
+    ref: service:ui/ryeos-ui/items/list
+    role: items
+    params:
+      limit: 1000
+      project_path: "@session:project_root"
+    dynamic_parameters: [query, kind]
+    requires_project: true
+  file_space:
+    ref: service:ui/ryeos-ui/files/tree
+    role: file_space
+    params:
+      root: project
+      path: ""
+      max_depth: 8
+      max_entries: 3000
+      project_path: "@session:project_root"
+    dynamic_parameters: [root, path]
+    requires_project: true
+  file_read:
+    ref: service:ui/ryeos-ui/files/read
+    role: file_read
+    params:
+      root: project
+      project_path: "@session:project_root"
+      path: ""
+    dynamic_parameters: [root, path]
+    activation: on_demand
+    requires_project: true
 
 tiling:
   mode: master_stack
@@ -74,14 +120,19 @@ overlays:
 
 input:
   route:
+    requires_project: true
     invoke:
       type: service
       ref: service:threads/input
+    bindings:
+      input_parameter: input
+      thread_target_parameter: target
+      interrupt_intent_parameter: intent
     params:
       target:
         kind: fresh
         item_ref: directive:ryeos/ops/base
-        project_path: ""
+        project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
 

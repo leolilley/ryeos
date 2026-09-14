@@ -76,9 +76,7 @@ async function commit(envelope) {
       requestAnimationFrame(() => root?.querySelector("[data-ryeos-overlay-input]")?.focus());
     }
     for (const effect of envelope.effects || []) {
-      runEffect(effect, {
-        project_path: envelope.view_model?.session?.project_path,
-      })
+      runEffect(effect)
         .then((result) => {
           if (result?.kind === "dimension" && result?.data) latestDimension = result.data;
           ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
@@ -100,7 +98,7 @@ async function commit(envelope) {
 async function attachSeat(session, envelope) {
   const seededEvents = safeSeatEvents().length;
   try {
-    const opened = await invokeSeatService("service:ui/seat/open", {
+    const opened = await invokeSeatService("open", {
       surface_ref: session.surface_ref,
       client_ref: "client:ryeos/web",
     });
@@ -109,13 +107,13 @@ async function attachSeat(session, envelope) {
     if (seatHeartbeat) clearInterval(seatHeartbeat);
     seatHeartbeat = setInterval(() => {
       if (seatThreadId) {
-        invokeSeatService("service:ui/seat/touch", { thread_id: seatThreadId }).catch(() => {});
+        invokeSeatService("touch", { thread_id: seatThreadId }).catch(() => {});
       }
     }, 60_000);
 
     let replayedEnvelope = envelope;
     if (opened?.reattached) {
-      const replay = await invokeSeatService("service:ui/seat/replay", {
+      const replay = await invokeSeatService("replay", {
         chain_root_id: seatThreadId,
       });
       const events = Array.isArray(replay?.events) ? replay.events : [];
@@ -156,7 +154,7 @@ async function syncSeatBraid() {
 
   seatSyncing = true;
   try {
-    await invokeSeatService("service:ui/seat/append", {
+    await invokeSeatService("append", {
       thread_id: seatThreadId,
       events: batch,
     });
@@ -178,11 +176,8 @@ function safeSeatEvents() {
   }
 }
 
-async function invokeSeatService(commandId, args) {
-  const resp = await postJson("/ui/api/invocations/dispatch", {
-    target: { kind: "ref", ref: commandId },
-    params: args,
-  });
+async function invokeSeatService(operation, args) {
+  const resp = await postJson(`/ui/api/session/seat/${operation}`, args);
   return resp?.result?.result ?? resp?.result ?? resp;
 }
 
@@ -413,13 +408,12 @@ function attachBrowserEvents() {
   window.addEventListener("pagehide", () => {
     if (!seatThreadId) return;
     const body = JSON.stringify({
-      target: { kind: "ref", ref: "service:ui/seat/close" },
-      params: { thread_id: seatThreadId },
+      thread_id: seatThreadId,
     });
     if (navigator.sendBeacon) {
-      navigator.sendBeacon("/ui/api/invocations/dispatch", new Blob([body], { type: "application/json" }));
+      navigator.sendBeacon("/ui/api/session/seat/close", new Blob([body], { type: "application/json" }));
     } else {
-      fetch("/ui/api/invocations/dispatch", {
+      fetch("/ui/api/session/seat/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,

@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:92eb0ee127cf7541d819d4d22706e8da0b01564dabedb45d0a18d58c65d0bc0d:FZdS9IAFjiDYZf3pDJWIYxLKDE4EeymkJWDM+mqAQFW6RawBfHXzilcnam0DCX5fLyD3w1vMzaNcozg1d8uYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:7e0933d767e96492f7c38fece15589b08da4a8019864066effd725ceaf650c99:B1ehtSSYAQjlPXAf2zm2I1DbRi4Oy0/NCfuxxY+WCDKo6WWbSvUBHEi71Z7P5Ic/xSV3+6V5Pl0rDc9YO+v8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/gc/status
 version: "1.0.0"
 description: Read-only GC state — running status, current phase, and recent GC event history from the JSONL log.
 endpoint: ui.ryeos.gc.status
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

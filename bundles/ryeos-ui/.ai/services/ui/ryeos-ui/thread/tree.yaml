@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-15T02:11:39Z:0472037698dae4601fd8a182f1b866a94eb59634bc81688fe3a02e87771dc5c3:tLbs/vn2GXW2la01BuNxrzli+zWsubsR8y3+TKC2TQ6p1wXwDA2RYWM+lW7u+zOq8zcVKkuQwZESPjyYF8sfCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:b6b623a6203e827d194851deee72dc8e2dd7bcd8506150c957c2f052083d0775:7nuz7T/jpxfoEng6mUGUrXexjbdaS57Fmp2XuK9ZcALEZGGv9WI+rTpZNp0y8B25d8Xvhz/WwT+IvtxZUQRZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/tree
 version: "1.0.0"
 description: Bounded recursive execution ancestry for the focused RyeOS UI thread tree.
 endpoint: ui.ryeos.thread.tree
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

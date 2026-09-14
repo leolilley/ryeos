@@ -3,15 +3,15 @@
 //!
 //! All file access is constrained to allowed roots derived from the
 //! browser session's project path. No arbitrary absolute path reads.
-//! The bundled HTTP routes for these services must remain `browser_session`
-//! authenticated; the verified-operator lane exists for direct signed service
-//! dispatch and intentionally relies on the operator-supplied `project_path`.
+//! Browser renderers reach these services only through compiled binding
+//! coordinates. The direct HTTP route is a signed-operator lane; either lane
+//! is converted to a pinned project directory before any traversal.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use lillux::{PinnedDirectory, PinnedEntryType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,15 +30,25 @@ const MAX_TREE_ENTRIES: usize = 3_000;
 /// Maximum recursive depth for file-space tree snapshots.
 const MAX_TREE_DEPTH: usize = 12;
 
-/// Resolve the allowed root for a given root type + session project.
-fn resolve_allowed_root(root_type: &str, project_path: Option<&str>) -> Result<PathBuf> {
+fn resolve_allowed_root(
+    root_type: &str,
+    caller: &crate::seat_auth::SeatCaller,
+    operator_project_path: Option<&str>,
+) -> Result<PinnedDirectory> {
+    let project = match caller.project_directory()? {
+        Some(project) => project,
+        None => {
+            let path = operator_project_path
+                .ok_or_else(|| anyhow::anyhow!("no project bound to this invocation"))?;
+            PinnedDirectory::open(Path::new(path))?
+                .ok_or_else(|| anyhow::anyhow!("operator-selected project does not exist"))?
+        }
+    };
     match root_type {
-        "project" => project_path
-            .map(PathBuf::from)
-            .context("no project bound to this session"),
-        "project_ai" => project_path
-            .map(|p| PathBuf::from(p).join(".ai"))
-            .context("no project bound to this session"),
+        "project" => Ok(project),
+        "project_ai" => project
+            .open_child_directory(std::ffi::OsStr::new(".ai"))?
+            .ok_or_else(|| anyhow::anyhow!("project .ai directory does not exist")),
         _ => anyhow::bail!(
             "unknown root type '{}': allowed roots are 'project' and 'project_ai'",
             root_type
@@ -46,21 +56,17 @@ fn resolve_allowed_root(root_type: &str, project_path: Option<&str>) -> Result<P
     }
 }
 
-/// Canonicalize `requested` and verify it stays under `root`.
-/// Returns the canonical path on success.
-fn safe_path(root: &Path, requested: &str) -> Result<PathBuf> {
-    let root_canonical = root.canonicalize().context("allowed root does not exist")?;
-
-    // Join and canonicalize to resolve any `..` traversal.
-    let joined = root_canonical.join(requested);
-    let canonical = joined.canonicalize().context("path does not exist")?;
-
-    // Verify the canonical path starts with the root.
-    if !canonical.starts_with(&root_canonical) {
-        anyhow::bail!("path escapes allowed root");
+fn open_relative_directory(root: &PinnedDirectory, relative: &str) -> Result<PinnedDirectory> {
+    let mut directory = root.try_clone()?;
+    for component in Path::new(relative).components() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("directory path is not a normalized relative path");
+        };
+        directory = directory
+            .open_child_directory(name)?
+            .ok_or_else(|| anyhow::anyhow!("directory path does not exist"))?;
     }
-
-    Ok(canonical)
+    Ok(directory)
 }
 
 // ── files.list ────────────────────────────────────────────────────
@@ -79,12 +85,10 @@ pub async fn handle_files_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_root: Option<String> = caller.project_root().map(String::from).or_else(|| {
-        params
-            .get("project_path")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
+    let operator_project_path = params
+        .get("project_path")
+        .and_then(Value::as_str)
+        .map(String::from);
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");
@@ -93,43 +97,28 @@ pub async fn handle_files_list(
     let req: FilesListRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, project_root.as_deref())
+    let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
+        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+    let directory = open_relative_directory(&allowed_root, &req.path)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
-    let safe =
-        safe_path(&allowed_root, &req.path).map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-
-    if !safe.is_dir() {
-        return Err(HandlerError::BadRequest("path is not a directory".into()).into());
-    }
-
     let mut entries: Vec<Value> = Vec::new();
-    let dir = std::fs::read_dir(&safe)?;
-    for entry in dir.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let metadata = std::fs::symlink_metadata(&path).ok();
-        let is_dir = metadata.as_ref().is_some_and(|meta| meta.is_dir());
+    let observed = directory.entries_no_follow_bounded(MAX_LIST_ENTRIES + 1)?;
+    let truncated = observed.len() > MAX_LIST_ENTRIES;
+    for entry in observed.into_iter().take(MAX_LIST_ENTRIES) {
+        let name = entry.name.to_string_lossy().into_owned();
+        let is_dir = entry.entry_type == PinnedEntryType::Directory;
 
         let mut entry_val = serde_json::json!({
             "name": name,
             "is_dir": is_dir,
         });
-
-        if let Some(meta) = metadata {
-            entry_val["size"] = serde_json::json!(meta.len());
-            if let Ok(modified) = meta.modified()
-                && let Some(modified) = modified_epoch_ms(modified)
-            {
-                entry_val["modified"] = serde_json::json!(modified);
-            }
+        if entry.entry_type == PinnedEntryType::Regular
+            && let Some(file) = directory.open_pinned_regular(&entry.name, false)?
+        {
+            entry_val["size"] = serde_json::json!(file.size()?);
         }
-
         entries.push(entry_val);
-
-        if entries.len() >= MAX_LIST_ENTRIES {
-            break;
-        }
     }
 
     entries.sort_by(|a, b| {
@@ -149,7 +138,7 @@ pub async fn handle_files_list(
     Ok(serde_json::json!({
         "root": req.root,
         "path": req.path,
-        "truncated": entries.len() >= MAX_LIST_ENTRIES,
+        "truncated": truncated,
         "entries": entries,
     }))
 }
@@ -177,24 +166,16 @@ struct FileSpaceEntry {
     modified: Option<u64>,
 }
 
-fn modified_epoch_ms(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-}
-
 pub async fn handle_files_tree(
     params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_root: Option<String> = caller.project_root().map(String::from).or_else(|| {
-        params
-            .get("project_path")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
+    let operator_project_path = params
+        .get("project_path")
+        .and_then(Value::as_str)
+        .map(String::from);
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");
@@ -203,27 +184,32 @@ pub async fn handle_files_tree(
     let req: FilesTreeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, project_root.as_deref())
+    let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-    let root_canonical = allowed_root
-        .canonicalize()
-        .map_err(|e| HandlerError::BadRequest(format!("allowed root does not exist: {e}")))?;
-    let safe =
-        safe_path(&allowed_root, &req.path).map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-    if !safe.is_dir() {
-        return Err(HandlerError::BadRequest("path is not a directory".into()).into());
-    }
+    let directory = open_relative_directory(&allowed_root, &req.path)
+        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
     let max_depth = req.max_depth.clamp(1, MAX_TREE_DEPTH);
     let max_entries = req.max_entries.clamp(1, MAX_TREE_ENTRIES);
+    let ignore = &state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+        .matcher;
     let mut entries = Vec::new();
     let mut truncated = false;
+    let policy_relative = match req.root.as_str() {
+        "project" => PathBuf::from(&req.path),
+        "project_ai" => Path::new(".ai").join(&req.path),
+        _ => unreachable!("root type was validated above"),
+    };
     collect_tree_entries(
-        &root_canonical,
-        &safe,
+        &directory,
+        Path::new(&req.path),
+        &policy_relative,
         0,
         max_depth,
         max_entries,
+        ignore,
         &mut entries,
         &mut truncated,
     )?;
@@ -238,17 +224,19 @@ pub async fn handle_files_tree(
         "truncated": truncated,
         "watchable": false,
         "supports_expand": true,
-        "ignore_mode": "built_in",
+        "ignore_mode": "node_policy",
         "entries": entries,
     }))
 }
 
 fn collect_tree_entries(
-    root: &Path,
-    dir: &Path,
+    directory: &PinnedDirectory,
+    relative_directory: &Path,
+    policy_relative_directory: &Path,
     depth: usize,
     max_depth: usize,
     max_entries: usize,
+    ignore: &ryeos_app::ignore::IgnoreMatcher,
     out: &mut Vec<FileSpaceEntry>,
     truncated: &mut bool,
 ) -> Result<()> {
@@ -256,46 +244,51 @@ fn collect_tree_entries(
         return Ok(());
     }
 
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
+    let remaining = max_entries.saturating_sub(out.len());
+    let entries = directory.entries_no_follow_bounded(remaining.saturating_add(1))?;
+    if entries.len() > remaining {
         *truncated = true;
-        return Ok(());
-    };
-    let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-
-    for entry in entries {
+    }
+    for entry in entries.into_iter().take(remaining) {
         if out.len() >= max_entries {
             *truncated = true;
             break;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if should_skip_tree_entry(&name) {
+        let name = entry.name.to_string_lossy().into_owned();
+        let relative = relative_directory.join(&entry.name);
+        let policy_relative = policy_relative_directory.join(&entry.name);
+        let relative_text = relative.to_string_lossy().replace('\\', "/");
+        if ignore.is_ignored(&policy_relative.to_string_lossy().replace('\\', "/")) {
             continue;
         }
-        let path = entry.path();
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            continue;
+        let is_dir = entry.entry_type == PinnedEntryType::Directory;
+        let size = if entry.entry_type == PinnedEntryType::Regular {
+            directory
+                .open_pinned_regular(&entry.name, false)?
+                .map(|file| file.size())
+                .transpose()?
+        } else {
+            None
         };
-        let is_dir = metadata.is_dir();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
         out.push(FileSpaceEntry {
-            path: rel,
+            path: relative_text,
             name,
             is_dir,
-            size: (!is_dir).then_some(metadata.len()),
-            modified: metadata.modified().ok().and_then(modified_epoch_ms),
+            size,
+            modified: None,
         });
-        if is_dir && !metadata.file_type().is_symlink() {
+        if is_dir {
+            let child = directory
+                .open_child_directory(&entry.name)?
+                .ok_or_else(|| anyhow::anyhow!("directory changed during file-tree traversal"))?;
             collect_tree_entries(
-                root,
-                &path,
+                &child,
+                &relative,
+                &policy_relative,
                 depth + 1,
                 max_depth,
                 max_entries,
+                ignore,
                 out,
                 truncated,
             )?;
@@ -305,13 +298,6 @@ fn collect_tree_entries(
         }
     }
     Ok(())
-}
-
-fn should_skip_tree_entry(name: &str) -> bool {
-    matches!(
-        name,
-        ".git" | "target" | "node_modules" | "dist" | "build" | ".next" | ".cache"
-    )
 }
 
 fn default_tree_depth() -> usize {
@@ -337,12 +323,10 @@ pub async fn handle_files_read(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_root: Option<String> = caller.project_root().map(String::from).or_else(|| {
-        params
-            .get("project_path")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
+    let operator_project_path = params
+        .get("project_path")
+        .and_then(Value::as_str)
+        .map(String::from);
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");
@@ -351,24 +335,15 @@ pub async fn handle_files_read(
     let req: FilesReadRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, project_root.as_deref())
+    let allowed_root = resolve_allowed_root(&req.root, &caller, operator_project_path.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-
-    let safe =
-        safe_path(&allowed_root, &req.path).map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-
-    if !safe.is_file() {
-        return Err(HandlerError::BadRequest("path is not a file".into()).into());
-    }
-
-    let metadata = std::fs::metadata(&safe)?;
-    let size = metadata.len() as usize;
-    let truncated = size > MAX_READ_BYTES;
-
-    use std::io::Read;
-    let file = std::fs::File::open(&safe)?;
-    let mut buf = Vec::with_capacity(std::cmp::min(size, MAX_READ_BYTES));
-    file.take(MAX_READ_BYTES as u64).read_to_end(&mut buf)?;
+    let file = allowed_root
+        .open_pinned_regular_descendant(Path::new(&req.path), false)?
+        .ok_or_else(|| HandlerError::BadRequest("path is not a regular file".into()))?;
+    let size = file.size()?;
+    let truncated = size > MAX_READ_BYTES as u64;
+    let mut buf = file.read_bounded(MAX_READ_BYTES as u64 + 1)?;
+    buf.truncate(MAX_READ_BYTES);
     let content = String::from_utf8_lossy(&buf).into_owned();
 
     Ok(serde_json::json!({
@@ -414,6 +389,7 @@ pub const FILES_TREE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use serde_json::Value;
 
     fn workspace_root() -> std::path::PathBuf {
@@ -425,10 +401,10 @@ mod tests {
     }
 
     #[test]
-    fn bundled_file_routes_are_browser_session_only() {
-        // If one of these routes becomes `ryeos_signed`, the operator lane can
-        // reach file services over HTTP with caller-supplied `project_path`.
-        // Keep HTTP file browsing bound to the browser session's project root.
+    fn bundled_file_routes_require_a_signed_principal() {
+        // Browser renderers use compiled binding coordinates. These direct
+        // routes are the explicit operator lane and therefore require a
+        // signed caller; their project root is pinned before traversal.
         let routes = [
             "bundles/ryeos-ui/.ai/node/routes/ui/ryeos-ui/files-list.yaml",
             "bundles/ryeos-ui/.ai/node/routes/ui/ryeos-ui/files-read.yaml",
@@ -446,8 +422,34 @@ mod tests {
             let yaml: Value = serde_yaml::from_str(&contents)
                 .unwrap_or_else(|err| panic!("parse {route}: {err}"));
 
-            assert_eq!(yaml["auth"], "browser_session", "{route}");
+            assert_eq!(yaml["auth"], "ryeos_signed", "{route}");
             assert_eq!(yaml["response"]["source"], service_ref, "{route}");
         }
+    }
+
+    #[test]
+    fn retained_project_descriptor_cannot_be_redirected_by_path_replacement() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let original = temporary.path().join("project");
+        let moved = temporary.path().join("project-moved");
+        std::fs::create_dir(&original).expect("create original project");
+        std::fs::write(original.join("proof.txt"), b"original").expect("write original file");
+        let pinned = PinnedDirectory::open(&original)
+            .expect("pin original project")
+            .expect("original project exists");
+
+        std::fs::rename(&original, &moved).expect("replace project path");
+        std::fs::create_dir(&original).expect("create replacement project");
+        std::fs::write(original.join("proof.txt"), b"replacement").expect("write replacement");
+
+        let file = pinned
+            .open_pinned_regular_descendant(Path::new("proof.txt"), false)
+            .expect("descriptor-relative lookup")
+            .expect("original file remains reachable");
+        assert_eq!(
+            file.read_bounded(32).expect("read pinned file"),
+            b"original"
+        );
+        assert!(open_relative_directory(&pinned, "../project/proof.txt").is_err());
     }
 }

@@ -17,9 +17,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ryeos_client_base::surface::LoadedSurface;
 use ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
-use ryeos_client_base::ui::{
-    BrowserSession, BrowserViewport, RyeOsCore, RyeOsEffectResult, RyeOsEvent,
-};
+use ryeos_client_base::ui::{BrowserViewport, RyeOsCore, RyeOsEffectResult, RyeOsEvent};
 
 use crate::render::RyeOsTerminalRenderer;
 use crate::terminal::TerminalGuard;
@@ -45,18 +43,17 @@ const SEAT_RECONNECT_MAX_MS: u64 = 30_000;
 
 pub async fn run(
     project_path: &str,
-    read_only: bool,
     loaded_surface: LoadedSurface,
     diagnostics: Vec<String>,
     client: Option<DaemonClient>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the connection the surface was resolved over (discovery and
     // audience already settled there); connect fresh only without one.
-    let mut client = match client {
+    let client = match client {
         Some(client) => client,
         None => DaemonClient::try_connect().await?,
     };
-    let surface_ref = loaded_surface
+    let mut surface_ref = loaded_surface
         .requested_ref()
         .map(str::to_string)
         .unwrap_or_else(|| loaded_surface.spec().name.clone());
@@ -75,15 +72,20 @@ pub async fn run(
     let mut tail_chain: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    client
+        .mint_ui_session(&surface_ref, Some(project_path))
+        .await?;
+    let current_session = client.current_ui_session().await?;
+    let session = current_session;
     let start_effects = core.dispatch(RyeOsEvent::Start {
-        session: session_for(project_path, read_only, &loaded_surface),
+        session,
         viewport: viewport(width, height),
         now_ms: now_ms(),
     });
     // The seed count marks the surface-declared seat facets; the deferred
     // reattach below compares against it to detect a lost race with live
     // local writes.
-    let seeded_events = core.seat.events().len();
+    let mut seeded_events = core.seat.events().len();
 
     // Surface startup diagnostics (surface/view resolution warnings) as in-TUI
     // notices. Otherwise they print to stderr BEFORE the alternate screen is
@@ -99,9 +101,6 @@ pub async fn run(
         renderer.render(&mut stdout, &vm, width, height)?;
     }
 
-    client
-        .mint_ui_session(&surface_ref, Some(project_path), read_only)
-        .await?;
     let client = Arc::new(client);
 
     // Effect results come home over this channel: batches run off the
@@ -109,7 +108,7 @@ pub async fn run(
     // blocks a frame.
     let (effect_tx, mut effect_rx) =
         tokio::sync::mpsc::unbounded_channel::<Vec<RyeOsEffectResult>>();
-    spawn_effects(&client, project_path_of(&core), start_effects, &effect_tx);
+    spawn_effects(&client, start_effects, &effect_tx);
 
     // The seat is itself a thread: braided, owned, replayable. Reattach
     // to the latest running owned seat for this surface when possible;
@@ -160,9 +159,9 @@ pub async fn run(
     // Session hints: transient "look" signals; bound views declaring
     // `refresh.on_hint` refetch their sources. This replaces polling —
     // content decides its own liveness.
-    let (session_tx, mut session_rx) =
+    let (mut session_tx, mut session_rx) =
         tokio::sync::mpsc::unbounded_channel::<hints::SessionMessage>();
-    hints::spawn_session_listener(client.clone(), session_tx.clone());
+    let mut session_task = hints::spawn_session_listener(client.clone(), session_tx.clone());
 
     let mut events = EventStream::new();
     // Adaptive frame clock: the backdrop's breathe/sweep animation reads
@@ -239,7 +238,7 @@ pub async fn run(
                         {
                             feed_dirty = true;
                         }
-                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        spawn_effects(&client, effects, &effect_tx);
                         queue_seat_sync(
                             &core,
                             &seat_thread,
@@ -252,7 +251,7 @@ pub async fn run(
                     Event::Resize(w, h) => {
                         let _ = term.update_size();
                         let effects = core.dispatch(RyeOsEvent::Resize { viewport: viewport(w, h) });
-                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        spawn_effects(&client, effects, &effect_tx);
                         dirty = true;
                     }
                     _ => {}
@@ -261,11 +260,102 @@ pub async fn run(
             Some(results) = effect_rx.recv() => {
                 // Fold one batch's results in emission order; any effects
                 // the folds emit form the next spawned generation.
+                let previous_session_id = core
+                    .data
+                    .session
+                    .as_ref()
+                    .map(|session| session.session_id.clone());
                 let mut follow = Vec::new();
+                let mut replaced_generation = false;
                 for result in results {
-                    follow.extend(core.dispatch(RyeOsEvent::EffectResult { result }));
+                    if replaced_generation {
+                        // Every remaining result belonged to the predecessor's
+                        // concurrent batch. The replacement core deliberately
+                        // has no pending coordinate for it.
+                        continue;
+                    }
+                    let before = core
+                        .data
+                        .session
+                        .as_ref()
+                        .map(|session| session.session_id.clone());
+                    let emitted = core.dispatch(RyeOsEvent::EffectResult { result });
+                    let after = core
+                        .data
+                        .session
+                        .as_ref()
+                        .map(|session| session.session_id.clone());
+                    if after != before {
+                        // Discard any follow-up derived from earlier results in
+                        // the predecessor batch. Only successor bootstrap work
+                        // may cross the immutable session cut.
+                        follow = emitted;
+                        replaced_generation = true;
+                    } else {
+                        follow.extend(emitted);
+                    }
                 }
-                spawn_effects(&client, project_path_of(&core), follow, &effect_tx);
+                let current_session = core.data.session.as_ref().map(|session| {
+                    (
+                        session.session_id.clone(),
+                        session.surface_ref.clone(),
+                        session.project_path.clone().unwrap_or_default(),
+                    )
+                });
+                let current_session_id = current_session
+                    .as_ref()
+                    .map(|(session_id, _, _)| session_id.clone());
+                if current_session_id != previous_session_id {
+                    // A project/surface authority change creates a new immutable
+                    // UI session. Every transport keyed by the predecessor must
+                    // turn over with it; changing only the request cookie would
+                    // leave hints and the durable seat attached to stale authority.
+                    session_task.abort();
+                    let (replacement_tx, replacement_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<hints::SessionMessage>();
+                    session_tx = replacement_tx;
+                    session_rx = replacement_rx;
+                    session_task =
+                        hints::spawn_session_listener(client.clone(), session_tx.clone());
+
+                    if let Some(task) = tail_task.take() {
+                        task.abort();
+                    }
+                    tail_chain = None;
+                    pending_hints.clear();
+                    hint_batch_started_ms = None;
+
+                    if let Some(old_thread_id) = seat_thread.take() {
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            seat::close_seat_thread(&client, &old_thread_id).await;
+                        });
+                    }
+                    seat_synced = 0;
+                    seat_sync_inflight = false;
+                    seat_bootstrap_retry_at_ms = None;
+                    seat_reconnect_delay_ms = SEAT_RECONNECT_MIN_MS;
+                    seeded_events = core.seat.events().len();
+
+                    if let Some((_, replacement_surface, replacement_project)) = current_session {
+                        surface_ref = replacement_surface;
+                        let client = client.clone();
+                        let replacement_surface = surface_ref.clone();
+                        let seat_tx = seat_tx.clone();
+                        seat_bootstrap_inflight = true;
+                        tokio::spawn(async move {
+                            let _ = seat_tx.send(
+                                seat::bootstrap_seat(
+                                    &client,
+                                    &replacement_surface,
+                                    &replacement_project,
+                                )
+                                .await,
+                            );
+                        });
+                    }
+                }
+                spawn_effects(&client, follow, &effect_tx);
                 dirty = true;
             }
             Some(ack) = seat_ack_rx.recv() => {
@@ -326,7 +416,7 @@ pub async fn run(
                         event_type,
                         payload,
                     });
-                    spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                    spawn_effects(&client, effects, &effect_tx);
                 }
             }
             Some(message) = session_rx.recv() => {
@@ -336,7 +426,7 @@ pub async fn run(
                             kind: kind.clone(),
                             payload,
                         });
-                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        spawn_effects(&client, effects, &effect_tx);
                         if pending_hints.is_empty() {
                             hint_batch_started_ms = Some(now_ms());
                         }
@@ -345,7 +435,7 @@ pub async fn run(
                     }
                     hints::SessionMessage::DaemonEvent { payload } => {
                         let effects = core.dispatch(RyeOsEvent::DaemonEvent { payload });
-                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        spawn_effects(&client, effects, &effect_tx);
                         dirty = true;
                     }
                     hints::SessionMessage::Resubscribed => {
@@ -353,7 +443,7 @@ pub async fn run(
                         // the gap is lost. One full refetch instead of
                         // trusting whatever the screen froze on.
                         let effects = core.initial_effects();
-                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        spawn_effects(&client, effects, &effect_tx);
                         pending_hints.clear();
                         hint_batch_started_ms = None;
                         dirty = true;
@@ -447,13 +537,13 @@ pub async fn run(
                     let effects = core.dispatch(RyeOsEvent::HintFlushBatch {
                         kinds: hints.into_iter().collect(),
                     });
-                    spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                    spawn_effects(&client, effects, &effect_tx);
                 }
                 // Flush a debounced live-filter refetch once typing has settled.
                 if feed_dirty {
                     feed_dirty = false;
                     let effects = core.refresh_focused_feeds();
-                    spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                    spawn_effects(&client, effects, &effect_tx);
                 }
                 // Step the scene clock exactly once per on-time tick (see
                 // `advance_scene_frame`): the fast tick period equals the
@@ -461,7 +551,7 @@ pub async fn run(
                 // into held frames and double steps.
                 core.advance_scene_frame(tick_now);
                 let effects = core.dispatch(RyeOsEvent::Tick { now_ms: tick_now });
-                spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                spawn_effects(&client, effects, &effect_tx);
                 queue_seat_sync(
                     &core,
                     &seat_thread,
@@ -474,11 +564,10 @@ pub async fn run(
         }
     }
 
-    // Give the terminal back BEFORE settling the seat: the close is one
-    // best-effort daemon round trip on `/execute`, which deliberately has
-    // no total request timeout, so it must never hold the raw alternate
-    // screen hostage on a slow daemon. Drop the input stream first so a
-    // keystroke typed at the restored shell isn't eaten by the reader.
+    // Give the terminal back BEFORE settling the seat: close is a best-effort
+    // session-route round trip and must never hold the raw alternate screen
+    // hostage on a slow daemon. Drop the input stream first so a keystroke
+    // typed at the restored shell isn't eaten by the reader.
     drop(events);
     drop(term);
     if let Some(thread_id) = &seat_thread {
@@ -498,13 +587,6 @@ fn frame_clock(period_ms: u64) -> tokio::time::Interval {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(period_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tick
-}
-
-fn project_path_of(core: &RyeOsCore) -> Option<String> {
-    core.data
-        .session
-        .as_ref()
-        .and_then(|session| session.project_path.clone())
 }
 
 /// Hand the braid writer the next unmirrored slice, at most one batch in
@@ -559,28 +641,6 @@ fn invalidate_seat_generation(
 fn schedule_seat_reconnect(retry_at_ms: &mut Option<u64>, delay_ms: &mut u64, now_ms: u64) {
     *retry_at_ms = Some(now_ms.saturating_add(*delay_ms));
     *delay_ms = delay_ms.saturating_mul(2).min(SEAT_RECONNECT_MAX_MS);
-}
-
-fn session_for(
-    project_path: &str,
-    read_only: bool,
-    loaded_surface: &LoadedSurface,
-) -> BrowserSession {
-    let surface_ref = loaded_surface
-        .requested_ref()
-        .map(str::to_string)
-        .unwrap_or_else(|| loaded_surface.spec().name.clone());
-    BrowserSession {
-        ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.to_string(),
-        session_id: format!("terminal:{}", now_ms()),
-        surface_ref,
-        user_principal_id: None,
-        effective_surface: Some(serde_json::to_value(loaded_surface.spec()).unwrap_or_default()),
-        project_path: Some(project_path.to_string()),
-        read_only,
-        granted_caps: Vec::new(),
-        events_url: None,
-    }
 }
 
 fn viewport(width: u16, height: u16) -> BrowserViewport {

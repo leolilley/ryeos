@@ -12,6 +12,7 @@
 //! kind-schema loading, signature verification, or extends-chain composition.
 //! Those belong in ryeosd / item services.
 
+use crate::ui::content::SourceBinding;
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -48,6 +49,11 @@ pub struct SurfaceSpec {
     pub style: SurfaceStyleSpec,
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+    /// Shell-wide observation sources. Like view sources, these are compiled
+    /// into the session binding; renderers address their signed coordinates
+    /// and never select executable endpoints themselves.
+    #[serde(default)]
+    pub sources: BTreeMap<String, SourceBinding>,
     /// Resolved `view:` bindings embedded at session/load time, keyed by
     /// ref (views-as-content; populated by the resolver, never authored
     /// inline — surfaces reference views, they do not define them).
@@ -115,18 +121,23 @@ pub struct SurfaceOverlaySourceSpec {
     pub params: serde_json::Value,
 }
 
-/// Surface capability restrictions.
-/// Child surfaces can only narrow, never widen.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Capability-pattern ceilings for sources and executable affordances named by
+/// this surface's signed views.
+///
+/// The surface kind composes these lanes with
+/// `narrow_against_parent_effective`: the root-most declaration establishes
+/// the ceiling and each child can only retain covered patterns. A child can,
+/// for example, produce an observation-only surface by declaring an empty
+/// `affordances` lane while inheriting `sources` from its parent. These lists
+/// constrain binding compilation; they do not name or grant executable
+/// targets themselves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SurfaceCapabilitySpec {
     #[serde(default)]
-    pub allow_execute: Option<bool>,
+    pub sources: Vec<String>,
     #[serde(default)]
-    pub allow_thread_cancel: Option<bool>,
-    #[serde(default)]
-    pub allow_thread_kill: Option<bool>,
-    #[serde(default)]
-    pub allow_layout_changes: Option<bool>,
+    pub affordances: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +799,7 @@ pub fn builtin_default() -> SurfaceSpec {
         slots: SlotsSpec::default(),
         style: SurfaceStyleSpec::default(),
         input: None,
+        sources: BTreeMap::new(),
         views: None,
         backdrop: None,
         library: Vec::new(),
@@ -897,13 +909,6 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
 
     // Warn about unsupported fields
     let mut diagnostics = Vec::new();
-    if spec.capabilities.is_some() {
-        diagnostics.push(SurfaceDiagnostic::UnsupportedField {
-            field: "capabilities".into(),
-            message: "capability enforcement not yet implemented, field accepted but ignored"
-                .into(),
-        });
-    }
     if !spec.instruments.is_empty() {
         diagnostics.push(SurfaceDiagnostic::UnsupportedField {
             field: "instruments".into(),
@@ -1465,6 +1470,45 @@ tiles:
     }
 
     #[test]
+    fn capability_ceiling_parses_as_composer_compatible_string_lists() {
+        let spec: SurfaceSpec = serde_yaml::from_str(
+            r#"
+name: observe
+capabilities:
+  sources: ["rye.get.*", "rye.list.*"]
+  affordances: []
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.capabilities,
+            Some(SurfaceCapabilitySpec {
+                sources: vec!["rye.get.*".to_string(), "rye.list.*".to_string()],
+                affordances: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn capability_ceiling_rejects_boolean_switches_and_unknown_lanes() {
+        for capabilities in [
+            serde_json::json!({ "allow_execute": false }),
+            serde_json::json!({ "sources": ["*"], "actions": [] }),
+            serde_json::json!({ "sources": [true] }),
+        ] {
+            let value = serde_json::json!({
+                "name": "invalid",
+                "capabilities": capabilities,
+            });
+            assert!(
+                serde_json::from_value::<SurfaceSpec>(value).is_err(),
+                "invalid capability vocabulary must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_fields_generate_diagnostics() {
         let dir = std::env::temp_dir().join("ryeos_tui_test_unsupported");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1477,7 +1521,8 @@ version = "0.1.0"
 tiles = ["view:ryeos/threads/list"]
 
 [capabilities]
-allow_execute = true
+sources = ["rye.get.*"]
+affordances = []
 
 [[instruments]]
 id = "test"
@@ -1491,13 +1536,15 @@ id = "test"
         };
         let loaded = load_surface(&opts);
         if let LoadedSurface::LocalPreview { diagnostics, .. } = &loaded {
-            let has_cap_warning = diagnostics.iter().any(|d| {
-                matches!(d, SurfaceDiagnostic::UnsupportedField { field, .. } if field == "capabilities")
-            });
             let has_instr_warning = diagnostics.iter().any(|d| {
                 matches!(d, SurfaceDiagnostic::UnsupportedField { field, .. } if field == "instruments")
             });
-            assert!(has_cap_warning, "should warn about capabilities");
+            assert!(
+                !diagnostics.iter().any(|d| {
+                    matches!(d, SurfaceDiagnostic::UnsupportedField { field, .. } if field == "capabilities")
+                }),
+                "capabilities are retained binding input, not an unsupported field"
+            );
             assert!(has_instr_warning, "should warn about instruments");
         } else {
             panic!("expected LocalPreview");

@@ -8,7 +8,7 @@ pub struct RyeOsSessionVm {
     #[serde(default)]
     pub ambient: RyeOsAmbientVm,
     pub user_principal_id: Option<String>,
-    pub read_only: bool,
+    pub posture: crate::ui::binding::UiEffectivePosture,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

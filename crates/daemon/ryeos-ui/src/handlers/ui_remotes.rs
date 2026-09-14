@@ -25,6 +25,35 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
 }
 
+fn retained_session(
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<crate::browser_session::BrowserSession, HandlerError> {
+    if let Some(session) = crate::seat_auth::compiled_ui_session() {
+        return Ok(session);
+    }
+    let session_id = session_id_from_context(ctx)
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI session required".into()))?;
+    get_ui_state(state)
+        .expect("UiState not set")
+        .browser_sessions
+        .get_session(&session_id)
+        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))
+}
+
+fn retained_project_path(
+    session: &crate::browser_session::BrowserSession,
+) -> Result<Option<std::path::PathBuf>> {
+    session
+        .project_authority
+        .as_ref()
+        .map(|authority| {
+            authority.ensure_path_binding()?;
+            authority.descriptor_path()
+        })
+        .transpose()
+}
+
 // ── remotes.list ──────────────────────────────────────────────────
 
 pub async fn handle_remotes_list(
@@ -32,16 +61,9 @@ pub async fn handle_remotes_list(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    let project = session.project_root.as_deref().map(std::path::Path::new);
+    let session = retained_session(&ctx, &state)?;
+    let project_path = retained_project_path(&session)?;
+    let project = project_path.as_deref();
 
     let report =
         ryeos_api::remote::config::load_remotes_layered_report(&state.config.app_root, project)?;
@@ -89,16 +111,9 @@ pub async fn handle_remotes_probe(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    let project = session.project_root.as_deref().map(std::path::Path::new);
+    let session = retained_session(&ctx, &state)?;
+    let project_path = retained_project_path(&session)?;
+    let project = project_path.as_deref();
 
     let req: ProbeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;

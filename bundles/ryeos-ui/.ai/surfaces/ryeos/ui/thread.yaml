@@ -1,7 +1,11 @@
-# ryeos:signed:2026-07-15T02:11:39Z:054bd0233bc466db1f894d4b37bd193d3aa215d1bc5c4c85be6801e09f2297e4:VmAdTRA/t60CbrQt1I2TOoCuPjuiQOKneS1A29YI2lfzwGfexya9mIc31YfKYYy2FMJW8xrYOH3uGou986OMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:5e4c5fdf8ca696aca935ff2563de6dadc939fa8d23f05bc8233f1b015e6d15ca:mFGyc5R9r9Ct2Z2e5ZR1E3+HtwdU8e0+cJ+1zNttxgXv6YxCf/xo9DWPluQMXV7aDSA6Y5wP8hKsF84/kVn7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
 version: "1.0.0"
 description: Directive thread — watch and drive a single execution stream
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
 
 # One center tile: the directive thread event stream. It starts empty
 # (its source is the route head thread `@facet:input.route.thread`, which
@@ -42,14 +46,19 @@ library:
 
 input:
   route:
+    requires_project: true
     invoke:
       type: service
       ref: service:threads/input
+    bindings:
+      input_parameter: input
+      thread_target_parameter: target
+      interrupt_intent_parameter: intent
     params:
       target:
         kind: fresh
         item_ref: directive:ryeos/ops/base
-        project_path: ""
+        project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
 

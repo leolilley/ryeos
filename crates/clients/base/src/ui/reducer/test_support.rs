@@ -34,34 +34,19 @@ pub(crate) fn session() -> BrowserSession {
             }
         })),
         project_path: Some("/tmp/project".to_string()),
-        read_only: true,
-        granted_caps: Vec::new(),
+        binding_digest: "11".repeat(32),
+        binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {
+            max_request_bytes: 64 * 1024,
+            max_input_bytes: 16 * 1024,
+        },
+        posture: crate::ui::binding::UiEffectivePosture::ObservationOnly,
         events_url: Some("/ui/events/session/session-1".to_string()),
     }
 }
 
 pub(crate) fn writable_session() -> BrowserSession {
     BrowserSession {
-        read_only: false,
-        ..session()
-    }
-}
-
-pub(crate) fn atlas_session() -> BrowserSession {
-    BrowserSession {
-        surface_ref: "surface:ryeos/ryeos/atlas".to_string(),
-        effective_surface: Some(serde_json::json!({
-            "name": "ryeos-atlas",
-            "version": "1.0.0",
-            "tiles": [],
-            "ambient": {
-                "show_background": true,
-                "opacity": 1.0,
-                "mode": "namespace_atlas",
-                "atlas": { "style": "flat_2d" }
-            }
-        })),
-        project_path: None,
+        posture: crate::ui::binding::UiEffectivePosture::Interactive,
         ..session()
     }
 }

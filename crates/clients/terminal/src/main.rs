@@ -54,7 +54,6 @@ fn print_help(console: &Console) {
             "--project <PATH>",
             "Project root for daemon-backed resolution",
         ),
-        Row::key_value("--read-only", "Open a read-only seat"),
         Row::key_value("--help", "Show this help"),
     ];
     document.sections.push(options);
@@ -107,12 +106,10 @@ fn main() {
     let mut surface_file: Option<String> = None;
     let mut surface_name: Option<String> = None;
     let mut views_root: Option<String> = None;
-    let mut read_only = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--read-only" => read_only = true,
             "--project" => {
                 i += 1;
                 if i < args.len() {
@@ -198,7 +195,7 @@ fn main() {
         // --surface always means daemon resolution, not local preview.
         let loaded: ryeos_client_base::surface::LoadedSurface = if surface_name.is_some() {
             match transport::daemon::DaemonClient::try_connect().await {
-                Ok(mut client) => {
+                Ok(client) => {
                     let ref_str = surface_name.as_deref().unwrap();
                     let mut progress = console
                         .progress(OperationKind::Fetch, "opening UI session")
@@ -207,10 +204,7 @@ fn main() {
                     if let Some(progress) = progress.as_mut() {
                         let _ = progress.update("opening UI session", Some(ref_str));
                     }
-                    if let Err(e) = client
-                        .mint_ui_session(ref_str, Some(&project_path), read_only)
-                        .await
-                    {
+                    if let Err(e) = client.mint_ui_session(ref_str, Some(&project_path)).await {
                         finish_progress(&mut progress);
                         exit_with_error(
                             &console,
@@ -311,7 +305,7 @@ fn main() {
                 });
             }
             match transport::daemon::DaemonClient::try_connect().await {
-                Ok(mut client) => {
+                Ok(client) => {
                     let total_views = view_refs.len();
                     let mut progress = console
                         .progress(OperationKind::Fetch, "opening preview UI session")
@@ -326,7 +320,7 @@ fn main() {
                             .update("opening preview UI session", Some(&session_surface_ref));
                     }
                     match client
-                        .mint_ui_session(&session_surface_ref, Some(&project_path), read_only)
+                        .mint_ui_session(&session_surface_ref, Some(&project_path))
                         .await
                     {
                         Ok(()) => {
@@ -398,7 +392,7 @@ fn main() {
             }
         }
 
-        let result = app::run(&project_path, read_only, loaded, diagnostics, daemon_client).await;
+        let result = app::run(&project_path, loaded, diagnostics, daemon_client).await;
 
         if let Err(e) = result {
             exit_with_error(&console, format!("terminal workspace failed: {e}"), None);

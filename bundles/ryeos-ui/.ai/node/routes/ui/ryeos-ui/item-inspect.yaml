@@ -1,9 +1,9 @@
-# ryeos:signed:2026-07-06T12:32:28Z:84dccd078c9a204d87ce7802e519983ce9cce7b5c3dba74f14ff44ba1e004b4b:a5CASuGKa0y5A2U5vEJepABydfAtZxsrPOwGpNsThG8YZq/p3g6AMSTpibNomuQInhPcQKmgulCP+BPCBKOpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:57c584234ae5da39d1fceba530c7964509c74ae6214c9a0055c0e015e6cc76d7:Yl2/LuQGMYObMp/hCfdzGTih/NXdeMozZ+P9KCtQtj/7IXiZopHPlQCwTXhNqD0DJh0FYZRyJcdyNHT83e2rDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/ryeos-ui/item/inspect
 path: /ui/api/ryeos-ui/item/inspect
 methods:
   - POST
-auth: browser_session
+auth: ryeos_signed
 request:
   body: json
 limits:

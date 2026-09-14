@@ -1,9 +1,9 @@
-# ryeos:signed:2026-07-06T12:32:28Z:ec1cd5aea2fd0a725a73268e4130e9cffd9340ddebf837e3aae2c51263c12fa7:K8U6WRqJZPUIe4aw12Qu3d9OY+7uu+Y3noFv1luqJHQL8UGXCvh9hnk+otq4p0nDknslAFHnD2DNocMz0zCjBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:c0ad4dee2ec1b1bb8d8f6a2007e7825ebec4fcf7e49aa2fd26b927474f52e33d:3LAcj+Mcq1/F/Ioku6jqX5oGToCoU/dIZRvIGsTgAxbuAHzu/GJ9PQfBpxcP5XHgQPfy2dqr72JU9D+7YV1uBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/ryeos-ui/schedules/list
 path: /ui/api/ryeos-ui/schedules/list
 methods:
   - GET
-auth: browser_session
+auth: ryeos_signed
 limits:
   body_bytes_max: 0
   timeout_ms: 10000

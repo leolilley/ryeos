@@ -3,22 +3,20 @@
 // Pins current behavior so Slice 3 can refactor with a net.
 
 mod test_state;
-use test_state::build_test_state;
+use test_state::{build_test_state, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn test_context() -> LaunchContext {
-    LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: None,
-        read_only: false,
-        granted_caps: vec!["ui.read".into()],
-        user_principal_id: None,
-    }
+fn test_context() -> ryeos_ui::browser_session::LaunchContext {
+    launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
+        None,
+    )
 }
 
 #[tokio::test]

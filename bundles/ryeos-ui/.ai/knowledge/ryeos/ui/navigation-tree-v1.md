@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-04T23:37:21Z:a8105b26cda29fb14920eefbef6e877649d14eec0d31bdb8e0758854cf240053:viy+DRhZsnTUQO78Z0uBPu+c3HZZyaJ35VfK5iLBkphtgXKFpJCVPBxdW3aHytVNvJsazqEyuRQyjY6imUHlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-14T10:03:08Z:65361148aec2cc20bca28b786f50797313a92d48a5ed963a1e9029eee8285b43:yCxKtyvDwc9N6LCRjcNaR3ep0UvHsAnkb7BN4WCky+FEulDhG0yIAhEwAFxhQgzL2/n36HSNgUQnNrn+JTlNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -230,6 +230,14 @@ Project scope is the default for cockpit driving. Node scope is the broader
 operator view. Node-wide activity is not a separate object called "fleet" or
 "activity"; it is the same thread list with a wider scope.
 
+Selecting another project is an authority transition, not renderer-local
+navigation. The node pins the selected project, recompiles the same signed
+surface under that authority, and mints a successor UI session. Web clients
+redeem the successor in the same tab; native clients replace their binding,
+source subscriptions, thread tail, and seat generation together. No client
+rewrites a project path into requests, and the predecessor binding is never
+mutated in place.
+
 The UI should make scope visible whenever a thread list can include more than
 one project. Node-wide thread rows must carry a project column. Current-project
 thread rows may still carry project metadata for drill-down and diagnostics,
@@ -303,7 +311,7 @@ sources:
     ref: service:ui/ryeos-ui/threads/list
     params:
       project: current
-      project_path: ""
+      project_path: "@session:project_root"
 ```
 
 `view:ryeos/node/threads/history` is node-scoped:
@@ -461,7 +469,7 @@ Selection
 Scope
 |-- current project
 |-- node-wide or project-scoped list
-`-- read-only/session principal
+`-- compiled signed surface/view binding and session principal
 ```
 
 This can later become a client-local source such as

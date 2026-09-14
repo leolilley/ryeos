@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:6bc03cf832257621feb7f3dfce20878839e8f53ad1b07874bc1dc4c39578d0eb:kF+AnHxFcTcdOY+U0Wg8DZVzy+U73ErJINO1+4Gh/lBMiQpoI/4z7asjaPjYSoBRlwelCi55YnqNVA1eiYrRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:b04c6bd3ea0804cada532c8ea10db481dc6deac1c64bd95927ebab7a52cb7e6e:iV3OccVYUGJcDUQtnsZE/UZrrzSdRqlUxWSmYSPUGS47oAJcnMNyutxiSxGmi0R6xyA4kBCPZgnPwddLVwxdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-schedules
 title: Schedules
 version: "1.0.0"
@@ -33,6 +33,7 @@ affordances:
     label: Pause
     invoke:
       plane: rye
+      ref: service:commands/dispatch
       tokens: [scheduler, pause]
       args:
         schedule_id: "{record.schedule_id}"
@@ -40,6 +41,7 @@ affordances:
     label: Resume
     invoke:
       plane: rye
+      ref: service:commands/dispatch
       tokens: [scheduler, resume]
       args:
         schedule_id: "{record.schedule_id}"

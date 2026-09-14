@@ -146,18 +146,20 @@ pub async fn handle_open(
         }));
     }
 
-    let project_root = session
-        .project_root
-        .as_deref()
-        .map(std::path::Path::new)
-        .unwrap_or(&state.config.app_root);
+    let project_root = match session.project_authority.as_ref() {
+        Some(authority) => {
+            authority.ensure_path_binding()?;
+            authority.descriptor_path()?
+        }
+        None => state.config.app_root.clone(),
+    };
     let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
         &state.engine,
         state
             .node_history_policy()
             .map_err(|error| HandlerError::Internal(error.to_string()))?,
         &surface_ref,
-        project_root,
+        &project_root,
         &owner,
         session.granted_caps.clone(),
         state.threads.site_id(),

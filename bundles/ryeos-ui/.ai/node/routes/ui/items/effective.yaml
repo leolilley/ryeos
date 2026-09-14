@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-19T05:40:59Z:7e630723e9be0746cc14afd1ab9a4c56a2e1808a1ee8efa618802198ed2ddc10:TkOPNuwRfPdckx3XI6Jq5O+ZaObngyzwcxSZLXVpH2gdtI8Qxy7/jgEy8oO79/xYCWhsrnw7XeRDIy5MeuPcDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:08Z:cd34ca5fb6d6209bd2ed4a48b85b5778a09c29e50f39d7086d1c834a5ee61254:xewnegPA3J6Zjk1yf9qmcZ/86jkCIcogqbgQ7o54S1EuEr2xQB7+PFU9AkipZcEY12CDOS8Zs37F6QTcCNywBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/items/effective
 path: /ui/api/items/effective
 methods:
   - POST
-auth: browser_session
+auth: ryeos_signed
 limits:
   body_bytes_max: 65536
   timeout_ms: 10000

@@ -12,7 +12,6 @@ pub mod ui_field_runs;
 pub mod ui_files;
 pub mod ui_gc;
 pub mod ui_graph_topology;
-pub mod ui_intents_apply;
 pub mod ui_invocations_dispatch;
 pub mod ui_items;
 pub mod ui_launch;
@@ -30,7 +29,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
-    ui_intents_apply::DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,

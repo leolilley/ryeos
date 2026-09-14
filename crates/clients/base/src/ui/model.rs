@@ -3,10 +3,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use super::dto::{
-    RyeOsDimensionDto, RyeOsFileReadDto, RyeOsFileSpaceDto, RyeOsFilesDto, RyeOsItemsDto,
-    RyeOsProjectsDto, RyeOsThreadsDto, RyeOsTopologyDto,
+    RyeOsDimensionDto, RyeOsFileSpaceDto, RyeOsFilesDto, RyeOsItemsDto, RyeOsProjectsDto,
+    RyeOsThreadsDto, RyeOsTopologyDto,
 };
-use super::effect::{RyeOsEffect, RyeOsEffectKind};
+use super::effect::{RyeOsEffect, RyeOsEffectKind, RyeOsUiError};
+use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::scene_model::RyeOsSceneModel;
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
 use crate::atlas::AtlasUiStateVm;
@@ -31,10 +32,17 @@ pub struct BrowserSession {
     pub effective_surface: Option<serde_json::Value>,
     #[serde(default)]
     pub project_path: Option<String>,
+    /// Digest of the daemon-compiled surface/view binding for this exact
+    /// session. Content-defined effects address entries under this digest;
+    /// they never carry executable refs or capability claims.
     #[serde(default)]
-    pub read_only: bool,
+    pub binding_digest: String,
     #[serde(default)]
-    pub granted_caps: Vec<String>,
+    pub binding_request_bounds: super::binding::UiBindingRequestBounds,
+    /// Derived display posture only. Dispatch authority remains the compiled
+    /// binding addressed by `binding_digest`.
+    #[serde(default)]
+    pub posture: super::binding::UiEffectivePosture,
     #[serde(default)]
     pub events_url: Option<String>,
 }
@@ -401,6 +409,11 @@ pub struct RyeOsUiState {
     pub motion: Vec<RyeOsMotionEventVm>,
     pub loading: BTreeMap<String, bool>,
     pub notices: Vec<RyeOsNotice>,
+    /// Bounded structured failures keyed by the exact effect coordinate. A
+    /// mutation whose outcome is unknown stays distinguishable from a refused
+    /// request after its transient notice is gone.
+    #[serde(default)]
+    pub effect_failures: BTreeMap<u64, RyeOsUiError>,
     pub route: Option<String>,
     #[serde(default)]
     pub top_status_visible: bool,
@@ -428,6 +441,7 @@ impl Default for RyeOsUiState {
             motion: Vec::new(),
             loading: BTreeMap::new(),
             notices: Vec::new(),
+            effect_failures: BTreeMap::new(),
             route: None,
             // Both status bars start hidden — their content was incoherent
             // and we have nothing settled to put there yet. Toggle-on still
@@ -460,7 +474,6 @@ pub struct RyeOsDataState {
     /// `body.scope` declares a file-space root/path. Absent tile → the
     /// shared `file_space` (ambient / scopeless tiles).
     pub tile_file_space: HashMap<String, RyeOsFileSpaceDto>,
-    pub file_read: Option<RyeOsFileReadDto>,
     /// Bound-view source responses, keyed by the canonical source-instance
     /// identity (mounted view host plus channel). The values remain open JSON
     /// projected through view bindings.
@@ -470,7 +483,7 @@ pub struct RyeOsDataState {
     /// exactly like `sources`, cleared when a retry launches or newer data
     /// lands, and rendered only when no usable response exists.
     #[serde(default)]
-    pub source_errors: HashMap<String, String>,
+    pub source_errors: HashMap<String, RyeOsUiError>,
     /// Transient projected timeline cache, keyed by the same source key as
     /// `sources`. Rebuilt only when source data lands so scroll keys do not
     /// re-project long transcripts on every frame.
@@ -509,12 +522,6 @@ pub struct RyeOsDataState {
     /// response happens to be cached under it.
     #[serde(default)]
     pub source_subject_fingerprint: HashMap<String, String>,
-    /// The newest applied result id per shared dataset snapshot
-    /// (dimension, topology, projects, threads, items). Effect batches
-    /// resolve concurrently, so an older snapshot can arrive after a
-    /// newer one; only the freshest may land.
-    #[serde(default, skip)]
-    pub(crate) dataset_epoch: HashMap<&'static str, u64>,
     /// Transient live cognition stream for the tailed head thread —
     /// ephemeral deltas accumulated between durable snapshots. Not truth;
     /// the braid snapshot is. Cleared once a fresh snapshot supersedes it.
@@ -541,25 +548,6 @@ pub(crate) struct RyeOsTimelineSourceCache {
 // of the thread-execution-stream concern in `super::timeline`.
 pub use super::timeline::RyeOsLiveDelta;
 
-/// An atlas tile's content scope is declared in its view `body.scope`
-/// (content, not engine code): `{ kind, query }` narrow the AiSpace items.
-/// Returns `(query, kind)`; either/both `None` when undeclared — such a
-/// tile shares the global atlas dataset rather than fetching its own.
-pub(crate) fn atlas_item_scope(
-    binding: &super::content::ViewBinding,
-) -> (Option<String>, Option<String>) {
-    let scope = binding.body.get("scope");
-    let field = |key: &str| {
-        scope
-            .and_then(|s| s.get(key))
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    (field("query"), field("kind"))
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsRuntimeState {
     pub viewport: BrowserViewport,
@@ -577,6 +565,10 @@ pub struct RyeOsRuntimeState {
     pub scene_frame: u64,
     #[serde(default)]
     pub scene_frame_anchor_ms: u64,
+    /// Renderer-neutral continuity state. Channels are recorded separately so
+    /// a lossy hint reconnect cannot masquerade as durable-tail freshness.
+    #[serde(default)]
+    pub transport: RyeOsTransportState,
 }
 
 impl Default for RyeOsRuntimeState {
@@ -589,13 +581,96 @@ impl Default for RyeOsRuntimeState {
             attention_until_ms: 0,
             scene_frame: 0,
             scene_frame_anchor_ms: 0,
+            transport: RyeOsTransportState::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTransportChannelState {
+    pub freshness: RyeOsTransportFreshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<RyeOsUiError>,
+}
+
+impl Default for RyeOsTransportChannelState {
+    fn default() -> Self {
+        Self {
+            freshness: RyeOsTransportFreshness::Connecting,
+            last_observed_at_ms: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTransportState {
+    #[serde(default)]
+    pub channels: BTreeMap<RyeOsTransportChannel, RyeOsTransportChannelState>,
+}
+
+impl Default for RyeOsTransportState {
+    fn default() -> Self {
+        Self {
+            channels: BTreeMap::from([(
+                RyeOsTransportChannel::Session,
+                // `RyeOsCore` is constructed only after the exact session
+                // bootstrap succeeds. Pre-bootstrap connecting state belongs
+                // to the launcher adapter; once a core exists its session
+                // channel starts current.
+                RyeOsTransportChannelState {
+                    freshness: RyeOsTransportFreshness::Current,
+                    ..RyeOsTransportChannelState::default()
+                },
+            )]),
+        }
+    }
+}
+
+impl RyeOsTransportState {
+    pub fn overall_freshness(&self) -> RyeOsTransportFreshness {
+        let session = self
+            .channels
+            .get(&RyeOsTransportChannel::Session)
+            .map(|state| state.freshness)
+            .unwrap_or(RyeOsTransportFreshness::Connecting);
+        if session == RyeOsTransportFreshness::ExpiredOrRevoked {
+            return session;
+        }
+        if self
+            .channels
+            .values()
+            .any(|state| state.freshness == RyeOsTransportFreshness::GapResnapshotRequired)
+        {
+            return RyeOsTransportFreshness::GapResnapshotRequired;
+        }
+        if session != RyeOsTransportFreshness::Current {
+            return session;
+        }
+        match self.channels.get(&RyeOsTransportChannel::FocusedTail) {
+            Some(state) if state.freshness != RyeOsTransportFreshness::Current => state.freshness,
+            _ => RyeOsTransportFreshness::Current,
+        }
+    }
+
+    pub fn last_observed_at_ms(&self) -> Option<u64> {
+        self.channels
+            .values()
+            .filter_map(|state| state.last_observed_at_ms)
+            .max()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RyeOsCore {
     pub data: RyeOsDataState,
+    /// Shell-wide observation sources authored by the effective surface.
+    /// These are presentation metadata only; executable authority remains in
+    /// the daemon-compiled binding addressed by the active session digest.
+    #[serde(default)]
+    pub surface_sources: BTreeMap<String, super::content::SourceBinding>,
     /// Resolved `view:` bindings embedded in the effective surface
     /// (views-as-content; every binding remains an addressable item).
     #[serde(default)]
@@ -629,7 +704,8 @@ pub struct RyeOsCore {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DeferredSourceFetch {
-    pub source_ref: String,
+    pub view_ref: String,
+    pub channel: String,
     pub params: serde_json::Value,
 }
 
@@ -644,6 +720,7 @@ impl RyeOsCore {
             .unwrap_or_else(builtin_default);
         let input_route = super::seat::InputRoute::from_surface_input(surface.input.as_ref());
         let mut core = Self {
+            surface_sources: surface.sources.clone(),
             views: binding_contract_matches
                 .then(|| super::content::views_from_surface(session.effective_surface.as_ref()))
                 .unwrap_or_default(),
@@ -685,6 +762,69 @@ impl RyeOsCore {
         }
     }
 
+    pub(crate) fn compiled_binding_operation(
+        &self,
+        coordinate: super::binding::UiBindingCoordinate,
+        payload: super::binding::UiBindingPayload,
+    ) -> (
+        super::binding::UiBindingRequest,
+        super::binding::UiBindingRequestBounds,
+    ) {
+        let session = self.data.session.as_ref();
+        (
+            super::binding::UiBindingRequest {
+                binding_digest: session
+                    .map(|session| session.binding_digest.clone())
+                    .unwrap_or_default(),
+                coordinate,
+                payload,
+            },
+            session
+                .map(|session| session.binding_request_bounds)
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Resolve command grammar from the signed input block currently holding
+    /// focus. The reducer never names a view or affordance ID.
+    pub(crate) fn focused_command_submit_coordinate(
+        &self,
+    ) -> Option<super::binding::UiBindingCoordinate> {
+        let (_, view_ref) = self.focused_input_instance()?;
+        let affordance_id = self
+            .views
+            .get(&view_ref)?
+            .input
+            .as_ref()?
+            .command_submit
+            .as_ref()?
+            .clone();
+        Some(super::binding::UiBindingCoordinate::Affordance {
+            view_ref,
+            affordance_id,
+        })
+    }
+
+    /// Resolve the one signed input block that owns global thread-control
+    /// grammar. Multiple declarations are ambiguous and fail closed.
+    pub(crate) fn thread_control_coordinate(&self) -> Option<super::binding::UiBindingCoordinate> {
+        let mut matches = self.views.iter().filter_map(|(view_ref, view)| {
+            view.input
+                .as_ref()?
+                .thread_control
+                .as_ref()
+                .map(|affordance_id| (view_ref.clone(), affordance_id.clone()))
+        });
+        let (view_ref, affordance_id) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(super::binding::UiBindingCoordinate::Affordance {
+            view_ref,
+            affordance_id,
+        })
+    }
+
     pub fn has_project_bound(&self) -> bool {
         self.data
             .session
@@ -707,23 +847,7 @@ impl RyeOsCore {
             return Vec::new();
         }
         self.normalize_field_local_states();
-        let needs_atlas = self.surface_uses_atlas_ambient();
-        let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
-        let needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
-        // An empty center can host the ambient topology background; the
-        // backdrop scene itself is client-side, but the atlas ambient
-        // still wants topology when no tiles occupy the center.
-        let mut needs_topology = self.workspace.center_is_empty();
         let mut bound_tiles: Vec<(crate::ids::TileId, RyeOsViewInstanceKey, String)> = Vec::new();
-        // Per-tile scene-data fetches: an atlas tile whose `body.scope`
-        // declares an item scope, or whose file-space projection has its own
-        // arrangement, fetches its OWN data keyed to the tile — so two atlas
-        // tiles can show genuinely different content, not just different
-        // projections of one shared dataset. Scopeless tiles fall through to
-        // the shared global fetch below (no regression).
-        let mut tile_item_fetches: Vec<(String, Option<String>, Option<String>)> = Vec::new();
-        let mut tile_file_fetches: Vec<(String, String, String)> = Vec::new();
-        let has_project = self.has_project_bound();
 
         for tile_id in self.workspace.tile_ids() {
             let Some(tile) = self.workspace.tiles.get(&tile_id) else {
@@ -731,50 +855,38 @@ impl RyeOsCore {
             };
             let view_ref = tile.view.view_ref.clone();
             bound_tiles.push((tile_id, tile.instance_key.clone(), view_ref.clone()));
-            // The scene widgets need engine data the generic source path
-            // doesn't carry: graph wants topology, atlas wants topology plus
-            // items or file space (per this tile's projection).
-            match self
-                .views
-                .get(&view_ref)
-                .map(|binding| binding.widget.as_str())
-            {
-                Some("atlas") => {
-                    needs_topology = true;
-                    match self.tile_atlas_state(tile_id).active_projection {
-                        crate::atlas::AtlasProjectionVm::AiSpace => {
-                            let scope = self
-                                .views
-                                .get(&view_ref)
-                                .map(atlas_item_scope)
-                                .unwrap_or_default();
-                            if scope.0.is_some() || scope.1.is_some() {
-                                tile_item_fetches.push((tile_id.0.to_string(), scope.0, scope.1));
-                            } else {
-                                needs_atlas_items = true;
-                            }
-                        }
-                        crate::atlas::AtlasProjectionVm::FileSpace => {
-                            if has_project {
-                                let atlas = self.tile_atlas_state(tile_id);
-                                tile_file_fetches.push((
-                                    tile_id.0.to_string(),
-                                    atlas.file_space_root.clone(),
-                                    atlas.file_space_path.clone(),
-                                ));
-                            }
-                        }
-                    }
-                }
-                Some("graph") => needs_topology = true,
-                _ => {}
-            }
         }
 
-        let mut effects = vec![
-            self.emit(RyeOsEffectKind::FetchDimension),
-            self.emit(RyeOsEffectKind::FetchProjects),
-        ];
+        let mut effects = Vec::new();
+        let surface_ref = self
+            .data
+            .session
+            .as_ref()
+            .map(|session| session.surface_ref.clone())
+            .unwrap_or_default();
+        let surface_sources = self
+            .surface_sources
+            .iter()
+            .filter(|(_, source)| {
+                source.activation == super::content::SourceActivation::Initial
+                    && (!source.requires_project || self.has_project_bound())
+            })
+            .map(|(channel, source)| (channel.clone(), source.params.clone()))
+            .collect::<Vec<_>>();
+        for (channel, params) in surface_sources {
+            let (request, request_bounds) = self.compiled_binding_operation(
+                super::binding::UiBindingCoordinate::Source {
+                    view_ref: surface_ref.clone(),
+                    channel: channel.clone(),
+                },
+                super::binding::UiBindingPayload::SourceParameters { params },
+            );
+            effects.push(self.emit(RyeOsEffectKind::FetchSource {
+                tile_id: format!("surface/{channel}"),
+                request,
+                request_bounds,
+            }));
+        }
         let visible_docks = self.visible_dock_views();
         let mut visible_input_instances: Vec<(RyeOsViewInstanceKey, String)> = bound_tiles
             .iter()
@@ -790,91 +902,68 @@ impl RyeOsCore {
         // @-mention sources: fetch the refs each input declares, keyed so the
         // reader (key_context / CompleteInput) reads them back. A generic
         // FetchSource, so clients need no bespoke handling.
-        let mention_fetches: Vec<(String, String)> = visible_input_instances
+        let mention_fetches: Vec<(String, String, String)> = visible_input_instances
             .iter()
             .filter_map(|(instance_key, view_ref)| {
                 let binding = self.views.get(view_ref)?;
                 let input = binding.input.as_ref()?;
-                let mentions = input.mentions.as_ref()?;
+                input.mentions.as_ref()?;
                 Some((
                     super::source_key::RyeOsSourceInstanceKey::mention(
                         instance_key.clone(),
                         &input.id,
                     )
                     .encode(),
-                    mentions.item_ref.clone(),
+                    view_ref.clone(),
+                    super::binding::input_mentions_channel(&input.id),
                 ))
             })
             .collect();
-        for (key, source_ref) in mention_fetches {
+        for (key, view_ref, channel) in mention_fetches {
+            let (request, request_bounds) = self.compiled_binding_operation(
+                super::binding::UiBindingCoordinate::Source { view_ref, channel },
+                super::binding::UiBindingPayload::SourceParameters {
+                    params: serde_json::json!({}),
+                },
+            );
             effects.push(self.emit(RyeOsEffectKind::FetchSource {
                 tile_id: key,
-                source_ref,
-                params: serde_json::json!({}),
+                request,
+                request_bounds,
             }));
         }
         // `completion` sources (the line-start `/` grammar): fetched through the
         // same generic keyed FetchSource as mentions, read back by the
         // slash-completion projectors. No bespoke commands effect.
-        let completion_fetches: Vec<(String, String)> = visible_input_instances
+        let completion_fetches: Vec<(String, String, String)> = visible_input_instances
             .iter()
             .filter_map(|(instance_key, view_ref)| {
                 let binding = self.views.get(view_ref)?;
                 let input = binding.input.as_ref()?;
-                let completion = input.completion.as_ref()?;
+                input.completion.as_ref()?;
                 Some((
                     super::source_key::RyeOsSourceInstanceKey::completion(
                         instance_key.clone(),
                         &input.id,
                     )
                     .encode(),
-                    completion.item_ref.clone(),
+                    view_ref.clone(),
+                    super::binding::input_completion_channel(&input.id),
                 ))
             })
             .collect();
-        for (key, source_ref) in completion_fetches {
+        for (key, view_ref, channel) in completion_fetches {
+            let (request, request_bounds) = self.compiled_binding_operation(
+                super::binding::UiBindingCoordinate::Source { view_ref, channel },
+                super::binding::UiBindingPayload::SourceParameters {
+                    params: serde_json::json!({}),
+                },
+            );
             effects.push(self.emit(RyeOsEffectKind::FetchSource {
                 tile_id: key,
-                source_ref,
-                params: serde_json::json!({}),
+                request,
+                request_bounds,
             }));
-        }
-        for (tile_id, query, kind) in tile_item_fetches {
-            effects.push(self.emit(RyeOsEffectKind::FetchItems {
-                tile_id: Some(tile_id),
-                query,
-                kind,
-                limit: 1000,
-            }));
-        }
-        for (tile_id, root, path) in tile_file_fetches {
-            effects.push(self.emit(RyeOsEffectKind::FetchFileSpace {
-                tile_id: Some(tile_id),
-                root,
-                path,
-                max_depth: 8,
-                max_entries: 3000,
-            }));
-        }
-        if needs_atlas_items {
-            effects.push(self.emit(RyeOsEffectKind::FetchItems {
-                tile_id: None,
-                query: None,
-                kind: None,
-                limit: 1000,
-            }));
-        }
-        if needs_file_space && self.has_project_bound() {
-            effects.push(self.emit(RyeOsEffectKind::FetchFileSpace {
-                tile_id: None,
-                root: self.ui.atlas.file_space_root.clone(),
-                path: self.ui.atlas.file_space_path.clone(),
-                max_depth: 8,
-                max_entries: 3000,
-            }));
-        }
-        if needs_topology {
-            effects.push(self.emit(RyeOsEffectKind::FetchTopology));
         }
         effects
     }
@@ -1185,6 +1274,11 @@ impl RyeOsCore {
         let resolved = sources
             .into_iter()
             .filter(|(channel, _)| only_channel.is_none_or(|only| channel == only))
+            .filter(|(_, source)| {
+                only_channel.is_some()
+                    || (source.activation == super::content::SourceActivation::Initial
+                        && (!source.requires_project || self.has_project_bound()))
+            })
             .map(|(channel, source)| {
                 let mut params =
                     super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
@@ -1213,8 +1307,12 @@ impl RyeOsCore {
                     }
                 }
                 (
-                    super::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), channel)
-                        .encode(),
+                    super::source_key::RyeOsSourceInstanceKey::named(
+                        instance_key.clone(),
+                        &channel,
+                    )
+                    .encode(),
+                    channel,
                     source,
                     params,
                 )
@@ -1222,8 +1320,15 @@ impl RyeOsCore {
             .collect::<Vec<_>>();
         resolved
             .into_iter()
-            .filter_map(|(key, source, params)| {
-                self.build_fetch_source(key, &source, params, hint_single_flight)
+            .filter_map(|(key, channel, source, params)| {
+                self.build_fetch_source(
+                    key,
+                    view_ref,
+                    &channel,
+                    &source,
+                    params,
+                    hint_single_flight,
+                )
             })
             .collect()
     }
@@ -1291,6 +1396,8 @@ impl RyeOsCore {
     fn build_fetch_source(
         &mut self,
         source_key: String,
+        view_ref: &str,
+        channel: &str,
         source: &super::content::SourceBinding,
         params: serde_json::Value,
         hint_single_flight: bool,
@@ -1330,7 +1437,8 @@ impl RyeOsCore {
             self.deferred_source_fetches.insert(
                 source_key,
                 DeferredSourceFetch {
-                    source_ref: source.item_ref.clone(),
+                    view_ref: view_ref.to_string(),
+                    channel: channel.to_string(),
                     params,
                 },
             );
@@ -1342,15 +1450,90 @@ impl RyeOsCore {
         // previous subject after the new request settles.
         self.deferred_source_fetches.remove(&source_key);
         self.data.source_errors.remove(&source_key);
+        let (request, request_bounds) = self.compiled_binding_operation(
+            super::binding::UiBindingCoordinate::Source {
+                view_ref: view_ref.to_string(),
+                channel: channel.to_string(),
+            },
+            super::binding::UiBindingPayload::SourceParameters { params },
+        );
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.clone(),
-            source_ref: source.item_ref.clone(),
-            params,
+            request,
+            request_bounds,
         });
         // Mark this as the newest request for the key; an older in-flight fetch
         // for the same key that resolves later is then dropped on arrival.
         self.data.source_epoch.insert(source_key, effect.id);
         Some(effect)
+    }
+
+    /// Fetch a presentation-role source for one exact mounted view. Roles are
+    /// signed view metadata; this lookup never chooses an executable target.
+    pub(crate) fn fetch_view_source_role(
+        &mut self,
+        instance_key: RyeOsViewInstanceKey,
+        view_ref: &str,
+        role: &str,
+        dynamic_params: serde_json::Value,
+    ) -> Option<RyeOsEffect> {
+        let (channel, source) = self
+            .views
+            .get(view_ref)?
+            .sources
+            .iter()
+            .find(|(_, source)| source.role.as_deref() == Some(role))?;
+        let channel = channel.clone();
+        let source = source.clone();
+        let source_key =
+            super::source_key::RyeOsSourceInstanceKey::named(instance_key, &channel).encode();
+        self.build_fetch_source(
+            source_key,
+            view_ref,
+            &channel,
+            &source,
+            dynamic_params,
+            false,
+        )
+    }
+
+    pub(crate) fn fetch_surface_source_role(
+        &mut self,
+        role: &str,
+        dynamic_params: serde_json::Value,
+    ) -> Option<RyeOsEffect> {
+        let (channel, source) = self
+            .surface_sources
+            .iter()
+            .find(|(_, source)| source.role.as_deref() == Some(role))?;
+        let channel = channel.clone();
+        let source = source.clone();
+        let surface_ref = self.data.session.as_ref()?.surface_ref.clone();
+        self.build_fetch_source(
+            format!("surface/{channel}"),
+            &surface_ref,
+            &channel,
+            &source,
+            dynamic_params,
+            false,
+        )
+    }
+
+    pub(crate) fn fetch_atlas_source_role(
+        &mut self,
+        tile_id: Option<&str>,
+        role: &str,
+        dynamic_params: serde_json::Value,
+    ) -> Option<RyeOsEffect> {
+        let Some(tile_id) = tile_id else {
+            return self.fetch_surface_source_role(role, dynamic_params);
+        };
+        let tile = tile_id
+            .parse::<u64>()
+            .ok()
+            .map(crate::ids::TileId::new)
+            .and_then(|id| self.workspace.tiles.get(&id).cloned())?;
+        self.fetch_view_source_role(tile.instance_key, &tile.view.view_ref, role, dynamic_params)
     }
 
     /// Release one trailing hint reconciliation after the prior request for
@@ -1371,10 +1554,19 @@ impl RyeOsCore {
         }
         let deferred = self.deferred_source_fetches.remove(source_key)?;
         self.data.source_errors.remove(source_key);
+        let (request, request_bounds) = self.compiled_binding_operation(
+            super::binding::UiBindingCoordinate::Source {
+                view_ref: deferred.view_ref,
+                channel: deferred.channel,
+            },
+            super::binding::UiBindingPayload::SourceParameters {
+                params: deferred.params,
+            },
+        );
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.to_string(),
-            source_ref: deferred.source_ref,
-            params: deferred.params,
+            request,
+            request_bounds,
         });
         self.data
             .source_epoch
@@ -1412,16 +1604,6 @@ impl RyeOsCore {
         self.views
             .get(view_ref)
             .is_some_and(|binding| binding.input.is_some())
-    }
-
-    fn surface_uses_atlas_ambient(&self) -> bool {
-        self.data
-            .session
-            .as_ref()
-            .and_then(|session| session.effective_surface.as_ref())
-            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
-            .and_then(|surface| surface.ambient)
-            .is_some_and(|ambient| ambient.uses_namespace_atlas())
     }
 
     fn surface_uses_backdrop_underlay(&self) -> bool {
@@ -2385,6 +2567,7 @@ impl Default for RyeOsCore {
         let workspaces = vec![workspace.clone(); 9];
         Self {
             data: RyeOsDataState::default(),
+            surface_sources: surface.sources,
             views: std::collections::BTreeMap::new(),
             ui: RyeOsUiState::default(),
             seat: super::seat::SeatLog::default(),
@@ -2469,7 +2652,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -2479,9 +2662,14 @@ mod tests {
             .filter_map(|effect| match &effect.kind {
                 RyeOsEffectKind::FetchSource {
                     tile_id,
-                    source_ref,
+                    request:
+                        crate::ui::binding::UiBindingRequest {
+                            coordinate:
+                                crate::ui::binding::UiBindingCoordinate::Source { channel, .. },
+                            ..
+                        },
                     ..
-                } => Some((tile_id.clone(), source_ref.clone())),
+                } => Some((tile_id.clone(), channel.clone())),
                 _ => None,
             })
             .collect();
@@ -2490,23 +2678,23 @@ mod tests {
         assert_eq!(fetches.len(), 2, "one fetch per section: {fetches:?}");
         let by_channel = fetches
             .iter()
-            .map(|(key, source)| {
+            .map(|(key, binding_channel)| {
                 let decoded = crate::ui::source_key::RyeOsSourceInstanceKey::decode(key)
                     .expect("typed source key");
                 let crate::ui::source_key::RyeOsSourceChannel::Named(channel) = decoded.channel
                 else {
                     panic!("view source must use a named channel");
                 };
-                (channel, source.as_str())
+                (channel, binding_channel.clone())
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(
-            by_channel.get("threads"),
-            Some(&"service:ui/ryeos-ui/threads/list")
+            by_channel.get("threads").map(String::as_str),
+            Some("threads")
         );
         assert_eq!(
-            by_channel.get("bundles"),
-            Some(&"service:ui/ryeos-ui/items/list")
+            by_channel.get("bundles").map(String::as_str),
+            Some("bundles")
         );
         assert_ne!(fetches[0].0, fetches[1].0);
     }
@@ -2525,19 +2713,28 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let effects = core.initial_effects();
         let fetch = effects.iter().find_map(|effect| match &effect.kind {
-            RyeOsEffectKind::FetchSource {
-                source_ref, params, ..
-            } => Some((source_ref.clone(), params.clone())),
+            RyeOsEffectKind::FetchSource { request, .. } => match &request.payload {
+                crate::ui::binding::UiBindingPayload::SourceParameters { params } => {
+                    Some((request.coordinate.clone(), params.clone()))
+                }
+                _ => None,
+            },
             _ => None,
         });
-        let (source_ref, params) = fetch.expect("bound tile emits FetchSource");
-        assert_eq!(source_ref, "service:ui/ryeos-ui/threads/list");
+        let (coordinate, params) = fetch.expect("bound tile emits FetchSource");
+        assert_eq!(
+            coordinate,
+            crate::ui::binding::UiBindingCoordinate::Source {
+                view_ref: "view:ryeos/threads/list".to_string(),
+                channel: "default".to_string(),
+            }
+        );
         assert_eq!(params["limit"], 5);
     }
 
@@ -2561,7 +2758,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -2570,19 +2767,24 @@ mod tests {
             .effects_for_hints(&["activity".to_string(), "thread".to_string()])
             .iter()
             .filter_map(|effect| match &effect.kind {
-                RyeOsEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
+                RyeOsEffectKind::FetchSource { request, .. } => match &request.coordinate {
+                    crate::ui::binding::UiBindingCoordinate::Source { view_ref, .. } => {
+                        Some(view_ref.clone())
+                    }
+                    _ => None,
+                },
                 _ => None,
             })
             .collect();
         assert_eq!(
             hint_fetches
                 .iter()
-                .filter(|source_ref| *source_ref == "service:ui/ryeos-ui/threads/list")
+                .filter(|view_ref| *view_ref == "view:ryeos/threads/list")
                 .count(),
             1,
             "one coalescing window deduplicates views matching multiple hints"
         );
-        assert!(hint_fetches.contains(&"service:node/status".to_string()));
+        assert!(hint_fetches.contains(&"view:ryeos/node/status".to_string()));
     }
 
     #[test]
@@ -2602,19 +2804,17 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let fetches: Vec<(String, String)> = core
+        let fetches: Vec<(String, crate::ui::binding::UiBindingCoordinate)> = core
             .effects_for_hint("thread")
             .iter()
             .filter_map(|effect| match &effect.kind {
                 RyeOsEffectKind::FetchSource {
-                    tile_id,
-                    source_ref,
-                    ..
-                } => Some((tile_id.clone(), source_ref.clone())),
+                    tile_id, request, ..
+                } => Some((tile_id.clone(), request.coordinate.clone())),
                 _ => None,
             })
             .collect();
@@ -2626,71 +2826,12 @@ mod tests {
                     "default",
                 )
                 .encode(),
-                "service:node/status".to_string()
+                crate::ui::binding::UiBindingCoordinate::Source {
+                    view_ref: "view:ryeos/node/status".to_string(),
+                    channel: "default".to_string(),
+                }
             )]
         );
-    }
-
-    #[test]
-    fn scoped_atlas_tiles_emit_independent_per_tile_item_fetches() {
-        // Two atlas tiles, each a distinct view item declaring its own
-        // `body.scope` — content-addressed scope. Each must fetch its OWN
-        // items (tile-scoped), so the tiles can show different content sets.
-        let session = BrowserSession {
-            effective_surface: Some(serde_json::json!({
-                "name": "t",
-                "tiles": ["view:ryeos/atlas/knowledge", "view:ryeos/atlas/services"],
-                "views": {
-                    "view:ryeos/atlas/knowledge": { "widget": "atlas", "body": { "scope": { "kind": "knowledge" } } },
-                    "view:ryeos/atlas/services": { "widget": "atlas", "body": { "scope": { "kind": "service" } } }
-                }
-            })),
-            read_only: false,
-            ..Default::default()
-        };
-        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let fetches: Vec<(Option<String>, Option<String>)> = core
-            .initial_effects()
-            .iter()
-            .filter_map(|effect| match &effect.kind {
-                RyeOsEffectKind::FetchItems { tile_id, kind, .. } => {
-                    Some((tile_id.clone(), kind.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        // One tile-scoped fetch per atlas tile, each carrying its kind; no
-        // unscoped/global fetch (both tiles declare a scope).
-        assert_eq!(fetches.len(), 2, "{fetches:?}");
-        assert!(fetches.iter().all(|(tile_id, _)| tile_id.is_some()));
-        let kinds: Vec<String> = fetches.iter().filter_map(|(_, k)| k.clone()).collect();
-        assert!(kinds.contains(&"knowledge".to_string()), "{kinds:?}");
-        assert!(kinds.contains(&"service".to_string()), "{kinds:?}");
-    }
-
-    #[test]
-    fn scopeless_atlas_tile_falls_back_to_the_shared_item_fetch() {
-        // An atlas tile with no declared scope shares the global dataset —
-        // one unscoped (tile_id: None) fetch, no regression.
-        let session = BrowserSession {
-            effective_surface: Some(serde_json::json!({
-                "name": "t",
-                "tiles": ["view:ryeos/atlas"],
-                "views": { "view:ryeos/atlas": { "widget": "atlas" } }
-            })),
-            read_only: false,
-            ..Default::default()
-        };
-        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let fetches: Vec<Option<String>> = core
-            .initial_effects()
-            .iter()
-            .filter_map(|effect| match &effect.kind {
-                RyeOsEffectKind::FetchItems { tile_id, .. } => Some(tile_id.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(fetches, vec![None]);
     }
 
     #[test]
@@ -2812,7 +2953,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_input_submit_respects_read_only_default() {
+    fn visible_input_submit_requires_a_compiled_binding() {
         let mut core = RyeOsCore::default();
         with_input_view(&mut core);
         // Focus moves explicitly — `RyeOsCore::new` lands it on the input
@@ -2828,7 +2969,10 @@ mod tests {
         });
         assert!(effects.is_empty());
         assert_eq!(core.ui.notices.len(), 1);
-        assert_eq!(core.ui.notices[0].message, "This session is read-only.");
+        assert_eq!(
+            core.ui.notices[0].message,
+            "This UI has no current compiled operation binding."
+        );
         assert_eq!(core.focused_input_buffer().unwrap().text, "run this");
     }
 }

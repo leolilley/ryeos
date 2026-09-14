@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::effect::RyeOsEffectResult;
+use super::effect::{RyeOsEffectResult, RyeOsUiError};
 use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
 use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
 use crate::ids::RyeOsViewInstanceKey;
@@ -68,25 +68,12 @@ pub enum RyeOsUiIntent {
     InspectItem {
         canonical_ref: String,
     },
-    EnterItemFolder {
-        tile_id: String,
-        path: String,
-    },
     InspectThread {
         thread_id: String,
     },
     InspectSummary {
         title: String,
         detail: serde_json::Value,
-    },
-    AddCurrentProject,
-    OpenProject {
-        local_id: String,
-    },
-    ListFiles {
-        tile_id: String,
-        root: String,
-        path: String,
     },
     ReadFile {
         root: String,
@@ -97,11 +84,6 @@ pub enum RyeOsUiIntent {
     },
     OpenExternal {
         url: String,
-    },
-    ExecuteItem {
-        item_ref: String,
-        ref_bindings: std::collections::BTreeMap<String, String>,
-        parameters: serde_json::Value,
     },
     /// Steer the route's head thread via `service:commands/submit`
     /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
@@ -358,6 +340,30 @@ pub enum FieldStepDirection {
     Live,
 }
 
+/// Independent renderer transports whose continuity has different evidence.
+/// The lossy hint bus can reconnect without proving a focused durable tail is
+/// current, and neither condition should be inferred from an HTTP request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsTransportChannel {
+    Session,
+    Hints,
+    FocusedTail,
+}
+
+/// Explicit freshness of one transport channel. A renderer reports observed
+/// facts; it never collapses disconnect into execution failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsTransportFreshness {
+    #[default]
+    Connecting,
+    Current,
+    Reconnecting,
+    GapResnapshotRequired,
+    ExpiredOrRevoked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsEvent {
@@ -385,9 +391,17 @@ pub enum RyeOsEvent {
     HintFlushBatch {
         kinds: Vec<String>,
     },
-    /// A lossy transport came back after a gap (or explicitly requested a
-    /// snapshot); rebuild all content-bound sources.
-    TransportReconnected,
+    /// Update one transport's explicit freshness. Entering
+    /// `gap_resnapshot_required` rebuilds read projections exactly once;
+    /// reconnecting/current transitions never repeat a mutation.
+    TransportStateChanged {
+        channel: RyeOsTransportChannel,
+        freshness: RyeOsTransportFreshness,
+        #[serde(default)]
+        observed_at_ms: Option<u64>,
+        #[serde(default)]
+        error: Option<RyeOsUiError>,
+    },
     /// One frame from the head thread's live SSE tail. The reducer applies
     /// ryeos event semantics so both clients reach them through `dispatch`:
     /// cognition deltas accumulate into the live buffer; durable milestones

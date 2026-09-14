@@ -220,7 +220,6 @@ impl RyeOsCore {
         self.deferred_source_fetches.clear();
         self.pending_effects
             .retain(|_, kind| !matches!(kind, RyeOsEffectKind::FetchSource { .. }));
-        self.data.file_read = None;
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
         });
@@ -511,7 +510,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -607,7 +606,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -838,8 +837,12 @@ mod tests {
                 }
             })),
             project_path: Some("/tmp/p".to_string()),
-            read_only: false,
-            granted_caps: Vec::new(),
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
+            binding_digest: "11".repeat(32),
+            binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {
+                max_request_bytes: 64 * 1024,
+                max_input_bytes: 16 * 1024,
+            },
             events_url: None,
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -1020,9 +1023,7 @@ mod tests {
             core.data
                 .sources
                 .insert(key.clone(), serde_json::json!({ "key": key }));
-            core.data
-                .source_errors
-                .insert(key.clone(), "error".to_string());
+            core.data.source_errors.insert(key.clone(), "error".into());
             core.data.source_epoch.insert(key.clone(), 4);
             core.data.source_stored_epoch.insert(key.clone(), 3);
             core.data.source_floor.insert(key.clone(), 2);
@@ -1041,7 +1042,8 @@ mod tests {
         core.deferred_source_fetches.insert(
             closing_keys[2].clone(),
             crate::ui::model::DeferredSourceFetch {
-                source_ref: "service:test/source".to_string(),
+                view_ref: "view:test/source".to_string(),
+                channel: "default".to_string(),
                 params: serde_json::json!({}),
             },
         );

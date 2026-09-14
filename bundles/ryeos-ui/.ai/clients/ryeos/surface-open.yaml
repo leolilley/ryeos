@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:a5c556205809de6e87f6373b2812ba620af23e14983ad43a3f80b22ec3201833:uBqJ1kbfonli9u+QQjrnekS6giWKrR6JT95i0sJVDC7G3yVbQN20prJstg1bHtLcoIi8tm/I9G0/i6Ft3RHaAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:08Z:18197e30192f9289be718e1a57a178ee4519376db29411e7c99c49f484fe77bb:VuSTh3xgsTadPLAFgy+q5EuNLxlP7AomMdnS0belXuelWkNAMAddn8vhrG8PXAK+903JFCbsjk6yhIWC2TRlDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: client
 name: surface-open
 version: "1.0.0"
@@ -19,7 +19,6 @@ launch:
     surface: "--surface"
     surface_file: "--surface-file"
     mock: "--mock"
-    read_only: "--read-only"
     project: "--project"
 
 capabilities:

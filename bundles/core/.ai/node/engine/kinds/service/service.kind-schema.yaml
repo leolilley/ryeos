@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T03:28:04Z:ce1b10b9222803905c2bf36906be2d975be3ac5db9d3a3f279648f465102809f:On7r2B4/9/pjs4v+I+D3DWu3UUfVwocMen9tq3q/jZXA5Bux10zKGvhZosFlk3CICT+8+QKxT+X8kH//dBATDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:08Z:d36dcd228da7c91f4c46aa3d9e0490b0c032b0e647ee004cf1ef1ae3894f7eb5:5Y6M7dAgbAefNyPa5Vx0StzXP3x3DiW5UO1XB26avpnJHz/myXcSUYBzqYHpXvimmgf8v/qXi9uoCnlrhcEUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -83,6 +83,10 @@ composed_value_contract:
       type: single
       prim: string
       enum: [verified, session_local]
+    ui_result_effect:
+      type: single
+      prim: string
+      enum: [replace_session]
     schema: { type: single, prim: mapping }
 metadata:
   rules:
@@ -116,6 +120,9 @@ metadata:
     ui_dispatch:
       from: path
       key: ui_dispatch
+    ui_result_effect:
+      from: path
+      key: ui_result_effect
     schema:
       from: path_value
       key: schema

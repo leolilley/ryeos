@@ -157,6 +157,12 @@ pub enum FieldType {
     Union {
         prims: Vec<PrimType>,
     },
+    /// Mapping whose arbitrary keys all carry the same closed value type.
+    /// This freezes data-driven registries without turning their keys into
+    /// engine-owned vocabulary.
+    Mapping {
+        values: Box<FieldType>,
+    },
 }
 
 impl Default for FieldType {
@@ -188,6 +194,9 @@ enum FieldTypeRaw {
     Union {
         prims: Vec<PrimType>,
     },
+    Mapping {
+        values: Box<FieldTypeRaw>,
+    },
 }
 
 impl TryFrom<FieldTypeRaw> for FieldType {
@@ -195,6 +204,9 @@ impl TryFrom<FieldTypeRaw> for FieldType {
 
     fn try_from(raw: FieldTypeRaw) -> Result<Self, String> {
         match raw {
+            FieldTypeRaw::Mapping { values } => Ok(FieldType::Mapping {
+                values: Box::new(FieldType::try_from(*values)?),
+            }),
             FieldTypeRaw::Union { prims } => {
                 if prims.is_empty() {
                     return Err("empty union is not a valid type".to_string());
@@ -529,6 +541,10 @@ impl ValueShape {
 ///     element type must satisfy the consumer's element type.
 pub(crate) fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
     match (consumer, producer) {
+        (FieldType::Mapping { values: consumer }, FieldType::Mapping { values: producer }) => {
+            field_type_covers(consumer, producer)
+        }
+        (FieldType::Mapping { .. }, _) | (_, FieldType::Mapping { .. }) => false,
         (FieldType::Single { prim: c_prim, .. }, FieldType::Single { prim: p_prim, .. }) => {
             if *c_prim == PrimType::Any {
                 return true;
@@ -554,10 +570,12 @@ pub(crate) fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> b
             let consumer_set: Vec<PrimType> = match consumer {
                 FieldType::Single { prim, .. } => vec![*prim],
                 FieldType::Union { prims } => prims.clone(),
+                FieldType::Mapping { .. } => vec![PrimType::Mapping],
             };
             let producer_set: Vec<PrimType> = match producer {
                 FieldType::Single { prim, .. } => vec![*prim],
                 FieldType::Union { prims } => prims.clone(),
+                FieldType::Mapping { .. } => vec![PrimType::Mapping],
             };
             if consumer_set.contains(&PrimType::Any) {
                 return true;
@@ -863,6 +881,20 @@ fn validate_field(
                     ),
                     found: json_type_name(value).to_string(),
                 });
+            }
+        }
+        FieldType::Mapping { values } => {
+            let Some(mapping) = value.as_object() else {
+                report.errors.push(InstanceViolation {
+                    path: field_path,
+                    code: InstanceViolationCode::TypeMismatch,
+                    expected: "Mapping".to_string(),
+                    found: json_type_name(value).to_string(),
+                });
+                return;
+            };
+            for (key, value) in mapping {
+                validate_field(value, values, &[field_path.as_str()], key, report);
             }
         }
     }
@@ -1420,6 +1452,45 @@ optional:
         } else {
             panic!("expected element_type on items field");
         }
+    }
+
+    #[test]
+    fn typed_mapping_values_parse_and_validate_each_dynamic_key() {
+        let yaml = "\
+root_type: mapping
+required:
+  sources:
+    type: mapping
+    values:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          ref: { type: single, prim: string }
+        optional: {}
+";
+        let shape: ValueShape = serde_yaml::from_str(yaml).expect("typed mapping parses");
+        assert!(
+            shape
+                .validate_instance(&serde_json::json!({
+                    "sources": {
+                        "first": {"ref": "service:test/first"},
+                        "second": {"ref": "service:test/second"}
+                    }
+                }))
+                .errors
+                .is_empty()
+        );
+        let report = shape.validate_instance(&serde_json::json!({
+            "sources": {
+                "valid": {"ref": "service:test/valid"},
+                "invalid": {"ref": 7}
+            }
+        }));
+        assert!(report.errors.iter().any(|error| {
+            error.path == "sources.invalid.ref" && error.code == InstanceViolationCode::TypeMismatch
+        }));
     }
 
     #[test]

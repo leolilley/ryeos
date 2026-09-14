@@ -1,10 +1,5 @@
-use super::dto::{
-    RyeOsAddProjectDto, RyeOsDimensionDto, RyeOsFileReadDto, RyeOsFileSpaceDto, RyeOsFilesDto,
-    RyeOsItemsDto, RyeOsOpenProjectDto, RyeOsThreadsDto, RyeOsTopologyDto,
-};
 use super::effect::{RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
 use super::model::RyeOsCore;
-use super::parse_tile_id;
 use super::view_model::RyeOsTone;
 
 const INPUT_QUEUE_NOTICE_PREFIX: &str = "Queued behind active thread";
@@ -20,6 +15,13 @@ impl RyeOsCore {
         };
 
         if !effect_result_kind_matches(&expected, &result.kind) {
+            self.record_effect_failure(
+                result.id,
+                super::effect::RyeOsUiError::definite(
+                    "mismatched_effect_result",
+                    "RyeOS ignored a mismatched platform effect result.",
+                ),
+            );
             self.notice(
                 "RyeOS ignored a mismatched platform effect result.",
                 RyeOsTone::Warn,
@@ -28,22 +30,26 @@ impl RyeOsCore {
         }
 
         if !result.ok {
-            if let Some(source_key) = completed_source_key.as_deref() {
-                self.record_source_failure(source_key, result.id, result.error.as_deref());
+            let error = result
+                .error
+                .unwrap_or_else(|| {
+                    super::effect::RyeOsUiError::definite(
+                        "platform_effect_failed",
+                        "RyeOS platform effect failed",
+                    )
+                })
+                .normalized();
+            if let Some(source_key) = completed_source_key.as_deref()
+                && !self.record_source_failure(source_key, result.id, &error)
+            {
+                return self.finish_source_effect(Some(source_key), Vec::new());
             }
-            self.notice(
-                effect_failure_notice(&expected, result.error.as_deref()),
-                RyeOsTone::Danger,
-            );
+            self.record_effect_failure(result.id, error.clone());
+            self.notice(effect_failure_notice(&expected, &error), RyeOsTone::Danger);
             return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
-        if matches!(
-            result.kind,
-            RyeOsEffectResultKind::InvocationDispatch
-                | RyeOsEffectResultKind::ThreadCommandSubmitted
-                | RyeOsEffectResultKind::Invoked
-        ) {
+        if result.kind == RyeOsEffectResultKind::BindingInvoked {
             let data = result
                 .data
                 .as_ref()
@@ -51,6 +57,31 @@ impl RyeOsCore {
                 .unwrap_or(serde_json::Value::Null);
             let effects = self.apply_invocation_result(&expected, result.kind, data);
             return self.finish_source_effect(completed_source_key.as_deref(), effects);
+        }
+
+        if matches!(expected, RyeOsEffectKind::ReplaceSession { .. }) {
+            // Browser navigation unloads this core and returns null. Native
+            // adapters instead return the newly loaded session so the same
+            // renderer-neutral state machine can replace its authority in
+            // place without retaining any old binding entry.
+            let Some(data) = result.data else {
+                return Vec::new();
+            };
+            if data.is_null() {
+                return Vec::new();
+            }
+            let Ok(session) = serde_json::from_value(data) else {
+                self.notice(
+                    "The replacement UI session could not be loaded.",
+                    RyeOsTone::Danger,
+                );
+                return Vec::new();
+            };
+            let viewport = self.runtime.viewport;
+            let now_ms = self.runtime.now_ms;
+            *self = RyeOsCore::new(session, viewport, now_ms);
+            self.bump_generation();
+            return self.initial_effects();
         }
 
         let Some(data) = result.data else {
@@ -75,7 +106,23 @@ impl RyeOsCore {
         effects
     }
 
-    fn record_source_failure(&mut self, source_key: &str, result_id: u64, error: Option<&str>) {
+    fn record_effect_failure(&mut self, result_id: u64, error: super::effect::RyeOsUiError) {
+        const MAX_RETAINED_EFFECT_FAILURES: usize = 32;
+        self.ui.effect_failures.insert(result_id, error);
+        while self.ui.effect_failures.len() > MAX_RETAINED_EFFECT_FAILURES {
+            let Some(oldest) = self.ui.effect_failures.keys().next().copied() else {
+                break;
+            };
+            self.ui.effect_failures.remove(&oldest);
+        }
+    }
+
+    fn record_source_failure(
+        &mut self,
+        source_key: &str,
+        result_id: u64,
+        error: &super::effect::RyeOsUiError,
+    ) -> bool {
         let floor = self.data.source_floor.get(source_key).copied().unwrap_or(0);
         let newest = self.data.source_epoch.get(source_key).copied().unwrap_or(0);
         let stored = self.data.source_stored_epoch.get(source_key).copied();
@@ -83,30 +130,17 @@ impl RyeOsCore {
             || result_id < newest
             || stored.is_some_and(|stored_id| result_id < stored_id)
         {
-            return;
+            return false;
         }
-        self.data.source_errors.insert(
-            source_key.to_string(),
-            error.unwrap_or("source request failed").to_string(),
-        );
+        self.data
+            .source_errors
+            .insert(source_key.to_string(), error.clone());
         self.stop_field_playback_for_source(source_key);
+        true
     }
 
-    /// Effect batches resolve concurrently, so an older shared-dataset
-    /// snapshot can arrive after a newer one; only the freshest may land.
-    fn dataset_is_latest(&mut self, key: &'static str, result_id: u64) -> bool {
-        let latest = self.data.dataset_epoch.entry(key).or_insert(0);
-        if result_id >= *latest {
-            *latest = result_id;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// The command-result arms (`InvocationDispatch` / `ThreadCommandSubmitted` /
-    /// `Invoked`) — a synthetic-`Null`-defaulted body that always resolves to a
-    /// notice plus a refresh, never to the parse-and-store path.
+    /// A bound invocation result always resolves through the invocation tower,
+    /// never through the source parse-and-store path.
     fn apply_invocation_result(
         &mut self,
         expected: &RyeOsEffectKind,
@@ -114,20 +148,7 @@ impl RyeOsCore {
         data: serde_json::Value,
     ) -> Vec<RyeOsEffect> {
         match kind {
-            RyeOsEffectResultKind::InvocationDispatch => {
-                self.notice(effect_success_notice(expected, &data), RyeOsTone::Good);
-                vec![
-                    self.emit(RyeOsEffectKind::FetchDimension),
-                    self.emit(RyeOsEffectKind::FetchThreads { limit: 100 }),
-                ]
-            }
-            RyeOsEffectResultKind::ThreadCommandSubmitted => {
-                self.notice(effect_success_notice(expected, &data), RyeOsTone::Good);
-                let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
-                effects.extend(self.effects_for_hint("thread"));
-                effects
-            }
-            RyeOsEffectResultKind::Invoked => {
+            RyeOsEffectResultKind::BindingInvoked => {
                 // Typed submit result: { thread_id?, delivery, notice?, execution? }.
                 let outcome: super::dto::LaunchOutcome =
                     serde_json::from_value(data.clone()).unwrap_or_default();
@@ -153,11 +174,43 @@ impl RyeOsCore {
         // success: refresh the list/braid and preserve the focused input. Copy
         // comes from the affordance's `notice:` template (rendered against the
         // outcome), falling back to the generic success notice.
-        if let RyeOsEffectKind::Invoke {
-            intent: super::effect::InvokeIntent::Service,
-            success_notice,
-            ..
-        } = expected
+        let service_notice = match expected {
+            RyeOsEffectKind::InvokeBinding {
+                intent: super::effect::InvokeIntent::Service,
+                success_notice,
+                ..
+            } => Some(success_notice),
+            _ => None,
+        };
+        if let Some(transition) = data.get("ui_transition")
+            && transition.get("kind").and_then(serde_json::Value::as_str) == Some("replace_session")
+        {
+            let Some(session_id) = transition
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+            else {
+                self.notice(
+                    "The replacement UI session has no session id.",
+                    RyeOsTone::Danger,
+                );
+                return Vec::new();
+            };
+            let Some(launch_url) = transition
+                .get("launch_url")
+                .and_then(serde_json::Value::as_str)
+            else {
+                self.notice(
+                    "The replacement UI session has no launch URL.",
+                    RyeOsTone::Danger,
+                );
+                return Vec::new();
+            };
+            return vec![self.emit(RyeOsEffectKind::ReplaceSession {
+                session_id: session_id.to_string(),
+                launch_url: launch_url.to_string(),
+            })];
+        }
+        if let Some(success_notice) = service_notice
             && outcome.delivery.is_none()
         {
             let notice = match success_notice {
@@ -165,9 +218,7 @@ impl RyeOsCore {
                 None => effect_success_notice(expected, data),
             };
             self.notice(notice, RyeOsTone::Good);
-            let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
-            effects.extend(self.effects_for_hint("thread"));
-            return effects;
+            return self.effects_for_hint("thread");
         }
         if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
             // A refused delivery (non-continuation target, settled
@@ -203,9 +254,7 @@ impl RyeOsCore {
             } else {
                 self.notice(notice.message, notice.tone);
             }
-            let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
-            effects.extend(self.effects_for_hint("thread"));
-            return effects;
+            return self.effects_for_hint("thread");
         }
         self.clear_focused_input();
         let Some(thread_id) = outcome.thread_id.clone() else {
@@ -217,21 +266,24 @@ impl RyeOsCore {
         // the input at the produced thread so the next submit
         // continues the chain. A stale result (route changed
         // since issue) may notice but never retargets.
-        if let RyeOsEffectKind::Invoke {
-            route_seq,
-            ratchet_on_thread_id,
-            ..
-        } = expected
-        {
+        let route_metadata = match expected {
+            RyeOsEffectKind::InvokeBinding {
+                route_seq,
+                ratchet_on_thread_id,
+                ..
+            } => Some((*route_seq, *ratchet_on_thread_id)),
+            _ => None,
+        };
+        if let Some((route_seq, ratchet_on_thread_id)) = route_metadata {
             self.try_ratchet_route(
-                *route_seq,
-                *ratchet_on_thread_id,
+                route_seq,
+                ratchet_on_thread_id,
                 &thread_id,
                 outcome.execution,
             );
         }
         self.notice(format!("Thread {thread_id} launched."), RyeOsTone::Good);
-        let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
+        let mut effects = Vec::new();
         effects.extend(self.effects_for_facet(super::seat::KEY_INPUT_ROUTE));
         effects.extend(self.effects_for_hint("thread"));
         effects
@@ -303,15 +355,11 @@ impl RyeOsCore {
         data: serde_json::Value,
     ) -> Vec<RyeOsEffect> {
         match kind {
-            RyeOsEffectResultKind::Dimension => {
-                if self.dataset_is_latest("dimension", result_id) {
-                    self.apply_parsed::<RyeOsDimensionDto>(data, "dimension", |core, dimension| {
-                        core.data.dimension = Some(dimension);
-                    });
-                }
-            }
             RyeOsEffectResultKind::SourceData => {
-                if let RyeOsEffectKind::FetchSource { tile_id, .. } = expected {
+                if let RyeOsEffectKind::FetchSource {
+                    tile_id, request, ..
+                } = expected
+                {
                     // Freshness guard, two clauses:
                     // - the floor refuses stragglers from before the key's
                     //   subject changed (lens swap, drill return, selection
@@ -325,6 +373,7 @@ impl RyeOsCore {
                     let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                        self.apply_bound_source_projection(request, tile_id, &data);
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
@@ -343,112 +392,8 @@ impl RyeOsCore {
                     self.bump_generation();
                 }
             }
-            RyeOsEffectResultKind::Projects => {
-                if self.dataset_is_latest("projects", result_id) {
-                    self.apply_parsed::<super::dto::RyeOsProjectsDto>(
-                        data,
-                        "projects",
-                        |core, projects| {
-                            core.data.projects = Some(projects);
-                        },
-                    );
-                }
-            }
-            RyeOsEffectResultKind::Topology => {
-                if self.dataset_is_latest("topology", result_id) {
-                    self.apply_parsed::<RyeOsTopologyDto>(data, "topology", |core, topology| {
-                        core.data.topology = Some(topology);
-                    });
-                }
-            }
-            RyeOsEffectResultKind::InvocationDispatch
-            | RyeOsEffectResultKind::ThreadCommandSubmitted
-            | RyeOsEffectResultKind::Invoked => {
+            RyeOsEffectResultKind::BindingInvoked => {
                 unreachable!("command results are handled before optional data extraction")
-            }
-            RyeOsEffectResultKind::ProjectAdded => {
-                let added = match serde_json::from_value::<RyeOsAddProjectDto>(data) {
-                    Ok(added) => added,
-                    Err(error) => {
-                        self.notice(
-                            format!("RyeOS could not read project_add response: {error}"),
-                            RyeOsTone::Danger,
-                        );
-                        return Vec::new();
-                    }
-                };
-                self.notice(
-                    if added.created {
-                        format!("Registered project {}.", added.project.name)
-                    } else {
-                        format!("Updated project {}.", added.project.name)
-                    },
-                    RyeOsTone::Good,
-                );
-                return vec![self.emit(RyeOsEffectKind::FetchProjects)];
-            }
-            RyeOsEffectResultKind::ProjectOpened => {
-                return self.apply_project_opened(data);
-            }
-            RyeOsEffectResultKind::Threads => {
-                if self.dataset_is_latest("threads", result_id) {
-                    self.apply_parsed::<RyeOsThreadsDto>(data, "threads", |core, threads| {
-                        core.data.threads = Some(threads);
-                    });
-                }
-            }
-            RyeOsEffectResultKind::Items => {
-                self.apply_parsed::<RyeOsItemsDto>(data, "items", |core, items| {
-                    if effect_matches_current_items(Some(expected), core) {
-                        if let RyeOsEffectKind::FetchItems {
-                            tile_id: Some(tile_id),
-                            ..
-                        } = expected
-                        {
-                            core.data.tile_items.insert(tile_id.clone(), items.clone());
-                        } else if core.dataset_is_latest("items", result_id) {
-                            core.data.items = Some(items);
-                        }
-                    }
-                });
-            }
-            RyeOsEffectResultKind::FilesList => {
-                self.apply_parsed::<RyeOsFilesDto>(data, "files_list", |core, files| {
-                    if effect_matches_current_files(Some(expected), core, &files) {
-                        if let RyeOsEffectKind::ListFiles {
-                            tile_id: Some(tile_id),
-                            ..
-                        } = expected
-                        {
-                            core.data.tile_files.insert(tile_id.clone(), files.clone());
-                        }
-                        core.data.files = Some(files);
-                    }
-                });
-            }
-            RyeOsEffectResultKind::FileSpace => {
-                self.apply_parsed::<RyeOsFileSpaceDto>(data, "file_space", |core, file_space| {
-                    if effect_matches_current_file_space(Some(expected), core, &file_space) {
-                        if let RyeOsEffectKind::FetchFileSpace {
-                            tile_id: Some(tile_id),
-                            ..
-                        } = expected
-                        {
-                            core.data
-                                .tile_file_space
-                                .insert(tile_id.clone(), file_space);
-                        } else {
-                            core.data.file_space = Some(file_space);
-                        }
-                    }
-                });
-            }
-            RyeOsEffectResultKind::FileRead => {
-                self.apply_parsed::<RyeOsFileReadDto>(data, "file_read", |core, file_read| {
-                    if effect_matches_current_file_read(Some(expected), core, &file_read) {
-                        core.data.file_read = Some(file_read);
-                    }
-                });
             }
             RyeOsEffectResultKind::BrowserOnly => {}
         }
@@ -457,79 +402,78 @@ impl RyeOsCore {
         Vec::new()
     }
 
-    fn apply_project_opened(&mut self, data: serde_json::Value) -> Vec<RyeOsEffect> {
-        let opened = match serde_json::from_value::<RyeOsOpenProjectDto>(data) {
-            Ok(opened) => opened,
-            Err(error) => {
-                self.notice(
-                    format!("RyeOS could not read project_open response: {error}"),
-                    RyeOsTone::Danger,
-                );
-                return Vec::new();
-            }
+    /// Project the small set of renderer-wide scene datasets from signed
+    /// source coordinates. The coordinate names presentation roles; it does
+    /// not select an endpoint or grant authority. Ordinary table/timeline/
+    /// field sources remain open JSON in `data.sources`.
+    fn apply_bound_source_projection(
+        &mut self,
+        request: &crate::ui::binding::UiBindingRequest,
+        source_key: &str,
+        data: &serde_json::Value,
+    ) {
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return;
         };
-        let project_root =
-            opened.session.project_root.clone().or_else(|| {
-                (!opened.project.root.is_empty()).then_some(opened.project.root.clone())
-            });
-        if let Some(session) = &mut self.data.session {
-            if !opened.session.session_id.is_empty() {
-                session.session_id = opened.session.session_id.clone();
-                session.read_only = opened.session.read_only;
-            }
-            session.project_path = project_root;
-        }
-        if let Some(projects) = &mut self.data.projects {
-            for project in &mut projects.projects {
-                project.current = project.local_id == opened.project.local_id;
-                if project.current {
-                    *project = opened.project.clone();
-                    project.current = true;
+        let role = self
+            .data
+            .session
+            .as_ref()
+            .filter(|session| session.surface_ref == *view_ref)
+            .and_then(|_| self.surface_sources.get(channel))
+            .or_else(|| self.views.get(view_ref)?.sources.get(channel))
+            .and_then(|source| source.role.as_deref());
+        match role {
+            Some("dimension") => {
+                if let Ok(value) = serde_json::from_value(data.clone()) {
+                    self.data.dimension = Some(value);
                 }
             }
+            Some("projects") => {
+                if let Ok(value) = serde_json::from_value(data.clone()) {
+                    self.data.projects = Some(value);
+                }
+            }
+            Some("topology") => {
+                if let Ok(value) = serde_json::from_value(data.clone()) {
+                    self.data.topology = Some(value);
+                }
+            }
+            Some("items") => {
+                if let Ok(value) = serde_json::from_value(data.clone()) {
+                    if let Some(tile_id) = bound_source_tile_id(source_key) {
+                        self.data.tile_items.insert(tile_id, value);
+                    } else {
+                        self.data.items = Some(value);
+                    }
+                }
+            }
+            Some("file_space") => {
+                if let Ok(value) = serde_json::from_value(data.clone()) {
+                    if let Some(tile_id) = bound_source_tile_id(source_key) {
+                        self.data.tile_file_space.insert(tile_id, value);
+                    } else {
+                        self.data.file_space = Some(value);
+                    }
+                }
+            }
+            // File reads remain under their exact source-instance key in
+            // `data.sources`. A global projection would let two mounted views
+            // overwrite one another and erase the originating coordinate.
+            Some("file_read") => {}
+            _ => {}
         }
-        self.data.dimension = None;
-        self.data.topology = None;
-        self.data.items = None;
-        self.data.file_space = None;
-        self.data.tile_items.clear();
-        self.data.tile_file_space.clear();
-        self.data.files = None;
-        self.data.tile_files.clear();
-        self.data.sources.clear();
-        self.data.source_errors.clear();
-        self.data.source_epoch.clear();
-        self.data.source_stored_epoch.clear();
-        self.data.source_floor.clear();
-        self.data.source_subject_fingerprint.clear();
-        self.deferred_source_fetches.clear();
-        self.data.timeline_sources.clear();
-        self.data.file_read = None;
-        self.pending_effects
-            .retain(|_, kind| !effect_depends_on_project_binding(kind));
-        self.notice(
-            format!("Opened project {}.", opened.project.name),
-            RyeOsTone::Good,
-        );
-        self.initial_effects()
     }
+}
 
-    pub(crate) fn apply_parsed<T>(
-        &mut self,
-        data: serde_json::Value,
-        label: &'static str,
-        apply: impl FnOnce(&mut Self, T),
-    ) where
-        T: serde::de::DeserializeOwned,
-    {
-        match serde_json::from_value::<T>(data) {
-            Ok(value) => apply(self, value),
-            Err(error) => self.notice(
-                format!("RyeOS could not read {label} response: {error}"),
-                RyeOsTone::Danger,
-            ),
-        }
-    }
+fn bound_source_tile_id(source_key: &str) -> Option<String> {
+    let key = crate::ui::source_key::RyeOsSourceInstanceKey::decode(source_key)?;
+    key.view_instance
+        .as_str()
+        .strip_prefix("tile:")
+        .map(str::to_string)
 }
 
 struct SubmittedDeliveryNotice {
@@ -586,63 +530,28 @@ fn format_staged_input_notice(pending: u64) -> String {
 /// Fallback notice when a refused delivery carries no reason from the daemon.
 const REFUSED_NOTICE: &str = "Delivery refused.";
 
-fn effect_success_notice(expected: &RyeOsEffectKind, data: &serde_json::Value) -> String {
+fn effect_success_notice(expected: &RyeOsEffectKind, _data: &serde_json::Value) -> String {
     match expected {
-        RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
-            // `data.target.ref` is a path, not key alternatives — reaching
-            // for `json_field_text` here would stringify the whole target.
-            let item_ref = data
-                .get("target")
-                .and_then(|target| target.get("ref"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| item_ref.clone());
-            format!("Ran {item_ref}.")
-        }
-        RyeOsEffectKind::SubmitThreadCommand {
-            thread_id,
-            command_type,
-        } => format!("Sent {command_type} to {thread_id}."),
-        RyeOsEffectKind::Invoke { .. } => "Invocation completed.".to_string(),
+        RyeOsEffectKind::InvokeBinding { .. } => "Invocation completed.".to_string(),
         _ => "RyeOS command completed.".to_string(),
     }
 }
 
-fn effect_failure_notice(expected: &RyeOsEffectKind, error: Option<&str>) -> String {
-    let reason = error
-        .and_then(effect_error_summary)
-        .unwrap_or_else(|| "RyeOS platform effect failed".to_string());
+fn effect_failure_notice(
+    expected: &RyeOsEffectKind,
+    error: &super::effect::RyeOsUiError,
+) -> String {
+    let reason = if let Some(remediation) = error.remediation.as_deref() {
+        format!("{} — {remediation}", error.message)
+    } else {
+        error.message.clone()
+    };
     match expected {
-        RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
-            format!("Run {item_ref} failed: {reason}")
+        RyeOsEffectKind::InvokeBinding { .. } => {
+            format!("Invocation failed: {reason}")
         }
-        RyeOsEffectKind::SubmitThreadCommand {
-            thread_id,
-            command_type,
-        } => format!("Sending {command_type} to {thread_id} failed: {reason}"),
-        RyeOsEffectKind::Invoke { .. } => format!("Invocation failed: {reason}"),
         _ => reason,
     }
-}
-
-fn effect_error_summary(raw: &str) -> Option<String> {
-    structured_error_message(raw).or_else(|| {
-        let trimmed = raw.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
-}
-
-fn structured_error_message(raw: &str) -> Option<String> {
-    raw.char_indices()
-        .filter_map(|(index, ch)| (ch == '{').then_some(index))
-        .find_map(|index| serde_json::from_str::<serde_json::Value>(&raw[index..]).ok())
-        .and_then(|value| {
-            json_field_text(&value, &["message", "error", "detail", "code"]).or_else(|| {
-                value
-                    .get("body")
-                    .and_then(|body| json_field_text(body, &["message", "error", "detail", "code"]))
-            })
-        })
 }
 
 /// Render an affordance success-notice template, substituting `{result.<field>}`
@@ -682,47 +591,11 @@ fn effect_result_kind_matches(expected: &RyeOsEffectKind, actual: &RyeOsEffectRe
     matches!(
         (expected, actual),
         (
-            RyeOsEffectKind::FetchDimension,
-            RyeOsEffectResultKind::Dimension
-        ) | (
-            RyeOsEffectKind::FetchProjects,
-            RyeOsEffectResultKind::Projects
-        ) | (
-            RyeOsEffectKind::FetchTopology,
-            RyeOsEffectResultKind::Topology
-        ) | (
-            RyeOsEffectKind::AddProject { .. },
-            RyeOsEffectResultKind::ProjectAdded
-        ) | (
-            RyeOsEffectKind::OpenProject { .. },
-            RyeOsEffectResultKind::ProjectOpened
-        ) | (
-            RyeOsEffectKind::FetchThreads { .. },
-            RyeOsEffectResultKind::Threads
-        ) | (
-            RyeOsEffectKind::FetchItems { .. },
-            RyeOsEffectResultKind::Items
-        ) | (
             RyeOsEffectKind::FetchSource { .. },
             RyeOsEffectResultKind::SourceData
         ) | (
-            RyeOsEffectKind::ListFiles { .. },
-            RyeOsEffectResultKind::FilesList
-        ) | (
-            RyeOsEffectKind::FetchFileSpace { .. },
-            RyeOsEffectResultKind::FileSpace
-        ) | (
-            RyeOsEffectKind::ReadFile { .. },
-            RyeOsEffectResultKind::FileRead
-        ) | (
-            RyeOsEffectKind::DispatchInvocation { .. },
-            RyeOsEffectResultKind::InvocationDispatch
-        ) | (
-            RyeOsEffectKind::SubmitThreadCommand { .. },
-            RyeOsEffectResultKind::ThreadCommandSubmitted
-        ) | (
-            RyeOsEffectKind::Invoke { .. },
-            RyeOsEffectResultKind::Invoked
+            RyeOsEffectKind::InvokeBinding { .. },
+            RyeOsEffectResultKind::BindingInvoked
         ) | (
             RyeOsEffectKind::SetLocationHash { .. },
             RyeOsEffectResultKind::BrowserOnly
@@ -732,130 +605,11 @@ fn effect_result_kind_matches(expected: &RyeOsEffectKind, actual: &RyeOsEffectRe
         ) | (
             RyeOsEffectKind::OpenUrl { .. },
             RyeOsEffectResultKind::BrowserOnly
+        ) | (
+            RyeOsEffectKind::ReplaceSession { .. },
+            RyeOsEffectResultKind::BrowserOnly
         )
     )
-}
-
-fn effect_depends_on_project_binding(kind: &RyeOsEffectKind) -> bool {
-    matches!(
-        kind,
-        RyeOsEffectKind::FetchDimension
-            | RyeOsEffectKind::FetchTopology
-            | RyeOsEffectKind::FetchItems { .. }
-            | RyeOsEffectKind::FetchFileSpace { .. }
-            | RyeOsEffectKind::ListFiles { .. }
-            | RyeOsEffectKind::ReadFile { .. }
-            | RyeOsEffectKind::DispatchInvocation { .. }
-            | RyeOsEffectKind::FetchSource { .. }
-    )
-}
-
-fn effect_matches_current_items(expected: Option<&RyeOsEffectKind>, core: &RyeOsCore) -> bool {
-    let Some(RyeOsEffectKind::FetchItems {
-        tile_id,
-        query,
-        kind,
-        ..
-    }) = expected
-    else {
-        return true;
-    };
-    let Some(tile_id) = tile_id.as_deref() else {
-        // The shared/ambient fetch is unscoped.
-        return query.is_none() && kind.is_none();
-    };
-    // A tile-scoped fetch is current iff that tile still binds an atlas view
-    // whose declared `body.scope` still matches this fetch's (query, kind) —
-    // content is the scope, so a re-bound or re-scoped tile drops the stale
-    // response instead of caching it.
-    let Some(tile_id) = parse_tile_id(tile_id) else {
-        return false;
-    };
-    let Some(binding) = core
-        .workspace
-        .tiles
-        .get(&tile_id)
-        .and_then(|tile| core.views.get(&tile.view.view_ref))
-    else {
-        return false;
-    };
-    if binding.widget != "atlas" {
-        return false;
-    }
-    let (want_query, want_kind) = super::model::atlas_item_scope(binding);
-    &want_query == query && &want_kind == kind
-}
-
-fn effect_matches_current_files(
-    expected: Option<&RyeOsEffectKind>,
-    core: &RyeOsCore,
-    files: &RyeOsFilesDto,
-) -> bool {
-    let Some(RyeOsEffectKind::ListFiles {
-        tile_id,
-        root,
-        path,
-    }) = expected
-    else {
-        return true;
-    };
-    let Some(tile_id) = tile_id.as_deref().and_then(parse_tile_id) else {
-        return false;
-    };
-    // Tile-scoped file listings died with the legacy file tiles.
-    let _ = (core, tile_id, root, path, files);
-    false
-}
-
-fn effect_matches_current_file_space(
-    expected: Option<&RyeOsEffectKind>,
-    core: &RyeOsCore,
-    file_space: &RyeOsFileSpaceDto,
-) -> bool {
-    let Some(RyeOsEffectKind::FetchFileSpace {
-        tile_id,
-        root,
-        path,
-        ..
-    }) = expected
-    else {
-        return true;
-    };
-    let response_matches = root == &file_space.root && path == &file_space.path;
-    // Per-tile fetch: validate against THIS tile's file-space arrangement;
-    // the shared fetch validates against the ambient atlas state.
-    let atlas = match tile_id.as_deref().map(parse_tile_id) {
-        Some(Some(tile_id)) => core.tile_atlas_state(tile_id),
-        Some(None) => return false,
-        None => &core.ui.atlas,
-    };
-    atlas.active_projection.is_file_space()
-        && root == &atlas.file_space_root
-        && path == &atlas.file_space_path
-        && response_matches
-}
-
-fn effect_matches_current_file_read(
-    expected: Option<&RyeOsEffectKind>,
-    core: &RyeOsCore,
-    file_read: &RyeOsFileReadDto,
-) -> bool {
-    let Some(RyeOsEffectKind::ReadFile { root, path }) = expected else {
-        return true;
-    };
-    let selection_matches = core
-        .seat
-        .fold()
-        .get(super::seat::KEY_SELECTION)
-        .and_then(|selection| selection.get("file"))
-        .is_some_and(|file| {
-            file.get("root") == Some(&serde_json::Value::String(root.clone()))
-                && file.get("path") == Some(&serde_json::Value::String(path.clone()))
-        });
-    if !selection_matches {
-        return false;
-    }
-    root == &file_read.root && path == &file_read.path
 }
 
 #[cfg(test)]
@@ -871,141 +625,161 @@ mod tests {
         crate::ui::source_key::RyeOsSourceInstanceKey::named(test_instance(), "default").encode()
     }
 
-    #[test]
-    fn service_ref_cancel_result_refreshes_without_launch_semantics() {
-        use crate::ui::effect::{InvokeRef, RyeOsEffectResult, RyeOsEffectResultKind};
-        // A focused list lens with a live filter and typed text.
-        let session = BrowserSession {
-            effective_surface: Some(serde_json::json!({
-                "name": "t",
-                "tiles": ["view:ryeos/threads/list"],
-                "views": { "view:ryeos/threads/list": {
-                    "widget": "table",
-                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
-                    "input": { "id": "filter", "feeds": { "param": "status" } }
-                }}
-            })),
-            read_only: false,
-            ..Default::default()
-        };
-        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::InsertInputChar { ch: 'r' },
-        });
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::InsertInputChar { ch: 'u' },
-        });
-        assert_eq!(
-            core.focused_input_buffer().map(|b| b.text.clone()),
-            Some("ru".to_string())
-        );
-
-        // A service-ref cancel invoke (as the row Cancel affordance emits) whose
-        // result looks superficially like a launch outcome ({thread_id, status}).
-        let effect = core.emit(RyeOsEffectKind::Invoke {
-            target: InvokeRef::Ref {
-                item_ref: "service:commands/submit".to_string(),
+    fn test_fetch_source(tile_id: String) -> RyeOsEffectKind {
+        RyeOsEffectKind::FetchSource {
+            tile_id,
+            request: crate::ui::binding::UiBindingRequest {
+                binding_digest: "sha256:test-binding".to_string(),
+                coordinate: crate::ui::binding::UiBindingCoordinate::Source {
+                    view_ref: "view:test/source".to_string(),
+                    channel: "default".to_string(),
+                },
+                payload: crate::ui::binding::UiBindingPayload::SourceParameters {
+                    params: serde_json::json!({}),
+                },
             },
-            params: serde_json::json!({ "thread_id": "T-7", "command_type": "cancel" }),
-            // As the row Cancel affordance now emits: a Service intent carrying
-            // the authored success-notice template.
-            intent: crate::ui::effect::InvokeIntent::Service,
-            success_notice: Some("Cancelled {result.thread_id}.".to_string()),
-            route_seq: None,
-            ratchet_on_thread_id: false,
-        });
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: effect.id,
-                ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
-                data: Some(serde_json::json!({ "thread_id": "T-7", "status": "cancelled" })),
-                error: None,
+            request_bounds: crate::ui::binding::UiBindingRequestBounds {
+                max_request_bytes: 16 * 1024,
+                max_input_bytes: 8 * 1024,
             },
-        });
-
-        // The focused filter buffer is PRESERVED (a launch would have cleared it).
-        assert_eq!(
-            core.focused_input_buffer().map(|b| b.text.clone()),
-            Some("ru".to_string()),
-            "cancel must not clear the focused filter"
-        );
-        // The route is NOT ratcheted onto the cancelled thread.
-        assert!(core.seat.fold().input_route().thread.is_none());
-        // A thread-list refresh is emitted.
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(&e.kind, RyeOsEffectKind::FetchThreads { .. })),
-            "cancel refreshes the thread list; got {effects:?}"
-        );
-        // The notice reads as a cancel, not a false launch.
-        let notice = core.ui.notices.last().expect("a notice");
-        assert!(
-            notice.message.contains("Cancelled"),
-            "got {:?}",
-            notice.message
-        );
-        assert!(
-            !notice.message.contains("launched"),
-            "got {:?}",
-            notice.message
-        );
+        }
     }
 
     #[test]
-    fn topology_effect_result_updates_state() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        let effects = core.initial_effects();
-        let topology_id = effects
-            .iter()
-            .find(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology))
-            .map(|effect| effect.id)
-            .expect("graph startup should fetch topology");
-
+    fn signed_surface_source_role_projects_shell_data() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.surface_sources.insert(
+            "projects".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "ref": "service:projects/list",
+                "role": "projects",
+                "params": {}
+            }))
+            .unwrap(),
+        );
+        let effect = core
+            .initial_effects()
+            .into_iter()
+            .find(|effect| {
+                matches!(
+                    &effect.kind,
+                    RyeOsEffectKind::FetchSource { request, .. }
+                        if matches!(
+                            &request.coordinate,
+                            crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                if channel == "projects"
+                        )
+                )
+            })
+            .expect("surface source fetch");
         core.dispatch(RyeOsEvent::EffectResult {
             result: RyeOsEffectResult {
-                id: topology_id,
+                id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Topology,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(serde_json::json!({"version": 1, "projects": []})),
+                error: None,
+            },
+        });
+        assert_eq!(core.data.projects.as_ref().unwrap().version, 1);
+    }
+
+    #[test]
+    fn project_transition_replaces_the_complete_native_session_generation() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 41);
+        let invocation = core.emit(RyeOsEffectKind::InvokeBinding {
+            request: crate::ui::binding::UiBindingRequest {
+                binding_digest: "11".repeat(32),
+                coordinate: crate::ui::binding::UiBindingCoordinate::Affordance {
+                    view_ref: "view:ryeos/projects/list".to_string(),
+                    affordance_id: "open-project".to_string(),
+                },
+                payload: crate::ui::binding::UiBindingPayload::Selection {
+                    record: serde_json::json!({"local_id": "project-2"}),
+                },
+            },
+            request_bounds: crate::ui::binding::UiBindingRequestBounds {
+                max_request_bytes: 4096,
+                max_input_bytes: 1024,
+            },
+            intent: crate::ui::effect::InvokeIntent::Service,
+            success_notice: None,
+            route_seq: None,
+            ratchet_on_thread_id: false,
+        });
+        let transition = core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: invocation.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({
-                    "version": "1",
-                    "kind": "topology",
-                    "metadata": {},
-                    "nodes": [{
-                        "id": "tool:demo/run",
-                        "kind": "tool",
-                        "label": "run",
-                        "ref": "tool:demo/run"
-                    }],
-                    "edges": []
+                    "ui_transition": {
+                        "kind": "replace_session",
+                        "session_id": "session-2",
+                        "launch_url": "/ui/launch/successor"
+                    }
                 })),
                 error: None,
             },
         });
+        assert!(matches!(
+            transition.as_slice(),
+            [RyeOsEffect {
+                kind: RyeOsEffectKind::ReplaceSession { session_id, .. },
+                ..
+            }] if session_id == "session-2"
+        ));
 
-        let topology = core.data.topology.as_ref().expect("topology state");
-        assert_eq!(topology.nodes.len(), 1);
-        assert_eq!(topology.nodes[0].ref_, "tool:demo/run");
+        let replacement_effect = &transition[0];
+        let mut successor = writable_session();
+        successor.session_id = "session-2".to_string();
+        successor.project_path = Some("/tmp/project-2".to_string());
+        successor.binding_digest = "22".repeat(32);
+        successor.effective_surface.as_mut().unwrap()["sources"] = serde_json::json!({
+            "projects": {
+                "ref": "service:projects/list",
+                "role": "projects",
+                "params": {}
+            }
+        });
+        let initial = core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: replacement_effect.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::BrowserOnly,
+                data: Some(serde_json::to_value(&successor).unwrap()),
+                error: None,
+            },
+        });
+        assert_eq!(
+            core.data
+                .session
+                .as_ref()
+                .map(|session| session.session_id.as_str()),
+            Some("session-2")
+        );
+        assert_eq!(
+            core.data
+                .session
+                .as_ref()
+                .and_then(|session| session.project_path.as_deref()),
+            Some("/tmp/project-2")
+        );
+        assert!(
+            !initial.is_empty(),
+            "successor must bootstrap its own sources"
+        );
     }
 
     #[test]
     fn stale_source_response_is_dropped_by_the_freshness_guard() {
-        use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
+        use crate::ui::effect::{RyeOsEffectResult, RyeOsEffectResultKind};
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let key = test_source_key();
         // Two fetches issued for the SAME key — a single-lens tile reused for a
         // new selection keeps its key. The second is the newest request.
-        let older = core.emit(RyeOsEffectKind::FetchSource {
-            tile_id: key.clone(),
-            source_ref: "service:x".to_string(),
-            params: serde_json::json!({}),
-        });
-        let newer = core.emit(RyeOsEffectKind::FetchSource {
-            tile_id: key.clone(),
-            source_ref: "service:x".to_string(),
-            params: serde_json::json!({}),
-        });
+        let older = core.emit(test_fetch_source(key.clone()));
+        let newer = core.emit(test_fetch_source(key.clone()));
         assert!(newer.id > older.id);
         // build_fetch_source would record the newest request; simulate that.
         core.data.source_epoch.insert(key.clone(), newer.id);
@@ -1091,12 +865,19 @@ mod tests {
                 ok: false,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: None,
-                error: Some("daemon rejected source".to_string()),
+                error: Some("daemon rejected source".into()),
             },
         });
         assert_eq!(
-            core.data.source_errors.get(&key).map(String::as_str),
+            core.data
+                .source_errors
+                .get(&key)
+                .map(|error| error.message.as_str()),
             Some("daemon rejected source")
+        );
+        assert_eq!(
+            core.ui.effect_failures[&failed.id].code,
+            "platform_effect_failed"
         );
 
         let retry = core
@@ -1130,7 +911,7 @@ mod tests {
                 ok: false,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: None,
-                error: Some("stale failure".to_string()),
+                error: Some("stale failure".into()),
             },
         });
         assert!(!core.data.source_errors.contains_key(&key));
@@ -1267,100 +1048,6 @@ mod tests {
     }
 
     #[test]
-    fn open_project_effect_result_rebinds_session_and_reloads() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        let effects = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenProject {
-                    local_id: "prj_1".to_string(),
-                },
-            },
-        });
-        assert!(matches!(
-            effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::OpenProject { local_id }) if local_id == "prj_1"
-        ));
-
-        let reloads = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: effects[0].id,
-                ok: true,
-                kind: RyeOsEffectResultKind::ProjectOpened,
-                data: Some(serde_json::json!({
-                    "project": {
-                        "local_id": "prj_1",
-                        "name": "next",
-                        "root": "/tmp/next",
-                        "exists": true
-                    },
-                    "session": {
-                        "session_id": "session-1",
-                        "project_root": "/tmp/next",
-                        "read_only": false
-                    },
-                    "recent": []
-                })),
-                error: None,
-            },
-        });
-
-        assert_eq!(
-            core.data
-                .session
-                .as_ref()
-                .and_then(|s| s.project_path.as_deref()),
-            Some("/tmp/next")
-        );
-        assert!(
-            reloads
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
-        );
-        assert!(
-            reloads
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects))
-        );
-    }
-
-    #[test]
-    fn project_added_refetches_projects() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        let effects = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::AddCurrentProject,
-            },
-        });
-        assert!(matches!(
-            effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::AddProject { root }) if root == "/tmp/project"
-        ));
-
-        let followups = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: effects[0].id,
-                ok: true,
-                kind: RyeOsEffectResultKind::ProjectAdded,
-                data: Some(serde_json::json!({
-                    "project": {
-                        "local_id": "prj_1",
-                        "name": "project",
-                        "root": "/tmp/project",
-                        "exists": true
-                    },
-                    "created": true
-                })),
-                error: None,
-            },
-        });
-
-        assert!(matches!(
-            followups.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::FetchProjects)
-        ));
-    }
-
-    #[test]
     fn refused_delivery_surfaces_reason_and_does_not_ratchet() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core); // targeting input → ratchet would be eligible
@@ -1376,7 +1063,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({
                     "thread_id": serde_json::Value::Null,
                     "delivery": "refused",
@@ -1414,7 +1101,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: e1.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({ "thread_id": "T-1", "delivery": "launched" })),
                 error: None,
             },
@@ -1435,7 +1122,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: e2.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({ "thread_id": "T-2", "delivery": "launched" })),
                 error: None,
             },
@@ -1472,7 +1159,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({
                     "thread_id": "T-stale",
                     "delivery": "launched"
@@ -1501,7 +1188,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({
                     "delivery": "refused",
                     "notice": "Thread is live; delivery refused."
@@ -1517,316 +1204,6 @@ mod tests {
                 .notices
                 .last()
                 .is_some_and(|notice| notice.message.contains("refused"))
-        );
-    }
-
-    #[test]
-    fn invocation_dispatch_result_notices_and_refreshes() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        let invoke = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ExecuteItem {
-                    item_ref: "tool:demo/run".to_string(),
-                    ref_bindings: std::collections::BTreeMap::new(),
-                    parameters: serde_json::json!({}),
-                },
-            },
-        });
-        let invoke_id = invoke
-            .first()
-            .map(|effect| effect.id)
-            .expect("execute should emit invoke effect");
-
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: invoke_id,
-                ok: true,
-                kind: RyeOsEffectResultKind::InvocationDispatch,
-                data: Some(serde_json::json!({
-                    "status": "executed",
-                    "target": { "kind": "ref", "ref": "tool:demo/run" },
-                    "invocation_id": "inv-1"
-                })),
-                error: None,
-            },
-        });
-
-        assert!(
-            core.ui
-                .notices
-                .iter()
-                .any(|notice| notice.message == "Ran tool:demo/run.")
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 100 }))
-        );
-    }
-
-    #[test]
-    fn invocation_dispatch_failure_names_item_and_structured_error() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        let invoke = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ExecuteItem {
-                    item_ref: "tool:demo/run".to_string(),
-                    ref_bindings: std::collections::BTreeMap::new(),
-                    parameters: serde_json::json!({}),
-                },
-            },
-        });
-        let invoke_id = invoke
-            .first()
-            .map(|effect| effect.id)
-            .expect("execute should emit invoke effect");
-
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: invoke_id,
-                ok: false,
-                kind: RyeOsEffectResultKind::InvocationDispatch,
-                data: None,
-                error: Some(
-                    "/ui/api/invocations/dispatch: 500 {\"message\":\"capability denied\"}"
-                        .to_string(),
-                ),
-            },
-        });
-
-        assert!(effects.is_empty());
-        assert!(core.ui.notices.iter().any(|notice| {
-            notice.message == "Run tool:demo/run failed: capability denied"
-                && notice.tone == RyeOsTone::Danger
-        }));
-    }
-
-    #[test]
-    fn invocation_dispatch_success_without_body_still_notices_and_refreshes() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        let invoke = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ExecuteItem {
-                    item_ref: "tool:demo/run".to_string(),
-                    ref_bindings: std::collections::BTreeMap::new(),
-                    parameters: serde_json::json!({}),
-                },
-            },
-        });
-        let invoke_id = invoke
-            .first()
-            .map(|effect| effect.id)
-            .expect("execute should emit invoke effect");
-
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: invoke_id,
-                ok: true,
-                kind: RyeOsEffectResultKind::InvocationDispatch,
-                data: None,
-                error: None,
-            },
-        });
-
-        assert!(
-            core.ui
-                .notices
-                .iter()
-                .any(|notice| notice.message == "Ran tool:demo/run.")
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 100 }))
-        );
-    }
-
-    #[test]
-    fn thread_command_submitted_result_notices_and_refreshes() {
-        // The one cancel path's result: an Esc / command overlay / row cancel all land
-        // as `SubmitThreadCommand { cancel }` → `ThreadCommandSubmitted`, which
-        // notices and refreshes the thread list.
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "thread": "T-run" }),
-        );
-        core.data.threads = Some(RyeOsThreadsDto {
-            threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
-        });
-        let cancel = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::InterruptHead,
-        });
-        let cancel_id = cancel
-            .first()
-            .map(|effect| effect.id)
-            .expect("cancel should emit effect");
-
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: cancel_id,
-                ok: true,
-                kind: RyeOsEffectResultKind::ThreadCommandSubmitted,
-                data: Some(serde_json::json!({
-                    "thread_id": "T-run",
-                    "command_type": "cancel"
-                })),
-                error: None,
-            },
-        });
-
-        assert!(
-            core.ui
-                .notices
-                .iter()
-                .any(|notice| notice.message == "Sent cancel to T-run.")
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 200 }))
-        );
-    }
-
-    #[test]
-    fn thread_cancel_failure_names_thread() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "thread": "T-run" }),
-        );
-        core.data.threads = Some(RyeOsThreadsDto {
-            threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
-        });
-        let cancel = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::InterruptHead,
-        });
-        let cancel_id = cancel
-            .first()
-            .map(|effect| effect.id)
-            .expect("cancel should emit effect");
-
-        let effects = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: cancel_id,
-                ok: false,
-                kind: RyeOsEffectResultKind::ThreadCommandSubmitted,
-                data: None,
-                error: Some("thread already finished".to_string()),
-            },
-        });
-
-        assert!(effects.is_empty());
-        assert!(core.ui.notices.iter().any(|notice| {
-            notice.message == "Sending cancel to T-run failed: thread already finished"
-                && notice.tone == RyeOsTone::Danger
-        }));
-    }
-
-    #[test]
-    fn dimension_effect_result_updates_view_model() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        let effects = core.initial_effects();
-        let dimension_id = effects
-            .iter()
-            .find(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
-            .map(|effect| effect.id)
-            .expect("initial load should fetch dimension");
-        core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: dimension_id,
-                ok: true,
-                kind: RyeOsEffectResultKind::Dimension,
-                data: Some(serde_json::json!({
-                    "schema_version": "ryeos.test",
-                    "session": {
-                        "session_id": "session-1",
-                        "surface_ref": "surface:ryeos/ryeos/base",
-                        "read_only": true
-                    },
-                    "local_node": {
-                        "health": { "status": "healthy" },
-                        "services": [
-                            { "endpoint": "ui.session.current", "service_ref": "service:ui/session/current", "availability": "DaemonOnly" }
-                        ]
-                    },
-                    "project": { "path": "/tmp/project" }
-                })),
-                error: None,
-            },
-        });
-
-        let envelope = core.envelope(Vec::new());
-        assert_eq!(envelope.view_model.chrome.health_label, "healthy");
-        assert_eq!(
-            envelope.view_model.session.project_path.as_deref(),
-            Some("/tmp/project")
-        );
-    }
-
-    #[test]
-    fn stale_file_read_result_requires_current_root_and_path() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        let old = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ReadFile {
-                    root: "project_ai".to_string(),
-                    path: "README.md".to_string(),
-                },
-            },
-        });
-        let new = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ReadFile {
-                    root: "user_ai".to_string(),
-                    path: "README.md".to_string(),
-                },
-            },
-        });
-
-        core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: new[0].id,
-                ok: true,
-                kind: RyeOsEffectResultKind::FileRead,
-                data: Some(serde_json::json!({
-                    "root": "user_ai",
-                    "path": "README.md",
-                    "content": "new"
-                })),
-                error: None,
-            },
-        });
-        core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: old[0].id,
-                ok: true,
-                kind: RyeOsEffectResultKind::FileRead,
-                data: Some(serde_json::json!({
-                    "root": "project_ai",
-                    "path": "README.md",
-                    "content": "old"
-                })),
-                error: None,
-            },
-        });
-
-        assert_eq!(
-            core.data
-                .file_read
-                .as_ref()
-                .map(|file| file.content.as_str()),
-            Some("new")
         );
     }
 
@@ -1852,7 +1229,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: fetch_items.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Dimension,
+                kind: RyeOsEffectResultKind::BrowserOnly,
                 data: Some(serde_json::json!({
                     "schema_version": "ryeos.test",
                     "session": { "session_id": "session-1", "surface_ref": "surface:ryeos/ryeos/base", "read_only": true },
@@ -1934,7 +1311,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(data),
                 error: None,
             },
@@ -2033,7 +1410,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({ "thread_id": "T-2", "delivery": "launched" })),
                 error: None,
             },

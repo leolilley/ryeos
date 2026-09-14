@@ -1,7 +1,7 @@
 //! `web` — mints a RyeOS RyeOs launch token and opens the browser.
 //!
 //! This binary is the `cli_exec` target for `client:ryeos/web`. It:
-//! 1. Parses launch args (surface, project, read_only).
+//! 1. Parses launch args (surface and project).
 //! 2. Resolves the daemon URL from `daemon.json` or `RYEOSD_URL`.
 //! 3. Discovers the daemon's public key for request signing.
 //! 4. Calls `POST /ui/api/launch/mint` with the launch context.
@@ -28,15 +28,6 @@ struct Cli {
     #[arg(long = "project")]
     project: Option<PathBuf>,
 
-    /// Read-only mode
-    #[arg(long = "read-only")]
-    read_only: bool,
-
-    /// Allow browser intents that can mutate daemon/project state.
-    /// RyeOs defaults to read-only unless this is explicit.
-    #[arg(long = "allow-intents")]
-    allow_intents: bool,
-
     /// Print the minted one-shot launch URL to stdout.
     #[arg(long = "print-url")]
     print_url: bool,
@@ -58,7 +49,6 @@ struct MintRequest {
     surface_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<String>,
-    read_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_principal_id: Option<String>,
 }
@@ -122,7 +112,6 @@ async fn main() -> Result<()> {
         ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
         surface_ref: cli.surface,
         project_path,
-        read_only: cli.read_only || !cli.allow_intents,
         user_principal_id: cli
             .hosted_principal
             .then(|| format!("fp:{}", signer.fingerprint)),
@@ -382,13 +371,13 @@ mod tests {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             surface_ref: "surface:ryeos/ryeos/base".to_string(),
             project_path: Some("/tmp/proj".to_string()),
-            read_only: false,
             user_principal_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["surface_ref"], "surface:ryeos/ryeos/base");
         assert_eq!(json["project_path"], "/tmp/proj");
-        assert_eq!(json["read_only"], false);
+        assert!(json.get("mode").is_none());
+        assert!(json.get("read_only").is_none());
         assert_eq!(
             json["ui_binding_contract_revision"],
             ryeos_client_base::UI_BINDING_CONTRACT_REVISION
@@ -401,7 +390,6 @@ mod tests {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             surface_ref: "surface:x/y/z".to_string(),
             project_path: None,
-            read_only: true,
             user_principal_id: None,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -409,7 +397,8 @@ mod tests {
             !json.contains("project_path"),
             "should skip_serializing_if None"
         );
-        assert!(json.contains("read_only"));
+        assert!(!json.contains("mode"));
+        assert!(!json.contains("read_only"));
     }
 
     #[test]
@@ -418,7 +407,6 @@ mod tests {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             surface_ref: "surface:x/y/z".to_string(),
             project_path: None,
-            read_only: true,
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -439,5 +427,19 @@ mod tests {
             "http://localhost:8080/custom/launch/abc-123"
         );
         assert_eq!(resp.session_id, "sess-456");
+    }
+
+    #[test]
+    fn launcher_rejects_authority_posture_flags() {
+        for posture_flag in ["--read-only", "--allow-intents", "--mode"] {
+            let mut args = vec!["web", "--surface", "surface:ryeos/ryeos/base", posture_flag];
+            if posture_flag == "--mode" {
+                args.push("operate");
+            }
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "launcher posture flag {posture_flag} must fail closed"
+            );
+        }
     }
 }

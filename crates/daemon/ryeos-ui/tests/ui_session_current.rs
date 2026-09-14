@@ -1,21 +1,19 @@
 // Tests for `ui.session.current` handler.
 
 mod test_state;
-use test_state::build_test_state;
+use test_state::{build_test_state, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 
-fn test_context() -> LaunchContext {
-    LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: Some("/tmp/project".into()),
-        read_only: false,
-        granted_caps: vec!["ui.read".into()],
-        user_principal_id: None,
-    }
+fn test_context() -> ryeos_ui::browser_session::LaunchContext {
+    launch_context(
+        "surface:ryeos/ui/base",
+        Some("/tmp/project"),
+        ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
+        None,
+    )
 }
 
 #[tokio::test]
@@ -45,7 +43,8 @@ async fn session_current_returns_session_fields() {
     assert_eq!(result["session_id"], session_id);
     assert_eq!(result["surface_ref"], "surface:ryeos/ui/base");
     assert_eq!(result["project_path"], "/tmp/project");
-    assert!(!result["read_only"].as_bool().unwrap());
+    assert_eq!(result["posture"], "interactive");
+    assert_eq!(result["binding_digest"], "11".repeat(32));
     assert!(result["events_url"].as_str().unwrap().contains(&session_id));
 }
 
@@ -88,16 +87,15 @@ async fn session_current_with_expired_session_rejected() {
 }
 
 #[tokio::test]
-async fn session_current_with_read_only_flag() {
+async fn session_current_reports_observation_only_posture() {
     let (_tmp, state) = build_test_state();
 
-    let ctx = LaunchContext {
-        surface_ref: "surface:ryeos/test/ro".into(),
-        project_path: None,
-        read_only: true,
-        granted_caps: vec![],
-        user_principal_id: None,
-    };
+    let ctx = launch_context(
+        "surface:ryeos/test/ro",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
+        None,
+    );
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -113,7 +111,7 @@ async fn session_current_with_read_only_flag() {
     .await
     .expect("should succeed");
 
-    assert!(result["read_only"].as_bool().unwrap());
+    assert_eq!(result["posture"], "observation_only");
     assert_eq!(result["project_path"], serde_json::Value::Null);
 }
 
@@ -121,13 +119,12 @@ async fn session_current_with_read_only_flag() {
 async fn session_current_returns_durable_user_principal_when_present() {
     let (_tmp, state) = build_test_state();
     let user_principal_id = format!("fp:{}", "cd".repeat(32));
-    let ctx = LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: None,
-        read_only: false,
-        granted_caps: vec!["ui.read".into()],
-        user_principal_id: Some(user_principal_id.clone()),
-    };
+    let ctx = launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
+        Some(user_principal_id.clone()),
+    );
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:d97d238fad765ae2fbc48d8b2fb97886595ec0f2bfc67d615b65d7b3dbe3c679:IlSwiItLJDFao8z03hGYDKUrYkltYk6pA+ODjxqcxf1CluzeXiB/03V3Emv7w5uiE7+crORXyulbspEQM73kAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:1b5234705f8f61642c714c82fe147e81b811652b0b0fd16eeac473a3b592648a:z9dAWUXe4QNawEQlS19LIX6cvZMHe29DehBirDgamv8XXnWPWr+2lE5vjsxEpB4nouZhcTwl552OFOHr+r7BAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: graph-topology
 title: Topology
 version: "1.0.0"
@@ -10,3 +10,7 @@ description: >-
   case. New topology views are new view items, never engine code.
 
 widget: graph
+sources:
+  topology:
+    ref: service:ui/graph/topology
+    role: topology

@@ -1,30 +1,28 @@
 // Tests for principal-aware RyeOS UI user-space storage.
 
 mod test_state;
-use test_state::build_test_state;
+use test_state::{build_test_state, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::{HandlerError, extract_handler_error};
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use serde_json::json;
 use std::sync::Arc;
 
-fn launch_context(user_principal_id: String) -> LaunchContext {
-    LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: None,
-        read_only: false,
-        granted_caps: vec!["ui.read".into()],
-        user_principal_id: Some(user_principal_id),
-    }
+fn principal_launch_context(user_principal_id: String) -> ryeos_ui::browser_session::LaunchContext {
+    launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
+        Some(user_principal_id),
+    )
 }
 
 fn session_context(state: &ryeos_app::state::AppState, principal: &str) -> HandlerContext {
     let (session_id, _token) = get_ui_state(state)
         .unwrap()
         .browser_sessions
-        .mint_token(launch_context(principal.to_string()));
+        .mint_token(principal_launch_context(principal.to_string()));
     HandlerContext::new(
         format!("session:{session_id}"),
         vec!["ui.read".into()],
@@ -99,7 +97,6 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
         ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
         surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
-        read_only: false,
         user_principal_id: Some("session:not-a-principal".into()),
     };
 
@@ -122,7 +119,6 @@ async fn launch_mint_rejects_mismatched_user_principal() {
         ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
         surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
-        read_only: false,
         user_principal_id: Some(format!("fp:{}", "aa".repeat(32))),
     };
 

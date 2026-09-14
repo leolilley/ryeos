@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-11T02:28:44Z:27abe9c6d254ddb275f69833a9165e06318d51cac6878eed282bb66afba807a0:SarkYysN8gpg7dDrgvrZhB2L0YpKiR0TgR9T4rZV5CRZU6ZPQ0Eo35D+vRG5U0f66q5Q3EVKtFA4jA8ioK26CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:10Z:8f0735eff8bfb8164200e552d975ab5bd3f9a27e3265b02cfd5d95cf7a5894aa:FGsSMuKfHr8hw0Ximmw2YlMKUJXLb5jXSAZR5pRhz6GzLYfANp+cBgNhGCKNLgxtqdfUGkpwGMKBx0OqgA/gAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "list"
 kind: service
 endpoint: commands.list
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 required_caps: []
 schema: {}

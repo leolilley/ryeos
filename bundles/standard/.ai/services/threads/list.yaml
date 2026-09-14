@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-11T02:28:46Z:d2daf130a8ae69fdfe70560a704b8e8367a77188ab02af1e36d3422d4ba58a77:CHohNm476PiY4616hOwo3Dov6bQPa17LkTWi9Vk91npHOfecSCnsKwXwMkUAOGXFNmp+0ZjWXa7NCo/F9o0rDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:10Z:d1641f4ec41a2dd2dd52cd05aea09c7e267d60dc63477cd7ad8cc0c95a7f98d4:weLJgF2CY2lUBlLwZoLUnQaZj6hgtM0Jrzhcgy+JuBJpKwYvdtkvqfEqKhelxqsC0PhjtPGV6+xkVQJqEK4fBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "list"
 kind: service
 endpoint: threads.list
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 required_caps: []
 schema:

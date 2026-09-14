@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:9c9ac80ccb57cafefc15760aba254237eb45572b8ede21b181ff90f3ace7cac9:gdhtrXQeEFJ13Z9KVXwc5k1PNjiN/W/EnEwohg64sAe0lGl1kNUJ6Xxv+0NwgpPGSsiWANofA/k87/wPxxWaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:2626adc1d55346eed2339eca99240e0e695b33ec86dfeeb390fc378c4163dd58:bdskZPZGS8C3Mr1VnfUb46ZFBlXhUJq62+5XxK5cOKzauiqW9Us2OxsJhVAu6+8MTdVoQsZ1zwUlqNEc9noqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: schedules-list
 version: "1.0.0"
 description: Registered schedules and their state
@@ -32,6 +32,7 @@ affordances:
     label: Pause
     invoke:
       plane: rye
+      ref: service:commands/dispatch
       tokens: [scheduler, pause]
       args:
         schedule_id: "{record.schedule_id}"
@@ -39,6 +40,7 @@ affordances:
     label: Resume
     invoke:
       plane: rye
+      ref: service:commands/dispatch
       tokens: [scheduler, resume]
       args:
         schedule_id: "{record.schedule_id}"

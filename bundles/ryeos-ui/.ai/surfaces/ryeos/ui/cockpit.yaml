@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T02:11:39Z:573181b228f0d4329281db400baf809962f62a5f29d6de474d1e0aac232b80fa:9f9z6s/acBXoc+yoWEa0vcWAR3NFsSrgcgwZdyPGydGqp54gRWxXmv7unUhI9q0jm8gaeotJ0P8rmOVeK8//Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:7a5a6631bb73fca6b9a2fb54070f861dc06ee6edb0f381cd874ae84c5fb0f23d:qvE1FE54uT7QpRCTToFxnbvmB3i/ixfDXSCbRYE7xIEuRT7rDZWpAy1PTcnghxyG92Kak6xi2ACPxjz2DMbADg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-cockpit
 version: "1.0.0"
 description: >-
@@ -7,6 +7,10 @@ description: >-
   the foot input injects cognition into the current project or routed thread.
   Unlike the single-lens TUI, the activity list remains visible while the
   operator watches or chats with a directive thread.
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
 
 tiling:
   mode: master_stack
@@ -55,14 +59,19 @@ library:
 
 input:
   route:
+    requires_project: true
     invoke:
       type: service
       ref: service:threads/input
+    bindings:
+      input_parameter: input
+      thread_target_parameter: target
+      interrupt_intent_parameter: intent
     params:
       target:
         kind: fresh
         item_ref: directive:ryeos/ops/base
-        project_path: ""
+        project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
 

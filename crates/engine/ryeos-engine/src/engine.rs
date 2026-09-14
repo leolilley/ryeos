@@ -64,6 +64,11 @@ pub struct EffectiveItemDiagnostic {
 pub struct EffectiveItem {
     pub requested_ref: String,
     pub canonical_ref: String,
+    /// Exact engine-owned identity of the effective definition. This is
+    /// computed from the complete resolution before that authority is
+    /// projected into the read-oriented [`EffectiveItem`] response; callers
+    /// must not approximate it by hashing `composed_value` or source bytes.
+    pub effective_definition_digest: crate::resolution::EffectiveDefinitionDigest,
     pub kind: String,
     pub trusted: bool,
     pub trust_class: crate::resolution::TrustClass,
@@ -918,6 +923,7 @@ pub struct Engine {
 /// the whole batch instead of once per item.
 pub struct CheckedEngineGeneration<'a> {
     engine: &'a Engine,
+    request_engine_generation_identity: String,
 }
 
 fn parallel_map_ordered<T, U>(items: &[T], operation: impl Fn(&T) -> U + Sync) -> Vec<U>
@@ -951,6 +957,14 @@ where
 }
 
 impl CheckedEngineGeneration<'_> {
+    /// Exact process-local identity of the immutable admitted engine/bundle
+    /// generation held by this guard. Downstream coherent-batch consumers
+    /// retain this value; they must not reconstruct it from item payloads or
+    /// registered paths.
+    pub fn request_engine_generation_identity(&self) -> &str {
+        &self.request_engine_generation_identity
+    }
+
     pub fn resolve(
         &self,
         ctx: &PlanContext,
@@ -1149,7 +1163,10 @@ impl Engine {
         self.isolation_generation
             .ensure_registered_generation_current()
             .map_err(E::from)?;
-        let generation = CheckedEngineGeneration { engine: self };
+        let generation = CheckedEngineGeneration {
+            engine: self,
+            request_engine_generation_identity: self.request_engine_generation_identity(),
+        };
         let value = operation(&generation)?;
         self.isolation_generation
             .ensure_registered_generation_current()
@@ -3047,6 +3064,14 @@ impl Engine {
     ) -> Result<EffectiveItem, EngineError> {
         let output = self.effective_resolution_output_current(&request)?;
 
+        let effective_definition_digest =
+            output.effective_definition_digest().map_err(|error| {
+                EngineError::EffectiveItemCompositionFailed {
+                    canonical_ref: request.item_ref.to_string(),
+                    reason: format!("compute effective-definition identity: {error}"),
+                }
+            })?;
+
         let trust_class = output.effective_trust_class;
         let trusted = matches!(
             trust_class,
@@ -3094,6 +3119,7 @@ impl Engine {
         Ok(EffectiveItem {
             requested_ref: request.item_ref.to_string(),
             canonical_ref: output.root.resolved_ref.clone(),
+            effective_definition_digest,
             kind: request.item_ref.kind,
             trusted,
             trust_class,
@@ -3991,6 +4017,10 @@ formats:
 
         engine
             .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                assert_eq!(
+                    generation.request_engine_generation_identity(),
+                    engine.request_engine_generation_identity()
+                );
                 let results = generation.resolve_many(&ctx, &[item_ref.clone(), item_ref]);
                 assert_eq!(results.len(), 2);
                 assert!(results.into_iter().all(|result| result.is_err()));

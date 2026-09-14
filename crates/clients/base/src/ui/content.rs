@@ -238,6 +238,7 @@ impl FieldCursorScopeBinding {
 /// A singular transient input buffer declared on a view binding. Not a
 /// facet, not a widget — a place keystrokes accumulate, view-local.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputBlock {
     /// Unique within the view (instance keying).
     pub id: String,
@@ -261,6 +262,16 @@ pub struct InputBlock {
     /// Enter behaviour: an affordance id, or the reserved `route` value.
     #[serde(default)]
     pub submit: Option<String>,
+    /// Signed affordance that receives parsed slash-command tokens. The
+    /// renderer discovers this role from the input binding; it never embeds a
+    /// product ref or privileged endpoint for command execution.
+    #[serde(default)]
+    pub command_submit: Option<String>,
+    /// Signed affordance that receives `{thread_id, command_type}` for the
+    /// currently routed thread. As with every affordance, the view owns its
+    /// exact execution target and parameter template.
+    #[serde(default)]
+    pub thread_control: Option<String>,
     /// Optional targeting capability: the input can retarget where its
     /// route-submit lands. Declares the *semantic capability* only — no
     /// physical keys (the central keymap owns those). Valid only on
@@ -435,7 +446,11 @@ impl InputBlock {
 pub struct SourceBinding {
     #[serde(rename = "ref")]
     pub item_ref: String,
+    /// Optional renderer projection role. This selects how inert response
+    /// data is presented; it never selects the executable source.
     #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default = "empty_object")]
     pub params: Value,
     /// Path to the record array inside the source response (rows /
     /// timeline). Absent = the whole response is the record (key_value /
@@ -446,6 +461,26 @@ pub struct SourceBinding {
     /// view's refresh rule for this source only.
     #[serde(default)]
     pub refresh: Value,
+    /// Parameters whose values may be supplied by renderer state at fetch
+    /// time. The signed source still owns the target and all other params.
+    #[serde(default)]
+    pub dynamic_parameters: Vec<String>,
+    #[serde(default)]
+    pub activation: SourceActivation,
+    #[serde(default)]
+    pub requires_project: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceActivation {
+    #[default]
+    Initial,
+    OnDemand,
+}
+
+fn empty_object() -> Value {
+    Value::Object(Default::default())
 }
 
 /// One section of a `sections` view: a titled projection over one named source
@@ -1124,6 +1159,10 @@ pub enum Producer {
     Selection,
     /// An input buffer submit — supplies `{value}` (the buffer text).
     Input,
+    /// Parsed command grammar tokens supplied by the shared shell. This is a
+    /// producer namespace, not permission to select an execution target: the
+    /// signed surface affordance still owns the exact target and template.
+    Tokens,
 }
 
 impl Producer {
@@ -1131,6 +1170,7 @@ impl Producer {
         match self {
             Producer::Selection => "record",
             Producer::Input => "value",
+            Producer::Tokens => "tokens",
         }
     }
 
@@ -1142,6 +1182,7 @@ impl Producer {
                 .strip_prefix("record.")
                 .is_some_and(|rest| !rest.is_empty()),
             Producer::Input => placeholder == "value",
+            Producer::Tokens => matches!(placeholder, "tokens" | "arguments"),
         }
     }
 }
@@ -1153,6 +1194,10 @@ impl Producer {
 pub enum Payload<'a> {
     Selection(&'a Value),
     Input(&'a str),
+    Tokens {
+        tokens: &'a [String],
+        arguments: &'a Value,
+    },
 }
 
 impl Payload<'_> {
@@ -1171,6 +1216,11 @@ impl Payload<'_> {
                     Value::Null
                 }
             }
+            Payload::Tokens { tokens, arguments } => match placeholder {
+                "tokens" => serde_json::to_value(tokens).unwrap_or(Value::Null),
+                "arguments" => (*arguments).clone(),
+                _ => Value::Null,
+            },
         }
     }
 }
@@ -1298,6 +1348,34 @@ fn source_contract_error(binding: &ViewBinding) -> Option<String> {
                 "field cursor scope requires a source cursor parameter bound to @field:cursor"
                     .to_string(),
             );
+        }
+    }
+    if let Some(input) = &binding.input {
+        for (field, expected_producer, affordance_id) in [
+            ("command_submit", "tokens", input.command_submit.as_deref()),
+            (
+                "thread_control",
+                "selection",
+                input.thread_control.as_deref(),
+            ),
+        ] {
+            let Some(affordance_id) = affordance_id else {
+                continue;
+            };
+            let Some(affordance) = binding
+                .affordances
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(affordance_id))
+            else {
+                return Some(format!(
+                    "input {field} references unknown affordance '{affordance_id}'"
+                ));
+            };
+            if affordance.get("producer").and_then(Value::as_str) != Some(expected_producer) {
+                return Some(format!(
+                    "input {field} affordance '{affordance_id}' must declare producer: {expected_producer}"
+                ));
+            }
         }
     }
     None
@@ -1429,11 +1507,10 @@ pub enum AffordanceInvoke {
         /// affordance's `notice:` and surfaced when the invocation succeeds.
         notice: Option<String>,
     },
-    /// Invoke a service by ref with args through the daemon `/execute` path (as
-    /// the foot input does). Args reach the daemon as `parameters` — unlike the
-    /// token dispatch path. Row management (cancel / kill / continue on a
-    /// specific row) uses this so `{record.thread_id}` actually reaches the
-    /// service, targeting that row rather than the route head.
+    /// Signed service affordance with bound arguments. The effective content
+    /// is useful for local validation and presentation, but the renderer sends
+    /// only the affordance coordinate and produced record; the daemon resolves
+    /// this target again from the compiled session binding.
     Service {
         item_ref: String,
         args: Value,
@@ -1490,8 +1567,9 @@ pub fn resolve_affordance_invoke(
             })
         }
         "rye" => {
-            // A `ref:` selects the service-invocation form (args → `/execute`
-            // parameters); otherwise it's grammar-token dispatch.
+            // A `ref:` selects the signed service-affordance form; otherwise
+            // this is grammar-token dispatch. Neither executable target is
+            // serialized in a renderer request.
             // The success-notice template is rendered later against the result
             // outcome (`{result.<field>}`), so it is carried raw, not
             // payload-substituted here.
@@ -2657,6 +2735,36 @@ mod tests {
             AffordanceInvoke::Rye {
                 tokens: vec!["thread".into(), "input".into()],
                 args: json!({ "line": "hello world" }),
+                notice: None,
+            }
+        );
+    }
+
+    #[test]
+    fn token_substitution_preserves_typed_command_payload() {
+        let affordance = json!({
+            "invoke": {
+                "plane": "rye",
+                "ref": "service:commands/dispatch",
+                "args": { "tokens": "{tokens}", "arguments": "{arguments}" }
+            }
+        });
+        let tokens = vec!["thread".to_string(), "list".to_string()];
+        let arguments = json!({"limit": 4});
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Tokens,
+            &Payload::Tokens {
+                tokens: &tokens,
+                arguments: &arguments,
+            },
+        )
+        .expect("token producer satisfies only the signed token template");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Service {
+                item_ref: "service:commands/dispatch".into(),
+                args: json!({"tokens":["thread","list"],"arguments":{"limit":4}}),
                 notice: None,
             }
         );

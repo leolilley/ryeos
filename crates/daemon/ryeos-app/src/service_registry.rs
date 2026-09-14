@@ -219,8 +219,11 @@ pub fn extract_standalone_state_access(
     }
 }
 
-/// Whether a signed service may be invoked from a browser session whose
-/// project authority is read-only. This is independent of audit policy.
+/// Whether a signed service declares itself side-effect-free for the UI source
+/// lane. This is necessary but not sufficient admission: ordinary verified
+/// services must also declare `state_access: read_only_existing`, while
+/// session-local services remain constrained to their daemon-owned session
+/// state. Clients cannot supply or override either fact.
 pub fn extract_ui_read_only(metadata_extra: &HashMap<String, Value>) -> Result<bool> {
     match metadata_extra.get("ui_read_only") {
         None => Ok(false),
@@ -233,6 +236,29 @@ pub fn extract_ui_read_only(metadata_extra: &HashMap<String, Value>) -> Result<b
 pub enum UiDispatchMode {
     Verified,
     SessionLocal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiResultEffect {
+    ReplaceSession,
+}
+
+/// Renderer effect a signed service is allowed to return through compiled UI
+/// dispatch. The dispatch layer validates and retains the effect; arbitrary
+/// service JSON never acquires renderer-control semantics by field shape.
+pub fn extract_ui_result_effect(
+    metadata_extra: &HashMap<String, Value>,
+) -> Result<Option<UiResultEffect>> {
+    match metadata_extra.get("ui_result_effect") {
+        None => Ok(None),
+        Some(Value::String(value)) if value == "replace_session" => {
+            Ok(Some(UiResultEffect::ReplaceSession))
+        }
+        Some(Value::String(other)) => anyhow::bail!(
+            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected replace_session"
+        ),
+        Some(_) => anyhow::bail!("service YAML field 'ui_result_effect' must be a string"),
+    }
 }
 
 /// Browser dispatch mechanism declared by the signed service item. The normal

@@ -1,9 +1,9 @@
-# ryeos:signed:2026-07-06T12:32:28Z:23da09880cc9cdbd2022b2ac1e97a334d0c6f6fda246f8d2c69bf99502ce681a:QlKRugKECsZ6+sy6z6HQywkgj73yfDVZ+zCI9JHIwg109esB1JshRxR9APo1LnW1buBe7MWHmqPB8clTg3gUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:08Z:e48d79281bdcdbac7d747ce22d4f07099cddcb76638636e78b3af29a0d5e0fce:zJ6+b5k8AEiRRkIJBkzdfSyLofyWDVLL/iPOQaAeDDcfYbcRx6gTCJzBaEWZuAgBVkO9AQJ6YIYl80XBmtZtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/ryeos-ui/config/get
 path: /ui/api/ryeos-ui/config/get
 methods:
   - GET
-auth: browser_session
+auth: ryeos_signed
 limits:
   body_bytes_max: 0
   timeout_ms: 5000

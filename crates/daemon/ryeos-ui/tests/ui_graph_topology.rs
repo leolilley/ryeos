@@ -5,10 +5,9 @@ mod test_state;
 use std::sync::Arc;
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 
-use test_state::build_test_state_with_live_bundles;
+use test_state::{build_test_state_with_live_bundles, launch_context};
 
 fn workspace_root() -> String {
     ryeos_engine::test_support::workspace_root()
@@ -19,13 +18,13 @@ fn workspace_root() -> String {
 #[tokio::test]
 async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let launch_context = LaunchContext {
-        surface_ref: "surface:ryeos/ui/atlas".into(),
-        project_path: Some(workspace_root()),
-        read_only: true,
-        granted_caps: vec!["ui.read".into()],
-        user_principal_id: None,
-    };
+    let project_root = workspace_root();
+    let launch_context = launch_context(
+        "surface:ryeos/ui/atlas",
+        Some(&project_root),
+        ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
+        None,
+    );
     let (session_id, _token) = get_ui_state(&state)
         .expect("ui state registered")
         .browser_sessions

@@ -1,0 +1,8 @@
+# ryeos:signed:2026-09-14T10:03:09Z:f66d347b9d525266ed0e2b53126033bcd9508e1255970e4b06a4eef3d0cff701:jdoM9m2xb1AjdTzaQIMxki2S5jZIXodvebDA+shrXZwdAEVr347m935mIEuDjJAzgUOaCfLadZS55uiagosQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/seat/touch
+path: /ui/api/session/seat/touch
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 16384, timeout_ms: 10000, concurrent_max: 32 }
+request: { body: json }
+response: { mode: json, source: "service:ui/seat/touch" }

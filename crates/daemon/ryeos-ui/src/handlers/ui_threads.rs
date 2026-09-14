@@ -110,7 +110,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         // bools for authored views and text for the TUI live-filter input.
         active_only: active_filter(&params),
         exclude_item_prefixes: string_list_filter(&params, "exclude_item_prefixes"),
-        project_root: project_filter(&params, caller.project_root())?,
+        project_root: project_filter(&params, caller.project_path()?.as_deref())?,
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
@@ -145,14 +145,16 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     }))
 }
 
-fn project_filter(params: &Value, caller_project_root: Option<&str>) -> Result<Option<PathBuf>> {
+fn project_filter(params: &Value, caller_project_root: Option<&Path>) -> Result<Option<PathBuf>> {
     let project_path = string_filter(params, "project_path");
     match string_filter(params, "project").as_deref() {
-        Some("current") => project_path
-            .as_deref()
-            .or(caller_project_root)
-            .map(canonicalize_project_filter)
-            .transpose(),
+        Some("current") => match caller_project_root {
+            Some(path) => Ok(Some(path.to_path_buf())),
+            None => project_path
+                .as_deref()
+                .map(canonicalize_project_filter)
+                .transpose(),
+        },
         Some(path) => canonicalize_existing_dir(path).map(Some),
         None => Ok(None),
     }

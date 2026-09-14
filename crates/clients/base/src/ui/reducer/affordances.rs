@@ -70,37 +70,23 @@ impl RyeOsCore {
                 open_view,
                 drill,
             }) => self.apply_ui_affordance(facet, value, merge, open_view, drill),
-            Some(super::content::AffordanceInvoke::Rye {
-                tokens,
-                args,
-                notice,
-            }) => {
-                vec![self.emit(RyeOsEffectKind::Invoke {
-                    target: super::effect::InvokeRef::Tokens { tokens },
-                    params: args,
-                    intent: super::effect::InvokeIntent::Service,
-                    success_notice: notice,
-                    route_seq: None,
-                    ratchet_on_thread_id: false,
-                })]
-            }
-            Some(super::content::AffordanceInvoke::Service {
-                item_ref,
-                args,
-                notice,
-            }) => {
-                if (item_ref == "service:projects/open"
-                    || item_ref == "service:ui/projects/open"
-                    || item_ref == "service:ui/ryeos-ui/projects/open")
-                    && let Some(local_id) = args.get("local_id").and_then(serde_json::Value::as_str)
-                {
-                    return vec![self.emit(RyeOsEffectKind::OpenProject {
-                        local_id: local_id.to_string(),
-                    })];
+            Some(super::content::AffordanceInvoke::Rye { notice, .. })
+            | Some(super::content::AffordanceInvoke::Service { notice, .. }) => {
+                if self.refuse_blocked_mutation() {
+                    return Vec::new();
                 }
-                vec![self.emit(RyeOsEffectKind::Invoke {
-                    target: super::effect::InvokeRef::Ref { item_ref },
-                    params: args,
+                let (request, request_bounds) = self.compiled_binding_operation(
+                    crate::ui::binding::UiBindingCoordinate::Affordance {
+                        view_ref: view_ref.to_string(),
+                        affordance_id: affordance_id.to_string(),
+                    },
+                    crate::ui::binding::UiBindingPayload::Selection {
+                        record: record.clone(),
+                    },
+                );
+                vec![self.emit(RyeOsEffectKind::InvokeBinding {
+                    request,
+                    request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: notice,
                     route_seq: None,
@@ -276,34 +262,8 @@ impl RyeOsCore {
 
     pub(crate) fn effects_for_view(&mut self, view: &ViewSpec) -> Vec<RyeOsEffect> {
         let view_ref = view.view_ref.clone();
-        // Scene widgets pull engine data the generic source path doesn't
-        // carry; everything else fetches its declared source.
-        let widget = self
-            .views
-            .get(&view_ref)
-            .map(|binding| binding.widget.clone());
-        match widget.as_deref() {
-            Some("atlas") => vec![
-                self.emit(RyeOsEffectKind::FetchDimension),
-                self.emit(RyeOsEffectKind::FetchTopology),
-                self.emit(RyeOsEffectKind::FetchItems {
-                    tile_id: None,
-                    query: None,
-                    kind: None,
-                    limit: 1000,
-                }),
-            ],
-            Some("graph") => vec![
-                self.emit(RyeOsEffectKind::FetchDimension),
-                self.emit(RyeOsEffectKind::FetchTopology),
-            ],
-            _ => {
-                let tile_id = self.workspace.focused_tile;
-                self.emit_fetch_source(tile_id, &view_ref)
-                    .into_iter()
-                    .collect()
-            }
-        }
+        let tile_id = self.workspace.focused_tile;
+        self.emit_fetch_source(tile_id, &view_ref)
     }
 }
 
@@ -311,6 +271,30 @@ impl RyeOsCore {
 mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
+
+    fn source_request(effect: &RyeOsEffect) -> Option<(&str, &str, &str, &serde_json::Value)> {
+        let RyeOsEffectKind::FetchSource {
+            tile_id, request, ..
+        } = &effect.kind
+        else {
+            return None;
+        };
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return None;
+        };
+        let crate::ui::binding::UiBindingPayload::SourceParameters { params } = &request.payload
+        else {
+            return None;
+        };
+        Some((
+            tile_id.as_str(),
+            view_ref.as_str(),
+            channel.as_str(),
+            params,
+        ))
+    }
 
     #[test]
     fn explicit_empty_source_refresh_disables_inherited_facet_liveness() {
@@ -392,11 +376,9 @@ mod tests {
         let fold = core.seat.fold();
         assert_eq!(fold.get("selection").unwrap()["item"], "tool:demo/run");
         assert!(matches!(
-            effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::FetchSource { tile_id: fetched_tile, source_ref, params })
-                if fetched_tile == &source_key
-                    && source_ref == "service:test/inspect"
-                    && params["canonical_ref"] == "tool:demo/run"
+            effects.first().and_then(source_request),
+            Some((fetched_tile, "view:test/inspector", "default", params))
+                if fetched_tile == source_key && params["canonical_ref"] == "tool:demo/run"
         ));
     }
 
@@ -462,19 +444,17 @@ mod tests {
 
         // 3. Its fetch resolved the just-written chain_root (write-then-open order).
         assert!(
-            effects.iter().any(|e| matches!(&e.kind,
-                RyeOsEffectKind::FetchSource { source_ref, params, .. }
-                    if source_ref == "service:events/chain_replay"
-                        && params["chain_root_id"] == "T-root")),
+            effects.iter().filter_map(source_request).any(
+                |(_, view_ref, channel, params)| view_ref == "view:ryeos/thread/transcript"
+                    && channel == "default"
+                    && params["chain_root_id"] == "T-root"
+            ),
             "timeline fetch must use the selected chain_root; got {effects:?}"
         );
     }
 
     #[test]
-    fn service_ref_affordance_emits_execute_invoke_with_row_args() {
-        // Row management (P2): a service-ref affordance emits an /execute Invoke
-        // carrying the row's args — so cancel/kill/continue target that row, not
-        // the route head (the token path would drop the args).
+    fn service_ref_affordance_emits_bound_selection_coordinate() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,
@@ -505,15 +485,70 @@ mod tests {
 
         assert!(
             matches!(effects.first().map(|e| &e.kind),
-                Some(RyeOsEffectKind::Invoke {
-                    target: crate::ui::effect::InvokeRef::Ref { item_ref },
-                    params,
+                Some(RyeOsEffectKind::InvokeBinding {
+                    request: crate::ui::binding::UiBindingRequest {
+                        coordinate: crate::ui::binding::UiBindingCoordinate::Affordance { view_ref, affordance_id },
+                        payload: crate::ui::binding::UiBindingPayload::Selection { record },
+                        ..
+                    },
                     ..
-                }) if item_ref == "service:commands/submit"
-                    && params["thread_id"] == "T-7"
-                    && params["command_type"] == "cancel"),
-            "service-ref affordance must /execute with the row's args; got {effects:?}"
+                }) if view_ref == "view:ryeos/threads/list"
+                    && affordance_id == "cancel"
+                    && record["thread_id"] == "T-7"),
+            "service affordance must send only its compiled coordinate and selection; got {effects:?}"
         );
+    }
+
+    #[test]
+    fn service_affordance_does_not_infer_navigation_from_target_ref() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/projects",
+            serde_json::json!({
+                "widget": "table",
+                "sources": { "default": {
+                    "ref": "service:test/projects",
+                    "params": {},
+                    "collection": "projects"
+                } },
+                "affordances": [{
+                    "id": "open",
+                    "invoke": {
+                        "plane": "rye",
+                        "ref": "service:projects/open",
+                        "args": { "local_id": "{record.local_id}" }
+                    }
+                }]
+            }),
+        );
+
+        let effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    view_ref: "view:test/projects".to_string(),
+                    affordance_id: "open".to_string(),
+                    record: serde_json::json!({ "local_id": "project-7" }),
+                },
+            },
+        });
+
+        assert!(matches!(
+            effects.as_slice(),
+            [RyeOsEffect {
+                kind: RyeOsEffectKind::InvokeBinding {
+                    request: crate::ui::binding::UiBindingRequest {
+                        coordinate: crate::ui::binding::UiBindingCoordinate::Affordance { view_ref, affordance_id },
+                        payload: crate::ui::binding::UiBindingPayload::Selection { record },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }] if view_ref == "view:test/projects"
+                && affordance_id == "open"
+                && record == &serde_json::json!({ "local_id": "project-7" })
+        ));
     }
 
     #[test]
@@ -571,10 +606,11 @@ mod tests {
             "watch opens the braid lens"
         );
         assert!(
-            effects.iter().any(|e| matches!(&e.kind,
-                RyeOsEffectKind::FetchSource { source_ref, params, .. }
-                    if source_ref == "service:events/chain_replay"
-                        && params["chain_root_id"] == "T-root")),
+            effects.iter().filter_map(source_request).any(
+                |(_, view_ref, channel, params)| view_ref == "view:ryeos/thread/transcript"
+                    && channel == "default"
+                    && params["chain_root_id"] == "T-root"
+            ),
             "timeline fetch uses the row's chain_root; got {effects:?}"
         );
     }
@@ -612,11 +648,10 @@ mod tests {
             "T-left"
         );
         assert!(
-            !left_effects.iter().any(|effect| matches!(
-                &effect.kind,
-                RyeOsEffectKind::FetchSource { source_ref, .. }
-                    if source_ref == "service:ui/ryeos-ui/field/comparison"
-            )),
+            !left_effects
+                .iter()
+                .filter_map(source_request)
+                .any(|(_, view_ref, _, _)| view_ref == "view:ryeos/runs/comparison"),
             "a missing right operand must suppress comparison fetch"
         );
 
@@ -633,13 +668,13 @@ mod tests {
         let facet = fold.get("comparison").unwrap();
         assert_eq!(facet["left_thread_id"], "T-left");
         assert_eq!(facet["right_thread_id"], "T-right");
-        assert!(right_effects.iter().any(|effect| matches!(
-            &effect.kind,
-            RyeOsEffectKind::FetchSource { source_ref, params, .. }
-                if source_ref == "service:ui/ryeos-ui/field/comparison"
+        assert!(
+            right_effects.iter().filter_map(source_request).any(
+                |(_, view_ref, _, params)| view_ref == "view:ryeos/runs/comparison"
                     && params["left_thread_id"] == "T-left"
                     && params["right_thread_id"] == "T-right"
-        )));
+            )
+        );
     }
 
     #[test]
@@ -686,9 +721,9 @@ mod tests {
             "the raw threads/cancel affordance route is gone"
         );
 
-        // Resolving it emits a Service-intent /execute Invoke carrying the row's
-        // thread and the cancel command — the same shape every other row-service
-        // affordance uses (no bespoke cancel effect).
+        // Resolving it identifies the signed service form and bound row data.
+        // The emitted effect itself carries only the compiled affordance
+        // coordinate (no bespoke cancel effect and no executable target).
         let record = serde_json::json!({ "thread_id": "T-42" });
         let resolved = crate::ui::content::resolve_affordance_invoke(
             cancel,
@@ -760,10 +795,13 @@ mod tests {
             Some(&serde_json::json!({ "chain_root": "A" }))
         );
         assert!(
-            effects.iter().any(|e| matches!(&e.kind,
-                RyeOsEffectKind::FetchSource { source_ref, params, .. }
-                    if source_ref == "service:events/chain_replay"
-                        && params["chain_root_id"] == "A")),
+            effects
+                .iter()
+                .filter_map(source_request)
+                .any(
+                    |(_, view_ref, _, params)| view_ref == "view:ryeos/thread/transcript"
+                        && params["chain_root_id"] == "A"
+                ),
             "pop refetches the restored braid at chain_root A; got {effects:?}"
         );
     }
@@ -826,10 +864,13 @@ mod tests {
         assert_eq!(route["chain_root"], "C");
         // The braid lens refetched onto the child chain via the route facet.
         assert!(
-            effects.iter().any(|e| matches!(&e.kind,
-                RyeOsEffectKind::FetchSource { source_ref, params, .. }
-                    if source_ref == "service:events/chain_replay"
-                        && params["chain_root_id"] == "C")),
+            effects
+                .iter()
+                .filter_map(source_request)
+                .any(
+                    |(_, view_ref, _, params)| view_ref == "view:ryeos/thread/transcript"
+                        && params["chain_root_id"] == "C"
+                ),
             "drill refetches the child braid; got {effects:?}"
         );
 
@@ -850,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn invoke_affordance_rye_plane_emits_token_invoke_with_args() {
+    fn invoke_affordance_rye_plane_emits_bound_selection_coordinate() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,
@@ -862,6 +903,7 @@ mod tests {
                     "id": "cancel",
                     "invoke": {
                         "plane": "rye",
+                        "ref": "service:commands/dispatch",
                         "tokens": ["thread", "cancel"],
                         "args": { "thread_id": "{record.thread_id}" }
                     }
@@ -881,13 +923,17 @@ mod tests {
 
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::Invoke {
-                target: super::super::effect::InvokeRef::Tokens { tokens },
-                params,
+            Some(RyeOsEffectKind::InvokeBinding {
+                request: crate::ui::binding::UiBindingRequest {
+                    coordinate: crate::ui::binding::UiBindingCoordinate::Affordance { view_ref, affordance_id },
+                    payload: crate::ui::binding::UiBindingPayload::Selection { record },
+                    ..
+                },
                 route_seq: None,
                 ..
-            }) if tokens == &vec!["thread".to_string(), "cancel".to_string()]
-                && params["thread_id"] == "T-demo"
+            }) if view_ref == "view:test/threads"
+                && affordance_id == "cancel"
+                && record["thread_id"] == "T-demo"
         ));
     }
 
@@ -932,84 +978,6 @@ mod tests {
         let route = fold.get(crate::ui::seat::KEY_INPUT_ROUTE).unwrap();
         assert_eq!(route["directive"], "directive:demo/base");
         assert_eq!(route["thread"], "T-route");
-    }
-
-    #[test]
-    fn graph_view_effects_fetch_topology() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        seed_view_value(
-            &mut core,
-            "view:ryeos/graph/topology",
-            serde_json::json!({ "widget": "graph" }),
-        );
-        let effects = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::OpenView {
-                    view: ViewSpec::bound("view:ryeos/graph/topology"),
-                },
-            },
-        });
-
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology))
-        );
-    }
-
-    #[test]
-    fn atlas_surface_fetches_items_and_builds_scene_atlas() {
-        let mut core = RyeOsCore::new(atlas_session(), BrowserViewport::default(), 0);
-        let effects = core.initial_effects();
-        let items_id = effects
-            .iter()
-            .find(|effect| {
-                matches!(
-                    effect.kind,
-                    RyeOsEffectKind::FetchItems {
-                        tile_id: None,
-                        query: None,
-                        kind: None,
-                        ..
-                    }
-                )
-            })
-            .map(|effect| effect.id)
-            .expect("atlas surface should fetch atlas items");
-
-        core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: items_id,
-                ok: true,
-                kind: RyeOsEffectResultKind::Items,
-                data: Some(serde_json::json!({
-                    "schema_version": "ryeos.items.v1",
-                    "counts": { "by_kind": {}, "by_space": {} },
-                    "items": [{
-                        "canonical_ref": "tool:demo/run",
-                        "item_kind": "tool",
-                        "bare_id": "demo/run",
-                        "label": "run",
-                        "namespace": "demo",
-                        "source_path": "/tmp/.ai/tools/demo/run.yaml",
-                        "space": "project",
-                        "executable": true
-                    }]
-                })),
-                error: None,
-            },
-        });
-
-        let scene = crate::ui::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
-        let atlas = scene.atlas.expect("atlas surface should build scene atlas");
-        assert_eq!(atlas.root_label, ".ai");
-        assert!(
-            atlas
-                .nodes
-                .iter()
-                .flat_map(|node| &node.stack)
-                .any(|item| item.canonical_ref == "tool:demo/run")
-        );
     }
 
     #[test]

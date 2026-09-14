@@ -28,7 +28,7 @@ pub enum SessionMessage {
 pub fn spawn_session_listener(
     client: Arc<DaemonClient>,
     tx: tokio::sync::mpsc::UnboundedSender<SessionMessage>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The stream is the list's only live signal: if it dies without a
         // reconnect the UI silently freezes at the last flush (classic
@@ -56,7 +56,7 @@ pub fn spawn_session_listener(
             }
             tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
         }
-    });
+    })
 }
 
 async fn run_session_stream(

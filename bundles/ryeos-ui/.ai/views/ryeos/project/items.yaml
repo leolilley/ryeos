@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:3f324e5e8756da022381c654514a0d18f2802e0b8109dbd8a355ab3adda8c6d7:ZQKTuaRKcifVnMkS4L/eUI91m3IPVa8D9LIINYu7vKGk/trwIi8Lp1cdYxb6B3c0WdL5cp+khlyDPIVuAP9dAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:86671c46763baf1e473cbfa79f3cda418037ff7617a8a39737709a9f989266bb:bzRa/J8JisMLgiIYsL0G+EnOKWFKNadgKx4/xIW8Og5QQTGwAEPbCzW61tkx8UguAN71LR06grUxSDAg8eg9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-items
 title: Items
 version: "1.0.0"
@@ -10,8 +10,9 @@ sources:
     ref: service:ui/ryeos-ui/items/list
     params:
       limit: 500
-      project_path: ""
+      project_path: "@session:project_root"
     collection: items
+    requires_project: true
 projections:
   columns:
     - label: item

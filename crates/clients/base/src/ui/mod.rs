@@ -5,6 +5,7 @@
 //! JavaScript owns adapters for fetch/EventSource/DOM/Three.js and returns
 //! events/effect results to this core.
 
+pub mod binding;
 pub mod content;
 pub mod dto;
 pub mod effect;
@@ -20,14 +21,27 @@ pub mod timeline;
 pub mod tokenize;
 pub mod view_model;
 
+pub use binding::{
+    UiBindingCoordinate, UiBindingPayload, UiBindingRequest, UiBindingRequestBounds,
+    UiBindingRequestError, UiBindingRouteContext, UiEffectivePosture,
+};
 pub use content::{ProjectedRecord, SourceBinding, ViewBinding};
-pub use effect::{RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
-pub use event::{RyeOsEvent, RyeOsFilterField, RyeOsUiEvent, RyeOsUiIntent};
+pub use effect::{
+    RyeOsEffect, RyeOsEffectKind, RyeOsEffectOutcome, RyeOsEffectResult, RyeOsEffectResultKind,
+    RyeOsUiError,
+};
+pub use event::{
+    RyeOsEvent, RyeOsFilterField, RyeOsTransportChannel, RyeOsTransportFreshness, RyeOsUiEvent,
+    RyeOsUiIntent,
+};
 pub use field::{RyeOsFieldVm, project_field};
 pub use keymap::{
     RyeOsKey, RyeOsKeyCommand, RyeOsKeyContext, RyeOsKeyEvent, RyeOsKeyModifiers, ryeos_key_command,
 };
-pub use model::{BrowserSession, BrowserViewport, RyeOsCore, RyeOsEnvelope};
+pub use model::{
+    BrowserSession, BrowserViewport, RyeOsCore, RyeOsEnvelope, RyeOsTransportChannelState,
+    RyeOsTransportState,
+};
 pub use scene_model::RyeOsSceneModel;
 pub use seat::{InputRoute, InvokeTemplate, SeatEvent, SeatEventKind, SeatFold, SeatLog};
 pub use source_key::{RyeOsSourceChannel, RyeOsSourceInstanceKey};
