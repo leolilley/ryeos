@@ -389,7 +389,15 @@ fn main() -> Result<()> {
             .context("consume inherited external host-runtime authority")?;
     ryeos_app::provider_object_contracts::install()
         .context("install application object contracts")?;
+    // Recovery and launch reconstruction deserialize the complete retained
+    // authority envelope on a runtime worker. Unoptimized builds can exceed
+    // Tokio's 2 MiB default while doing that work (the real-process test
+    // harness has historically compensated with RUST_MIN_STACK). Make the
+    // daemon's actual runtime contract explicit so direct debug and local
+    // qualification installs have the same safe floor as the harness.
+    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(DAEMON_WORKER_STACK_BYTES)
         .enable_all()
         .build()
         .context("build daemon async runtime")?;
