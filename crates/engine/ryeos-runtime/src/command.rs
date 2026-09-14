@@ -366,6 +366,11 @@ pub struct CommandProjectPolicy {
     pub no_project_flag: bool,
     #[serde(default)]
     pub request_project_path: bool,
+    /// Capture the selected live project as an immutable generation at the
+    /// daemon admission boundary. This is command-owned execution policy, not
+    /// an item parameter or an argv-only control.
+    #[serde(default)]
+    pub pin_at_admission: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_parameter: Option<String>,
     /// Project the explicit projectless selector into this service parameter.
@@ -809,6 +814,7 @@ mod tests {
             default: CommandProjectDefault::None,
             no_project_flag: true,
             request_project_path: false,
+            pin_at_admission: false,
             bind_parameter: Some("project_path".into()),
             bind_no_project_parameter: Some("no_project".into()),
         });

@@ -931,7 +931,13 @@ fn resolve_command_for_daemon_with_commands(
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
         (parameters, project_path)
     };
-    if control.pin_project_at_admission && project_path.is_none() {
+    let descriptor_pin_at_admission = matched
+        .command
+        .project
+        .as_ref()
+        .is_some_and(|project| project.pin_at_admission);
+    let pin_project_at_admission = control.pin_project_at_admission || descriptor_pin_at_admission;
+    if pin_project_at_admission && project_path.is_none() {
         return Err(CliError::Local {
             detail:
                 "--pin-project requires a project root; it cannot be combined with --no-project"
@@ -951,13 +957,13 @@ fn resolve_command_for_daemon_with_commands(
                 .to_string(),
         });
     }
-    if control.pin_project_at_admission && control.pin_current_head_at_admission {
+    if pin_project_at_admission && control.pin_current_head_at_admission {
         return Err(CliError::Local {
             detail: "capture-live and current-HEAD project sources are mutually exclusive"
                 .to_string(),
         });
     }
-    if control.pin_project_at_admission && control.state_root.is_some() {
+    if pin_project_at_admission && control.state_root.is_some() {
         return Err(CliError::Local {
             detail: "--pin-project cannot be combined with --state-root; the pinned generation owns runtime state"
                 .to_string(),
@@ -992,7 +998,7 @@ fn resolve_command_for_daemon_with_commands(
         parameters,
         project_path,
         async_launch: control.async_launch,
-        pin_project_at_admission: control.pin_project_at_admission,
+        pin_project_at_admission,
         pin_current_head_at_admission: control.pin_current_head_at_admission,
         retain_child_results: control.retain_child_results,
         exclude_operator_vault: control.exclude_operator_vault,
@@ -2065,6 +2071,7 @@ mod tests {
                 default: ryeos_runtime::CommandProjectDefault::None,
                 no_project_flag: false,
                 request_project_path: false,
+                pin_at_admission: false,
                 bind_parameter: None,
                 bind_no_project_parameter: None,
             }),
@@ -2440,6 +2447,7 @@ mod tests {
                 default: ryeos_runtime::CommandProjectDefault::DiscoverUpwardAi,
                 no_project_flag: true,
                 request_project_path: true,
+                pin_at_admission: false,
                 bind_parameter: None,
                 bind_no_project_parameter: None,
             }),
@@ -3392,6 +3400,7 @@ mod tests {
                 serde_json::json!([])
             );
             assert!(!resolved.async_launch);
+            assert!(resolved.pin_project_at_admission);
             assert_eq!(
                 resolved.project_path.as_deref(),
                 Some(project.path().canonicalize().unwrap().as_path())

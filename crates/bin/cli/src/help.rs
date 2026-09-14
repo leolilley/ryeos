@@ -1106,6 +1106,7 @@ mod tests {
                     default: ryeos_runtime::CommandProjectDefault::None,
                     no_project_flag: false,
                     request_project_path: false,
+                    pin_at_admission: false,
                     bind_parameter: None,
                     bind_no_project_parameter: None,
                 }),

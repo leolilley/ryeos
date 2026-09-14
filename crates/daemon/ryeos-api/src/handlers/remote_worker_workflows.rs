@@ -1,12 +1,13 @@
 //! Source-owned orchestration for one bounded remote worker workflow.
 //!
-//! The recorded start-service root is the public work identity. The sync-job
-//! row below is only its crash-recovery projection and root inventory; it never
-//! manufactures a second caller-facing coordinate. Content liveness comes from
-//! the recorded root's pinned project authority and the existing active-job GC
-//! fence, not from `sync_jobs.roots_json` acting as a CAS pin.
+//! The recorded start-service root is the audit identity for the initiating
+//! command. A deterministic runtime-class work ID names the durable workflow
+//! across status and resume calls. The sync-job row is its crash-recovery
+//! projection and root inventory. Content liveness comes from the recorded
+//! invocation's pinned project authority and the existing active-job GC fence,
+//! not from `sync_jobs.roots_json` acting as a CAS pin.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
-const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v3";
+const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v4";
 const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v3";
 const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v3";
 const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v1";
@@ -90,6 +91,7 @@ struct Operation {
     operation_type: String,
     schema: String,
     source_work_id: String,
+    source_invocation_id: String,
     source_site_id: String,
     admitted_start_request: Value,
     admitted_start_request_digest: String,
@@ -204,6 +206,7 @@ struct CompiledWorkflow {
     parameters: Value,
     digest: String,
     effective_definition_digest: String,
+    source_definition_derived: HashMap<String, Value>,
 }
 
 impl Progress {
@@ -237,8 +240,7 @@ pub async fn start(
         .recorded_service_root_id()
         .context("remote-worker workflow start requires a recorded service root")?
         .to_owned();
-    ryeos_runtime::validate_runtime_thread_id(&invocation_root)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_executor::executor::validate_service_invocation_id(&invocation_root)?;
     let operator_fingerprint =
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     validate_recorded_invocation(
@@ -264,10 +266,12 @@ pub async fn start(
     if resolved_local_path != local_project_path {
         bail!("recorded workflow project identity changed during route resolution");
     }
+    let source_work_id = derive_source_work_id(&invocation_root)?;
     let operation = Operation {
         operation_type: OPERATION_TYPE.to_owned(),
         schema: OPERATION_SCHEMA.to_owned(),
-        source_work_id: invocation_root.clone(),
+        source_work_id: source_work_id.clone(),
+        source_invocation_id: invocation_root.clone(),
         source_site_id: state.threads.site_id().to_owned(),
         admitted_start_request_digest: ryeos_state::objects::canonical_value_digest(
             &admitted_start_request,
@@ -295,7 +299,7 @@ pub async fn start(
             &target_product_selections,
         )?,
         target_product_selections,
-        target_launch_id: derive_target_launch_id(&invocation_root)?,
+        target_launch_id: derive_target_launch_id(&source_work_id)?,
     };
     drive_operation(state, operation, true, &invocation_root).await
 }
@@ -315,8 +319,7 @@ pub async fn resume(
         &operator,
         "service:remote-worker-workflows/resume",
     )?;
-    ryeos_runtime::validate_runtime_thread_id(&req.source_work_id)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_runtime::validate_runtime_thread_id(&req.source_work_id).map_err(anyhow::Error::msg)?;
     let retained = state
         .state_store
         .with_state_db(|db| db.get_sync_job(&job_id(&req.source_work_id)))?
@@ -618,8 +621,7 @@ async fn drive_operation(
 }
 
 pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    ryeos_runtime::validate_runtime_thread_id(&req.source_work_id)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_runtime::validate_runtime_thread_id(&req.source_work_id).map_err(anyhow::Error::msg)?;
     let operator = ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     let job = state
         .state_store
@@ -770,12 +772,14 @@ fn compile_workflow(
         .context("compute source Graph effective-definition identity")?
         .as_str()
         .to_owned();
+    let source_definition_derived = effective.composed.derived.clone();
     Ok(CompiledWorkflow {
         driver: config.driver,
         ref_bindings: config.ref_bindings,
         parameters,
         digest: ryeos_state::objects::canonical_value_digest(&resolved.value)?,
         effective_definition_digest,
+        source_definition_derived,
     })
 }
 
@@ -970,18 +974,48 @@ async fn verify_target_launch(
             && snapshot_hash == &operation.source_snapshot_hash
             && environment == &expected_environment
     );
-    if sealed.item_ref() != compiled.driver
-        || sealed.effective_definition_digest().as_str() != compiled.effective_definition_digest
-        || sealed.admitted_parameters_digest()?
-            != ryeos_state::objects::canonical_value_digest(parameters)?
-        || sealed.project_authority().subject_base_snapshot_hash()
-            != Some(operation.source_snapshot_hash.as_str())
-        || sealed.ref_bindings() != &compiled.ref_bindings
-        || !sealed.product_selections().is_empty()
-        || capsule.lifecycle_authority != execution_policy.lifecycle_authority()
-        || !project_semantics_match
+    let item_matches = sealed.item_ref() == compiled.driver;
+    // Target admission finalizes receiver-local derived execution state (most
+    // notably its effective hook plan) before sealing the capsule. Compare
+    // the complete admitted resolution after projecting that derived layer
+    // back to the source-owned definition captured from the pinned project.
+    // The capsule decoder above independently verifies the unmodified target
+    // effective-definition digest, so this normalization cannot bless a
+    // forged target program.
+    let mut source_definition_projection = sealed.admitted_effective_resolution()?.clone();
+    source_definition_projection.composed.derived = compiled.source_definition_derived.clone();
+    let projected_definition_digest = source_definition_projection
+        .effective_definition_digest()?
+        .as_str()
+        .to_owned();
+    let definition_matches = projected_definition_digest == compiled.effective_definition_digest;
+    let parameters_match = sealed.admitted_parameters_digest()?
+        == ryeos_state::objects::canonical_value_digest(parameters)?;
+    let snapshot_matches = sealed.project_authority().subject_base_snapshot_hash()
+        == Some(operation.source_snapshot_hash.as_str());
+    let bindings_match = sealed.ref_bindings() == &compiled.ref_bindings;
+    let selections_match = sealed.product_selections().is_empty();
+    let lifecycle_matches = capsule.lifecycle_authority == execution_policy.lifecycle_authority();
+    if !(item_matches
+        && definition_matches
+        && parameters_match
+        && snapshot_matches
+        && bindings_match
+        && selections_match
+        && lifecycle_matches
+        && project_semantics_match)
     {
-        bail!("bound target launch capsule differs from retained workflow request");
+        bail!(
+            "bound target launch capsule differs from retained workflow request \
+             (item={item_matches}, definition={definition_matches}, \
+             parameters={parameters_match}, snapshot={snapshot_matches}, \
+             bindings={bindings_match}, selections={selections_match}, \
+             lifecycle={lifecycle_matches}, project={project_semantics_match}; \
+             admitted_definition={}, projected_definition={}, expected_definition={})",
+            sealed.effective_definition_digest().as_str(),
+            projected_definition_digest,
+            compiled.effective_definition_digest,
+        );
     }
     Ok(TargetAdmissionEvidence {
         admitted_capsule_hash: capsule_hash.to_owned(),
@@ -1261,7 +1295,11 @@ fn validate_operation(operation: &Operation) -> Result<()> {
         bail!("remote-worker workflow operation schema or type is not current");
     }
     ryeos_runtime::validate_runtime_thread_id(&operation.source_work_id)
-        .map_err(|error| anyhow::anyhow!(error))?;
+        .map_err(anyhow::Error::msg)?;
+    ryeos_executor::executor::validate_service_invocation_id(&operation.source_invocation_id)?;
+    if operation.source_work_id != derive_source_work_id(&operation.source_invocation_id)? {
+        bail!("remote-worker workflow work identity differs from its recorded invocation");
+    }
     if ryeos_state::objects::canonical_value_digest(&operation.admitted_start_request)?
         != operation.admitted_start_request_digest
     {
@@ -1350,8 +1388,9 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
     }
     ryeos_runtime::validate_runtime_thread_id(&receipt.target_chain_root_id)
         .map_err(|error| anyhow::anyhow!(error))?;
-    ryeos_runtime::validate_runtime_thread_id(&receipt.launch_acceptance_drive_root_id)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    ryeos_executor::executor::validate_service_invocation_id(
+        &receipt.launch_acceptance_drive_root_id,
+    )?;
     ryeos_runtime::validate_runtime_thread_id(&receipt.target_workflow_terminal_thread_id)
         .map_err(|error| anyhow::anyhow!(error))?;
     ryeos_runtime::validate_runtime_thread_id(&receipt.candidate_terminal_thread_id)
@@ -1380,28 +1419,30 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
 }
 
 fn validate_recorded_owner(state: &AppState, operation: &Operation) -> Result<()> {
+    let operator_principal = format!("fp:{}", operation.operator_fingerprint);
     let root = state
         .state_store
-        .authoritative_thread_subjects(&[&operation.source_work_id])?
+        .authoritative_thread_subjects(&[&operation.source_invocation_id])?
         .into_iter()
         .next()
         .flatten()
         .context("recorded remote-worker workflow root is absent")?;
-    if root.thread_id != operation.source_work_id
-        || root.chain_root_id != operation.source_work_id
+    if root.thread_id != operation.source_invocation_id
+        || root.chain_root_id != operation.source_invocation_id
         || root.item_ref != "service:remote-worker-workflows/start"
-        || root.requested_by.as_deref() != Some(operation.operator_fingerprint.as_str())
+        || root.requested_by.as_deref() != Some(operator_principal.as_str())
     {
         bail!("remote-worker workflow recovery projection differs from recorded root authority");
     }
     if state
         .threads
-        .recorded_service_parameters_digest(&operation.source_work_id)?
+        .recorded_service_parameters_digest(&operation.source_invocation_id)?
         != operation.admitted_start_request_digest
     {
         bail!("remote-worker workflow recovery projection differs from admitted request authority");
     }
-    let (project_path, snapshot_hash) = recorded_pinned_project(state, &operation.source_work_id)?;
+    let (project_path, snapshot_hash) =
+        recorded_pinned_project(state, &operation.source_invocation_id)?;
     if project_path != operation.local_project_path
         || snapshot_hash != operation.source_snapshot_hash
     {
@@ -1416,6 +1457,7 @@ fn validate_recorded_invocation(
     operator_fingerprint: &str,
     service_ref: &str,
 ) -> Result<()> {
+    let operator_principal = format!("fp:{operator_fingerprint}");
     let root = state
         .state_store
         .authoritative_thread_subjects(&[invocation_root])?
@@ -1426,7 +1468,7 @@ fn validate_recorded_invocation(
     if root.thread_id != invocation_root
         || root.chain_root_id != invocation_root
         || root.item_ref != service_ref
-        || root.requested_by.as_deref() != Some(operator_fingerprint)
+        || root.requested_by.as_deref() != Some(operator_principal.as_str())
     {
         bail!("remote-worker workflow invocation differs from recorded root authority");
     }
@@ -1469,11 +1511,12 @@ fn read_launch_acceptance(
     operation_digest: &str,
     drive_root_id: &str,
 ) -> Result<Option<LaunchAcceptance>> {
+    let operation_id = launch_acceptance_operation_id(&operation.source_work_id)?;
     let fact = ryeos_app::authoritative_root_fact::lookup(
         state,
         drive_root_id,
         LAUNCH_ACCEPTED_EVENT,
-        &launch_acceptance_operation_id(&operation.source_work_id)?,
+        &operation_id,
     )?;
     if fact.count == 0 {
         return Ok(None);
@@ -1481,12 +1524,25 @@ fn read_launch_acceptance(
     if fact.count != 1 {
         bail!("remote-worker workflow launch acceptance fact is duplicated");
     }
-    let acceptance: LaunchAcceptance = serde_json::from_value(
+    let acceptance: LaunchAcceptance = serde_json::from_value(strip_fact_operation_id(
         fact.payload
             .context("remote-worker workflow launch acceptance fact is unavailable")?,
-    )?;
+        &operation_id,
+    )?)?;
     validate_launch_acceptance(&acceptance, operation, operation_digest)?;
     Ok(Some(acceptance))
+}
+
+fn strip_fact_operation_id(mut payload: Value, expected: &str) -> Result<Value> {
+    let operation_id = payload
+        .as_object_mut()
+        .context("authoritative workflow fact payload is not an object")?
+        .remove("operation_id")
+        .and_then(|value| value.as_str().map(str::to_owned));
+    if operation_id.as_deref() != Some(expected) {
+        bail!("authoritative workflow fact carries another operation identity");
+    }
+    Ok(payload)
 }
 
 fn validate_launch_acceptance(
@@ -1515,8 +1571,9 @@ fn validate_launch_acceptance(
     }
     ryeos_runtime::validate_runtime_thread_id(&acceptance.target_chain_root_id)
         .map_err(anyhow::Error::msg)?;
-    ryeos_runtime::validate_runtime_thread_id(&acceptance.launch_acceptance_drive_root_id)
-        .map_err(anyhow::Error::msg)
+    ryeos_executor::executor::validate_service_invocation_id(
+        &acceptance.launch_acceptance_drive_root_id,
+    )
 }
 
 fn reconcile_launch_acceptance(
@@ -1629,7 +1686,7 @@ fn validate_drive_invocation(
     drive_root_id: &str,
     operation: &Operation,
 ) -> Result<()> {
-    let service_ref = if drive_root_id == operation.source_work_id {
+    let service_ref = if drive_root_id == operation.source_invocation_id {
         "service:remote-worker-workflows/start"
     } else {
         "service:remote-worker-workflows/resume"
@@ -1640,7 +1697,7 @@ fn validate_drive_invocation(
         &operation.operator_fingerprint,
         service_ref,
     )?;
-    if drive_root_id != operation.source_work_id {
+    if drive_root_id != operation.source_invocation_id {
         let expected = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
             "source_work_id": operation.source_work_id,
         }))?;
@@ -2127,6 +2184,22 @@ fn derive_target_launch_id(source_work_id: &str) -> Result<String> {
     Ok(format!("L-{}", &digest[..32]))
 }
 
+fn derive_source_work_id(source_invocation_id: &str) -> Result<String> {
+    ryeos_executor::executor::validate_service_invocation_id(source_invocation_id)?;
+    let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema": "ryeos.remote_worker_workflow_source_work_id.v1",
+        "source_invocation_id": source_invocation_id,
+    }))?;
+    Ok(format!(
+        "T-{}-{}-{}-{}-{}",
+        &digest[0..8],
+        &digest[8..12],
+        &digest[12..16],
+        &digest[16..20],
+        &digest[20..32],
+    ))
+}
+
 fn exact_snapshot_execution_policy(
     snapshot_hash: &str,
 ) -> Result<ryeos_app::execution_policy::ExecutionPolicy> {
@@ -2394,6 +2467,26 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_fact_envelope_is_removed_before_strict_payload_decode() {
+        let operation_id = "a".repeat(64);
+        let payload = serde_json::json!({
+            "operation_id": operation_id,
+            "schema": "fixture.v1",
+        });
+        assert_eq!(
+            strip_fact_operation_id(payload, &operation_id).unwrap(),
+            serde_json::json!({"schema": "fixture.v1"})
+        );
+        assert!(
+            strip_fact_operation_id(
+                serde_json::json!({"operation_id": "b".repeat(64)}),
+                &operation_id,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn receipt_must_name_the_operations_exact_snapshot() {
         let mut operation = operation_fixture();
         let mut receipt = receipt_fixture(&operation);
@@ -2479,7 +2572,7 @@ mod tests {
             workflow_digest: "1".repeat(64),
             target_request_digest: "2".repeat(64),
             target_launch_id: operation.target_launch_id.clone(),
-            launch_acceptance_drive_root_id: operation.source_work_id.clone(),
+            launch_acceptance_drive_root_id: operation.source_invocation_id.clone(),
             target_chain_root_id: "T-target-graph".into(),
             target_admission: TargetAdmissionEvidence {
                 admitted_capsule_hash: "3".repeat(64),
@@ -2530,7 +2623,7 @@ mod tests {
         assert_eq!(
             decode_settlement_payload(
                 payload.clone(),
-                &operation.source_work_id,
+                &operation.source_invocation_id,
                 &operation,
                 &operation_digest(&operation).unwrap(),
             )
@@ -2543,7 +2636,7 @@ mod tests {
         assert!(
             decode_settlement_payload(
                 forged,
-                &operation.source_work_id,
+                &operation.source_invocation_id,
                 &operation,
                 &operation_digest(&operation).unwrap(),
             )
@@ -2667,10 +2760,13 @@ mod tests {
             "task": {"objective": "edit"},
             "target_product_selections": [],
         });
+        let source_invocation_id = "svc-1789074790258-1427d4e2".to_owned();
+        let source_work_id = derive_source_work_id(&source_invocation_id).unwrap();
         Operation {
             operation_type: OPERATION_TYPE.into(),
             schema: OPERATION_SCHEMA.into(),
-            source_work_id: "T-0025cdcf-c920-0783-ff3a-95250dd8f8d2".into(),
+            source_work_id: source_work_id.clone(),
+            source_invocation_id,
             source_site_id: "site:source".into(),
             admitted_start_request_digest: ryeos_state::objects::canonical_value_digest(&request)
                 .unwrap(),
@@ -2698,8 +2794,7 @@ mod tests {
             target_product_selections: Vec::new(),
             target_product_selections_digest: target_product_selections_digest(&Vec::new())
                 .unwrap(),
-            target_launch_id: derive_target_launch_id("T-0025cdcf-c920-0783-ff3a-95250dd8f8d2")
-                .unwrap(),
+            target_launch_id: derive_target_launch_id(&source_work_id).unwrap(),
         }
     }
 
@@ -2720,13 +2815,13 @@ mod tests {
                 exact_program_hash: "1".repeat(64),
                 effective_definition_digest: "2".repeat(64),
             },
-            launch_acceptance_drive_root_id: operation.source_work_id.clone(),
+            launch_acceptance_drive_root_id: operation.source_invocation_id.clone(),
             target_workflow_terminal_thread_id: "T-target-graph-terminal".into(),
             target_workflow_result_digest: "3".repeat(64),
             candidate_terminal_thread_id: "T-target-candidate".into(),
             candidate_result,
             target_product_selections_digest: operation.target_product_selections_digest.clone(),
-            settlement_drive_root_id: operation.source_work_id.clone(),
+            settlement_drive_root_id: operation.source_invocation_id.clone(),
         }
     }
 
