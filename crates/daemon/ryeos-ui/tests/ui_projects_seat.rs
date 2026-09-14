@@ -66,13 +66,14 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     .await
     .expect("mint first project session");
     let first_session_id = minted["session_id"].as_str().unwrap();
-    assert_eq!(
-        ryeos_ui::state::get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(minted["token"].as_str().unwrap()),
-        Some(first_session_id.to_string())
-    );
+    let activated = ryeos_ui::handlers::ui_launch::handle(
+        json!({"token": minted["token"]}),
+        HandlerContext::anonymous(),
+        state.clone(),
+    )
+    .await
+    .expect("activate first project session");
+    assert_eq!(activated["session_id"], first_session_id);
     let first_session = ryeos_ui::state::get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -92,30 +93,44 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     .await
     .expect("open predecessor seat");
 
-    let opened = ryeos_ui::handlers::ui_projects::handle_projects_open(
-        json!({"local_id": project_ids[1]}),
+    let opened = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
+        json!({
+            "binding_digest": first_binding_digest,
+            "coordinate": {
+                "kind": "affordance",
+                "view_ref": "view:ryeos/projects/list",
+                "affordance_id": "open-project"
+            },
+            "payload": {
+                "kind": "selection",
+                "record": {"local_id": project_ids[1]}
+            }
+        }),
         predecessor_context,
         state.clone(),
     )
     .await
     .expect("open second project");
-    assert_eq!(opened["ui_transition"]["kind"], "replace_session");
-    let successor_id = opened["ui_transition"]["session_id"]
-        .as_str()
-        .expect("successor id");
+    let transition = &opened["result"]["ui_transition"];
+    assert_eq!(transition["kind"], "replace_session");
+    let successor_id = transition["session_id"].as_str().expect("successor id");
     assert_ne!(successor_id, first_session_id);
 
     let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
     assert!(ui.browser_sessions.get_session(successor_id).is_none());
-    let successor_token = opened["ui_transition"]["launch_url"]
+    let successor_token = transition["launch_url"]
         .as_str()
         .unwrap()
         .strip_prefix("/ui/launch/")
         .unwrap();
-    assert_eq!(
-        ui.browser_sessions.consume_launch_token(successor_token),
-        Some(successor_id.to_string())
-    );
+    let activated = ryeos_ui::handlers::ui_launch::handle(
+        json!({"token": successor_token}),
+        HandlerContext::anonymous(),
+        state.clone(),
+    )
+    .await
+    .expect("activate successor session");
+    assert_eq!(activated["session_id"], successor_id);
     let successor = ui
         .browser_sessions
         .get_session(successor_id)
