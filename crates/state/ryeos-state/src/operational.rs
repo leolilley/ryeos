@@ -3981,11 +3981,15 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?4",
                     )
                     .context("failed to prepare paged active sync recovery query")?;
-                stmt.query_map(
+                let mut rows = stmt.query_map(
                     rusqlite::params![operation_type, created_at, job_id, limit],
                     sync_job_from_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                )?;
+                let mut jobs = Vec::new();
+                while let Some(row) = rows.next() {
+                    jobs.push(row?);
+                }
+                jobs
             }
             None => {
                 let mut stmt = self
@@ -3999,8 +4003,13 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?2",
                     )
                     .context("failed to prepare active sync operation recovery query")?;
-                stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
+                let mut rows =
+                    stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
+                let mut jobs = Vec::new();
+                while let Some(row) = rows.next() {
+                    jobs.push(row?);
+                }
+                jobs
             }
         };
         Ok(rows)
@@ -4044,11 +4053,15 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?5",
                     )
                     .context("failed to prepare paged exact sync operation state query")?;
-                stmt.query_map(
+                let mut rows = stmt.query_map(
                     rusqlite::params![operation_type, state.as_str(), created_at, job_id, limit],
                     sync_job_from_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                )?;
+                let mut jobs = Vec::new();
+                while let Some(row) = rows.next() {
+                    jobs.push(row?);
+                }
+                jobs
             }
             None => {
                 let mut stmt = self
@@ -4062,11 +4075,15 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?3",
                     )
                     .context("failed to prepare exact sync operation state query")?;
-                stmt.query_map(
+                let mut rows = stmt.query_map(
                     rusqlite::params![operation_type, state.as_str(), limit],
                     sync_job_from_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                )?;
+                let mut jobs = Vec::new();
+                while let Some(row) = rows.next() {
+                    jobs.push(row?);
+                }
+                jobs
             }
         };
         Ok(rows)
@@ -5926,6 +5943,40 @@ mod tests {
         assert_eq!(completed_jobs.len(), 1);
         assert_eq!(completed_jobs[0].job_id, "job:alpha");
         assert_eq!(db.count_active_sync_jobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn sync_recovery_scans_do_not_exhaust_worker_stack() {
+        std::thread::Builder::new()
+            .name("sync-recovery-bounded-stack".to_string())
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let tempdir = tempfile::tempdir().unwrap();
+                let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+
+                assert!(
+                    db.list_active_sync_jobs_by_operation_type_after(
+                        "managed_activation",
+                        None,
+                        64,
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+                assert!(
+                    db.list_sync_jobs_by_operation_type_and_state_after(
+                        "managed_activation",
+                        SyncJobState::Failed,
+                        None,
+                        64,
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
