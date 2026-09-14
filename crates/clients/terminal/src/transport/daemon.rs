@@ -227,40 +227,54 @@ impl DaemonClient {
             .expect("session lock poisoned")
             .clone();
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), launch_path);
-        let headers = self.sign("GET", launch_path, b"")?;
-        let mut request = self
-            .http
-            .get(&url)
-            .header("x-ryeos-key-id", &headers.key_id)
-            .header("x-ryeos-timestamp", &headers.timestamp)
-            .header("x-ryeos-nonce", &headers.nonce)
-            .header("x-ryeos-signature", &headers.signature);
-        if let Some(cookie) = self.ui_cookie(launch_path) {
-            request = request.header("cookie", cookie);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| CliTransportError::Unreachable {
-                bind: url,
-                detail: format!("UI session activation: {error}"),
-            })?;
-        if !(response.status().is_success() || response.status().is_redirection()) {
-            return Err(ClientError::DaemonError {
-                path: launch_path.to_string(),
-                status: response.status().as_u16(),
-                message: "UI session activation refused".into(),
-            });
-        }
-        self.adopt_ui_session(session_id)?;
-        match self.current_ui_session().await {
-            Ok(session) if session.session_id == session_id => Ok(session),
-            Ok(_) | Err(_) => {
-                *self.ui_session_id.write().expect("session lock poisoned") = prior;
-                Err(ClientError::UiBindingRequest(
-                    "UI activation did not authenticate the named session".into(),
-                ))
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(55);
+        loop {
+            *self.ui_session_id.write().expect("session lock poisoned") = prior.clone();
+            let headers = self.sign("GET", launch_path, b"")?;
+            let mut request = self
+                .http
+                .get(&url)
+                .header("x-ryeos-key-id", &headers.key_id)
+                .header("x-ryeos-timestamp", &headers.timestamp)
+                .header("x-ryeos-nonce", &headers.nonce)
+                .header("x-ryeos-signature", &headers.signature);
+            if let Some(cookie) = self.ui_cookie(launch_path) {
+                request = request.header("cookie", cookie);
             }
+            let unknown = match request.send().await {
+                Ok(response)
+                    if response.status().is_success() || response.status().is_redirection() =>
+                {
+                    self.adopt_ui_session(session_id)?;
+                    match self.current_ui_session().await {
+                        Ok(session) if session.session_id == session_id => return Ok(session),
+                        Ok(_) => {
+                            *self.ui_session_id.write().expect("session lock poisoned") = prior;
+                            return Err(ClientError::UiBindingRequest(
+                                "UI activation authenticated a different session".into(),
+                            ));
+                        }
+                        Err(error) => format!("activation committed; observation failed: {error}"),
+                    }
+                }
+                Ok(response) => {
+                    *self.ui_session_id.write().expect("session lock poisoned") = prior;
+                    return Err(ClientError::DaemonError {
+                        path: launch_path.to_string(),
+                        status: response.status().as_u16(),
+                        message: "UI session activation refused".into(),
+                    });
+                }
+                Err(error) => format!("activation contact failed: {error}"),
+            };
+            if tokio::time::Instant::now() >= deadline {
+                *self.ui_session_id.write().expect("session lock poisoned") = prior;
+                return Err(ClientError::Transport(CliTransportError::Unreachable {
+                    bind: url,
+                    detail: unknown,
+                }));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     }
 

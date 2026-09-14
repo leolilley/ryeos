@@ -76,9 +76,7 @@ fn effect_error(kind: &RyeOsEffectKind, error: ClientError) -> ryeos_client_base
         } else {
             "invocation_outcome_unknown"
         };
-        ryeos_client_base::ui::RyeOsUiError::outcome_unknown(
-            code, error.to_string(),
-        )
+        ryeos_client_base::ui::RyeOsUiError::outcome_unknown(code, error.to_string())
     } else {
         ryeos_client_base::ui::RyeOsUiError::definite("platform_effect_failed", error.to_string())
     }

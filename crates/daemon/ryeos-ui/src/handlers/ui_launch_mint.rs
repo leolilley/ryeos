@@ -79,20 +79,30 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .transpose()?
         .map(Arc::new);
 
-    let user_principal_id = req
-        .user_principal_id
-        .clone()
-        .map(|principal| {
+    let user_principal_id = match req.user_principal_id.clone() {
+        Some(principal) => {
             ryeos_app::principal::principal_storage_key(&principal)
                 .map_err(|err| HandlerError::BadRequest(err.to_string()))?;
             if principal != ctx.fingerprint {
                 return Err(HandlerError::Forbidden(
                     "user_principal_id must match verified caller".into(),
-                ));
+                )
+                .into());
             }
-            Ok::<_, HandlerError>(principal)
-        })
-        .transpose()?;
+            Some(principal)
+        }
+        None => {
+            // A session without hosted-principal storage is the local UI lane.
+            // Establish that fact at mint time; later compiled dispatch may
+            // trust the retained principal but never reinterpret a cookie as
+            // local-operator authority.
+            ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)
+                .map_err(|_| {
+                    HandlerError::Forbidden("configured local operator required".into())
+                })?;
+            None
+        }
+    };
 
     let (compiled_binding, effective_surface) =
         compile_session_binding(&req, &ctx, &state, project_authority.as_deref())?;

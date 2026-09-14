@@ -80,14 +80,22 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
         .get_session(first_session_id)
         .expect("first session retained");
     let first_binding_digest = first_session.compiled_binding.binding_digest.clone();
+    let predecessor_context = HandlerContext::new(
+        format!("session:{first_session_id}"),
+        vec!["*".into()],
+        false,
+    );
+    let predecessor_seat = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+        json!({}),
+        predecessor_context.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("open predecessor seat");
 
     let opened = ryeos_ui::handlers::ui_projects::handle_projects_open(
         json!({"local_id": project_ids[1]}),
-        HandlerContext::new(
-            format!("session:{first_session_id}"),
-            vec!["*".into()],
-            false,
-        ),
+        predecessor_context,
         state.clone(),
     )
     .await
@@ -128,12 +136,14 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
         successor.compiled_binding.binding_digest,
         first_binding_digest
     );
-    let predecessor = ui
-        .browser_sessions
-        .get_session(first_session_id)
-        .expect("predecessor remains valid until bounded expiry");
-    assert_eq!(
-        predecessor.compiled_binding.binding_digest, first_binding_digest,
-        "project switching must not mutate the predecessor authority"
+    assert!(
+        ui.browser_sessions.get_session(first_session_id).is_none(),
+        "committed successor activation must retire the predecessor"
     );
+    let predecessor_seat = state
+        .state_store
+        .get_thread(predecessor_seat["thread_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(predecessor_seat.status, "completed");
 }

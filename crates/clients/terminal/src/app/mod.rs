@@ -325,12 +325,10 @@ pub async fn run(
                     pending_hints.clear();
                     hint_batch_started_ms = None;
 
-                    if let Some(old_thread_id) = seat_thread.take() {
-                        let client = client.clone();
-                        tokio::spawn(async move {
-                            seat::close_seat_thread(&client, &old_thread_id).await;
-                        });
-                    }
+                    // Successful activation settles the exact predecessor seat
+                    // daemon-side. The successor cookie is intentionally not
+                    // authorized to close predecessor-owned threads.
+                    seat_thread.take();
                     seat_synced = 0;
                     seat_sync_inflight = false;
                     seat_bootstrap_retry_at_ms = None;

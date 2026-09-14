@@ -98,10 +98,9 @@ async function commit(envelope) {
 async function attachSeat(session, envelope) {
   const seededEvents = safeSeatEvents().length;
   try {
-    const opened = await invokeSeatService("open", {
-      surface_ref: session.surface_ref,
-      client_ref: "client:ryeos/web",
-    });
+    // The daemon derives surface, project, and owner from the exact compiled
+    // session. Renderer-authored seat selectors would be a parallel authority.
+    const opened = await invokeSeatService("open", {});
     seatThreadId = opened?.thread_id || null;
     if (!seatThreadId) return envelope;
     if (seatHeartbeat) clearInterval(seatHeartbeat);

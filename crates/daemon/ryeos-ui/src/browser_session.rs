@@ -79,6 +79,14 @@ pub struct BrowserSessionStore {
     launch_token_ttl: Duration,
 }
 
+/// Exact result of one launch-token activation. The predecessor coordinate is
+/// retained on replay so daemon-owned dependent cleanup is itself retryable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchActivation {
+    pub session_id: String,
+    pub predecessor_session_id: Option<String>,
+}
+
 impl Default for BrowserSessionStore {
     fn default() -> Self {
         Self::new()
@@ -165,6 +173,11 @@ impl BrowserSessionStore {
     /// replayable until token expiry so a committed-but-lost HTTP response can
     /// be recovered without reviving the predecessor or minting a sibling.
     pub fn consume_launch_token(&self, token: &str) -> Option<String> {
+        self.activate_launch_token(token)
+            .map(|activation| activation.session_id)
+    }
+
+    pub fn activate_launch_token(&self, token: &str) -> Option<LaunchActivation> {
         let mut tokens = self.launch_tokens.lock().unwrap();
         let launch = tokens.get(token)?;
         if launch.expires_at < Instant::now() {
@@ -172,7 +185,10 @@ impl BrowserSessionStore {
             return None;
         }
         if launch.activated {
-            return Some(launch.session.session_id.clone());
+            return Some(LaunchActivation {
+                session_id: launch.session.session_id.clone(),
+                predecessor_session_id: launch.predecessor_session_id.clone(),
+            });
         }
 
         let predecessor = launch.predecessor_session_id.clone();
@@ -198,7 +214,10 @@ impl BrowserSessionStore {
                     || pending.predecessor_session_id.as_deref() != Some(predecessor_id)
             });
         }
-        Some(successor_id)
+        Some(LaunchActivation {
+            session_id: successor_id,
+            predecessor_session_id: predecessor,
+        })
     }
 
     /// Look up a session by ID. Returns `None` if not found or expired.

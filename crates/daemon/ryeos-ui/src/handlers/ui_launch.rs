@@ -37,11 +37,15 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
 
     // Activation is idempotent until token expiry so delivery loss can replay
     // the same transition without creating another successor.
-    let session_id = get_ui_state(&state)
+    let activation = get_ui_state(&state)
         .expect("UiState not set")
         .browser_sessions
-        .consume_launch_token(&req.token)
+        .activate_launch_token(&req.token)
         .ok_or_else(|| anyhow::anyhow!("invalid or expired launch token"))?;
+    if let Some(predecessor) = activation.predecessor_session_id.as_deref() {
+        super::ui_seat::retire_session_seats(&state, predecessor)?;
+    }
+    let session_id = activation.session_id;
 
     // Return session info. The route layer handles Set-Cookie + redirect.
     Ok(json!({
