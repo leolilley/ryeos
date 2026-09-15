@@ -1,17 +1,75 @@
-# ryeos:signed:2026-09-15T00:05:35Z:8990394d6e7412b6716a4a68c4c8062949442a4c923371985397c80a1cd3e935:qFhmT5kRUw625EEm5DUBs1sYx5lf3yAVWckSu2gWVEEZmNfjbrR+Z7PDKmBbwJ5X/hWkgS4PDdA/hi+nhA1lDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:35:45Z:aaadf7dc10ed36fc6633a3b34737b28cebded27383afed2a7e6888e83ba34ffd:NcfwKCqc089o154IaS59Wgg0P/Rj2tAeTmQ6tZXmuTGDTestRLGz9OiR4iRTuIC7zhO8epId7Z7Qa86P0bGzAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-review
 title: Review
 version: "1.0.0"
-description: Honest boundary until RyeOS supplies a signed aggregate review projection
+description: Exact principal-scoped attention awaiting an operator decision
 
-widget: text
-presentation:
-  chrome: thin
-  background: transparent
-  position: { x: 0.5, y: 0.5 }
-body:
-  lines:
-    - { text: "REVIEW", tone: accent }
-    - ""
-    - { text: "Aggregate review evidence is not available yet.", tone: neutral }
-    - { text: "No approval or completion state is inferred here.", tone: neutral }
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/work/attention
+    params: { limit: 200, project: current }
+    collection: attention
+
+projections:
+  columns:
+    - { label: kind, field: kind, present: words }
+    - { label: operation, field: operation_class, present: words }
+    - { label: state, field: state, present: words }
+    - { label: expires, field: expires_at_ms }
+  expand:
+    fields: [chain_root_id, placement_thread_id, approval_id, worker_boot_epoch, request_digest, requested_authority, created_at_ms]
+  tone:
+    field: state
+    map: { pending: warn }
+    default: neutral
+
+affordances:
+  - id: inspect_work
+    label: Open work
+    producer: selection
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.placement_thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/work/overview
+      drill: true
+  - id: accept
+    label: Approve
+    producer: selection
+    visible_when:
+      all:
+        - { field: kind, equals: worker_approval }
+        - { field: state, equals: pending }
+    enabled_when: { field: requested_authority.accept_allowed, equals: true }
+    disabled_reason: This approval request cannot be accepted; decline it or inspect its authority.
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: true
+      notice: Approval accepted
+  - id: decline
+    label: Decline
+    producer: selection
+    visible_when:
+      all:
+        - { field: kind, equals: worker_approval }
+        - { field: state, equals: pending }
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: false
+      notice: Approval declined
+
+refresh:
+  on_hint: [thread, activity]

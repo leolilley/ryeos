@@ -5,7 +5,7 @@
 //! second work state nor guesses approval, candidate, readiness, or action
 //! state from unrelated records.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -145,10 +145,108 @@ fn phase_category(status: &str) -> &'static str {
     }
 }
 
+/// Bounded principal/project attention projection. This first version admits
+/// only exact durable hosted-worker approval rows; later attention producers
+/// must join here through their authoritative projections rather than teaching
+/// clients to scan work roots.
+pub async fn handle_attention(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_LIMIT)
+        .clamp(1, MAX_LIMIT);
+    let project_root = match params.get("project").and_then(Value::as_str) {
+        Some("current") => caller.project_path()?,
+        _ => None,
+    };
+    let allowed_placements = if project_root.is_some() {
+        let threads = state.threads.list_thread_views_query(
+            MAX_SOURCE_THREADS,
+            &ryeos_app::thread_lifecycle::ThreadListFilter {
+                principal: Some(caller.principal_id().to_string()),
+                project_root,
+                ..Default::default()
+            },
+            ryeos_app::thread_lifecycle::ThreadSort::Newest,
+        )?;
+        Some(
+            threads
+                .into_iter()
+                .map(|thread| thread.item.thread_id)
+                .collect::<BTreeSet<_>>(),
+        )
+    } else {
+        None
+    };
+    let scan_limit = if allowed_placements.is_some() {
+        MAX_LIMIT
+    } else {
+        limit
+    };
+    let mut attention = state
+        .state_store
+        .pending_dedicated_session_approval_attention(caller.principal_id(), scan_limit)?
+        .into_iter()
+        .filter(|entry| {
+            allowed_placements
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&entry.approval.placement_thread_id))
+        })
+        .take(limit)
+        .map(|entry| {
+            serde_json::json!({
+                "schema_version":"ryeos.ui.attention_item.v1",
+                "kind":"worker_approval",
+                "chain_root_id":entry.chain_root_id,
+                "placement_thread_id":entry.approval.placement_thread_id,
+                "approval_id":entry.approval.approval_id,
+                "worker_boot_epoch":entry.approval.worker_boot_epoch,
+                "request_digest":entry.approval.request_digest,
+                "operation_class":entry.approval.operation_class,
+                "requested_authority":entry.approval.requested_authority,
+                "state":entry.approval.state,
+                "expires_at_ms":entry.approval.expires_at_ms,
+                "created_at_ms":entry.approval.created_at_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    attention.sort_by(|left, right| {
+        left["created_at_ms"]
+            .as_i64()
+            .cmp(&right["created_at_ms"].as_i64())
+            .then_with(|| {
+                left["approval_id"]
+                    .as_str()
+                    .cmp(&right["approval_id"].as_str())
+            })
+    });
+    Ok(serde_json::json!({
+        "schema_version":"ryeos.ui.attention.v1",
+        "attention":attention,
+        "next_cursor":null,
+    }))
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/ryeos-ui/work/list",
     endpoint: "ui.ryeos.work.list",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
+};
+
+pub const ATTENTION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/attention",
+    endpoint: "ui.ryeos.work.attention",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_attention(params, ctx, state).await })
+    },
 };

@@ -4552,6 +4552,15 @@ pub struct NewDedicatedSessionApproval<'a> {
     pub expires_at_ms: i64,
 }
 
+/// One current unresolved approval joined to its owning hosted-work root.
+/// This is a bounded read projection; the approval resolver remains the sole
+/// mutation authority and revalidates every coordinate against root facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedSessionApprovalAttention {
+    pub chain_root_id: String,
+    pub approval: DedicatedSessionApprovalRecord,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DedicatedSessionApprovalRecord {
@@ -8768,6 +8777,84 @@ impl RuntimeDb {
                 resolved_at_ms: row.14,
                 delivery_contacted_at_ms: row.15,
                 delivery_settled_at_ms: row.16,
+            })
+        })
+        .collect()
+    }
+
+    pub fn pending_dedicated_session_approval_attention(
+        &self,
+        owner_principal: &str,
+        limit: usize,
+    ) -> Result<Vec<DedicatedSessionApprovalAttention>> {
+        validate_bounded_runtime_text("approval owner principal", owner_principal, 512)?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let mut statement = self.conn.prepare(
+            "SELECT s.chain_root_id,
+                    a.placement_thread_id, a.approval_id, a.worker_instance_id,
+                    a.worker_boot_epoch, a.request_digest, a.operation_class,
+                    a.requested_authority_json, a.state, a.decision_principal,
+                    a.decision_json, a.decision_digest, a.reservation_token,
+                    a.expires_at_ms, a.created_at_ms, a.resolved_at_ms,
+                    a.delivery_contacted_at_ms, a.delivery_settled_at_ms
+               FROM dedicated_session_approval a
+               JOIN dedicated_session s
+                 ON s.placement_thread_id = a.placement_thread_id
+              WHERE s.owner_principal=?1
+                AND a.state='pending'
+                AND s.worker_instance_id=a.worker_instance_id
+                AND s.worker_boot_epoch=a.worker_boot_epoch
+              ORDER BY a.created_at_ms, a.approval_id
+              LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![owner_principal, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, Option<i64>>(15)?,
+                row.get::<_, Option<i64>>(16)?,
+                row.get::<_, Option<i64>>(17)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(DedicatedSessionApprovalAttention {
+                chain_root_id: row.0,
+                approval: DedicatedSessionApprovalRecord {
+                    placement_thread_id: row.1,
+                    approval_id: row.2,
+                    worker_instance_id: row.3,
+                    worker_boot_epoch: u64::try_from(row.4)?,
+                    request_digest: row.5,
+                    operation_class: row.6,
+                    requested_authority: serde_json::from_str(&row.7)?,
+                    state: row.8,
+                    decision_principal: row.9,
+                    decision: row
+                        .10
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()?,
+                    decision_digest: row.11,
+                    reservation_token: row.12,
+                    expires_at_ms: row.13,
+                    created_at_ms: row.14,
+                    resolved_at_ms: row.15,
+                    delivery_contacted_at_ms: row.16,
+                    delivery_settled_at_ms: row.17,
+                },
             })
         })
         .collect()
