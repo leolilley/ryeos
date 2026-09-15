@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T11:09:28Z:3f3f46c8fbfef02cf8ce68039516386c4cffc495722f1f0ebd8d4c583f798d69:VhuurYdqujIcSlocEIqf9Nl429MbGuHnPerNqIj91cPhmyu84CeVZRvQrA9mI4kS5QQodggTU42eahl8kPGACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-15T01:10:03Z:4cfb6b4e0ce0e9848a9bb11453a37891197063763b58f2411086be7f71305d18:MiJNhgW3Lu7VfCpYkAeAvcJb4PbU4wzZmVnmkjT14EVdq951Q1XpPKNK6gajm+2eBKlD0u7WS62tH11w5SfSCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]
@@ -7,6 +7,35 @@ description: Finite production and qualification of the shared command environme
 ---
 
 # Authoring-environment production
+
+## Bootstrap realization
+
+The production and qualification tools use the exact pinned
+`producer-python` realization as their sealed bootstrap interpreter. A fresh
+development node can acquire and retain those exact bytes through the trusted
+standard-bundle recipe:
+
+```sh
+ryeos external-content activate \
+  config:development/ryeos/producer-python-activation \
+  online
+```
+
+This recipe binds the retained manifest to the installed native-authoring
+verifier named by the recipe. Before launching a project production Graph, the
+target's local operator must use `external-content import-binding` and
+`external-content bind` to bind that same retained manifest to each exact Tool
+and project snapshot that consumes it. Managed activation and general binding
+remain local-operator authority; a configured remote operator does not acquire
+those capabilities merely because it owns the later producer products.
+
+Do not copy a realization directory from another node or add an ad hoc locator:
+activation verifies the signed archive recipe, the node's acquisition policy,
+and the final pinned tree manifest before retaining the witness. This recipe
+does not provision the separately pinned authoring source, build-support,
+platform, registry, or GNU Python inputs. Those inputs must come from their own
+publisher-authored acquisition artifacts and exact target-local bindings; their
+absence remains a closed preflight failure.
 
 The source-local namespace
 `tools/ryeos/development/authoring-environment-production/` owns finite,
