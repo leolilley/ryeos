@@ -152,6 +152,7 @@ impl SessionCompiledUiBinding {
         effective_surface: &Value,
         mut resolve_target: impl FnMut(&str) -> Result<CompiledUiTarget>,
     ) -> Result<Self> {
+        validate_navigation(effective_surface)?;
         let views = effective_surface
             .get("views")
             .and_then(Value::as_object)
@@ -411,6 +412,47 @@ impl SessionCompiledUiBinding {
         }
         Ok(surface)
     }
+}
+
+fn validate_navigation(effective_surface: &Value) -> Result<()> {
+    let Some(items) = effective_surface.get("navigation") else {
+        return Ok(());
+    };
+    let items = items
+        .as_array()
+        .context("surface navigation is not an array")?;
+    if items.len() > 64 {
+        bail!("surface navigation exceeds 64 destinations");
+    }
+    let mut ids = BTreeSet::new();
+    for item in items {
+        let item: ryeos_client_base::surface::SurfaceNavigationSpec =
+            serde_json::from_value(item.clone())
+                .context("surface navigation entry violates the closed contract")?;
+        let mut id = item.id.bytes();
+        if item.id.len() > 64
+            || !id.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            || !id.all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+            || !ids.insert(item.id.clone())
+        {
+            bail!("surface navigation ids must be unique and match [a-z][a-z0-9_-]{{0,63}}");
+        }
+        if item.label.is_empty()
+            || item.label.len() > 96
+            || item.label.trim() != item.label
+            || item.label.chars().any(char::is_control)
+        {
+            bail!("surface navigation labels must be canonical and bounded");
+        }
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&item.view)
+            .context("surface navigation destination is not a canonical ref")?;
+        if canonical.kind.as_str() != "view" {
+            bail!("surface navigation destinations must be view refs");
+        }
+    }
+    Ok(())
 }
 
 fn sanitize_sources(
@@ -987,6 +1029,24 @@ mod tests {
         assert!(compiled.binding.affordances.is_empty());
         assert!(compiled.binding.surface_route.is_none());
         assert_eq!(compiled.posture, EffectiveUiPosture::ObservationOnly);
+    }
+
+    #[test]
+    fn navigation_contract_rejects_duplicate_ids_and_non_view_destinations() {
+        let duplicate = serde_json::json!({
+            "navigation": [
+                {"id":"work", "label":"Work", "view":"view:test/work"},
+                {"id":"work", "label":"Other", "view":"view:test/other"}
+            ]
+        });
+        assert!(validate_navigation(&duplicate).is_err());
+
+        let wrong_kind = serde_json::json!({
+            "navigation": [
+                {"id":"work", "label":"Work", "view":"service:test/work"}
+            ]
+        });
+        assert!(validate_navigation(&wrong_kind).is_err());
     }
 
     #[test]
