@@ -119,6 +119,119 @@ pub struct ViewBinding {
     pub degraded: Option<String>,
 }
 
+/// Renderer-neutral presentation eligibility for one signed affordance.
+/// This can hide or disable a control; it never grants execution authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffordanceEligibility {
+    pub visible: bool,
+    pub enabled: bool,
+    pub disabled_reason: Option<String>,
+}
+
+/// Validate the deliberately small condition language used by affordances.
+/// Conditions may compare a record field with a JSON scalar, or conjoin a
+/// bounded list of those comparisons. Product semantics stay in signed data.
+pub fn validate_affordance_eligibility(affordance: &Value) -> Result<(), String> {
+    for key in ["visible_when", "enabled_when"] {
+        if let Some(condition) = affordance.get(key) {
+            validate_affordance_condition(condition, 0)?;
+        }
+    }
+    if let Some(reason) = affordance.get("disabled_reason") {
+        let reason = reason
+            .as_str()
+            .ok_or_else(|| "affordance disabled_reason must be a string".to_string())?;
+        if reason.is_empty()
+            || reason.len() > 256
+            || reason.trim() != reason
+            || reason.chars().any(char::is_control)
+        {
+            return Err("affordance disabled_reason must be canonical and bounded".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_affordance_condition(condition: &Value, depth: usize) -> Result<(), String> {
+    if depth > 1 {
+        return Err("affordance eligibility exceeds maximum condition depth".to_string());
+    }
+    let fields = condition
+        .as_object()
+        .ok_or_else(|| "affordance eligibility condition must be a mapping".to_string())?;
+    if fields.len() == 2 && fields.contains_key("field") && fields.contains_key("equals") {
+        let field = fields["field"]
+            .as_str()
+            .ok_or_else(|| "affordance eligibility field must be a string".to_string())?;
+        if field.is_empty()
+            || field.len() > 256
+            || field.trim() != field
+            || field.chars().any(char::is_control)
+        {
+            return Err("affordance eligibility field must be canonical and bounded".to_string());
+        }
+        if !matches!(
+            fields["equals"],
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+        ) {
+            return Err("affordance eligibility equals value must be a JSON scalar".to_string());
+        }
+        return Ok(());
+    }
+    if fields.len() == 1 && fields.contains_key("all") {
+        let terms = fields["all"]
+            .as_array()
+            .ok_or_else(|| "affordance eligibility all must be an array".to_string())?;
+        if terms.is_empty() || terms.len() > 8 {
+            return Err("affordance eligibility all must contain 1..=8 terms".to_string());
+        }
+        for term in terms {
+            validate_affordance_condition(term, depth + 1)?;
+        }
+        return Ok(());
+    }
+    Err("affordance eligibility condition has unsupported fields".to_string())
+}
+
+pub fn affordance_eligibility(affordance: &Value, record: &Value) -> AffordanceEligibility {
+    let visible = affordance
+        .get("visible_when")
+        .is_none_or(|condition| evaluate_affordance_condition(condition, record));
+    let enabled = visible
+        && affordance
+            .get("enabled_when")
+            .is_none_or(|condition| evaluate_affordance_condition(condition, record));
+    AffordanceEligibility {
+        visible,
+        enabled,
+        disabled_reason: (!enabled)
+            .then(|| affordance.get("disabled_reason").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string),
+    }
+}
+
+fn evaluate_affordance_condition(condition: &Value, record: &Value) -> bool {
+    let Some(fields) = condition.as_object() else {
+        return false;
+    };
+    if let (Some(field), Some(expected)) = (
+        fields.get("field").and_then(Value::as_str),
+        fields.get("equals"),
+    ) {
+        return field_path(record, field) == Some(expected);
+    }
+    fields
+        .get("all")
+        .and_then(Value::as_array)
+        .is_some_and(|terms| {
+            !terms.is_empty()
+                && terms
+                    .iter()
+                    .all(|term| evaluate_affordance_condition(term, record))
+        })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ViewPresentation {
     #[serde(default)]
@@ -2613,6 +2726,47 @@ mod tests {
                 open_view: None,
                 drill: false,
             }
+        );
+    }
+
+    #[test]
+    fn affordance_eligibility_is_closed_bounded_and_record_driven() {
+        let affordance = json!({
+            "visible_when": {"field": "state", "equals": "pending"},
+            "enabled_when": {"field": "requested.accept_allowed", "equals": true},
+            "disabled_reason": "This request cannot be accepted."
+        });
+        validate_affordance_eligibility(&affordance).unwrap();
+
+        let disabled = affordance_eligibility(
+            &affordance,
+            &json!({"state": "pending", "requested": {"accept_allowed": false}}),
+        );
+        assert!(disabled.visible);
+        assert!(!disabled.enabled);
+        assert_eq!(
+            disabled.disabled_reason.as_deref(),
+            Some("This request cannot be accepted.")
+        );
+
+        let enabled = affordance_eligibility(
+            &affordance,
+            &json!({"state": "pending", "requested": {"accept_allowed": true}}),
+        );
+        assert!(enabled.visible && enabled.enabled);
+        assert!(enabled.disabled_reason.is_none());
+
+        let hidden = affordance_eligibility(
+            &affordance,
+            &json!({"state": "settled", "requested": {"accept_allowed": true}}),
+        );
+        assert!(!hidden.visible && !hidden.enabled);
+
+        assert!(
+            validate_affordance_eligibility(&json!({
+                "enabled_when": {"field": "state", "not_equals": "settled"}
+            }))
+            .is_err()
         );
     }
 

@@ -55,6 +55,10 @@ impl RyeOsCore {
         else {
             return Vec::new();
         };
+        let eligibility = super::content::affordance_eligibility(&affordance, record);
+        if !eligibility.visible || !eligibility.enabled {
+            return Vec::new();
+        }
         // Row activation is the `selection` producer: affordances read
         // `{record.<field>}`. Validation is binding-time (fails closed).
         let payload = super::content::Payload::Selection(record);

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:05:35Z:8005ce426f21ce70bab9f46e32e85e453f626a90cb739766b765a96113373905:DTKjL5sFk+EAEHbie+Bpbm92R6hXW8PfeJZIZt1N+888b742Vei4xmjhx4oZo35jpnslJXrXaYNaJQpwW/6jCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:29:56Z:18b5fab624042d67475c2fed04bfd49366b338d3d99d05e119ea848d7ecdc12a:M5pePsDb1721mQRPpM5smVzy0AaI9Kom1A5s6S/U+2O6aa1fDrh9KxcAEvYQfgRSO6SPcdPO0JSLYx6sfc65Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -155,6 +155,9 @@ composed_value_contract:
               prim: string
               enum: [selection, input, tokens]
             requires_project: { type: single, prim: boolean }
+            visible_when: { type: single, prim: mapping }
+            enabled_when: { type: single, prim: mapping }
+            disabled_reason: { type: single, prim: string }
             invoke:
               type: single
               prim: mapping

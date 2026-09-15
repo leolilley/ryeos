@@ -1313,10 +1313,18 @@ fn bound_view_vm_keyed(
                             secondary: None,
                             meta: record.meta,
                             kind: None,
-                            intent: activate.map(|affordance_id| RyeOsUiIntent::InvokeAffordance {
-                                view_ref: view_ref.to_string(),
-                                affordance_id: affordance_id.clone(),
-                                record: record.raw.clone(),
+                            intent: activate.and_then(|affordance_id| {
+                                let affordance = binding.affordances.iter().find(|item| {
+                                    item.get("id").and_then(serde_json::Value::as_str)
+                                        == Some(affordance_id)
+                                })?;
+                                super::content::affordance_eligibility(affordance, &record.raw)
+                                    .enabled
+                                    .then(|| RyeOsUiIntent::InvokeAffordance {
+                                        view_ref: view_ref.to_string(),
+                                        affordance_id: affordance_id.clone(),
+                                        record: record.raw.clone(),
+                                    })
                             }),
                             tone: tone_from_name(record.tone.as_deref()),
                             selected,
@@ -1435,12 +1443,18 @@ fn bound_view_vm_keyed(
                         secondary: None,
                         meta: record.meta,
                         kind: None,
-                        intent: activate_affordance.as_ref().map(|affordance_id| {
-                            RyeOsUiIntent::InvokeAffordance {
-                                view_ref: view_ref.to_string(),
-                                affordance_id: affordance_id.clone(),
-                                record: record.raw.clone(),
-                            }
+                        intent: activate_affordance.as_ref().and_then(|affordance_id| {
+                            let affordance = binding.affordances.iter().find(|item| {
+                                item.get("id").and_then(serde_json::Value::as_str)
+                                    == Some(affordance_id)
+                            })?;
+                            super::content::affordance_eligibility(affordance, &record.raw)
+                                .enabled
+                                .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    view_ref: view_ref.to_string(),
+                                    affordance_id: affordance_id.clone(),
+                                    record: record.raw.clone(),
+                                })
                         }),
                         tone: tone_from_name(record.tone.as_deref()),
                         selected: selected_index == Some(index),
@@ -1654,12 +1668,18 @@ fn bound_view_vm_keyed(
                                 .collect()
                         },
                         tone: tone_from_name(record.tone.as_deref()),
-                        intent: activate_affordance.as_ref().map(|affordance_id| {
-                            RyeOsUiIntent::InvokeAffordance {
-                                view_ref: view_ref.to_string(),
-                                affordance_id: affordance_id.clone(),
-                                record: record.raw.clone(),
-                            }
+                        intent: activate_affordance.as_ref().and_then(|affordance_id| {
+                            let affordance = binding.affordances.iter().find(|item| {
+                                item.get("id").and_then(serde_json::Value::as_str)
+                                    == Some(affordance_id)
+                            })?;
+                            super::content::affordance_eligibility(affordance, &record.raw)
+                                .enabled
+                                .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    view_ref: view_ref.to_string(),
+                                    affordance_id: affordance_id.clone(),
+                                    record: record.raw.clone(),
+                                })
                         }),
                         selected: selected_index == Some(index),
                         expandable: !expand_fields.is_empty(),
@@ -2512,6 +2532,10 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
             if Some(id) == activate {
                 return None; // already the row's Enter intent
             }
+            let eligibility = super::content::affordance_eligibility(aff, &row.raw);
+            if !eligibility.visible {
+                return None;
+            }
             let label = aff
                 .get("label")
                 .and_then(|v| v.as_str())
@@ -2519,14 +2543,16 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
                 .to_string();
             Some(RyeOsOverlayChoice {
                 label,
-                hint: "focused row".to_string(),
+                hint: eligibility
+                    .disabled_reason
+                    .unwrap_or_else(|| "focused row".to_string()),
                 intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: view_ref.clone(),
                     affordance_id: id.to_string(),
                     record: row.raw.clone(),
                 },
                 secondary_intent: None,
-                enabled: true,
+                enabled: eligibility.enabled,
             })
         })
         .collect()

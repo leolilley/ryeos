@@ -781,6 +781,8 @@ fn compile_affordances(
 ) -> Result<()> {
     let mut seen = BTreeSet::new();
     for affordance in items {
+        ryeos_client_base::ui::content::validate_affordance_eligibility(affordance)
+            .map_err(anyhow::Error::msg)?;
         let id = affordance
             .get("id")
             .and_then(Value::as_str)
