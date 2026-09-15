@@ -8816,9 +8816,16 @@ impl RuntimeDb {
     pub fn pending_dedicated_session_approval_attention(
         &self,
         owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
         limit: usize,
     ) -> Result<Vec<DedicatedSessionApprovalProjection>> {
         validate_bounded_runtime_text("approval owner principal", owner_principal, 512)?;
+        if placement_thread_ids.is_some_and(BTreeSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let placement_thread_ids = placement_thread_ids
+            .map(serde_json::to_string)
+            .transpose()?;
         let limit = i64::try_from(limit.clamp(1, 500))?;
         let mut statement = self.conn.prepare(
             "SELECT s.chain_root_id,
@@ -8832,35 +8839,39 @@ impl RuntimeDb {
                JOIN dedicated_session s
                  ON s.placement_thread_id = a.placement_thread_id
               WHERE s.owner_principal=?1
+                AND (?2 IS NULL OR a.placement_thread_id IN (SELECT value FROM json_each(?2)))
                 AND s.state='awaiting_approval'
                 AND a.state='pending'
                 AND s.worker_instance_id=a.worker_instance_id
                 AND s.worker_boot_epoch=a.worker_boot_epoch
               ORDER BY a.created_at_ms, a.approval_id
-              LIMIT ?2",
+              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![owner_principal, limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, i64>(13)?,
-                row.get::<_, i64>(14)?,
-                row.get::<_, Option<i64>>(15)?,
-                row.get::<_, Option<i64>>(16)?,
-                row.get::<_, Option<i64>>(17)?,
-            ))
-        })?;
+        let rows = statement.query_map(
+            params![owner_principal, placement_thread_ids, limit],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, Option<i64>>(15)?,
+                    row.get::<_, Option<i64>>(16)?,
+                    row.get::<_, Option<i64>>(17)?,
+                ))
+            },
+        )?;
         rows.map(|row| {
             let row = row?;
             Ok(DedicatedSessionApprovalProjection {
@@ -8895,9 +8906,16 @@ impl RuntimeDb {
     pub fn dedicated_session_candidate_attention(
         &self,
         owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
         limit: usize,
     ) -> Result<Vec<DedicatedSessionCandidateAttention>> {
         validate_bounded_runtime_text("candidate owner principal", owner_principal, 512)?;
+        if placement_thread_ids.is_some_and(BTreeSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let placement_thread_ids = placement_thread_ids
+            .map(serde_json::to_string)
+            .transpose()?;
         let limit = i64::try_from(limit.clamp(1, 500))?;
         let mut statement = self.conn.prepare(
             "SELECT chain_root_id, placement_thread_id, state,
@@ -8905,24 +8923,28 @@ impl RuntimeDb {
                     candidate_evaluation_hash, publication_result, updated_at_ms
                FROM dedicated_session
               WHERE owner_principal=?1
+                AND (?2 IS NULL OR placement_thread_id IN (SELECT value FROM json_each(?2)))
                 AND candidate_snapshot_hash IS NOT NULL
                 AND candidate_disposition_root_id IS NULL
                 AND publication_result IN ('retained','retained_for_review')
               ORDER BY updated_at_ms DESC, placement_thread_id
-              LIMIT ?2",
+              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![owner_principal, limit], |row| {
-            Ok(DedicatedSessionCandidateAttention {
-                chain_root_id: row.get(0)?,
-                placement_thread_id: row.get(1)?,
-                state: row.get(2)?,
-                candidate_snapshot_hash: row.get(3)?,
-                candidate_validation_hash: row.get(4)?,
-                candidate_evaluation_hash: row.get(5)?,
-                publication_result: row.get(6)?,
-                updated_at_ms: row.get(7)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![owner_principal, placement_thread_ids, limit],
+            |row| {
+                Ok(DedicatedSessionCandidateAttention {
+                    chain_root_id: row.get(0)?,
+                    placement_thread_id: row.get(1)?,
+                    state: row.get(2)?,
+                    candidate_snapshot_hash: row.get(3)?,
+                    candidate_validation_hash: row.get(4)?,
+                    candidate_evaluation_hash: row.get(5)?,
+                    publication_result: row.get(6)?,
+                    updated_at_ms: row.get(7)?,
+                })
+            },
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -8930,9 +8952,16 @@ impl RuntimeDb {
     pub fn dedicated_session_approval_history(
         &self,
         owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
         limit: usize,
     ) -> Result<Vec<DedicatedSessionApprovalHistory>> {
         validate_bounded_runtime_text("approval owner principal", owner_principal, 512)?;
+        if placement_thread_ids.is_some_and(BTreeSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let placement_thread_ids = placement_thread_ids
+            .map(serde_json::to_string)
+            .transpose()?;
         let limit = i64::try_from(limit.clamp(1, 500))?;
         let mut statement = self.conn.prepare(
             "SELECT s.chain_root_id,
@@ -8944,28 +8973,32 @@ impl RuntimeDb {
                JOIN dedicated_session s
                  ON s.placement_thread_id = a.placement_thread_id
               WHERE s.owner_principal=?1
+                AND (?2 IS NULL OR a.placement_thread_id IN (SELECT value FROM json_each(?2)))
                 AND a.state IN ('delivery_settled','expired','stale_epoch')
               ORDER BY COALESCE(a.resolved_at_ms, a.delivery_settled_at_ms, a.created_at_ms) DESC,
                        a.approval_id
-              LIMIT ?2",
+              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![owner_principal, limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, i64>(10)?,
-                row.get::<_, Option<i64>>(11)?,
-                row.get::<_, Option<i64>>(12)?,
-            ))
-        })?;
+        let rows = statement.query_map(
+            params![owner_principal, placement_thread_ids, limit],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                ))
+            },
+        )?;
         rows.map(|row| {
             let row = row?;
             let decision = row

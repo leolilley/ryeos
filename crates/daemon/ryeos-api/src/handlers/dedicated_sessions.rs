@@ -6044,15 +6044,18 @@ async fn approvals(
         .into_iter()
         .filter(|approval| approval.state == "pending")
         .map(|approval| {
-            let mut value = serde_json::to_value(approval).map_err(internal)?;
-            value
-                .as_object_mut()
-                .ok_or_else(|| internal("approval projection is not an object"))?
-                .insert(
-                    "chain_root_id".to_string(),
-                    Value::String(session.chain_root_id.clone()),
-                );
-            Ok(value)
+            Ok(json!({
+                "chain_root_id":session.chain_root_id.clone(),
+                "placement_thread_id":approval.placement_thread_id,
+                "approval_id":approval.approval_id,
+                "worker_boot_epoch":approval.worker_boot_epoch,
+                "request_digest":approval.request_digest,
+                "operation_class":approval.operation_class,
+                "requested_authority":ryeos_app::dedicated_session_service::public_approval_authority(&approval.requested_authority),
+                "state":approval.state,
+                "expires_at_ms":approval.expires_at_ms,
+                "created_at_ms":approval.created_at_ms,
+            }))
         })
         .collect::<Result<Vec<_>, HandlerError>>()?;
     Ok(json!({

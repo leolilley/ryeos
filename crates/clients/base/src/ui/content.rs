@@ -1011,8 +1011,11 @@ pub fn table_hierarchy_rows(
 /// vocabulary is content-owned (`projections.expand.fields`), while Rust only
 /// knows "field label/value lines".
 pub fn expand_fields(binding: &ViewBinding) -> Vec<String> {
-    binding
-        .projections
+    expand_fields_from_projection(&binding.projections)
+}
+
+pub fn expand_fields_from_projection(projection: &Value) -> Vec<String> {
+    projection
         .get("expand")
         .and_then(|expand| expand.get("fields"))
         .and_then(Value::as_array)
@@ -1136,6 +1139,16 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// record — one row — so a sections view can carry a singular status line
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    source_collection_for_section(section, response)
+        .iter()
+        .map(|record| project_record(record, &section.projection))
+        .collect()
+}
+
+pub fn source_collection_for_section<'a>(
+    section: &SectionBinding,
+    response: &'a Value,
+) -> Vec<&'a Value> {
     match section.collection.as_deref() {
         // A `collection` path selects a sub-value of the response. An array is a
         // list source (one row per element); a single object is a detail source
@@ -1145,14 +1158,11 @@ pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<Projec
         // raw-JSON dump — which is what projecting the whole response through a
         // missing path would otherwise produce.
         Some(path) => match field_path(response, path) {
-            Some(Value::Array(records)) => records
-                .iter()
-                .map(|record| project_record(record, &section.projection))
-                .collect(),
-            Some(value @ Value::Object(_)) => vec![project_record(value, &section.projection)],
+            Some(Value::Array(records)) => records.iter().collect(),
+            Some(value @ Value::Object(_)) => vec![value],
             _ => Vec::new(),
         },
-        None => vec![project_record(response, &section.projection)],
+        None => vec![response],
     }
 }
 

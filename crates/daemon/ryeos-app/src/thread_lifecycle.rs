@@ -5274,6 +5274,31 @@ impl ThreadLifecycleService {
         Ok(false)
     }
 
+    /// Return the authoritative continuation lineage, from the chain root to
+    /// its current head. Auxiliary threads may share `chain_root_id`, but are
+    /// deliberately absent because only persisted successor links advance the
+    /// logical execution placement.
+    pub fn continuation_lineage(&self, chain_root_id: &str) -> Result<Vec<ThreadView>> {
+        let mut lineage = Vec::new();
+        let mut cursor = chain_root_id.to_string();
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..1024 {
+            if !visited.insert(cursor.clone()) {
+                bail!("continuation lineage for {chain_root_id} contains a cycle at {cursor}");
+            }
+            let thread = self.get_thread(&cursor)?.ok_or_else(|| {
+                anyhow!("continuation lineage for {chain_root_id} is missing thread {cursor}")
+            })?;
+            let successor = thread.successor_thread_id.clone();
+            lineage.push(self.decorate_thread(thread)?);
+            let Some(next) = successor else {
+                return Ok(lineage);
+            };
+            cursor = next;
+        }
+        bail!("continuation lineage for {chain_root_id} exceeds the 1024-placement bound")
+    }
+
     /// Recover a `waiting` follow waiter whose child chain already reached a
     /// non-continued terminal but was never recorded — the crash window between
     /// persisting the child's terminal and `record_follow_child_terminal`.

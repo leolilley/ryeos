@@ -594,7 +594,8 @@ fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
         .seat
         .fold()
         .get(super::seat::KEY_NAVIGATION_DESTINATION)
-        .and_then(serde_json::Value::as_str);
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let focused = core
         .workspace
         .tiles
@@ -604,7 +605,7 @@ fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
         .surface_navigation()
         .into_iter()
         .map(|entry| {
-            let selected = destination == Some(entry.id.as_str())
+            let selected = destination.as_deref() == Some(entry.id.as_str())
                 || (destination.is_none() && focused == Some(entry.view.as_str()));
             RyeOsNavigationItemVm {
                 id: entry.id,
@@ -1289,6 +1290,8 @@ fn bound_view_vm_keyed(
                     .get(&key)
                     .map(|response| super::content::project_section(section, response))
                     .unwrap_or_default();
+                let expand_fields =
+                    super::content::expand_fields_from_projection(&section.projection);
                 let count = records.len();
                 let mut header_selected = false;
                 let mut rows = Vec::new();
@@ -1302,6 +1305,10 @@ fn bound_view_vm_keyed(
                 } else {
                     rows.reserve(count);
                     for record in records {
+                        let row_key =
+                            format!("{index}:{}", super::model::row_key(&record.raw, rows.len()));
+                        let expanded =
+                            expanded_rows.is_some_and(|expanded| expanded.contains(&row_key));
                         let selected = cursor == Some(flat);
                         if selected {
                             fold_section = Some(index);
@@ -1328,9 +1335,13 @@ fn bound_view_vm_keyed(
                             }),
                             tone: tone_from_name(record.tone.as_deref()),
                             selected,
-                            expandable: false,
-                            expanded: false,
-                            detail: Vec::new(),
+                            expandable: !expand_fields.is_empty(),
+                            expanded,
+                            detail: if expanded {
+                                detail_vm(&record.raw, &expand_fields)
+                            } else {
+                                Vec::new()
+                            },
                             changed_at_ms: None,
                             changed_tone: None,
                         });

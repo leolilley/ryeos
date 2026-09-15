@@ -73,7 +73,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     };
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
         principal: Some(caller.principal_id().to_string()),
-        project_root,
+        project_root: project_root.clone(),
         ..Default::default()
     };
     let threads = state.threads.list_thread_views_query(
@@ -84,72 +84,86 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let mut attention_by_chain = BTreeMap::<String, BTreeSet<&'static str>>::new();
     for entry in state
         .state_store
-        .pending_dedicated_session_approval_attention(caller.principal_id(), MAX_SOURCE_THREADS)?
+        .pending_dedicated_session_approval_attention(
+            caller.principal_id(),
+            None,
+            MAX_SOURCE_THREADS,
+        )?
     {
         attention_by_chain
             .entry(entry.chain_root_id)
             .or_default()
             .insert("approval_required");
     }
-    for entry in state
-        .state_store
-        .dedicated_session_candidate_attention(caller.principal_id(), MAX_SOURCE_THREADS)?
-    {
+    for entry in state.state_store.dedicated_session_candidate_attention(
+        caller.principal_id(),
+        None,
+        MAX_SOURCE_THREADS,
+    )? {
         attention_by_chain
             .entry(entry.chain_root_id)
             .or_default()
             .insert("candidate_ready");
     }
 
-    let mut chains = BTreeMap::<String, Vec<ryeos_app::thread_lifecycle::ThreadListView>>::new();
-    for thread in threads {
-        chains
-            .entry(thread.item.chain_root_id.clone())
-            .or_default()
-            .push(thread);
-    }
-    let mut work = chains
+    let chain_roots = threads
         .into_iter()
-        .filter_map(|(chain_root_id, placements)| {
-            let head = placements
+        .map(|thread| thread.item.chain_root_id)
+        .collect::<BTreeSet<_>>();
+    let mut work = Vec::new();
+    for chain_root_id in chain_roots {
+        let placements = state.threads.continuation_lineage(&chain_root_id)?;
+        let root = placements
+            .first()
+            .context("continuation lineage unexpectedly has no root")?;
+        let head = placements
+            .last()
+            .context("continuation lineage unexpectedly has no head")?;
+        // The list query discovers candidate roots under the seat's
+        // principal/project filter. Re-check the authoritative root so an
+        // auxiliary thread that merely shares the chain cannot admit work.
+        let Some(owner_principal_id) = root.thread.requested_by.clone() else {
+            continue;
+        };
+        if owner_principal_id != caller.principal_id() {
+            continue;
+        }
+        if let Some(project_root) = project_root.as_ref() {
+            if !placements
                 .iter()
-                .filter(|thread| thread.item.successor_thread_id.is_none())
-                .max_by(|left, right| left.item.updated_at.cmp(&right.item.updated_at))
-                .or_else(|| {
-                    placements
-                        .iter()
-                        .max_by(|left, right| left.item.updated_at.cmp(&right.item.updated_at))
-                })?;
-            let owner_principal_id = head.item.requested_by.clone()?;
-            let attention = attention_by_chain
-                .remove(&chain_root_id)
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let attention_count = attention.len();
-            Some(WorkSummary {
-                schema_version: "ryeos.ui.work_summary.v1",
-                coordinate: WorkCoordinate { chain_root_id },
-                owner_principal_id,
-                project: head.project.clone(),
-                item_ref: head.item.item_ref.clone(),
-                kind: head.item.kind.clone(),
-                placement: WorkPlacement {
-                    thread_id: head.item.thread_id.clone(),
-                    origin_site_id: head.item.origin_site_id.clone(),
-                    current_site_id: head.item.current_site_id.clone(),
-                },
-                phase: WorkPhase {
-                    category: phase_category(&head.item.status),
-                    state_code: head.item.status.clone(),
-                },
-                observed_at: head.item.updated_at.clone(),
-                placement_count: placements.len(),
-                attention,
-                attention_count,
-            })
-        })
-        .collect::<Vec<_>>();
+                .any(|placement| placement.thread.project_root.as_deref() == project_root.to_str())
+            {
+                continue;
+            }
+        }
+        let attention = attention_by_chain
+            .remove(&chain_root_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let attention_count = attention.len();
+        work.push(WorkSummary {
+            schema_version: "ryeos.ui.work_summary.v1",
+            coordinate: WorkCoordinate { chain_root_id },
+            owner_principal_id,
+            project: head.project.clone(),
+            item_ref: head.thread.item_ref.clone(),
+            kind: head.thread.kind.clone(),
+            placement: WorkPlacement {
+                thread_id: head.thread.thread_id.clone(),
+                origin_site_id: head.thread.origin_site_id.clone(),
+                current_site_id: head.thread.current_site_id.clone(),
+            },
+            phase: WorkPhase {
+                category: phase_category(&head.thread.status),
+                state_code: head.thread.status.clone(),
+            },
+            observed_at: head.thread.updated_at.clone(),
+            placement_count: placements.len(),
+            attention,
+            attention_count,
+        });
+    }
     work.sort_by(|left, right| {
         right.observed_at.cmp(&left.observed_at).then_with(|| {
             left.coordinate
@@ -215,21 +229,14 @@ pub async fn handle_attention(
     } else {
         None
     };
-    let scan_limit = if allowed_placements.is_some() {
-        MAX_LIMIT
-    } else {
-        limit
-    };
     let mut attention = state
         .state_store
-        .pending_dedicated_session_approval_attention(caller.principal_id(), scan_limit)?
+        .pending_dedicated_session_approval_attention(
+            caller.principal_id(),
+            allowed_placements.as_ref(),
+            limit,
+        )?
         .into_iter()
-        .filter(|entry| {
-            allowed_placements
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&entry.approval.placement_thread_id))
-        })
-        .take(limit)
         .map(|entry| {
             serde_json::json!({
                 "schema_version":"ryeos.ui.attention_item.v1",
@@ -240,7 +247,7 @@ pub async fn handle_attention(
                 "worker_boot_epoch":entry.approval.worker_boot_epoch,
                 "request_digest":entry.approval.request_digest,
                 "operation_class":entry.approval.operation_class,
-                "requested_authority":entry.approval.requested_authority,
+                "requested_authority":ryeos_app::dedicated_session_service::public_approval_authority(&entry.approval.requested_authority),
                 "state":entry.approval.state,
                 "expires_at_ms":entry.approval.expires_at_ms,
                 "created_at_ms":entry.approval.created_at_ms,
@@ -259,14 +266,12 @@ pub async fn handle_attention(
     });
     let candidates = state
         .state_store
-        .dedicated_session_candidate_attention(caller.principal_id(), scan_limit)?
+        .dedicated_session_candidate_attention(
+            caller.principal_id(),
+            allowed_placements.as_ref(),
+            limit,
+        )?
         .into_iter()
-        .filter(|entry| {
-            allowed_placements
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&entry.placement_thread_id))
-        })
-        .take(limit)
         .map(|entry| {
             serde_json::json!({
                 "schema_version":"ryeos.ui.candidate_attention_item.v1",
@@ -328,14 +333,12 @@ pub async fn handle_approval_history(
     };
     let history = state
         .state_store
-        .dedicated_session_approval_history(caller.principal_id(), MAX_LIMIT)?
+        .dedicated_session_approval_history(
+            caller.principal_id(),
+            allowed_placements.as_ref(),
+            limit,
+        )?
         .into_iter()
-        .filter(|entry| {
-            allowed_placements
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&entry.placement_thread_id))
-        })
-        .take(limit)
         .map(|entry| {
             serde_json::json!({
                 "schema_version":"ryeos.ui.approval_history_item.v1",
@@ -346,7 +349,7 @@ pub async fn handle_approval_history(
                 "worker_boot_epoch":entry.worker_boot_epoch,
                 "request_digest":entry.request_digest,
                 "operation_class":entry.operation_class,
-                "requested_authority":entry.requested_authority,
+                "requested_authority":ryeos_app::dedicated_session_service::public_approval_authority(&entry.requested_authority),
                 "state":entry.state,
                 "decision":entry.decision,
                 "decision_principal":entry.decision_principal,
@@ -437,7 +440,6 @@ pub async fn handle_candidate(
             "turn_id":fence.turn_id,
             "command_sequence":fence.command_sequence,
             "request_digest":fence.request_digest,
-            "response_digest":fence.response_digest,
             "completion_operation_id":fence.completion_operation_id,
         })
     });

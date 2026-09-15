@@ -2320,6 +2320,19 @@ struct ApprovalRequestAuthority {
     requested_authority: Value,
 }
 
+/// Public, presentation-safe portion of a retained worker approval request.
+/// Upstream request/session/operation coordinates are delivery authority and
+/// must remain inside the dedicated-session owner.
+pub fn public_approval_authority(requested_authority: &Value) -> Value {
+    json!({
+        "accept_allowed": requested_authority
+            .get("accept_allowed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "display": requested_authority.get("display").cloned().unwrap_or(Value::Null),
+    })
+}
+
 fn approval_request_authority(
     session: &DedicatedSessionRecord,
     worker_boot_epoch: u64,

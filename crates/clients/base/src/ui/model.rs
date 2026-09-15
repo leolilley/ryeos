@@ -2273,11 +2273,10 @@ impl RyeOsCore {
         let tile_id = self.workspace.focused_tile;
         let tile = self.workspace.tiles.get(&tile_id)?;
         let binding = self.views.get(&tile.view.view_ref)?;
-        let fields = super::content::expand_fields(binding);
+        let (key, _, fields) = self.focused_expandable_row(tile_id, binding)?;
         if fields.is_empty() {
             return None;
         }
-        let (key, _) = self.focused_row_key_and_record(tile_id, binding)?;
         let expanded = match &tile.local {
             ViewLocalState::GenericList { expanded_rows, .. } => expanded_rows.contains(&key),
             ViewLocalState::None | ViewLocalState::Field(_) => false,
@@ -2293,12 +2292,12 @@ impl RyeOsCore {
         let Some(binding) = self.views.get(&tile.view.view_ref) else {
             return false;
         };
-        if super::content::expand_fields(binding).is_empty() {
-            return false;
-        }
-        let Some((key, _)) = self.focused_row_key_and_record(tile_id, binding) else {
+        let Some((key, _, fields)) = self.focused_expandable_row(tile_id, binding) else {
             return false;
         };
+        if fields.is_empty() {
+            return false;
+        }
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
             return false;
         };
@@ -2455,6 +2454,52 @@ impl RyeOsCore {
             }
             _ => None,
         }
+    }
+
+    fn focused_expandable_row(
+        &self,
+        tile_id: crate::ids::TileId,
+        binding: &super::content::ViewBinding,
+    ) -> Option<(String, serde_json::Value, Vec<String>)> {
+        if binding.widget != "sections" {
+            let (key, record) = self.focused_row_key_and_record(tile_id, binding)?;
+            return Some((key, record, super::content::expand_fields(binding)));
+        }
+        let tile = self.workspace.tiles.get(&tile_id)?;
+        let (cursor, collapsed) = match &tile.local {
+            ViewLocalState::GenericList {
+                cursor, collapsed, ..
+            } => (*cursor, collapsed),
+            ViewLocalState::None | ViewLocalState::Field(_) => return None,
+        };
+        let mut flat = 0usize;
+        for (section_index, section) in binding.sections.iter().enumerate() {
+            if collapsed.contains(&section_index) {
+                if cursor == flat {
+                    return None;
+                }
+                flat += 1;
+                continue;
+            }
+            let source_key = super::source_key::RyeOsSourceInstanceKey::named(
+                tile.instance_key.clone(),
+                &section.source_channel,
+            )
+            .encode();
+            let response = self.data.sources.get(&source_key)?;
+            let records = super::content::source_collection_for_section(section, response);
+            if cursor < flat.saturating_add(records.len()) {
+                let index = cursor - flat;
+                let record = (*records.get(index)?).clone();
+                return Some((
+                    format!("{section_index}:{}", row_key(&record, index)),
+                    record,
+                    super::content::expand_fields_from_projection(&section.projection),
+                ));
+            }
+            flat += records.len();
+        }
+        None
     }
 }
 

@@ -183,6 +183,15 @@ function dispatchUi(event) {
   void commit(ryeos_dispatch({ type: "ui", event }));
 }
 
+function dispatchTransport(channel, freshness) {
+  void commit(ryeos_dispatch({
+    type: "transport_state_changed",
+    channel,
+    freshness,
+    observed_at_ms: BigInt(Date.now()),
+  }));
+}
+
 function rerenderShell() {
   if (!currentEnvelope || committing) return;
   renderDom(root, currentEnvelope.view_model, currentEnvelope.scene_model, dispatchUi, shellController());
@@ -353,13 +362,15 @@ function attachSessionEvents(session) {
   });
   const reconcile = () => {
     ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
-    void commit(ryeos_dispatch({ type: "transport_reconnected" }));
+    dispatchTransport("hints", "gap_resnapshot_required");
   };
   source.addEventListener("snapshot_required", reconcile);
   source.addEventListener("open", () => {
     if (sessionOpened) reconcile();
+    else dispatchTransport("hints", "current");
     sessionOpened = true;
   });
+  source.addEventListener("error", () => dispatchTransport("hints", "reconnecting"));
   syncThreadTail(currentEnvelope?.view_model);
 }
 
@@ -400,10 +411,13 @@ function syncThreadTail(vm) {
   source.addEventListener("message", forward);
   source.addEventListener("open", () => {
     if (opened) {
-      void commit(ryeos_dispatch({ type: "transport_reconnected" }));
+      dispatchTransport("focused_tail", "gap_resnapshot_required");
+    } else {
+      dispatchTransport("focused_tail", "current");
     }
     opened = true;
   });
+  source.addEventListener("error", () => dispatchTransport("focused_tail", "reconnecting"));
 }
 
 function attachBrowserEvents() {

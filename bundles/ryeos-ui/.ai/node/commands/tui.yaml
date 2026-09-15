@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:08Z:fc98ba59a6bbe94017f03e5bbd7e253ebb056cf894173238a8864336485dffd8:MEgUigKbW5o4kZNBrzCAPRPCCcpRbLLiaElhyrzBxdrlJIJbAjQ7okCxEpTDhpCBJAvyygf6qH+lpCszgvbXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:39:00Z:3eed62ba2fb2b7fa0647e072ce7b84bc9c4aefcee8681d1149090245395620a6:rs7rDcY1FGp3jsCndxKuI7LrRDHSf44Rg3R7yb05NF4pmaFaO0VRI6B2Q8+Z4L0KtXYzQ4lSAJ+FleIyYCiwAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - tui
 description: Open the observation-only terminal RyeOS UI
@@ -6,7 +6,7 @@ forms:
 - slots:
   - field: surface
 defaults:
-  surface: surface:ryeos/ui/lens-observe
+  surface: surface:ryeos/ui/assistant-observe
 project:
   resolution: optional
   bind_parameter: project
