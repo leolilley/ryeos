@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:24:00Z:c9fbd49920f7d3f93ff0bad30f1735ad94abc0da1b20409d7025deb3d6ed9be0:v2PxI+yyqsN+HDtO+UZHygEFVyUxn9OWzPq5vhu2nI5sbhmnGBHl0o/oRXOU5JTQiNRDxJ8JeE9o2W5aiPoQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:58:49Z:10c9ef9d49b2bd7a91be2628c07d9a24a1ce3c60d34cdde990152c274f387811:CLx3Asnbly86c0JfbixeBoEHm7M4+37LfacKP5j4DMUP51yJvU9rxF8p37aVy06W+RYwyVIr7jwn7gW4OqS4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work
 title: Work
 version: "1.0.0"
@@ -74,6 +74,16 @@ affordances:
         thread: "{record.placement.thread_id}"
         chain_root: "{record.coordinate.chain_root_id}"
       open_view: view:ryeos/work/approvals
+      drill: true
+  - id: candidate
+    label: Candidate
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.placement.thread_id}"
+        chain_root: "{record.coordinate.chain_root_id}"
+      open_view: view:ryeos/work/candidate
       drill: true
 refresh:
   on_hint: [thread, activity]

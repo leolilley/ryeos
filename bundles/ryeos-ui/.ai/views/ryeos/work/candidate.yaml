@@ -1,0 +1,43 @@
+# ryeos:signed:2026-09-15T00:59:13Z:f699bb61452fd6212d26b06b0c0671726b0e46c8486ee3c863342261ac2c0cda:7cQyb3flv0tGKHgPwEc39jXahha5RYN2c0/uB25tGePipl6ToVqddgXZeL6w3vlqWDHR6YsGnSvHaroI4lp+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work-candidate
+title: Candidate
+version: "1.0.0"
+description: Exact retained candidate, completion, validation, and evaluator evidence without inferred success
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/work/candidate
+    params:
+      thread_id: "@facet:input.route.thread"
+    collection: candidates
+
+projections:
+  columns:
+    - { label: state, field: state, present: words }
+    - { label: candidate, field: candidate_snapshot_hash }
+    - { label: accepted, field: evaluation_accepted, fallback: pending }
+    - { label: disposition, field: candidate_disposition, present: words }
+  expand:
+    fields:
+      - chain_root_id
+      - placement_thread_id
+      - candidate_snapshot_hash
+      - base_snapshot_hash
+      - candidate_validation_hash
+      - candidate_evaluation_hash
+      - evaluation_accepted
+      - evaluator_item_ref
+      - evaluator_definition_digest
+      - evaluator_result_digest
+      - publication_result
+      - terminal_reason
+      - completion
+  tone:
+    field: evaluation_accepted
+    map: { "true": good, "false": danger }
+    default: neutral
+
+refresh:
+  on_facet: input.route
+  on_hint: [thread, activity]

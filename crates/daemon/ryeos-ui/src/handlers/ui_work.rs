@@ -306,6 +306,79 @@ pub async fn handle_approval_history(
     }))
 }
 
+/// Read-only candidate evidence for one exact hosted-work placement. This is
+/// a projection of the dedicated-session owner; it neither decides readiness
+/// nor turns a completed model turn into a successful candidate.
+pub async fn handle_candidate(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let placement_thread_id = params
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ryeos_app::handler_error::HandlerError::BadRequest("thread_id is required".into())
+        })?;
+    crate::thread_authorization::authorize_exact_thread_subjects(
+        &ctx,
+        &state,
+        &caller,
+        &[placement_thread_id],
+    )?;
+    let Some(session) = state.state_store.dedicated_session(placement_thread_id)? else {
+        return Ok(serde_json::json!({
+            "schema_version":"ryeos.ui.work_candidate.v1",
+            "candidates":[],
+        }));
+    };
+    if session.owner_principal != caller.principal_id() {
+        return Err(ryeos_app::handler_error::HandlerError::NotFound.into());
+    }
+    let Some(candidate_snapshot_hash) = session.candidate_snapshot_hash.as_deref() else {
+        return Ok(serde_json::json!({
+            "schema_version":"ryeos.ui.work_candidate.v1",
+            "candidates":[],
+        }));
+    };
+    let evaluation = session.candidate_evaluation.as_ref();
+    let completion = session.completion_fence.as_ref().map(|fence| {
+        serde_json::json!({
+            "placement_thread_id":fence.placement_thread_id,
+            "worker_boot_epoch":fence.worker_boot_epoch,
+            "turn_id":fence.turn_id,
+            "command_sequence":fence.command_sequence,
+            "request_digest":fence.request_digest,
+            "response_digest":fence.response_digest,
+            "completion_operation_id":fence.completion_operation_id,
+        })
+    });
+    let candidate = serde_json::json!({
+        "schema_version":"ryeos.ui.work_candidate_item.v1",
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "state":session.state,
+        "candidate_disposition":session.candidate_disposition.as_str(),
+        "candidate_snapshot_hash":candidate_snapshot_hash,
+        "base_snapshot_hash":evaluation.and_then(|value| value.pointer("/candidate/base_snapshot_hash")),
+        "candidate_validation_hash":session.candidate_validation_hash,
+        "candidate_evaluation_hash":session.candidate_evaluation_hash,
+        "evaluation_accepted":evaluation.and_then(|value| value.pointer("/result/accepted")),
+        "evaluator_item_ref":evaluation.and_then(|value| value.pointer("/evaluator/item_ref")),
+        "evaluator_definition_digest":evaluation.and_then(|value| value.pointer("/evaluator/effective_definition_digest")),
+        "evaluator_result_digest":evaluation.and_then(|value| value.pointer("/result/result_digest")),
+        "publication_result":session.publication_result,
+        "terminal_reason":session.terminal_reason,
+        "completion":completion,
+    });
+    Ok(serde_json::json!({
+        "schema_version":"ryeos.ui.work_candidate.v1",
+        "candidates":[candidate],
+    }))
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/ryeos-ui/work/list",
     endpoint: "ui.ryeos.work.list",
@@ -331,5 +404,15 @@ pub const APPROVAL_HISTORY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[],
     handler: |params, ctx, state| {
         Box::pin(async move { handle_approval_history(params, ctx, state).await })
+    },
+};
+
+pub const CANDIDATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/candidate",
+    endpoint: "ui.ryeos.work.candidate",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_candidate(params, ctx, state).await })
     },
 };
