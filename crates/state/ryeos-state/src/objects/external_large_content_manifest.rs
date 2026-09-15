@@ -35,8 +35,10 @@ pub const MAX_LARGE_CONTENT_FILE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 /// Per manifest. The ceiling permits large retained realizations without
 /// making the substrate unbounded.
 pub const MAX_LARGE_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024 * 1024;
-/// Regular files, not tree entries.
-pub const MAX_LARGE_CONTENT_MANIFEST_ENTRIES: usize = 256;
+/// All tree entries, including directories and small CAS-backed files. Large
+/// content includes complete runtime trees, not only a short list of weights.
+/// The serialized-byte ceiling below remains independently mandatory.
+pub const MAX_LARGE_CONTENT_MANIFEST_ENTRIES: usize = super::MAX_EXTERNAL_REALIZATION_ENTRIES;
 /// The chunk lists dominate: a 64 GiB entry carries 1024 chunk hashes.
 pub const MAX_LARGE_CONTENT_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 
@@ -390,6 +392,31 @@ mod tests {
             entries,
             total_bytes: total,
         }
+    }
+
+    #[test]
+    fn large_tree_entry_capacity_retains_the_serialized_byte_bound() {
+        let entries = (0..20_000)
+            .map(|index| {
+                let mut file = entry(&format!("file-{index:05}"), 1);
+                file.file_sha256 = None;
+                file.chunk_size = None;
+                file.chunk_hashes.clear();
+                file.blob_hash = Some("a".repeat(64));
+                file
+            })
+            .collect();
+        let mut object = manifest(entries);
+        let value = object.to_value().unwrap();
+        assert_eq!(
+            ExternalLargeContentManifestObject::from_value(&value).unwrap(),
+            object
+        );
+        // The large-tier count does not authorize an unbounded manifest body.
+        for file in &mut object.entries {
+            file.path.push_str(&"x".repeat(512));
+        }
+        assert!(object.validate().unwrap_err().to_string().contains("bytes"));
     }
 
     #[test]

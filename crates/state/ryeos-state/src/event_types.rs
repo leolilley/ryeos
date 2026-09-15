@@ -65,6 +65,9 @@ pub const STREAM_OPENED: &str = "stream_opened";
 pub const TOKEN_DELTA: &str = "token_delta";
 pub const STREAM_SNAPSHOT: &str = "stream_snapshot";
 pub const STREAM_CLOSED: &str = "stream_closed";
+/// Daemon projection of a validated subprocess frame. Multiple bounded pieces
+/// of one frame are committed atomically; this is observation, not exit authority.
+pub const SUBPROCESS_OUTPUT_OBSERVED: &str = "subprocess_output_observed";
 pub const OBSERVATION: &str = "observation";
 /// Daemon-authored durable result of a hook declared as `observation`.
 pub const HOOK_OBSERVATION_RECORDED: &str = "hook_observation_recorded";

@@ -148,7 +148,7 @@ impl ExternalContentImportLimits {
             bail!("external-content import max_depth is outside the supported range");
         }
         if limits.max_entries == 0
-            || limits.max_entries > ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES
+            || limits.max_entries > ryeos_state::objects::MAX_EXTERNAL_REALIZATION_ENTRIES
         {
             bail!("external-content import max_entries is outside the manifest bound");
         }
@@ -205,7 +205,7 @@ impl ManagedExternalContentActivationPolicy {
             bail!("managed external-content max_archives is outside 1..=8");
         }
         let maximum_archive_entries =
-            (ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES + 1).saturating_mul(8);
+            (ryeos_state::objects::MAX_EXTERNAL_REALIZATION_ENTRIES + 1).saturating_mul(8);
         if self.max_members == 0 || self.max_members > maximum_archive_entries {
             bail!("managed external-content max_members is outside 1..={maximum_archive_entries}");
         }

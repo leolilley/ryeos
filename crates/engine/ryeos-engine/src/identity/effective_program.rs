@@ -155,6 +155,14 @@ pub fn lock_validated_effective_program(
     })
 }
 
+/// Capture the validated derived projection before product selection binds D0.
+pub fn capture_validated_effective_program_derived(
+    resolution: ResolutionOutput,
+    validation: EffectiveValidationSuccess,
+) -> Result<ResolutionOutput, EngineError> {
+    Ok(lock_validated_effective_program(resolution, validation)?.resolution)
+}
+
 /// Relock a recovered admitted program after recomputing its semantic
 /// validation against a view with no pre-populated engine-owned projection.
 /// Missing, malformed, stale, or divergent captured authority fails before
@@ -185,6 +193,7 @@ pub fn relock_recovered_effective_program(
 /// candidate. A changed dependency never produces a finalization token.
 pub fn prove_finalization_authority(
     candidate: &ValidatedEffectiveProgramCandidate,
+    external_content_contract: Option<&crate::kind_registry::KindExternalContentDecl>,
     proofs: &[LaunchConfigDependencyProof],
     roots: &ResolutionRoots,
     project: Option<(&std::path::Path, &dyn AuthoritativeProjectContent)>,
@@ -197,6 +206,39 @@ pub fn prove_finalization_authority(
         &dyn crate::source_closure::SourceClosureStore,
     )>,
 ) -> Result<FinalizationAuthorityProof, EngineError> {
+    let has_product_selection = candidate
+        .resolution
+        .composed
+        .composed
+        .get("external_product_slots")
+        .is_some()
+        || candidate
+            .resolution
+            .composed
+            .derived
+            .contains_key(crate::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY);
+    let selected_declarations = if has_product_selection {
+        // Validate the exact signed slots at D1. Only the separately proved
+        // realization projection is removed; source, hooks, and semantic
+        // validator projections all remain part of the selection's D0.
+        let mut selected = candidate.resolution.clone();
+        selected
+            .composed
+            .derived
+            .remove(crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY);
+        Some(
+            crate::external_content::effective_external_content_declarations(
+                &selected,
+                external_content_contract,
+                crate::external_content::declaring_authority(&selected)
+                    .map_err(|error| EngineError::Internal(error.to_string()))?,
+            )
+            .map_err(|error| EngineError::Internal(error.to_string()))?
+            .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
     let mut identities = Vec::with_capacity(proofs.len());
     for proof in proofs {
         match proof.revalidate_under_authority_status(roots, project) {
@@ -235,12 +277,42 @@ pub fn prove_finalization_authority(
         .get("external_content")
         .and_then(|value| value.as_array())
         .is_some_and(|entries| !entries.is_empty());
-    if declared_external && captured.is_none() {
+    if (declared_external
+        || selected_declarations
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty()))
+        && captured.is_none()
+    {
         return Err(EngineError::Internal(
             "effective program declares external content that was never realized; \
              this launch path cannot execute external declarations"
                 .to_string(),
         ));
+    }
+    if let (Some(declarations), Some(realized)) =
+        (selected_declarations.as_ref(), captured.as_ref())
+    {
+        for declaration in declarations {
+            if !realized.iter().any(|entry| {
+                entry.id == declaration.id
+                    && entry.kind == declaration.kind
+                    && entry.mode == declaration.mode
+                    && declaration
+                        .digest
+                        .as_deref()
+                        .is_none_or(|digest| digest == entry.manifest_hash)
+                    && entry.mount_root == declaration.mount_root
+                    && entry.mount == declaration.mount
+            }) {
+                return Err(EngineError::Internal(format!(
+                    "selected declaration `{}` differs from its admitted realization",
+                    declaration.id
+                )));
+            }
+        }
+        // Additional entries can be inherited from an admitted parent. Their
+        // origin is checked by admission; the proof below must cover the whole
+        // captured set, never just the selected declaration subset.
     }
     match (captured.as_ref(), external_realization) {
         (None, None) => {}
@@ -472,6 +544,24 @@ mod tests {
     }
 
     #[test]
+    fn preselection_effect_projection_survives_revalidation_without_identity_drift() {
+        let mut prepared = capture_validated_effective_program_derived(
+            resolution("preselection"),
+            effect_validation("node", 'a'),
+        )
+        .unwrap();
+        let original_digest = prepared.effective_definition_digest().unwrap();
+        let recovered = take_recovered_effective_program_derived(&mut prepared);
+        let candidate =
+            relock_recovered_effective_program(prepared, effect_validation("node", 'a'), recovered)
+                .unwrap();
+        assert_eq!(
+            original_digest,
+            candidate.resolution.effective_definition_digest().unwrap()
+        );
+    }
+
+    #[test]
     fn finalization_proof_is_bound_to_the_exact_validated_candidate() {
         let candidate_a = lock_validated_effective_program(
             resolution("a"),
@@ -480,6 +570,7 @@ mod tests {
         .unwrap();
         let proof_a = prove_finalization_authority(
             &candidate_a,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -506,6 +597,7 @@ mod tests {
         .unwrap();
         let proof_a = prove_finalization_authority(
             &candidate_a,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -532,6 +624,7 @@ mod tests {
         .unwrap();
         let proof = prove_finalization_authority(
             &candidate,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -583,9 +676,46 @@ mod tests {
         )
         .unwrap();
 
-        let error = prove_finalization_authority(&candidate, &[proof], &roots, None, None, None)
-            .unwrap_err();
+        let error =
+            prove_finalization_authority(&candidate, None, &[proof], &roots, None, None, None)
+                .unwrap_err();
         assert!(error.to_string().contains("authority changed"));
+    }
+
+    #[test]
+    fn root_product_slots_cannot_skip_signed_contract_and_selection_validation() {
+        for derived in [false, true] {
+            let mut declaring = resolution("unsupported-root-product");
+            if derived {
+                declaring.composed.derived.insert(
+                    crate::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
+                    serde_json::json!({"caller":"not-authority"}),
+                );
+            } else {
+                declaring.composed.composed["external_product_slots"] = serde_json::json!([]);
+            }
+            let candidate = lock_validated_effective_program(
+                declaring,
+                EffectiveValidationSuccess::no_declared_validator(),
+            )
+            .unwrap();
+            let error = prove_finalization_authority(
+                &candidate,
+                None,
+                &[],
+                &ResolutionRoots::from_flat(None, Vec::new()),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            let expected = if derived {
+                "invalid product selections"
+            } else {
+                "product slots require a signed external-content kind contract"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
@@ -605,6 +735,7 @@ mod tests {
         .unwrap();
         let error = prove_finalization_authority(
             &candidate,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -628,6 +759,7 @@ mod tests {
         .unwrap();
         prove_finalization_authority(
             &candidate,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -678,6 +810,7 @@ mod tests {
         .unwrap();
         let missing = prove_finalization_authority(
             &candidate,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -692,6 +825,7 @@ mod tests {
                 .unwrap();
         let mismatch = prove_finalization_authority(
             &candidate,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
@@ -703,6 +837,7 @@ mod tests {
 
         prove_finalization_authority(
             &candidate,
+            None,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,

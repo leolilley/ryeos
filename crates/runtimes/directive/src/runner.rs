@@ -3769,6 +3769,7 @@ impl Runner {
                     Ok(Box::new(ryeos_runtime::callback::DispatchActionRequest {
                         thread_id: self.thread_id.clone(),
                         action: ryeos_runtime::callback::ActionPayload {
+                            product_selections: Vec::new(),
                             operation_id: Some(operation_id.to_string()),
                             item_id: dispatch_result.canonical_ref.clone(),
                             ref_bindings: std::collections::BTreeMap::new(),
@@ -6292,7 +6293,7 @@ mod tests {
         async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {

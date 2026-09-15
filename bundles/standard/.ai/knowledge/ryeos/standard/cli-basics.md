@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:73cfa8a3be02c0f534f97ba180225b423cdcb565196eee4cddcd432ce1885afe:Bop9vF+AE7E7Vpp8OSzqqfCDXDLDKxUiwP4AqauP5ZcVQ+IVT+1WVmyNxWgFEr7x63kD6r3kNZVGZe05kYUKDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T23:19:40Z:79bb166dc012d7bb93621cd2b1c80c48d590f6d7e01b6bffabac1fb6fc48aeaf:oGj48um+z4cxUXJhka+mOTVpRsi4leDIcs811xF0yeqB1Q2kRMK2iES3sMo89v0D99USejo+ARU4djxxiN7rBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
-version: "1.4.1"
+version: "1.4.2"
 description: >
   LLM-facing quickstart for using the ryeos CLI from initialization through
   local execution, project execution, thread inspection, and remote execution.
@@ -59,16 +59,16 @@ node key fingerprint, vault fingerprint, and installed bundle names.
 
 ## 2. Start, stop, and inspect the local daemon
 
-Lifecycle verbs (`init`, `start`, `stop`, `status`) and
-`identity` are the only hardcoded CLI commands. Everything
-else is descriptor-driven from installed bundles.
+Use node-scoped status to inspect the daemon. Bare `ryeos status` and
+`ryeos snapshot status` compare a project's worktree with its principal's
+snapshot HEAD; they do not report daemon health.
 
 Start the daemon after `init`:
 
 ```bash
 ryeos start
-ryeos status
-ryeos status --json
+ryeos node status
+ryeos node status --json
 ryeos stop
 ```
 
@@ -80,7 +80,7 @@ ryeosd --app-root ~/.local/share/ryeos --bind 127.0.0.1:7400
 
 Useful rules for agents:
 
-- If a command says it cannot contact the daemon, run `ryeos status`.
+- If a command says it cannot contact the daemon, run `ryeos node status`.
 - If aliases seem stale after installing bundles, restart the daemon.
 - `ryeos identity` and `ryeos init` are useful before the
   daemon is running.
@@ -94,12 +94,12 @@ Commands come from signed bundle descriptors. Each service descriptor
 declares an `availability` field:
 
 - **`availability: local`** — runs as a local operation; the daemon may remain
-  live. Examples include `verify`, `fetch`, `bundle verify`, and `bundle publish`.
+  live. Examples include `verify`, `fetch`, and `bundle publish`.
 - **`availability: stopped_node`** — requires exclusive stopped-node state,
   such as bundle replacement or projection rebuild.
 - **`availability: both`** — prefers the live daemon and uses the same service
   standalone only when the node is stopped. Project `sign`, content pinning,
-  and maintenance GC use this shape.
+  `bundle verify`, project snapshot status, and maintenance GC use this shape.
 - **No `availability` field** (or daemon-only availability) — requires a
   running daemon. Most runtime commands fall here: `execute`, `thread`,
   `remote`, `events`, `scheduler`.
@@ -109,6 +109,36 @@ declared ownership mode before dispatch. It never guesses that an unavailable
 daemon means stopped-node authority.
 
 Do not stop or restart the daemon to use `sign`, `verify`, or `fetch`.
+
+### Project snapshot status
+
+`ryeos --project /absolute/project snapshot status` (also bare `status`) is a
+configured-local-operator inspection. It uses the live node, or the same
+node-owned service when the node is stopped. The stopped-node service opens
+only existing verified projection state and refuses missing or invalid state;
+it does not rebuild projections, repair history, or publish a snapshot.
+
+The signed command supplies a 5000 ms scan budget. Use
+`--time-budget-ms 0` for an explicitly unbounded scan and
+`--include-unchanged` to include unchanged entries. A timeboxed result may have
+`scan_complete: false`; do not treat that as proof the worktree is clean.
+This is a soft budget checked between entries; an in-flight file observation
+may finish after it. Incomplete scans never infer deletions from unvisited paths.
+Direct calls to `service:project/snapshot-status` must provide an absolute
+`project_path` and an explicit `time_budget_ms`.
+
+Preview and creation compose the same signed node ignore patterns, project
+snapshot exclusions and structural capture floor, using the same bounded,
+descriptor-rooted traversal. Status reports `effective_policy_hash`,
+`head_effective_policy_hash` and `policy_changed`; a policy-only change is dirty
+even when the selected file contents match. Status hashes files without writing
+CAS objects or refs. It rechecks the pinned root and policy source before
+returning, but a live worktree inspection is not a frozen execution snapshot.
+
+Runtime Tools keep the existing sealed live-project and manifest-backed
+snapshot callback authority. The terminal status Tool does not load node
+keys, policy, or databases when a callback is absent. `project.status` remains
+the separate deployed-snapshot metadata service.
 
 ## 4. Ask for help and discover commands
 
@@ -426,7 +456,7 @@ CLI output is incomplete or a runtime fails on the remote node.
 
 Start here when something fails:
 
-1. `ryeos status --json` — is the local daemon running?
+1. `ryeos node status --json` — is the local daemon running?
 2. `ryeos identity` — does local identity exist?
 3. `ryeos -p /project fetch <ref> --with-content` — does the item resolve?
 4. `ryeos -p /project verify <ref>` — is it signed and trusted?

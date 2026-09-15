@@ -537,12 +537,18 @@ mod tests {
     fn skeleton() -> PreparedManagedLaunchSkeleton {
         PreparedManagedLaunchSkeleton {
             prepared: PreparedRuntimeLaunch {
+                project_result_requirement: ryeos_handler_protocol::ProjectResultRequirement::None,
+                filesystem_authority_ceiling:
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 runtime_data: Default::default(),
                 required_secrets: Vec::new(),
                 runtime_facts: Default::default(),
                 binding_records: Default::default(),
                 execution_dependencies: Default::default(),
                 content_dependencies: Default::default(),
+                evidence_attachments: Default::default(),
                 environment_contributions: Default::default(),
                 admitted_sessions: Default::default(),
                 config_contributors: Vec::new(),
@@ -738,12 +744,19 @@ mod tests {
         fill.complete(
             PreparedManagedLaunchSkeleton {
                 prepared: PreparedRuntimeLaunch {
+                    project_result_requirement:
+                        ryeos_handler_protocol::ProjectResultRequirement::None,
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling:
+                        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     runtime_data: Default::default(),
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
                     execution_dependencies: Default::default(),
                     content_dependencies: Default::default(),
+                    evidence_attachments: Default::default(),
                     environment_contributions: Default::default(),
                     admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
@@ -763,12 +776,19 @@ mod tests {
         old_fill.complete(
             PreparedManagedLaunchSkeleton {
                 prepared: PreparedRuntimeLaunch {
+                    project_result_requirement:
+                        ryeos_handler_protocol::ProjectResultRequirement::None,
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling:
+                        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     runtime_data: Default::default(),
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
                     execution_dependencies: Default::default(),
                     content_dependencies: Default::default(),
+                    evidence_attachments: Default::default(),
                     environment_contributions: Default::default(),
                     admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
@@ -781,12 +801,19 @@ mod tests {
         new_fill.complete(
             PreparedManagedLaunchSkeleton {
                 prepared: PreparedRuntimeLaunch {
+                    project_result_requirement:
+                        ryeos_handler_protocol::ProjectResultRequirement::None,
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling:
+                        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     runtime_data: Default::default(),
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
                     execution_dependencies: Default::default(),
                     content_dependencies: Default::default(),
+                    evidence_attachments: Default::default(),
                     environment_contributions: Default::default(),
                     admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
@@ -809,6 +836,11 @@ mod tests {
         );
         let skeleton = PreparedManagedLaunchSkeleton {
             prepared: PreparedRuntimeLaunch {
+                project_result_requirement: ryeos_handler_protocol::ProjectResultRequirement::None,
+                filesystem_authority_ceiling:
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 runtime_data,
                 required_secrets: vec![super::super::launch_preparation::PreparedSecret {
                     name: "DO_NOT_LOG_SECRET_NAME".to_string(),
@@ -820,6 +852,7 @@ mod tests {
                 binding_records: Default::default(),
                 execution_dependencies: Default::default(),
                 content_dependencies: Default::default(),
+                evidence_attachments: Default::default(),
                 environment_contributions: Default::default(),
                 admitted_sessions: Default::default(),
                 config_contributors: Vec::new(),

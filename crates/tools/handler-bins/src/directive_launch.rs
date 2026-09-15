@@ -12,8 +12,8 @@ use ryeos_handler_protocol::{
     LaunchConfigContributorWire, LaunchConfigInputDeclWire, LaunchConfigSnapshotWire,
     LaunchDiagnosticScalarWire, LaunchExecutionDependencyRequestWire, LaunchPrepareError,
     LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse, LaunchPrepareSuccess,
-    LaunchSecretOriginWire, LaunchSecretRequirement, RuntimeFactKindWire, TrustClassWire,
-    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    LaunchSecretOriginWire, LaunchSecretRequirement, RefBindingSourceWire, RuntimeFactKindWire,
+    TrustClassWire, ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
     ValidateLaunchPreparerConfigSuccess,
 };
 
@@ -443,6 +443,12 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
     if !model.required {
         return Err("ref_bindings.model must be required".to_string());
     }
+    if model.source != RefBindingSourceWire::Caller {
+        return Err("ref_bindings.model must be caller-sourced".to_string());
+    }
+    if model.project_result_requirement != ryeos_handler_protocol::ProjectResultRequirement::None {
+        return Err("ref_bindings.model must not require a retained project result".to_string());
+    }
     exact_strings("model.allowed_kinds", &model.allowed_kinds, &["directive"])?;
     exact_values(
         "model.allowed_spaces",
@@ -587,6 +593,14 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         || request.content_dependencies.external_content.is_some()
     {
         return Err("content_dependencies must be disabled".into());
+    }
+    if request.evidence_attachments.max_attachments != 0
+        || request.evidence_attachments.max_total_bytes != 0
+        || request.evidence_attachments.target.is_some()
+        || request.evidence_attachments.destination_prefix.is_some()
+        || !request.evidence_attachments.allowed_access.is_empty()
+    {
+        return Err("evidence_attachments must be disabled".into());
     }
     if request.environment_contributions.max_contributions != 0
         || request

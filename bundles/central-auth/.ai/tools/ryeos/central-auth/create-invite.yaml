@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:6d921e990976cbf2c885cfed7e576e0fa7509dcdb42c0e158325d4dd7fb64885:sbiluTEoBUsp6NxFP5wZSv7xScMVKP3Gel2Bp+DgYlOPaoyWgjbIAf5Zlwbkh+P8BfKSueMLzKvYI9CkaKbfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:f38b611a34b359732e7a45c4a5a58b2a1adfadff900dc45250b4d1b792bb03cf:kARWpChd65S5SZ9QEaEqs8USNVwmOg5edvLIu1I5hEDmewmXO7Q/wKIFhRr34ydddSeNL1Jbud/ssOsfIzBLCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-invite"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.create-invite"]
 description: "Create a high-entropy one-time invite code for a realm."
 

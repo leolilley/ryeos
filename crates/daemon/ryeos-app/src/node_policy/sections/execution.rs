@@ -18,11 +18,25 @@ pub struct NodeExecutionAdmissionPolicy {
     pub max_live_fanout: u32,
     pub max_private_materialization_copy_bytes: u64,
     pub host_env_passthrough: Vec<String>,
+    /// Required-nullable target ceiling for a boot-local workload client.
+    /// Project data may request less; absence disables admission completely.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub workload_client: Option<ryeos_runtime::workload_client::WorkloadClientNodePolicy>,
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 impl NodeExecutionAdmissionPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 1 {
+        if self.schema != 2 {
             bail!("node execution policy schema is not current");
         }
         if self.max_live_fanout == 0 {
@@ -46,6 +60,11 @@ impl NodeExecutionAdmissionPolicy {
         )
         .map_err(anyhow::Error::from)
         .context("validate node execution host-env allowlist")?;
+        if let Some(policy) = &self.workload_client {
+            policy
+                .validate()
+                .context("validate node workload-client ceiling")?;
+        }
         Ok(())
     }
 
@@ -87,10 +106,11 @@ mod tests {
 
     fn valid_policy() -> NodeExecutionAdmissionPolicy {
         NodeExecutionAdmissionPolicy {
-            schema: 1,
+            schema: 2,
             max_live_fanout: 8,
             max_private_materialization_copy_bytes: 17_179_869_184,
             host_env_passthrough: Vec::new(),
+            workload_client: None,
         }
     }
 

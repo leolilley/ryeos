@@ -43,6 +43,17 @@ pub struct HandlerContext {
     /// payloads never populate this field. `None` denotes a local or non-RyeOS
     /// caller.
     pub authenticated_origin_site_id: Option<String>,
+    /// Stable target/source grant generations observed by RyeOS signed
+    /// verification. This admission-only sideband is intentionally excluded
+    /// from sealed invocation serialization.
+    #[serde(skip)]
+    pub authenticated_grant_authority:
+        Option<ryeos_engine::principal_contract::AuthenticatedGrantAuthority>,
+    /// Root of the currently executing recorded service invocation. The
+    /// executor supplies this only after that root is durably running; it is
+    /// local dispatch context, never caller input or portable authority.
+    #[serde(skip)]
+    recorded_service_root_id: Option<String>,
 }
 
 impl HandlerContext {
@@ -54,6 +65,8 @@ impl HandlerContext {
             verified,
             authorized_key_class: None,
             authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
+            recorded_service_root_id: None,
         }
     }
 
@@ -69,6 +82,8 @@ impl HandlerContext {
             verified,
             authorized_key_class: None,
             authenticated_origin_site_id,
+            authenticated_grant_authority: None,
+            recorded_service_root_id: None,
         }
     }
 
@@ -85,7 +100,52 @@ impl HandlerContext {
             verified,
             authorized_key_class,
             authenticated_origin_site_id,
+            authenticated_grant_authority: None,
+            recorded_service_root_id: None,
         }
+    }
+
+    pub fn new_with_grant_authority(
+        fingerprint: String,
+        scopes: Vec<String>,
+        authorized_key_class: crate::identity::AuthorizedKeyPrincipalClass,
+        authenticated_origin_site_id: Option<String>,
+        authenticated_grant_authority:
+            ryeos_engine::principal_contract::AuthenticatedGrantAuthority,
+    ) -> Self {
+        Self {
+            fingerprint,
+            scopes,
+            verified: true,
+            authorized_key_class: Some(authorized_key_class),
+            authenticated_origin_site_id,
+            authenticated_grant_authority: Some(authenticated_grant_authority),
+            recorded_service_root_id: None,
+        }
+    }
+
+    /// Bind the daemon-minted root of this recorded service call. This is an
+    /// executor-only causality coordinate, not an authorization input.
+    pub fn with_recorded_service_root_id(mut self, root_thread_id: String) -> anyhow::Result<Self> {
+        if root_thread_id.is_empty()
+            || root_thread_id.len() > 256
+            || root_thread_id.trim() != root_thread_id
+            || root_thread_id.chars().any(char::is_control)
+        {
+            anyhow::bail!("recorded service invocation root is not canonical");
+        }
+        if self
+            .recorded_service_root_id
+            .replace(root_thread_id)
+            .is_some()
+        {
+            anyhow::bail!("recorded service handler context already has an invocation root");
+        }
+        Ok(self)
+    }
+
+    pub fn recorded_service_root_id(&self) -> Option<&str> {
+        self.recorded_service_root_id.as_deref()
     }
 
     /// Resolve execution origin from authenticated handler authority only.
@@ -120,7 +180,9 @@ impl HandlerContext {
             anyhow::bail!("handler scopes differ from sealed execution scopes");
         }
         if (!self.verified)
-            && (self.authorized_key_class.is_some() || self.authenticated_origin_site_id.is_some())
+            && (self.authorized_key_class.is_some()
+                || self.authenticated_origin_site_id.is_some()
+                || self.authenticated_grant_authority.is_some())
         {
             anyhow::bail!("unverified handler context carries authenticated execution authority");
         }
@@ -157,6 +219,9 @@ impl HandlerContext {
     ) -> anyhow::Result<Self> {
         let mut narrowed = self.clone();
         narrowed.scopes = scopes;
+        // A nested execution receives its own lifecycle root. The parent
+        // service's append authority must never cross that boundary.
+        narrowed.recorded_service_root_id = None;
         narrowed.validate_execution_authority(
             &narrowed.fingerprint,
             &narrowed.scopes,

@@ -1,0 +1,145 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.tool.success"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "assistantMessageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "callID": {
+          "type": "string"
+        },
+        "structured": {
+          "type": "object"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LLMToolContent"
+          }
+        },
+        "outputPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "result": {},
+        "provider": {
+          "type": "object",
+          "properties": {
+            "executed": {
+              "type": "boolean"
+            },
+            "metadata": {
+              "$ref": "#/$defs/LLMProviderMetadata"
+            }
+          },
+          "required": [
+            "executed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "assistantMessageID",
+        "callID",
+        "structured",
+        "content",
+        "provider"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "LLMToolContent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolTextContent"
+        },
+        {
+          "$ref": "#/$defs/ToolFileContent"
+        }
+      ]
+    },
+    "ToolTextContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "ToolFileContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "uri",
+        "mime"
+      ],
+      "additionalProperties": false
+    },
+    "LLMProviderMetadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      }
+    }
+  }
+}

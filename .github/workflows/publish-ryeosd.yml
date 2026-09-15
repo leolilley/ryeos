@@ -87,6 +87,7 @@ jobs:
             echo "::error::Release source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
             exit 1
           fi
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$TAG_COMMIT")"
           if [[ -n "$RECOVERY_BUILD_DATE" ]]; then
             if [[ ! "$RECOVERY_BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
               echo "::error::Recovery build date must be an RFC3339 UTC timestamp"
@@ -94,9 +95,8 @@ jobs:
             fi
             BUILD_DATE="$RECOVERY_BUILD_DATE"
           else
-            BUILD_DATE="$(git show -s --format=%cI "$TAG_COMMIT")"
+            BUILD_DATE="$(date --utc --date="@$SOURCE_DATE_EPOCH" '+%Y-%m-%dT%H:%M:%SZ')"
           fi
-          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$TAG_COMMIT")"
 
           {
             echo "sha=$SOURCE_SHA"
@@ -198,6 +198,56 @@ jobs:
                 sha256sum "$ARCHIVE" > "$CHECKSUM"
               )
             fi
+          fi
+          echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve immutable workload-client realization assets
+        id: workload-client-assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.qualify.outputs.source_date_epoch }}
+        run: |
+          TAG="v${VERSION}"
+          ARCHIVE="ryeos-workload-client-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-workload-client-artifacts"
+          ARCHIVE_EXISTS=false
+          CHECKSUM_EXISTS=false
+          [[ ! -e "$ARTIFACT_DIR" ]] || {
+            echo "::error::Workload-client artifact workspace already exists: $ARTIFACT_DIR"
+            exit 1
+          }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            ARCHIVE_COUNT="$(grep -Fxc "$ARCHIVE" <<<"$EXISTING_ASSETS" || true)"
+            CHECKSUM_COUNT="$(grep -Fxc "$CHECKSUM" <<<"$EXISTING_ASSETS" || true)"
+            if (( ARCHIVE_COUNT > 1 || CHECKSUM_COUNT > 1 )); then
+              echo "::error::Duplicate immutable workload-client assets exist for $TAG"
+              exit 1
+            fi
+            if (( ARCHIVE_COUNT == 1 )); then ARCHIVE_EXISTS=true; fi
+            if (( CHECKSUM_COUNT == 1 )); then CHECKSUM_EXISTS=true; fi
+          fi
+          if [[ "$CHECKSUM_EXISTS" != "$ARCHIVE_EXISTS" ]]; then
+            echo "::error::Unsafe partial workload-client release state for $TAG"
+            echo "::error::The workload-client archive is not internally signed, so neither half of the pair can recover the other."
+            exit 1
+          fi
+          if [[ "$ARCHIVE_EXISTS" == true ]]; then
+            mkdir "$ARTIFACT_DIR"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$ARCHIVE"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$CHECKSUM"
+            scripts/release/verify-workload-client-realization.sh \
+              --version "$VERSION" \
+              --source-revision "$SOURCE_SHA" \
+              --build-date "$BUILD_DATE" \
+              --source-date-epoch "$SOURCE_DATE_EPOCH" \
+              --archive "$ARTIFACT_DIR/$ARCHIVE" \
+              --checksum "$ARTIFACT_DIR/$CHECKSUM"
           fi
           echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
           echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
@@ -311,12 +361,14 @@ jobs:
         id: release-plan
         env:
           ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
+          WORKLOAD_CLIENT_ARCHIVE_EXISTS: ${{ steps.workload-client-assets.outputs.archive_exists }}
           STANDARD_EXISTS: ${{ steps.resolve-images.outputs.standard_exists }}
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
           HOSTED_WORKFLOW_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
         run: |
           targets=()
           [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
+          [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
           [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
           [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
           [[ "$HOSTED_WORKFLOW_EXISTS" == true ]] || targets+=(hosted-workflow)
@@ -345,6 +397,7 @@ jobs:
             VCS_REF=${{ needs.qualify.outputs.source_sha }}
             BUILD_DATE=${{ needs.qualify.outputs.build_date }}
             ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
+            WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
             STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
             CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
             HOSTED_WORKFLOW_TAG=${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
@@ -423,6 +476,50 @@ jobs:
             --pattern "$(basename "$CHECKSUM")"
           scripts/release/verify-bundle-artifact.sh \
             --version "$VERSION" \
+            --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
+            --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
+
+      - name: Publish immutable workload-client realization assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.qualify.outputs.source_date_epoch }}
+          ARCHIVE_EXISTS: ${{ steps.workload-client-assets.outputs.archive_exists }}
+          CHECKSUM_EXISTS: ${{ steps.workload-client-assets.outputs.checksum_exists }}
+        run: |
+          TAG="v${VERSION}"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-workload-client-artifacts"
+          ARCHIVE="$ARTIFACT_DIR/ryeos-workload-client-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          test -s "$ARCHIVE"
+          test -s "$CHECKSUM"
+          scripts/release/verify-workload-client-realization.sh \
+            --version "$VERSION" \
+            --source-revision "$SOURCE_SHA" \
+            --build-date "$BUILD_DATE" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --archive "$ARCHIVE" \
+            --checksum "$CHECKSUM"
+          if [[ "$ARCHIVE_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$ARCHIVE"
+          fi
+          if [[ "$CHECKSUM_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$CHECKSUM"
+          fi
+
+          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-workload-client"
+          [[ ! -e "$PUBLISHED_DIR" ]]
+          mkdir "$PUBLISHED_DIR"
+          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")"
+          scripts/release/verify-workload-client-realization.sh \
+            --version "$VERSION" \
+            --source-revision "$SOURCE_SHA" \
+            --build-date "$BUILD_DATE" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
             --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
             --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 

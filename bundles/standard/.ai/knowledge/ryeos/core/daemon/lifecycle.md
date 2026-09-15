@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:28Z:54e02f447648fa25b24d6f00b1f88a41e93877da9739968f91eca327b6e3cb77:yxkfBOgUnPhIv1XKovx2NL9NnLY6lGBA+sQNJJ4Od76b+wVTEhBIp1jk3k05Kj27VhDteXLTdGkPjNSffVEbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-05T06:58:46Z:ab8b8448c9dbca3bf481a19314305d590e225bfbb592aa7008fe9aa4c9835557:tWsjbxrRrz2hrf/q0FMdYbfdQfClInv2sWwRzVxTNj+t7YA4WwlwYdLxmRfKPnF7C+gjSJsNrBQbtKLniOOkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
-version: "2.4.0"
+version: "2.5.0"
 description: >
   Daemon process lifecycle: strict startup ordering, local lifecycle status,
   exact signal control, daemon.json metadata, and shutdown cleanup.
@@ -45,6 +45,20 @@ from unlinking the first daemon's live socket.
 The isolation snapshot is immutable for the process lifetime. Operators validate
 edits with `ryeos node doctor` and restart before expecting a new policy
 generation. See [Execution Isolation](../node/execution-isolation.md).
+
+## Recovery ownership during live execution
+
+The final recovery ownership check is shared by startup and periodic live
+reconciliation. Besides verified subprocesses and durable launch/follow/handoff
+owners, a current daemon-owned handler is accounted for by the existing exact
+in-process handler registry. Long-running imports do not become ownerless merely
+because they have no subprocess PID. This is a launch-driver boundary, not a
+service-name or kind exception.
+
+That registry is volatile: after restart, a predecessor handler's durable
+reservation does not prove liveness. The normal owner-loss reconciliation must
+settle it before readiness. Releasing an owner without terminal settlement also
+removes its eligibility at the live ownership check.
 
 ## State lock
 

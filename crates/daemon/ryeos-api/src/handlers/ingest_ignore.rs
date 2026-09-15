@@ -21,7 +21,9 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
         .node_policy
         .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>(
     )?;
-    Ok(serde_json::to_value(&policy.effective_config)?)
+    Ok(serde_json::to_value(ryeos_app::ignore::IgnoreConfig {
+        patterns: policy.patterns.clone(),
+    })?)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

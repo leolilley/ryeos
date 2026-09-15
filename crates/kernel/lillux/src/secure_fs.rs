@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
@@ -54,7 +55,7 @@ fn try_reflink_regular_file(source: &File, target: &File) -> Result<bool> {
 /// a huge or sparse file cannot make verification perform work beyond the
 /// sealed file size. A one-byte sentinel still detects growth during the read.
 pub fn digest_open_regular_file_stable_exact(
-    file: &mut File,
+    file: &File,
     expected_bytes: u64,
 ) -> Result<(String, std::fs::Metadata)> {
     for attempt in 0..2 {
@@ -160,6 +161,81 @@ pub struct OpenRegularFileObservation {
     metadata: std::fs::Metadata,
 }
 
+/// Stable platform identity and mutation-relevant metadata for one already-
+/// open file. RyeOS may retain these values as an in-process fence, while all
+/// raw metadata extraction and effective-user interpretation stay in Lillux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenFileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+    mode: u32,
+    file_type: u32,
+    owner: u32,
+}
+
+impl OpenFileIdentity {
+    pub fn device(self) -> u64 {
+        self.device
+    }
+
+    pub fn inode(self) -> u64 {
+        self.inode
+    }
+
+    pub fn size(self) -> u64 {
+        self.size
+    }
+
+    pub fn modified_seconds(self) -> i64 {
+        self.modified_seconds
+    }
+
+    pub fn modified_nanoseconds(self) -> i64 {
+        self.modified_nanoseconds
+    }
+
+    pub fn changed_seconds(self) -> i64 {
+        self.changed_seconds
+    }
+
+    pub fn changed_nanoseconds(self) -> i64 {
+        self.changed_nanoseconds
+    }
+
+    pub fn mode(self) -> u32 {
+        self.mode
+    }
+
+    pub fn file_type(self) -> u32 {
+        self.file_type
+    }
+
+    pub fn owner(self) -> u32 {
+        self.owner
+    }
+
+    pub fn is_executable(self) -> bool {
+        self.mode & 0o111 != 0
+    }
+
+    pub fn is_group_or_other_writable(self) -> bool {
+        self.mode & 0o022 != 0
+    }
+}
+
+/// Portable class of an already-open mount-source descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMountEntryKind {
+    Regular,
+    Directory,
+    UnixSocket,
+}
+
 /// Serializable identity of an already-open directory. Platform coordinates
 /// remain opaque to authoring and transaction layers; they may retain and
 /// compare this value but never interpret its fields.
@@ -210,6 +286,16 @@ impl OpenRegularFileObservation {
 
     pub fn portable_mode(&self) -> Result<u32> {
         normalized_portable_regular_mode(&self.metadata)
+    }
+
+    pub fn is_executable(&self) -> Result<bool> {
+        #[cfg(not(unix))]
+        anyhow::bail!("regular-file executable inspection is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            Ok(self.metadata.permissions().mode() & 0o111 != 0)
+        }
     }
 
     /// Preserve the incumbent regular file's permission bits when publishing
@@ -292,6 +378,112 @@ pub fn observe_open_regular_file(file: &File) -> Result<OpenRegularFileObservati
     Ok(OpenRegularFileObservation { metadata })
 }
 
+/// Observe exact Unix file identity and mutation-relevant metadata without
+/// exposing a metadata object for higher layers to reinterpret.
+pub fn observe_open_file_identity(file: &File) -> Result<OpenFileIdentity> {
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        anyhow::bail!("open-file identity inspection is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = file.metadata()?;
+        Ok(OpenFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+            mode: metadata.mode(),
+            file_type: metadata.mode() & libc::S_IFMT,
+            owner: metadata.uid(),
+        })
+    }
+}
+
+/// Require the exact open descriptor to remain a current-effective-user-owned
+/// regular executable without group/other write authority.
+pub fn require_effective_user_owned_executable(file: &File) -> Result<OpenFileIdentity> {
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        anyhow::bail!("owned executable inspection is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        let identity = observe_open_file_identity(file)?;
+        if identity.file_type != libc::S_IFREG
+            || identity.owner != unsafe { libc::geteuid() }
+            || !identity.is_executable()
+            || identity.is_group_or_other_writable()
+        {
+            anyhow::bail!(
+                "descriptor is not a current-user-owned executable regular file without group/other write bits (uid={}, mode={:#o})",
+                identity.owner,
+                identity.mode & 0o7777,
+            );
+        }
+        Ok(identity)
+    }
+}
+
+/// Require the exact open descriptor to remain a current-effective-user-owned
+/// regular file without group/other write authority.
+pub fn require_effective_user_owned_regular(file: &File) -> Result<OpenFileIdentity> {
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        anyhow::bail!("owned regular-file inspection is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        let identity = observe_open_file_identity(file)?;
+        if identity.file_type != libc::S_IFREG
+            || identity.owner != unsafe { libc::geteuid() }
+            || identity.is_group_or_other_writable()
+        {
+            anyhow::bail!(
+                "descriptor is not a current-user-owned regular file without group/other write bits (uid={}, mode={:#o})",
+                identity.owner,
+                identity.mode & 0o7777,
+            );
+        }
+        Ok(identity)
+    }
+}
+
+/// Compare the inode identities of two already-open descriptors.
+pub fn same_open_file_identity(left: &File, right: &File) -> Result<bool> {
+    let left = observe_open_file_identity(left)?;
+    let right = observe_open_file_identity(right)?;
+    Ok(left.device == right.device && left.inode == right.inode)
+}
+
+/// Classify an already-open descriptor admitted as a mount source.
+pub fn open_mount_entry_kind(file: &File) -> Result<OpenMountEntryKind> {
+    let metadata = file.metadata()?;
+    let file_type = metadata.file_type();
+    if file_type.is_file() {
+        return Ok(OpenMountEntryKind::Regular);
+    }
+    if file_type.is_dir() {
+        return Ok(OpenMountEntryKind::Directory);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        if file_type.is_socket() {
+            return Ok(OpenMountEntryKind::UnixSocket);
+        }
+    }
+    anyhow::bail!("open descriptor is not a regular file, directory, or Unix socket")
+}
+
 pub fn ensure_open_regular_file_unchanged(
     file: &File,
     before: &OpenRegularFileObservation,
@@ -306,8 +498,10 @@ pub fn ensure_open_regular_file_unchanged(
 /// Read one already-open regular file through an exact descriptor observation.
 /// The caller supplies the admitted byte ceiling; Lillux proves size, identity,
 /// timestamps, and permissions stayed fixed for the whole read.
+/// Positional reads are mandatory: cloned descriptors share a seek cursor and
+/// must not corrupt one another's verification when reused concurrently.
 pub fn read_open_regular_file_stable_bounded(
-    file: &mut File,
+    file: &File,
     before: &OpenRegularFileObservation,
     max_bytes: u64,
 ) -> Result<Vec<u8>> {
@@ -315,29 +509,60 @@ pub fn read_open_regular_file_stable_bounded(
         anyhow::bail!("regular file exceeds {max_bytes} bytes");
     }
     ensure_open_regular_file_unchanged(file, before)?;
-    file.seek(std::io::SeekFrom::Start(0))?;
     let expected = usize::try_from(before.size())
         .map_err(|_| anyhow::anyhow!("regular file size does not fit this platform"))?;
     let mut bytes = vec![0_u8; expected];
-    file.read_exact(&mut bytes)?;
+    let mut offset = 0;
+    while offset < expected {
+        let count = read_regular_file_at(file, &mut bytes[offset..], offset as u64)?;
+        if count == 0 {
+            anyhow::bail!("regular file ended before its observed length");
+        }
+        offset += count;
+    }
     let mut sentinel = [0_u8; 1];
-    if file.read(&mut sentinel)? != 0 {
+    if read_regular_file_at(file, &mut sentinel, before.size())? != 0 {
         anyhow::bail!("regular file grew while its content was being observed");
     }
     ensure_open_regular_file_unchanged(file, before)?;
     Ok(bytes)
 }
 
-fn digest_open_regular_file_exact(file: &mut File, expected_bytes: u64) -> Result<String> {
-    file.seek(std::io::SeekFrom::Start(0))?;
+fn read_regular_file_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    loop {
+        #[cfg(unix)]
+        let result = std::os::unix::fs::FileExt::read_at(file, bytes, offset);
+        #[cfg(windows)]
+        let result = std::os::windows::fs::FileExt::seek_read(file, bytes, offset);
+        #[cfg(not(any(unix, windows)))]
+        let result = {
+            let _ = (file, &bytes, offset);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "positional regular-file reads are unsupported",
+            ))
+        };
+        match result {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
+fn digest_open_regular_file_exact(file: &File, expected_bytes: u64) -> Result<String> {
     let mut digest = sha2::Sha256::new();
     use sha2::Digest as _;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // This verifier is used from bounded runtime workers as well as ordinary
+    // host threads. Keep the bounded I/O workspace on the heap: a 1 MiB stack
+    // array can exhaust a correctly finite runtime stack before a single byte
+    // is read, turning valid snapshot verification into a process abort.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     let mut remaining = expected_bytes;
     while remaining > 0 {
         let requested = usize::try_from(remaining.min(buffer.len() as u64))
             .expect("bounded digest chunk always fits usize");
-        let read = file.read(&mut buffer[..requested])?;
+        let read =
+            read_regular_file_at(file, &mut buffer[..requested], expected_bytes - remaining)?;
         if read == 0 {
             anyhow::bail!("regular file ended before admitted size {expected_bytes} was consumed");
         }
@@ -345,7 +570,7 @@ fn digest_open_regular_file_exact(file: &mut File, expected_bytes: u64) -> Resul
         remaining -= read as u64;
     }
     let mut sentinel = [0_u8; 1];
-    if file.read(&mut sentinel)? != 0 {
+    if read_regular_file_at(file, &mut sentinel, expected_bytes)? != 0 {
         anyhow::bail!("regular file grew beyond admitted size {expected_bytes}");
     }
     Ok(format!("{:x}", digest.finalize()))
@@ -663,7 +888,325 @@ pub struct PinnedRegularFile {
     file: File,
 }
 
+/// Verify an absolute spelling inside an already-confined mount namespace.
+/// Read-only mounts prevent entry replacement; the caller's confinement must
+/// additionally prevent subsequent mount changes. This does not establish
+/// immutability of bytes through aliases outside that namespace.
+fn verified_read_only_namespace_path(path: &Path, held: &File) -> Result<PathBuf> {
+    verified_namespace_path(path, held, NamespaceLeafAccess::ReadOnly)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NamespaceLeafAccess {
+    ReadOnly,
+    WritableDirectory,
+}
+
+fn verified_namespace_path(
+    path: &Path,
+    held: &File,
+    leaf_access: NamespaceLeafAccess,
+) -> Result<PathBuf> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, held, leaf_access);
+        anyhow::bail!("verified namespace paths are unavailable on this platform");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::path::Component;
+
+        if !path.is_absolute() || path.as_os_str().as_bytes().len() >= libc::PATH_MAX as usize {
+            anyhow::bail!("namespace path must be bounded, absolute and normalized");
+        }
+        let normalized = path.components().collect::<PathBuf>();
+        if normalized.as_os_str().as_bytes() != path.as_os_str().as_bytes()
+            || path
+                .components()
+                .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+        {
+            anyhow::bail!("namespace path must be bounded, absolute and normalized");
+        }
+        let held_metadata = held.metadata()?;
+        if leaf_access == NamespaceLeafAccess::WritableDirectory
+            && (!held_metadata.is_dir() || path == Path::new("/"))
+        {
+            anyhow::bail!("writable namespace leaf must be a non-root pinned directory");
+        }
+        let mut directory = PinnedDirectory::open(Path::new("/"))?
+            .ok_or_else(|| anyhow::anyhow!("namespace root disappeared"))?;
+        require_namespace_mount_access(&directory.directory, NamespaceLeafAccess::ReadOnly)?;
+        let mut components = path.components().skip(1).peekable();
+        while let Some(Component::Normal(name)) = components.next() {
+            if components.peek().is_none() && held_metadata.is_file() {
+                let current = directory
+                    .open_pinned_regular(name, false)?
+                    .ok_or_else(|| anyhow::anyhow!("namespace file disappeared"))?;
+                require_namespace_mount_access(&current.file, NamespaceLeafAccess::ReadOnly)?;
+                require_same_namespace_object(held, &current.file)?;
+                return Ok(path.to_path_buf());
+            }
+            directory = directory
+                .open_child_directory(name)?
+                .ok_or_else(|| anyhow::anyhow!("namespace directory disappeared"))?;
+            require_namespace_mount_access(
+                &directory.directory,
+                if components.peek().is_none() {
+                    leaf_access
+                } else {
+                    NamespaceLeafAccess::ReadOnly
+                },
+            )?;
+        }
+        require_same_namespace_object(held, &directory.directory)?;
+        Ok(path.to_path_buf())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn require_namespace_mount_access(file: &File, access: NamespaceLeafAccess) -> Result<()> {
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::fstatvfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("inspect namespace mount flags");
+    }
+    let read_only = unsafe { stats.assume_init() }.f_flag & libc::ST_RDONLY != 0;
+    match access {
+        NamespaceLeafAccess::ReadOnly if !read_only => {
+            anyhow::bail!("namespace path traverses a writable mount");
+        }
+        NamespaceLeafAccess::WritableDirectory if read_only => {
+            anyhow::bail!("namespace directory leaf is not mounted writable");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_same_namespace_object(held: &File, current: &File) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let held = held.metadata()?;
+    let current = current.metadata()?;
+    if held.dev() != current.dev()
+        || held.ino() != current.ino()
+        || held.mode() & libc::S_IFMT != current.mode() & libc::S_IFMT
+        || !(held.is_file() || held.is_dir())
+    {
+        anyhow::bail!("namespace path does not select the exact pinned object");
+    }
+    Ok(())
+}
+
+/// One process-scoped generation in a strict flat regular-file namespace.
+///
+/// Creation, stale-generation collection, advisory lock ownership, host-clock
+/// naming, process coordinates, and exact descriptor-relative teardown stay
+/// inside Lillux. Higher layers retain only the generation directory and put
+/// their own semantic contents inside it.
+#[derive(Debug)]
+pub struct ProcessScopedFlatDirectoryGeneration {
+    generations: PinnedDirectory,
+    generation_name: OsString,
+    directory: PinnedDirectory,
+    _lifetime_lock: PinnedRegularFile,
+}
+
+/// Opaque wall-clock ordering coordinate for one descriptor-observed
+/// filesystem modification time.
+///
+/// Callers may compare these values to choose an operational eviction order,
+/// but cannot reinterpret the host clock as durable authority. Reading and
+/// converting the platform timestamp remains inside Lillux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FilesystemModificationTime(SystemTime);
+
+impl ProcessScopedFlatDirectoryGeneration {
+    /// Create a new generation below a descriptor-rooted relative namespace.
+    /// Every component is owner-private and no symlink is followed.
+    pub fn create_relative(root: &PinnedDirectory, components: &[&str]) -> Result<Self> {
+        #[cfg(not(unix))]
+        {
+            let _ = (root, components);
+            anyhow::bail!("process-scoped directory generations require Unix file locking");
+        }
+        #[cfg(unix)]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            const MAX_NAMESPACE_COMPONENTS: usize = 32;
+            const MAX_GENERATIONS: usize = 4_096;
+            if components.is_empty() || components.len() > MAX_NAMESPACE_COMPONENTS {
+                anyhow::bail!(
+                    "process-scoped generation namespace must contain 1..={MAX_NAMESPACE_COMPONENTS} components"
+                );
+            }
+            static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+            let mut generations = root.try_clone()?;
+            for component in components {
+                generations = generations.open_or_create_child(OsStr::new(*component), 0o700)?;
+            }
+            generations.set_mode(0o700)?;
+
+            // This file serializes generation publication with stale cleanup
+            // across processes. The pinned file, not its pathname, retains the
+            // advisory lock for this scope.
+            let cleanup_lock = generations.open_pinned_regular_create(
+                OsStr::new(".cleanup.lock"),
+                true,
+                false,
+                0o600,
+            )?;
+            cleanup_lock.set_mode(0o600)?;
+            cleanup_lock.lock_exclusive()?;
+
+            let created_at = crate::time::timestamp_millis();
+            let mut created = None;
+            for _ in 0..1_024 {
+                let sequence = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+                let name =
+                    OsString::from(format!("{}-{created_at}-{sequence}", std::process::id()));
+                match generations.create_child(&name, 0o700) {
+                    Ok(directory) => {
+                        created = Some((name, directory));
+                        break;
+                    }
+                    Err(error)
+                        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                            error.kind() == std::io::ErrorKind::AlreadyExists
+                        }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let (generation_name, directory) = created.ok_or_else(|| {
+                anyhow::anyhow!("could not reserve a unique directory generation")
+            })?;
+            let setup = (|| -> Result<PinnedRegularFile> {
+                directory.set_mode(0o700)?;
+                let lifetime_lock = directory.open_pinned_regular_create(
+                    OsStr::new(".lifetime.lock"),
+                    true,
+                    true,
+                    0o600,
+                )?;
+                lifetime_lock.set_mode(0o600)?;
+                if !lifetime_lock.try_lock_exclusive()? {
+                    anyhow::bail!("new directory-generation lifetime lock was already held");
+                }
+
+                let names = generations.entry_names_bounded(MAX_GENERATIONS + 1)?;
+                if names.len() > MAX_GENERATIONS {
+                    anyhow::bail!("flat generation namespace exceeds {MAX_GENERATIONS} entries");
+                }
+                for name in names {
+                    if name == generation_name || name.as_os_str() == OsStr::new(".cleanup.lock") {
+                        continue;
+                    }
+                    let Some(stale) = generations.open_child_directory(&name)? else {
+                        anyhow::bail!(
+                            "flat generation namespace contains unsupported entry {}",
+                            generations.path().join(&name).display()
+                        );
+                    };
+                    let _stale_lifetime_lock =
+                        match stale.open_pinned_regular(OsStr::new(".lifetime.lock"), true)? {
+                            Some(lock) if lock.try_lock_exclusive()? => Some(lock),
+                            Some(_) => continue,
+                            None => None,
+                        };
+                    remove_flat_directory_generation(&generations, &name, &stale)?;
+                }
+                Ok(lifetime_lock)
+            })();
+            let lifetime_lock = match setup {
+                Ok(lock) => lock,
+                Err(error) => {
+                    return match remove_flat_directory_generation(
+                        &generations,
+                        &generation_name,
+                        &directory,
+                    ) {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(error.context(format!(
+                            "new directory-generation cleanup also failed: {cleanup:#}"
+                        ))),
+                    };
+                }
+            };
+
+            Ok(Self {
+                generations,
+                generation_name,
+                directory,
+                _lifetime_lock: lifetime_lock,
+            })
+        }
+    }
+
+    /// Exact newly-created generation directory retained for this process.
+    pub fn directory(&self) -> &PinnedDirectory {
+        &self.directory
+    }
+}
+
+impl Drop for ProcessScopedFlatDirectoryGeneration {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Ok(Some(cleanup_lock)) = self
+            .generations
+            .open_pinned_regular(OsStr::new(".cleanup.lock"), true)
+            && cleanup_lock.lock_exclusive().is_ok()
+        {
+            let _ = remove_flat_directory_generation(
+                &self.generations,
+                &self.generation_name,
+                &self.directory,
+            );
+        }
+    }
+}
+
+fn remove_flat_directory_generation(
+    generations: &PinnedDirectory,
+    name: &OsStr,
+    directory: &PinnedDirectory,
+) -> Result<()> {
+    for entry in directory.regular_files()? {
+        directory.remove_pinned_regular_if_same(&entry)?;
+    }
+    if !generations.remove_empty_child_if_same(name, directory)? {
+        anyhow::bail!(
+            "directory generation is not a flat regular-file namespace: {}",
+            directory.path().display()
+        );
+    }
+    Ok(())
+}
+
 impl PinnedRegularFile {
+    /// Require administrator-selected ownership of this exact file. Callers
+    /// must separately protect its containing namespace; mode bits on a file
+    /// alone cannot prevent replacement through a writable parent.
+    pub fn require_owner(&self, owner: u32) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = self.file.metadata()?;
+            if metadata.uid() != owner || metadata.mode() & 0o022 != 0 || metadata.nlink() != 1 {
+                anyhow::bail!(
+                    "pinned file has unsafe ownership, permissions or links: {}",
+                    self.path.display()
+                );
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = owner;
+            anyhow::bail!("owned host files are unavailable on this platform")
+        }
+    }
+
     /// Return the pathname recorded when this authority was opened.
     ///
     /// This is diagnostic context only. It does not prove that the namespace
@@ -690,6 +1233,19 @@ impl PinnedRegularFile {
     /// Observe the exact descriptor for a later stable conditional read.
     pub fn observation(&self) -> Result<OpenRegularFileObservation> {
         observe_open_regular_file(&self.file)
+    }
+
+    /// Return the age of this exact file inode's modification time. This is a
+    /// diagnostic clock observation, never file identity or stale authority.
+    pub fn modification_age(&self) -> Result<Option<crate::time::Duration>> {
+        let metadata = self
+            .file
+            .metadata()
+            .with_context(|| format!("inspect pinned regular file {}", self.path.display()))?;
+        Ok(metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok()))
     }
 
     /// Read this exact descriptor and prove it still matches a prior
@@ -724,6 +1280,12 @@ impl PinnedRegularFile {
         observe_open_regular_file(&self.file)?.permission_mode()
     }
 
+    /// Apply an exact portable mode to this pinned regular inode.
+    pub fn set_mode(&self, mode: u32) -> Result<()> {
+        set_open_regular_file_mode(&self.file, mode)
+            .with_context(|| format!("protect pinned regular file {}", self.path.display()))
+    }
+
     /// Return the byte length observed from this exact descriptor.
     pub fn size(&self) -> Result<u64> {
         let metadata = self
@@ -756,6 +1318,26 @@ impl PinnedRegularFile {
         }
     }
 
+    /// Acquire a shared advisory lock on this exact open inode.
+    ///
+    /// The retained [`PinnedRegularFile`] is the lock authority. Dropping it
+    /// (and every descriptor clone derived from it) releases the shared lease
+    /// according to the platform lock contract.
+    pub fn lock_shared(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("regular-file advisory locking is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!("shared-lock pinned regular file {}", self.path.display())
+                });
+            }
+            Ok(())
+        }
+    }
+
     /// Attempt to acquire an exclusive advisory lock on this exact inode.
     /// Returns `false` only when another owner currently holds the lock.
     pub fn try_lock_exclusive(&self) -> Result<bool> {
@@ -778,6 +1360,26 @@ impl PinnedRegularFile {
         }
     }
 
+    /// Refresh the modification time of this exact open inode to the host's
+    /// current wall clock. This is an operational recency signal only; it must
+    /// never participate in durable identity or authorization.
+    pub fn refresh_modification_time(&self) -> Result<()> {
+        self.file
+            .set_modified(SystemTime::now())
+            .with_context(|| format!("touch pinned regular file {}", self.path.display()))
+    }
+
+    /// Observe this exact inode's modification time as an opaque ordering
+    /// coordinate. Filesystems that cannot report a modification time return
+    /// `None`; callers can conservatively treat that as oldest.
+    pub fn modification_time(&self) -> Result<Option<FilesystemModificationTime>> {
+        let metadata = self
+            .file
+            .metadata()
+            .with_context(|| format!("inspect pinned regular file {}", self.path.display()))?;
+        Ok(metadata.modified().ok().map(FilesystemModificationTime))
+    }
+
     /// Duplicate this exact open descriptor for a boundary whose own type
     /// retains descriptor authority (for example CAS ingestion or isolation).
     ///
@@ -789,6 +1391,22 @@ impl PinnedRegularFile {
         self.file
             .try_clone()
             .with_context(|| format!("duplicate pinned regular file {}", self.path.display()))
+    }
+
+    /// Derive a child descriptor with one registered lifetime owner. The
+    /// original remains a pinned byte source, never a plain inherited handle.
+    pub fn inherited_descriptor_authority(
+        &self,
+    ) -> Result<crate::exec::InheritedDescriptorAuthority> {
+        #[cfg(not(unix))]
+        anyhow::bail!("inherited descriptor authority is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let file = self.file.try_clone()?;
+            crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
+                .map_err(anyhow::Error::msg)
+        }
     }
 
     /// Require this already-open regular file to carry at least one executable
@@ -821,10 +1439,22 @@ impl PinnedRegularFile {
     }
 
     /// Consume this exact file authority into a descriptor-rooted child path.
+    ///
+    /// For ordinary descendant processes in a sealed namespace, see
+    /// [`Self::verified_read_only_namespace_path`].
     pub fn into_inherited_descriptor_path(
         self,
     ) -> Result<crate::exec::InheritedDescriptorAuthority> {
         crate::exec::inherited_descriptor_path(self.file).map_err(anyhow::Error::msg)
+    }
+
+    /// Prove that this absolute, no-follow spelling still selects this exact
+    /// file and traverses only read-only mounts, including every ancestor.
+    /// Unlike descriptor paths it survives ordinary descendants closing FDs.
+    /// The caller must already confine mount changes (as Lillux's native
+    /// sandbox does); this check does not seal mounts or immutable bytes.
+    pub fn verified_read_only_namespace_path(&self) -> Result<PathBuf> {
+        verified_read_only_namespace_path(&self.path, &self.file)
     }
 }
 
@@ -1003,6 +1633,51 @@ impl Drop for PinnedDirectoryLockInner {
 }
 
 impl PinnedDirectoryLock {
+    /// Replace this process while retaining the SAME locked open description.
+    /// Success never runs this guard's unlock destructor; failure keeps normal
+    /// RAII cleanup. Do not implement this as spawn + dropping the guard: an
+    /// explicit LOCK_UN would release the child's duplicated lock too.
+    /// `locator_env` carries only a descriptor locator. The receiver must call
+    /// require_inherited_exclusive_lock against its independently selected root.
+    pub fn exec_command_with_lock(
+        &self,
+        command: &mut std::process::Command,
+        locator_env: &str,
+    ) -> Result<std::convert::Infallible> {
+        if locator_env.is_empty() || locator_env.contains(['=', '\0']) {
+            anyhow::bail!("invalid inherited lock locator name");
+        }
+        #[cfg(unix)]
+        {
+            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let inherited = crate::exec::InheritedDescriptorAuthority::from_owned_file(
+                self.inner.file.try_clone()?,
+                &lease,
+            )
+            .map_err(anyhow::Error::msg)?;
+            drop(lease);
+            command.env(
+                locator_env,
+                inherited
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            );
+            crate::configure_inherited_descriptor_authorities(
+                command,
+                std::slice::from_ref(&inherited),
+            )
+            .map_err(anyhow::Error::msg)?;
+            Err(crate::replace_current_process(command))
+                .context("exec while retaining directory transaction lock")
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = command;
+            anyhow::bail!("inherited directory transaction locks are unavailable on this OS")
+        }
+    }
+
     /// Prove that this guard protects the exact directory inode selected by
     /// `directory`. Cloned guards share one underlying flock and release it
     /// only after the last guard is dropped.
@@ -1030,6 +1705,128 @@ impl PinnedDirectoryLock {
 }
 
 impl PinnedDirectory {
+    /// Validate a transported flock without unlocking it on return. Identity
+    /// alone is insufficient: an independent open must contend and the supplied
+    /// open description must itself own exclusive access. A numeric descriptor
+    /// or environment flag alone grants nothing. The caller retains the original
+    /// inherited descriptor for its complete transaction lifetime.
+    pub fn require_inherited_exclusive_lock(&self, descriptor: u32) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let descriptor =
+                i32::try_from(descriptor).context("inherited lock descriptor is out of range")?;
+            if descriptor <= libc::STDERR_FILENO {
+                anyhow::bail!("inherited lock overlaps stdio");
+            }
+            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            if duplicate < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let candidate = unsafe { File::from_raw_fd(duplicate) };
+            let held = candidate.metadata()?;
+            let expected = self.directory.metadata()?;
+            if !held.is_dir() || held.dev() != expected.dev() || held.ino() != expected.ino() {
+                anyhow::bail!("inherited transaction lock names a different directory");
+            }
+            let probe = self.independent_lock_descriptor()?;
+            if unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                // Closing this independently-open probe releases only its own
+                // acquired lock. No candidate lock was held in this case.
+                anyhow::bail!("selected directory has no inherited transaction owner");
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(error).context("probe inherited transaction exclusion");
+            }
+            if unsafe { libc::flock(candidate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("supplied descriptor does not own the transaction lock");
+            }
+            // File drops close duplicates only. Never LOCK_UN this shared OFD.
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = descriptor;
+            anyhow::bail!("inherited directory transaction locks are unavailable on this OS")
+        }
+    }
+
+    /// Select this exact directory for a child/controller exec. Do not turn a
+    /// verified pin back into Command::current_dir(path): a mutable parent can
+    /// replace that spelling between admission and exec.
+    pub fn configure_command_cwd(&self, command: &mut std::process::Command) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            let directory = self.directory.try_clone()?;
+            // SAFETY: the hook owns the descriptor through exec; fchdir is
+            // async-signal-safe and affects only the launching process.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(directory.as_raw_fd()) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = command;
+            anyhow::bail!("descriptor-selected working directories are unavailable")
+        }
+    }
+
+    /// Check this exact directory, not a pathname reopened after validation.
+    pub fn require_owner(&self, owner: u32) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = self.directory.metadata()?;
+            if metadata.uid() != owner || metadata.mode() & 0o022 != 0 {
+                anyhow::bail!(
+                    "pinned directory has unsafe ownership or permissions: {}",
+                    self.path.display()
+                );
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = owner;
+            anyhow::bail!("owned host directories are unavailable on this platform")
+        }
+    }
+
+    /// Open an absolute host-configuration path only through directories owned
+    /// by the selected administrator and not writable by others. Missing is
+    /// distinct from an unsafe ancestor/symlink and never conceals that error.
+    pub fn open_owned_hierarchy(path: &Path, owner: u32) -> Result<Option<Self>> {
+        if !path.is_absolute() {
+            anyhow::bail!("owned host hierarchy requires an absolute path");
+        }
+        let mut directory = Self::open(Path::new("/"))?
+            .ok_or_else(|| anyhow::anyhow!("host filesystem root is unavailable"))?;
+        directory.require_owner(owner)?;
+        for component in path.components() {
+            match component {
+                std::path::Component::RootDir => continue,
+                std::path::Component::Normal(name) => {
+                    let Some(child) = directory.open_child_directory(name)? else {
+                        return Ok(None);
+                    };
+                    child.require_owner(owner)?;
+                    directory = child;
+                }
+                _ => anyhow::bail!("owned host hierarchy has a noncanonical component"),
+            }
+        }
+        Ok(Some(directory))
+    }
+
     /// Adopt an already-open directory descriptor as a descriptor-relative
     /// authority. `path` is diagnostic only; all subsequent traversal and
     /// mutation remains rooted in `directory`.
@@ -1046,6 +1843,22 @@ impl PinnedDirectory {
             containing_device,
             inode,
         })
+    }
+
+    /// Return the age of this exact directory inode's modification time.
+    ///
+    /// Wall-clock observation and subtraction stay inside Lillux. `None`
+    /// means the filesystem does not expose a usable timestamp or reports a
+    /// value in the future, so callers must not classify it as stale.
+    pub fn modification_age(&self) -> Result<Option<crate::time::Duration>> {
+        let metadata = self
+            .directory
+            .metadata()
+            .with_context(|| format!("inspect pinned directory {}", self.path.display()))?;
+        Ok(metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok()))
     }
 
     /// Remove every entry below this exact pinned directory without following
@@ -1115,6 +1928,27 @@ impl PinnedDirectory {
         for entry in entries {
             let name_c = std::ffi::CString::new(entry.name.as_bytes())?;
             if entry.entry_type == PinnedEntryType::Directory {
+                if depth >= max_depth {
+                    anyhow::bail!("recursive removal exceeds its directory depth bound");
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    // Removing an empty directory requires access to its
+                    // parent, not read access to the child. OverlayFS leaves
+                    // mode-000 work directories: pin them without opening
+                    // their contents, and let rmdir prove emptiness. Never
+                    // chmod an entry or follow an alias to make cleanup pass.
+                    let pinned = self
+                        .open_mount_entry(&entry.name)?
+                        .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
+                    let child = Self::from_open_directory(self.path.join(&entry.name), pinned)?;
+                    if child.directory.metadata()?.dev() != root_device {
+                        anyhow::bail!("refusing to cross mounted filesystem during removal");
+                    }
+                    if self.remove_empty_child_if_same(&entry.name, &child)? {
+                        continue;
+                    }
+                }
                 let child = self
                     .open_child_directory(&entry.name)?
                     .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
@@ -1320,6 +2154,31 @@ impl PinnedDirectory {
             );
         }
         Ok(())
+    }
+
+    /// Prove this absolute, no-follow spelling selects this exact directory
+    /// and traverses only read-only mounts, including every ancestor. The
+    /// caller must already confine subsequent mount changes. Writable views
+    /// intentionally cannot be converted to immutable namespace authority.
+    pub fn verified_read_only_namespace_path(&self) -> Result<PathBuf> {
+        verified_read_only_namespace_path(&self.path, &self.directory)
+    }
+
+    /// Prove a stable writable mountpoint selects this exact pinned directory.
+    /// Every ancestor must be mounted read-only, and the final directory must
+    /// be mounted writable. No component is followed through a symlink.
+    ///
+    /// The source's diagnostic path may differ from `destination`, or have
+    /// been renamed: authority is the exact held directory, not that path.
+    /// Only the leaf directory identity is stable; its contents remain mutable.
+    /// The caller must already confine future mount changes and separately
+    /// admit the destination. This method creates neither mounts nor grants.
+    pub fn verified_writable_mount_namespace_path(&self, destination: &Path) -> Result<PathBuf> {
+        verified_namespace_path(
+            destination,
+            &self.directory,
+            NamespaceLeafAccess::WritableDirectory,
+        )
     }
 
     /// Walk regular files beneath this exact pinned root. Every child is
@@ -1976,13 +2835,25 @@ impl PinnedDirectory {
         }
     }
 
+    #[cfg(unix)]
+    fn independent_lock_descriptor(&self) -> Result<File> {
+        // dup/try_clone shares an open-file-description, so two acquisitions
+        // on the same PinnedDirectory would both succeed and either unlock
+        // would release the other's gate. Open "." relative to the retained
+        // descriptor: a new lock description for the exact same inode, never
+        // an ambient reopen of self.path(). Cloning an acquired guard remains
+        // intentionally shared through its existing Arc.
+        open_child_directory(&self.directory, c".", &self.path)?
+            .context("pinned directory disappeared while opening its lock description")
+    }
+
     /// Serialize cooperating mutations of this exact directory namespace.
     pub fn lock_exclusive(&self) -> Result<PinnedDirectoryLock> {
         #[cfg(not(unix))]
         anyhow::bail!("pinned directory locking is unavailable on this platform");
         #[cfg(unix)]
         {
-            let file = self.directory.try_clone()?;
+            let file = self.independent_lock_descriptor()?;
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
                 return Err(std::io::Error::last_os_error())
                     .with_context(|| format!("lock pinned directory {}", self.path.display()));
@@ -1990,6 +2861,31 @@ impl PinnedDirectory {
             Ok(PinnedDirectoryLock {
                 inner: Arc::new(PinnedDirectoryLockInner { file }),
             })
+        }
+    }
+
+    /// Attempt to serialize cooperating mutations of this exact directory
+    /// namespace. `Ok(None)` is exclusively the ordinary contention result;
+    /// callers do not need to interpret a native lock error or descriptor.
+    pub fn try_lock_exclusive(&self) -> Result<Option<PinnedDirectoryLock>> {
+        #[cfg(not(unix))]
+        anyhow::bail!("pinned directory locking is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            let file = self.independent_lock_descriptor()?;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Some(PinnedDirectoryLock {
+                    inner: Arc::new(PinnedDirectoryLockInner { file }),
+                }));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                Ok(None)
+            } else {
+                Err(error).with_context(|| format!("lock pinned directory {}", self.path.display()))
+            }
         }
     }
 
@@ -2007,7 +2903,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            let file = self.directory.try_clone()?;
+            let file = self.independent_lock_descriptor()?;
             let started = crate::time::MonotonicTimer::start();
             loop {
                 if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -2111,6 +3007,36 @@ impl PinnedDirectory {
                 })?;
             Ok(Self { path, directory })
         }
+    }
+
+    /// Create one collision-resistant private staging child. Process identity,
+    /// entropy, retry, and exact descriptor reopening remain Lillux mechanics;
+    /// the caller supplies only a diagnostic namespace prefix and mode.
+    pub fn create_unique_child(&self, prefix: &str, mode: u32) -> Result<(OsString, Self)> {
+        const MAX_ATTEMPTS: usize = 1_024;
+        if prefix.is_empty()
+            || prefix.len() > 160
+            || prefix.bytes().any(|byte| matches!(byte, 0 | b'/'))
+        {
+            anyhow::bail!("unique child prefix is not a bounded direct-child name");
+        }
+        for _ in 0..MAX_ATTEMPTS {
+            let name = OsString::from(format!(
+                "{prefix}.{}.{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            match self.create_child(&name, mode) {
+                Ok(child) => return Ok((name, child)),
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) => {
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        anyhow::bail!("could not reserve a unique private staging child")
     }
 
     /// Atomically exchange two directory children only while both names still
@@ -2480,12 +3406,134 @@ impl PinnedDirectory {
         }))
     }
 
+    /// Open one normalized regular-file descendant without following any
+    /// component through a symlink. The returned authority retains the exact
+    /// file descriptor and its descriptor-relative coordinate; callers do not
+    /// need to reconstruct traversal from raw `openat` operations.
+    pub fn open_pinned_regular_descendant(
+        &self,
+        relative: &Path,
+        writable: bool,
+    ) -> Result<Option<PinnedRegularFile>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (relative, writable);
+            anyhow::bail!("descriptor-relative descendant opening is unavailable")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let mut components = relative.components().peekable();
+            let mut directory = self
+                .directory
+                .try_clone()
+                .with_context(|| format!("clone pinned directory {}", self.path.display()))?;
+            let mut display = self.path.clone();
+            while let Some(component) = components.next() {
+                let std::path::Component::Normal(name) = component else {
+                    anyhow::bail!(
+                        "pinned regular descendant path is not normalized: {}",
+                        relative.display()
+                    );
+                };
+                if components.peek().is_none() {
+                    let name_c = std::ffi::CString::new(name.as_bytes())?;
+                    let file = open_regular_at_flags(
+                        &directory,
+                        &name_c,
+                        &display.join(name),
+                        if writable {
+                            libc::O_RDWR
+                        } else {
+                            libc::O_RDONLY
+                        },
+                        0,
+                        0,
+                    )?;
+                    return Ok(file.map(|file| PinnedRegularFile {
+                        path: display.join(name),
+                        name: name.to_os_string(),
+                        file,
+                    }));
+                }
+                let name_c = std::ffi::CString::new(name.as_bytes())?;
+                let child_path = display.join(name);
+                let Some(child) = open_child_directory(&directory, &name_c, &child_path)? else {
+                    return Ok(None);
+                };
+                directory = child;
+                display = child_path;
+            }
+            anyhow::bail!("pinned regular descendant path is empty")
+        }
+    }
+
     /// Consume this exact directory authority into a descriptor-rooted child
     /// path without reopening its ambient namespace name.
     pub fn into_inherited_descriptor_path(
         self,
     ) -> Result<crate::exec::InheritedDescriptorAuthority> {
         crate::exec::inherited_descriptor_path(self.directory).map_err(anyhow::Error::msg)
+    }
+
+    pub fn inherited_descriptor_authority(
+        &self,
+    ) -> Result<crate::exec::InheritedDescriptorAuthority> {
+        #[cfg(not(unix))]
+        anyhow::bail!("inherited descriptor authority is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let file = self.directory.try_clone()?;
+            crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
+                .map_err(anyhow::Error::msg)
+        }
+    }
+
+    /// Open and register an exact child mount descriptor before another
+    /// attachment may fork. Ordinary byte-stream callers keep open_regular.
+    pub fn open_inherited_mount_entry(
+        &self,
+        name: &OsStr,
+    ) -> Result<Option<crate::exec::InheritedDescriptorAuthority>> {
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            anyhow::bail!("inherited mount authority is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            self.open_mount_entry(name)?
+                .map(|file| {
+                    crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
+                        .map_err(anyhow::Error::msg)
+                })
+                .transpose()
+        }
+    }
+
+    pub fn open_inherited_regular(
+        &self,
+        name: &OsStr,
+        writable: bool,
+    ) -> Result<Option<crate::exec::InheritedDescriptorAuthority>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, writable);
+            anyhow::bail!("inherited descriptor authority is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            self.open_regular(name, writable)?
+                .map(|file| {
+                    crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
+                        .map_err(anyhow::Error::msg)
+                })
+                .transpose()
+        }
     }
 
     /// Pin one direct child as an `O_PATH` mount source. Regular files,
@@ -2616,6 +3664,23 @@ impl PinnedDirectory {
                 }
             }
         }
+    }
+
+    /// Typed counterpart to [`Self::atomic_create_regular`]. The returned
+    /// child coordinate and exact created inode remain one Lillux authority.
+    pub fn atomic_create_pinned_regular(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<Option<PinnedRegularFile>> {
+        Ok(self
+            .atomic_create_regular(name, bytes, mode)?
+            .map(|file| PinnedRegularFile {
+                path: self.path.join(name),
+                name: name.to_os_string(),
+                file,
+            }))
     }
 
     /// Stream and publish one bounded regular file without replacing an
@@ -2778,6 +3843,26 @@ impl PinnedDirectory {
             )?
             .ok_or_else(|| anyhow::anyhow!("created regular file disappeared"))
         }
+    }
+
+    /// Open or create one regular child as an exact typed authority.
+    ///
+    /// This is the create counterpart to [`Self::open_pinned_regular`]. It is
+    /// intended for descriptor-scoped leases and locks whose OS mechanics
+    /// must not escape into the caller.
+    pub fn open_pinned_regular_create(
+        &self,
+        name: &OsStr,
+        writable: bool,
+        create_new: bool,
+        mode: u32,
+    ) -> Result<PinnedRegularFile> {
+        let file = self.open_regular_create(name, writable, create_new, mode)?;
+        Ok(PinnedRegularFile {
+            path: self.path.join(name),
+            name: name.to_os_string(),
+            file,
+        })
     }
 
     /// Materialize one already-open immutable regular file as a new child.
@@ -4178,13 +5263,19 @@ impl PinnedDirectory {
             validate_child_name(name)?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
             let path = self.path.join(name);
+            #[cfg(target_os = "linux")]
+            let current = self.open_mount_entry(name)?.ok_or_else(|| {
+                anyhow::anyhow!("secure child directory disappeared: {}", path.display())
+            })?;
+            #[cfg(not(target_os = "linux"))]
             let current =
                 open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
                     anyhow::anyhow!("secure child directory disappeared: {}", path.display())
                 })?;
             let current_metadata = current.metadata()?;
             let expected_metadata = expected.directory.metadata()?;
-            if current_metadata.dev() != expected_metadata.dev()
+            if !current_metadata.is_dir()
+                || current_metadata.dev() != expected_metadata.dev()
                 || current_metadata.ino() != expected_metadata.ino()
             {
                 anyhow::bail!(
@@ -4579,6 +5670,105 @@ pub fn open_pinned_regular_file_no_follow(path: &Path) -> Result<PinnedRegularFi
         .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))
 }
 
+/// Resolve one existing ambient pathname for higher-level namespace policy.
+/// The result is diagnostic/semantic path data only; callers that execute or
+/// mount content must separately retain a descriptor authority.
+pub fn canonicalize_existing_path(path: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(path)
+        .with_context(|| format!("canonicalize existing path {}", path.display()))
+}
+
+/// Existing host roots that a same-UID sandbox must never receive as a broad
+/// writable mount. This is a Linux/host-layout safety floor, not authored
+/// workload policy; callers may add narrower protected roots but cannot make
+/// these disappear.
+pub fn protected_system_write_roots() -> Vec<PathBuf> {
+    let mut roots = [
+        "/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+    ]
+    .into_iter()
+    .filter_map(|path| canonicalize_existing_path(Path::new(path)).ok())
+    .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Canonical current-user home from the process environment, when usable.
+/// This is host diagnostic data only; it never becomes workload authority.
+pub fn current_user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").and_then(|home| canonicalize_existing_path(Path::new(&home)).ok())
+}
+
+/// Pin one already-canonical absolute mount source with `O_PATH`, without
+/// following its final component, and prove the resulting descriptor still
+/// resolves to that exact canonical spelling. Raw open/fcntl/procfs mechanics
+/// stay entirely inside Lillux.
+pub fn pin_canonical_mount_source(
+    path: &Path,
+) -> Result<crate::exec::InheritedDescriptorAuthority> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        anyhow::bail!("descriptor-pinned mount sources require Linux")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        if !path.is_absolute() {
+            anyhow::bail!("mount source is not absolute: {}", path.display());
+        }
+        let encoded = CString::new(path.as_os_str().as_bytes())
+            .context("mount source contains an interior NUL")?;
+        let lease = crate::exec::retain_fork_sensitive_descriptors();
+        let mut descriptor = unsafe {
+            libc::open(
+                encoded.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("pin mount source {}", path.display()));
+        }
+        if descriptor <= libc::STDERR_FILENO {
+            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            let duplicate_error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(descriptor);
+            }
+            if duplicate < 0 {
+                return Err(duplicate_error)
+                    .with_context(|| format!("move mount descriptor for {}", path.display()));
+            }
+            descriptor = duplicate;
+        }
+        // SAFETY: `open`/`fcntl` returned one newly owned descriptor.
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        open_mount_entry_kind(&file)?;
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let observed = std::fs::read_link(&descriptor_path).with_context(|| {
+            format!(
+                "resolve pinned mount source {} through {}",
+                path.display(),
+                descriptor_path.display()
+            )
+        })?;
+        if observed != path {
+            anyhow::bail!(
+                "mount source {} changed while it was pinned (opened {})",
+                path.display(),
+                observed.display()
+            );
+        }
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
 /// Open an existing regular file without following links and refuse to read
 /// more than `max_bytes`. The limit is enforced against both metadata and the
 /// bytes actually read from the pinned descriptor.
@@ -4612,10 +5802,10 @@ pub fn read_open_regular_file_bounded(mut file: File, max_bytes: u64) -> Result<
 /// Read an already-open regular file whose descriptor length was observed by
 /// the caller before reserving memory.
 ///
-/// The allocation is exactly `expected_bytes + 1`: the sentinel byte closes a
-/// concurrent-growth race without allowing `read_to_end` to grow the vector
-/// beyond the caller's reservation. The descriptor identity and metadata must
-/// remain stable across the read, and the sentinel must remain unused.
+/// The allocation is exactly `expected_bytes`, plus one stack sentinel byte.
+/// Positional bounded reads close the concurrent-growth and shared-cursor races
+/// without growing beyond the caller's reservation. The descriptor identity
+/// and metadata must remain stable, and the sentinel must remain unused.
 pub fn read_open_regular_file_exact_bounded(
     mut file: File,
     expected_bytes: u64,
@@ -4634,27 +5824,11 @@ pub fn read_open_regular_file_exact_bounded(
             before.len()
         );
     }
-    let allocation_bytes = expected_bytes
-        .checked_add(1)
-        .ok_or_else(|| anyhow::anyhow!("regular-file sentinel allocation overflow"))?;
-    let capacity = usize::try_from(allocation_bytes)
-        .context("regular-file sentinel allocation does not fit this platform")?;
-    file.seek(std::io::SeekFrom::Start(0))?;
-    let mut bytes = Vec::with_capacity(capacity);
-    std::io::Read::by_ref(&mut file)
-        .take(allocation_bytes)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).ok() != Some(expected_bytes) {
-        anyhow::bail!(
-            "open regular-file length changed while reading (expected {expected_bytes}, read {})",
-            bytes.len()
-        );
-    }
-    let after = file.metadata()?;
-    if !same_regular_file_observation(&before, &after) {
-        anyhow::bail!("open regular-file identity or metadata changed while reading");
-    }
-    Ok(bytes)
+    read_open_regular_file_stable_bounded(
+        &mut file,
+        &OpenRegularFileObservation { metadata: before },
+        max_bytes,
+    )
 }
 
 /// UTF-8 variant of [`read_regular_file_no_follow`].
@@ -4861,6 +6035,18 @@ where
     P: FnMut(&Path, bool) -> Result<bool>,
     V: FnMut(&Path, File) -> Result<()>,
 {
+    // Keep traversal depth in an explicit descriptor-retaining stack. A
+    // policy-bounded tree is not necessarily call-stack bounded, and this
+    // primitive is used while recovering large admitted project snapshots on
+    // runtime threads with deliberately finite stacks. Higher layers must not
+    // need OS- or executor-specific stack sizing to walk filesystem authority.
+    struct DirectoryFrame {
+        relative: PathBuf,
+        directory: File,
+        names: std::vec::IntoIter<std::ffi::OsString>,
+        depth: usize,
+    }
+
     let names = if let Some(state) = budget.as_deref_mut() {
         let names = directory_names_with_limit(directory, state.remaining_entries)?;
         state.remaining_entries = state.remaining_entries.saturating_sub(names.len());
@@ -4868,14 +6054,25 @@ where
     } else {
         directory_names(directory)?
     };
-    for name in names {
-        let relative = relative_directory.join(&name);
+    let mut frames = vec![DirectoryFrame {
+        relative: relative_directory.to_path_buf(),
+        directory: directory.try_clone()?,
+        names: names.into_iter(),
+        depth,
+    }];
+
+    while let Some(frame) = frames.last_mut() {
+        let Some(name) = frame.names.next() else {
+            frames.pop();
+            continue;
+        };
+        let relative = frame.relative.join(&name);
         let display = root.join(&relative);
         let name_c = std::ffi::CString::new(name.as_bytes())?;
-        if let Some(child_directory) = open_child_directory(directory, &name_c, &display)? {
+        if let Some(child_directory) = open_child_directory(&frame.directory, &name_c, &display)? {
             if !prune(&relative, true)? {
                 if let Some(state) = budget.as_ref()
-                    && depth >= state.max_depth
+                    && frame.depth >= state.max_depth
                 {
                     anyhow::bail!(
                         "secure directory traversal exceeds maximum depth {} at {}",
@@ -4883,19 +6080,25 @@ where
                         display.display()
                     );
                 }
-                visit_from_open_directory(
-                    root,
-                    &relative,
-                    &child_directory,
-                    budget.as_deref_mut(),
-                    depth.saturating_add(1),
-                    prune,
-                    visit,
-                )?;
+                let child_names = if let Some(state) = budget.as_deref_mut() {
+                    let names =
+                        directory_names_with_limit(&child_directory, state.remaining_entries)?;
+                    state.remaining_entries = state.remaining_entries.saturating_sub(names.len());
+                    names
+                } else {
+                    directory_names(&child_directory)?
+                };
+                let child_depth = frame.depth.saturating_add(1);
+                frames.push(DirectoryFrame {
+                    relative,
+                    directory: child_directory,
+                    names: child_names.into_iter(),
+                    depth: child_depth,
+                });
             }
             continue;
         }
-        let file = open_regular_at(directory, &name_c, &display)?.ok_or_else(|| {
+        let file = open_regular_at(&frame.directory, &name_c, &display)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "secure project walk encountered a symlink, special file, or disappearing entry: {}",
                 display.display()
@@ -5238,6 +6441,181 @@ fn restore_quarantined_regular(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn owned_host_files_reject_writable_modes_wrong_owners_and_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let owner = unsafe { libc::geteuid() };
+        root.require_owner(owner).unwrap();
+        assert!(root.require_owner(owner.wrapping_add(1)).is_err());
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(root.require_owner(owner).is_err());
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = temporary.path().join("host.json");
+        std::fs::write(&path, b"exact").unwrap();
+        let file = root
+            .open_pinned_regular(OsStr::new("host.json"), false)
+            .unwrap()
+            .unwrap();
+        file.require_owner(owner).unwrap();
+        assert!(file.require_owner(owner.wrapping_add(1)).is_err());
+        file.set_mode(0o666).unwrap();
+        assert!(file.require_owner(owner).is_err());
+        file.set_mode(0o600).unwrap();
+        std::fs::hard_link(&path, temporary.path().join("alias")).unwrap();
+        assert!(file.require_owner(owner).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_directory_discovery_distinguishes_absence_from_occupied_names() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert!(
+            directory
+                .open_child_directory(OsStr::new("absent"))
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(root.path().join("file"), b"occupied").unwrap();
+        std::fs::create_dir(root.path().join("real-directory")).unwrap();
+        symlink("real-directory", root.path().join("directory-link")).unwrap();
+        symlink("missing", root.path().join("dangling-link")).unwrap();
+        for name in ["file", "directory-link", "dangling-link"] {
+            assert!(
+                directory.open_child_directory(OsStr::new(name)).is_err(),
+                "{name} must not become direct-node fallback"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_controller_cwd_survives_path_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("node");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("marker"), b"retained").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.env_clear().args(["-c", "test -f marker"]);
+        root.configure_command_cwd(&mut command).unwrap();
+        std::fs::rename(&path, temporary.path().join("old-node")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(root.ensure_path_binding().is_err());
+        assert!(command.status().unwrap().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_only_namespace_path_rejects_noncanonical_spelling_before_mount_checks() {
+        let held = tempfile::tempfile().unwrap();
+        for path in [
+            "relative",
+            "/tmp/../member",
+            "/tmp/./member",
+            "/tmp//member",
+            "/tmp/",
+        ] {
+            let error = verified_read_only_namespace_path(Path::new(path), &held).unwrap_err();
+            assert!(
+                error.to_string().contains("absolute and normalized"),
+                "{path}: {error}"
+            );
+        }
+        let oversized = format!("/{}", "x".repeat(libc::PATH_MAX as usize));
+        assert!(verified_read_only_namespace_path(Path::new(&oversized), &held).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_only_namespace_object_check_requires_exact_held_inode_and_type() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("member");
+        std::fs::write(&path, b"same bytes").unwrap();
+        let held = File::open(&path).unwrap();
+        require_same_namespace_object(&held, &File::open(&path).unwrap()).unwrap();
+        std::fs::rename(&path, root.path().join("prior")).unwrap();
+        std::fs::write(&path, b"same bytes").unwrap();
+        assert!(require_same_namespace_object(&held, &File::open(&path).unwrap()).is_err());
+        assert!(require_same_namespace_object(&held, &File::open(root.path()).unwrap()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writable_mount_namespace_path_requires_directory_leaf_and_immutable_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert!(
+            pinned
+                .verified_writable_mount_namespace_path(root.path())
+                .is_err()
+        );
+        assert!(
+            pinned
+                .verified_writable_mount_namespace_path(Path::new("relative"))
+                .is_err()
+        );
+        let error = pinned
+            .verified_writable_mount_namespace_path(Path::new("/"))
+            .unwrap_err();
+        assert!(error.to_string().contains("non-root pinned directory"));
+        let file = tempfile::tempfile().unwrap();
+        let error = verified_namespace_path(
+            Path::new("/leaf"),
+            &file,
+            NamespaceLeafAccess::WritableDirectory,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("non-root pinned directory"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_only_namespace_path_rejects_writable_mount_and_symlink_rebinding() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("member");
+        std::fs::write(&path, b"exact").unwrap();
+        let held = open_pinned_regular_file_no_follow(&path).unwrap();
+        assert!(held.verified_read_only_namespace_path().is_err());
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert!(directory.verified_read_only_namespace_path().is_err());
+        std::fs::rename(&path, root.path().join("prior")).unwrap();
+        std::os::unix::fs::symlink("prior", &path).unwrap();
+        assert!(held.verified_read_only_namespace_path().is_err());
+        assert!(open_pinned_regular_file_no_follow(&path).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_scoped_flat_generations_retain_live_peers_and_remove_exact_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let first = ProcessScopedFlatDirectoryGeneration::create_relative(
+            &pinned,
+            &["state", "cache", "generations"],
+        )
+        .unwrap();
+        let first_path = first.directory().path().to_path_buf();
+        let second = ProcessScopedFlatDirectoryGeneration::create_relative(
+            &pinned,
+            &["state", "cache", "generations"],
+        )
+        .unwrap();
+        let second_path = second.directory().path().to_path_buf();
+        assert!(first_path.is_dir());
+        assert!(second_path.is_dir());
+
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second_path.is_dir());
+        drop(second);
+        assert!(!second_path.exists());
+    }
+
     #[test]
     fn stable_exact_digest_rejects_size_drift_before_body_work() {
         let root = tempfile::tempdir().unwrap();
@@ -5251,6 +6629,30 @@ mod tests {
 
         let mut file = File::open(&path).unwrap();
         assert!(digest_open_regular_file_stable_exact(&mut file, 1).is_err());
+    }
+
+    #[test]
+    fn stable_exact_digest_does_not_consume_runtime_worker_stack() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("value");
+        let bytes = vec![0x5a; 21 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let expected = crate::sha256_hex(&bytes);
+
+        let observed = std::thread::Builder::new()
+            .name("bounded-file-digest".to_owned())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let file = File::open(path).unwrap();
+                digest_open_regular_file_stable_exact(&file, bytes.len() as u64)
+                    .unwrap()
+                    .0
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(observed, expected);
     }
 
     #[cfg(unix)]
@@ -5582,6 +6984,30 @@ mod tests {
         assert!(read_open_regular_file_stable_bounded(&mut file, &observed, 1024).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exact_descriptor_reads_leave_a_shared_cursor_unchanged() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"exact retained bytes").unwrap();
+        file.seek(std::io::SeekFrom::Start(4)).unwrap();
+        let observed = observe_open_regular_file(&file).unwrap();
+        let mut clone = file.try_clone().unwrap();
+        assert_eq!(
+            read_open_regular_file_stable_bounded(&mut clone, &observed, 128).unwrap(),
+            b"exact retained bytes"
+        );
+        assert_eq!(file.stream_position().unwrap(), 4);
+        let (digest, _) =
+            digest_open_regular_file_stable_exact(&mut clone, observed.size()).unwrap();
+        assert_eq!(digest, crate::cas::sha256_hex(b"exact retained bytes"));
+        assert_eq!(file.stream_position().unwrap(), 4);
+        assert_eq!(
+            read_open_regular_file_exact_bounded(clone, observed.size(), 128).unwrap(),
+            b"exact retained bytes"
+        );
+        assert_eq!(file.stream_position().unwrap(), 4);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn conditional_regular_remove_preserves_a_racing_target() {
@@ -5764,6 +7190,134 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_lock_same_pin_acquisitions_are_independent_after_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("node");
+        std::fs::create_dir(&path).unwrap();
+        let directory = PinnedDirectory::open(&path).unwrap().unwrap();
+        let guard = directory.lock_exclusive().unwrap();
+        let retained = guard.clone();
+        assert!(
+            directory
+                .lock_exclusive_with_timeout(crate::time::Duration::ZERO)
+                .is_err()
+        );
+        drop(guard);
+        assert!(
+            directory
+                .lock_exclusive_with_timeout(crate::time::Duration::ZERO)
+                .is_err()
+        );
+        std::fs::rename(&path, root.path().join("original")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            directory
+                .lock_exclusive_with_timeout(crate::time::Duration::ZERO)
+                .is_err()
+        );
+        drop(retained);
+        let acquired = directory
+            .lock_exclusive_with_timeout(crate::time::Duration::ZERO)
+            .unwrap();
+        acquired.ensure_protects(&directory).unwrap();
+        assert!(
+            acquired
+                .ensure_protects(&PinnedDirectory::open(&path).unwrap().unwrap())
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_directory_lock_requires_owned_description_and_preserves_exclusion() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let unowned = directory.try_clone_descriptor().unwrap();
+        assert!(
+            directory
+                .require_inherited_exclusive_lock(unowned.as_raw_fd() as u32)
+                .is_err()
+        );
+        let guard = directory.lock_exclusive().unwrap();
+        let coordinate = guard.inner.file.as_raw_fd() as u32;
+        directory
+            .require_inherited_exclusive_lock(coordinate)
+            .unwrap();
+        assert!(
+            directory
+                .require_inherited_exclusive_lock(unowned.as_raw_fd() as u32)
+                .is_err()
+        );
+        let other_temp = tempfile::tempdir().unwrap();
+        let other = PinnedDirectory::open(other_temp.path()).unwrap().unwrap();
+        assert!(other.require_inherited_exclusive_lock(coordinate).is_err());
+        assert!(
+            directory
+                .lock_exclusive_with_timeout(std::time::Duration::ZERO)
+                .is_err()
+        );
+        drop(guard);
+        directory
+            .lock_exclusive_with_timeout(std::time::Duration::ZERO)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_directory_lock_survives_exec_and_releases_on_exit() {
+        const PHASE: &str = "LILLUX_LOCK_EXEC_TEST_PHASE";
+        const ROOT: &str = "LILLUX_LOCK_EXEC_TEST_ROOT";
+        const FD: &str = "LILLUX_LOCK_EXEC_TEST_FD";
+        const TEST: &str =
+            "secure_fs::tests::inherited_directory_lock_survives_exec_and_releases_on_exit";
+        match std::env::var(PHASE).ok().as_deref() {
+            Some("before") => {
+                let directory = PinnedDirectory::open(Path::new(&std::env::var(ROOT).unwrap()))
+                    .unwrap()
+                    .unwrap();
+                let guard = directory.lock_exclusive().unwrap();
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(PHASE, "after");
+                match guard.exec_command_with_lock(&mut command, FD) {
+                    Ok(never) => match never {},
+                    Err(error) => panic!("exec child while retaining lock: {error:#}"),
+                }
+            }
+            Some("after") => {
+                let directory = PinnedDirectory::open(Path::new(&std::env::var(ROOT).unwrap()))
+                    .unwrap()
+                    .unwrap();
+                directory
+                    .require_inherited_exclusive_lock(std::env::var(FD).unwrap().parse().unwrap())
+                    .unwrap();
+                assert!(
+                    directory
+                        .lock_exclusive_with_timeout(std::time::Duration::ZERO)
+                        .is_err()
+                );
+            }
+            None => {
+                let temp = tempfile::tempdir().unwrap();
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(PHASE, "before")
+                    .env(ROOT, temp.path())
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                let directory = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+                directory
+                    .lock_exclusive_with_timeout(std::time::Duration::ZERO)
+                    .unwrap();
+            }
+            Some(other) => panic!("unexpected fixture phase {other}"),
+        }
     }
 
     #[cfg(unix)]
@@ -6008,6 +7562,46 @@ mod tests {
         assert_eq!(
             visited,
             vec![PathBuf::from("nested/leaf"), PathBuf::from("root")]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_regular_file_walk_retains_deep_authority_without_call_stack_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut current = dir.path().to_path_buf();
+        for index in 0..64 {
+            current.push(format!("d{index}"));
+            std::fs::create_dir(&current).unwrap();
+        }
+        std::fs::write(current.join("leaf"), b"leaf").unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+
+        let visited = std::thread::Builder::new()
+            .name("bounded-descriptor-walk".to_owned())
+            .stack_size(32 * 1024)
+            .spawn(move || {
+                let mut visited = Vec::new();
+                pinned
+                    .visit_regular_files_bounded(
+                        DirectoryTraversalBudget::new(65, 64),
+                        |_relative, _directory| Ok(false),
+                        |relative, _file| {
+                            visited.push(relative.to_path_buf());
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                visited
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(visited.len(), 1);
+        assert_eq!(
+            visited[0],
+            current.strip_prefix(dir.path()).unwrap().join("leaf")
         );
     }
 

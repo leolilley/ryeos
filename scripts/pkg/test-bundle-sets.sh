@@ -6,11 +6,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT/scripts/pkg/bundle-sets.sh"
 
 mapfile -t full < <(ryeos_bundle_set_names full)
-mapfile -t sandbox < <(ryeos_bundle_set_names full-sandbox)
 mapfile -t hosted_workflow < <(ryeos_bundle_set_names hosted-workflow)
 mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
 mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
-mapfile -t sandbox_bin_managed < <(ryeos_bundle_set_bin_managed_names full-sandbox)
 
 contains() {
   local needle="$1"
@@ -59,14 +57,14 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full full-sandbox central-host standard hosted-node hosted-workflow" ]]
+[[ "${bundle_set_ids[*]}" == "full central-host standard hosted-node hosted-workflow" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains central-auth "${members[@]}"
 done
 
-[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex" ]]
-[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex local-inference tv-tracker-authoring" ]]
+[[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex opencode" ]]
+[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
 done
@@ -74,7 +72,10 @@ done
 ! ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "${bundle_set_ids[*]}" ]]
+[[ "${node_init_profiles[*]}" == "${bundle_set_ids[*]} development" ]]
+[[ "$(ryeos_node_init_profile_bundle_set development)" == "full" ]]
+! ryeos_node_init_profile_bundle_set release-artifacts
+! ryeos_node_init_profile_bundle_set unknown
 node_init_profile_dir="$ROOT/bundles/.ai/node/init/profiles"
 [[ -d "$node_init_profile_dir" && ! -L "$node_init_profile_dir" ]]
 ryeos_validate_node_init_root "$ROOT/bundles/.ai/node/init"
@@ -95,11 +96,12 @@ fi
   ! ryeos_validate_node_init_root "$invalid_init_root" >/dev/null 2>&1
 )
 
-for set_name in "${bundle_set_ids[@]}"; do
-  node_init_profile="$node_init_profile_dir/$set_name.yaml"
-  ryeos_validate_node_init_profile "$set_name" "$node_init_profile"
+for profile_name in "${node_init_profiles[@]}"; do
+  node_init_profile="$node_init_profile_dir/$profile_name.yaml"
+  ryeos_validate_node_init_profile "$profile_name" "$node_init_profile"
   verify_dev_signed_profile "$node_init_profile"
-  expected_exact_bundles="$(ryeos_bundle_set_names "$set_name" | sort)"
+  profile_bundle_set="$(ryeos_node_init_profile_bundle_set "$profile_name")"
+  expected_exact_bundles="$(ryeos_bundle_set_names "$profile_bundle_set" | sort)"
   actual_exact_bundles="$(
     sed -n '/^exact_bundles:/,/^policies:/p' "$node_init_profile" \
       | sed -nE 's/^  - ([A-Za-z0-9_-]+)$/\1/p' \
@@ -109,12 +111,7 @@ for set_name in "${bundle_set_ids[@]}"; do
 done
 
 contains local-inference "${full[@]}"
-! contains sandbox-linux-bubblewrap "${full[@]}"
-contains local-inference "${sandbox[@]}"
-contains sandbox-linux-bubblewrap "${sandbox[@]}"
 ! contains local-inference "${full_bin_managed[@]}"
-! contains local-inference "${sandbox_bin_managed[@]}"
-! contains sandbox-linux-bubblewrap "${sandbox_bin_managed[@]}"
 
 # Activation is a signed RyeOS service contract. Installed bundle sources do
 # not carry workload-specific operator assemblers or a packaging escape hatch

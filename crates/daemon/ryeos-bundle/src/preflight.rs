@@ -918,7 +918,10 @@ struct PreflightCommandRecord {
     parameter_binding: Option<PreflightCommandParameterBinding>,
     #[allow(dead_code)]
     #[serde(default)]
-    project: Option<PreflightCommandProject>,
+    // Project selection has one closed wire owner. Do not copy its fields here:
+    // a stale preflight mirror can reject descriptors accepted by the actual
+    // runtime and prevent the install needed to activate that same contract.
+    project: Option<ryeos_runtime::CommandProjectPolicy>,
     #[allow(dead_code)]
     #[serde(default)]
     control_flags: Vec<PreflightCommandControlFlag>,
@@ -1058,43 +1061,6 @@ enum PreflightFlagKeyNormalization {
     #[default]
     HyphenToUnderscore,
     Preserve,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightCommandProject {
-    #[allow(dead_code)]
-    #[serde(default)]
-    resolution: PreflightCommandProjectResolution,
-    #[allow(dead_code)]
-    #[serde(default)]
-    default: PreflightCommandProjectDefault,
-    #[allow(dead_code)]
-    #[serde(default)]
-    no_project_flag: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    request_project_path: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    bind_parameter: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum PreflightCommandProjectResolution {
-    #[default]
-    None,
-    Required,
-    Optional,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum PreflightCommandProjectDefault {
-    #[default]
-    None,
-    DiscoverUpwardAi,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1483,6 +1449,51 @@ mod tests {
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn preflight_accepts_shipped_core_command_contracts() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/core/.ai/node/commands");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+                continue;
+            }
+            let body: serde_json::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            validate_node_command_record(&path, &root, &body)
+                .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+            checked += 1;
+        }
+        assert!(checked > 0, "no shipped command descriptors were checked");
+    }
+
+    #[test]
+    fn preflight_uses_current_project_contract_for_shipped_remote_commands() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/core/.ai/node/commands");
+        for name in [
+            "remote-execute",
+            "remote-list",
+            "remote-status",
+            "remote-doctor",
+        ] {
+            let path = root.join(format!("{name}.yaml"));
+            let body: serde_json::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            validate_node_command_record(&path, &root, &body).unwrap();
+            let record: PreflightCommandRecord = serde_json::from_value(body.clone()).unwrap();
+            let policy = record.project.unwrap();
+            assert_eq!(
+                policy.bind_no_project_parameter.as_deref(),
+                (name != "remote-doctor").then_some("no_project")
+            );
+            let mut unknown = body;
+            unknown["project"]["undeclared_projection"] = serde_json::json!(true);
+            assert!(validate_node_command_record(&path, &root, &unknown).is_err());
+        }
+    }
 
     /// Regression: the shipped execute command declares `control_flags`; the
     /// preflight command-record schema must accept it (it previously rejected

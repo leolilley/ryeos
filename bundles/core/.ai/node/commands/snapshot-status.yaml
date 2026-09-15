@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-17T23:05:44Z:e3571e20332919f8ff0bc9a58c948f9db7eec5b4302012ee0e007ebaf1650402:gzAzXQP70m6wDrA1AH1+Tm+q3nQX59Pkg78FfRMoHaME7mbpQLjgIcGn6N1UpPMTfV0tYZyWyd97zLga3LWNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-06T06:51:53Z:e77b955a460e2bf13b74d79816323fbdb0bbcab350293bca877803912ce4a0eb:JnUIqfUw1br0kYCn42uZpCtC5hNS87AqGbB1jJKEHrRL3m1p75RhwDhBYFabeP1A6IYdLB2mK+UU0LW+LwPHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - status
 description: Show local project snapshot status
@@ -11,7 +11,9 @@ project:
   resolution: required
   request_project_path: true
   bind_parameter: project_path
+defaults:
+  time_budget_ms: 5000
 dispatch:
   kind: execute_ref
-  execute: tool:core/snapshot-status
-  availability: local
+  execute: service:project/snapshot-status
+  availability: both

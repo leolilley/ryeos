@@ -116,22 +116,47 @@ pub(crate) enum DefinitionIdentityScope {
 impl DefinitionIdentityScope {
     fn schema_tag(self) -> &'static str {
         match self {
-            Self::Effective => "ryeos.effective_definition.v2",
+            // v3 normalizes only the receiver-local product-witness source.
+            // The full source-bearing selection remains in sealed recovery
+            // state and in runtime-action request identity.
+            Self::Effective => "ryeos.effective_definition.v3",
             Self::Authored => "ryeos.authored_definition.v2",
         }
     }
 
-    fn composed_view(self, composed: &KindComposedView) -> KindComposedView {
+    fn composed_view(
+        self,
+        composed: &KindComposedView,
+    ) -> Result<KindComposedView, EffectiveDefinitionDigestError> {
         let mut view = composed.clone();
-        if matches!(self, Self::Authored) {
-            view.derived.retain(|key, _| {
-                !matches!(
-                    realization_derived_kind(key),
-                    Some(RealizationDerivedKind::External | RealizationDerivedKind::Source)
-                )
+        if matches!(self, Self::Effective) {
+            // State owns the one reserved-value projection shared with the
+            // admitted-capsule identity. Wrapping the composed view avoids
+            // cloning raw resolution payloads while retaining that exact
+            // closed decoder and semantic projection.
+            let wrapped = serde_json::json!({ "composed": view });
+            let projected = ryeos_state::external_content::products::composition::project_resolution_product_selections_for_identity(&wrapped)
+                .map_err(|error| EffectiveDefinitionDigestError(format!(
+                    "project effective-definition product selections: {error}"
+                )))?;
+            return serde_json::from_value(projected["composed"].clone()).map_err(|error| {
+                EffectiveDefinitionDigestError(format!(
+                    "decode projected effective-definition composed view: {error}"
+                ))
             });
         }
-        view
+        view.derived.retain(|key, _| {
+            !matches!(
+                realization_derived_kind(key),
+                Some(
+                    RealizationDerivedKind::External
+                        | RealizationDerivedKind::Source
+                        | RealizationDerivedKind::ProductSelection
+                        | RealizationDerivedKind::ContentDependencies
+                )
+            )
+        });
+        Ok(view)
     }
 }
 
@@ -139,12 +164,20 @@ impl DefinitionIdentityScope {
 enum RealizationDerivedKind {
     External,
     Source,
+    ProductSelection,
+    ContentDependencies,
 }
 
 fn realization_derived_kind(key: &str) -> Option<RealizationDerivedKind> {
     match key {
         EXTERNAL_REALIZATIONS_DERIVED_KEY => Some(RealizationDerivedKind::External),
         ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY => Some(RealizationDerivedKind::Source),
+        crate::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY => {
+            Some(RealizationDerivedKind::ProductSelection)
+        }
+        crate::content_dependencies::EFFECTIVE_CONTENT_DEPENDENCIES_DERIVED_KEY => {
+            Some(RealizationDerivedKind::ContentDependencies)
+        }
         _ => None,
     }
 }
@@ -153,7 +186,7 @@ fn realization_derived_kind(key: &str) -> Option<RealizationDerivedKind> {
 ///
 /// Fields remain private so callers cannot manufacture a lookalike document.
 /// Construction validates the exact finalized resolution contributors and
-/// preserves the current v2 canonical byte contract.
+/// preserves the current scope-specific canonical byte contract.
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefinitionIdentityDocument {
@@ -196,7 +229,7 @@ impl DefinitionIdentityDocument {
             referenced_items,
             reference_edges,
             effective_trust_class: resolution.effective_trust_class,
-            composed: scope.composed_view(&resolution.composed),
+            composed: scope.composed_view(&resolution.composed)?,
         })
     }
 
@@ -1205,7 +1238,7 @@ mod tests {
         let mut root = contributor("graph:test/root", 'a');
         root.added_by = ResolutionStepName::PipelineInit;
         DefinitionIdentityDocument {
-            schema: "ryeos.effective_definition.v2",
+            schema: "ryeos.effective_definition.v3",
             root,
             ancestors: Vec::new(),
             referenced_items: Vec::new(),
@@ -1342,6 +1375,7 @@ mod tests {
                 "manifest_hash": manifest.to_string().repeat(64),
                 "entry_count": 1,
                 "total_bytes": 1,
+                "mount_root": "project",
                 "mount": "vendor/sim"
             }])
         };
@@ -1421,6 +1455,7 @@ mod tests {
                 "manifest_hash": manifest.to_string().repeat(64),
                 "entry_count": 1,
                 "total_bytes": 1,
+                "mount_root": "project",
                 "mount": format!("vendor/{id}")
             })
         };

@@ -64,6 +64,20 @@ pub(crate) fn run_handler_subprocess(
     timeout: Duration,
     launch: &HandlerLaunchRuntime,
 ) -> Result<HandlerResponse, EngineError> {
+    run_handler_subprocess_bounded(handler, request, timeout, launch, None)
+}
+
+/// Run a handler with an additional caller-owned stdout byte ceiling. The
+/// immutable isolation runtime still applies its global output limit; this
+/// narrower bound lets signed contracts limit a particular pure projection
+/// before JSON decoding allocates its semantic response.
+pub(crate) fn run_handler_subprocess_bounded(
+    handler: &VerifiedHandler,
+    request: &HandlerRequest,
+    timeout: Duration,
+    launch: &HandlerLaunchRuntime,
+    maximum_stdout_bytes: Option<usize>,
+) -> Result<HandlerResponse, EngineError> {
     let (canonical_ref, binary_path, binary_hash, bundle_root) = match handler {
         VerifiedHandler::Resolved {
             canonical_ref,
@@ -107,8 +121,12 @@ pub(crate) fn run_handler_subprocess(
         envs: vec![],
         stdin_data: Some(request_json),
         timeout: timeout.as_secs_f64(),
-        limits: None,
+        limits: maximum_stdout_bytes.map(|maximum| lillux::SubprocessLimits {
+            max_stdout_bytes: Some(maximum as u64),
+            ..lillux::SubprocessLimits::default()
+        }),
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     };
 
@@ -119,6 +137,8 @@ pub(crate) fn run_handler_subprocess(
     let req = launch.isolation.apply(
         req,
         IsolationLaunchContext {
+            immutable_project: None,
+            workspace_view: None,
             project_path: &bundle_root,
             project_authority: IsolationProjectAuthority::ReadOnly,
             filesystem_authority_ceiling:
@@ -135,7 +155,8 @@ pub(crate) fn run_handler_subprocess(
             verified_code: &verified_code,
             verified_command: Some(&verified_code[0]),
             external_read_only_mounts: &[],
-            target_channel: None,
+            writable_runtime_view_mounts: &[],
+            target_channels: &[],
             item_ref: &canonical_ref,
             thread_id: "handler",
         },
@@ -159,6 +180,18 @@ pub(crate) fn run_handler_subprocess(
             handler: canonical_ref.clone(),
             exit_code: output.exit_code,
             stderr: output.stderr,
+        });
+    }
+
+    if let Some(maximum) = maximum_stdout_bytes
+        && output.stdout.len() > maximum
+    {
+        return Err(EngineError::HandlerProtocolViolation {
+            handler: canonical_ref,
+            detail: format!(
+                "handler response is {} bytes (max {maximum})",
+                output.stdout.len()
+            ),
         });
     }
 

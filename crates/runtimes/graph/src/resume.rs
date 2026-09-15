@@ -515,7 +515,9 @@ config:
         let definition = definition();
         for value in [
             json!({}),
-            json!({"schema_version": 1}),
+            json!({
+                "schema_version": crate::walker::GRAPH_CHECKPOINT_SCHEMA_VERSION - 1,
+            }),
             json!({"schema_version": 99}),
         ] {
             let error = from_checkpoint_value(&value, &definition)

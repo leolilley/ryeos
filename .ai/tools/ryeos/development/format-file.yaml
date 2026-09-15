@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-11T11:45:13Z:3773ac80e136dd27faec285d21f0b3054efb726f6b5b9889439fd9a97facbd26:mU9l/zMT/HxNEmvDQQz4FfNgoElNC/sKwpTSmSOG4xA9flTqHyDaw2zhOzTdQC/fT4TZQMfUMNwhrunYfCrvBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/development
+name: format-file
+version: "1.0.0"
+description: Format one explicit RyeOS Rust source file under exclusive workspace authority
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: shared_exclusive
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content: []
+external_product_slots:
+  - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_format_file
+    kind: tree
+    mount_root: execution_runtime
+    mount: platform
+config:
+  command: realization:platform/rust/bin/rustfmt
+  args: [--edition, "${params.edition}", --config, skip_children=true, "${params.path}"]
+  timeout_secs: 60
+config_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      maxLength: 4096
+      pattern: '^crates/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.rs$'
+    edition:
+      type: string
+      enum: ["2021", "2024"]
+  required: [path, edition]
+  additionalProperties: false

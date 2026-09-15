@@ -421,6 +421,7 @@ fn add_run_definition_versions(
                             "manifest_hash": entry.manifest_hash,
                             "entry_count": entry.entry_count,
                             "total_bytes": entry.total_bytes,
+                            "mount_root": entry.mount_root,
                             "mount": entry.mount,
                         }),
                         provenance: builder.provenance(evidence.clone()),
@@ -432,7 +433,7 @@ fn add_run_definition_versions(
                         target_id: definition_id.clone(),
                         status: None,
                         directed: true,
-                        attributes: json!({"mount": entry.mount}),
+                        attributes: json!({"mount_root": entry.mount_root, "mount": entry.mount}),
                         provenance: builder.provenance(evidence.clone()),
                     })?;
                 }

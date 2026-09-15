@@ -21,11 +21,16 @@ ARG BUILD_DATE=unknown
 ARG BUNDLE_BUILD_PROFILE=release
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
+ENV RYEOS_BUILD_VERSION=$VERSION
+ENV SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
 
 # COPY-provided bundle directories can live in a lower overlay rename domain.
 # Materialize the tree in this writable layer before atomic publication. Cargo
 # produces the ordinary host closure once and the explicitly static worker
-# closure once; every output target below shares this completed stage.
+# closure once; every output target below shares this completed stage. The
+# restricted workload client is then linked from that same exact source/build
+# coordinate as a standalone external realization. It is not staged into a
+# bundle and no runtime image filesystem is later mined for it.
 RUN --mount=type=secret,id=publisher-key,required=true \
     --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -43,7 +48,16 @@ RUN --mount=type=secret,id=publisher-key,required=true \
       --bundle-set release-artifacts \
       --build-profile "$BUNDLE_BUILD_PROFILE" \
       --all && \
-    mkdir -p /build/target/release /out && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 \
+    RYEOS_BUILD_VERSION="$VERSION" \
+    RYEOS_VCS_REF="$VCS_REF" \
+    RYEOS_BUILD_DATE="$BUILD_DATE" \
+    SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --target x86_64-unknown-linux-gnu \
+      -p ryeos-workload-client && \
+    mkdir -p /build/target/release /out /workload-out && \
     cp /build/target-cache/release/ryeosd /build/target/release/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/release/ryeos && \
     cp /build/target-cache/release/ryeos-core-tools /build/target/release/ryeos-core-tools && \
@@ -52,10 +66,22 @@ RUN --mount=type=secret,id=publisher-key,required=true \
       --source /build/bundles \
       --output "/out/ryeos-bundles-${VERSION}-x86_64.tar.gz" \
       --source-date-epoch "$SOURCE_DATE_EPOCH" \
-      --ryeos-bin /build/target/release/ryeos
+      --ryeos-bin /build/target/release/ryeos && \
+    ./scripts/release/package-workload-client-realization.sh \
+      --version "$VERSION" \
+      --source-revision "$VCS_REF" \
+      --build-date "$BUILD_DATE" \
+      --source-date-epoch "$SOURCE_DATE_EPOCH" \
+      --target x86_64-unknown-linux-gnu \
+      --binary /build/target-cache/x86_64-unknown-linux-gnu/release/ryeos-workload-client \
+      --license /build/LICENSE \
+      --output "/workload-out/ryeos-workload-client-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 
 FROM scratch AS bundle-artifact
 COPY --from=published /out/ /
+
+FROM scratch AS workload-client-artifact
+COPY --from=published /workload-out/ /
 
 FROM node:22-trixie-slim@sha256:e6d9a389d34ff9678438af985c9913fbd1eb6ed36e80fea56644f4b4f6dd70ba AS node-runtime
 RUN npm install --global npm@12.0.1 && npm cache clean --force
@@ -147,6 +173,7 @@ COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=published /build/bundles/standard     /opt/ryeos/standard
 COPY --from=published /build/bundles/hosted-node  /opt/ryeos/hosted-node
 COPY --from=published /build/bundles/codex        /opt/ryeos/codex
+COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app

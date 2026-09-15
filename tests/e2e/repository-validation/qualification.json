@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "date": "2026-09-07",
+  "driver": "disposable target-local operator through installed RyeOS CLI",
+  "purpose": "Observed execution evidence index; not admission or publication authority",
+  "node_fingerprint": "0db14ae10fa3e060d175a9ebdd975f4041b0a3a271c99078436a4a4b0e533f60",
+  "source_revision": "53a1776ad",
+  "source_additions": ["repository-validation Tools and helper", "repository-validation Config", "execution Config"],
+  "python_manifest": "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+  "executor_ref": "tool:ryeos/development/authoring-environment-production/runtime",
+  "contract": {
+    "filesystem_authority": "captured_execution",
+    "network_authority": "isolated",
+    "workspace_access": "immutable_current_generation",
+    "include_operator_vault": false,
+    "project_head_advanced_by_execution": false,
+    "worker_grants_changed": false
+  },
+  "initial_snapshot": "5fda53a0e8bf41ebc40a78766d711a154718fd9056d9af6a859dfd5f8153da66",
+  "initial_runs": [
+    {
+      "operation": "dependency-layers",
+      "thread_id": "T-b2ce869c-03b1-2933-181c-7e0759f1fe85",
+      "capsule_hash": "30147e1c9bca28d88b9616e2f7474cd7d9c89e56693a8acfdc5bb9ce885166cc",
+      "outcome_code": "exit:0",
+      "checked_files": 37,
+      "findings": 0
+    },
+    {
+      "operation": "cli-presentation",
+      "thread_id": "T-6da1b4c9-033f-e82c-869f-c72c5b8c9e20",
+      "capsule_hash": "c854d410df4c51483c28fea4aefa7d89bfb9961c6403bfb281770c82a98c0f41",
+      "outcome_code": "exit:0",
+      "checked_files": 26,
+      "findings": 0
+    },
+    {
+      "operation": "no-content-wrap",
+      "thread_id": "T-83ac6ea8-11f9-640b-2ca6-a703e9a19e80",
+      "capsule_hash": "34f6ee216193970978783f36d79004d0555f76b1d39c36d6e6a223c35d365280",
+      "outcome_code": "exit:0",
+      "checked_files": 1118,
+      "findings": 0
+    },
+    {
+      "operation": "naming",
+      "thread_id": "T-516c7ad1-f26d-df37-305f-318f6393ccef",
+      "capsule_hash": "301f961a0349b9c7966aec3898aea9108a4340378d0880d56f188ad427c74c31",
+      "outcome_code": "exit:1",
+      "checked_files": 2279,
+      "findings": 12,
+      "expected_failure": "Obsolete rule literals in replaced naming script and obsolete mock-provider comment"
+    }
+  ],
+  "inherited_dependency_check": {
+    "snapshot": "2fb76fc7e2b4556007153cc08b2c98735139411b3a44d2105fd53ff68058219b",
+    "change": "Resolve workspace-inherited aliases using Cargo's root manifest and count that manifest against the byte budget",
+    "operation": "dependency-layers",
+    "thread_id": "T-71352a12-34c4-070b-2203-93bbc1b21de7",
+    "capsule_hash": "23df4744a477a1ac47d302ef5ce41456ef3ab145a44b36deb0cd243919c80334",
+    "binding_hash": "0188d30c3fa511e272c2dd1b0f5723c209463c6de1b988ae4a1a5a8bd8d52670",
+    "outcome_code": "exit:0",
+    "checked_files": 37,
+    "findings": 0,
+    "result_snapshot": "2fb76fc7e2b4556007153cc08b2c98735139411b3a44d2105fd53ff68058219b"
+  },
+  "corrected_source": {
+    "snapshot": "6965ff92205ec24a454bf2a1f4886e73ae7f9b554dca8a9fb2bc54c9112384b6",
+    "changes": ["Remove the four replaced lint scripts", "Correct obsolete mock-provider comment"],
+    "operation": "naming",
+    "thread_id": "T-62327f22-5a6e-f319-23c9-0b2b625a35d3",
+    "capsule_hash": "16ac85de27554ceff9675ed8cc4cf500ee492f8bb5ba6ddb1054de051a5a4f61",
+    "binding_hash": "0c3f1a9e9c72789f43747aafce110412ae65ad1bf2bde179840f6bf2a7b44f3d",
+    "outcome_code": "exit:0",
+    "checked_files": 2275,
+    "findings": 0,
+    "result_snapshot": "6965ff92205ec24a454bf2a1f4886e73ae7f9b554dca8a9fb2bc54c9112384b6"
+  }
+}

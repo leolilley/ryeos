@@ -1,23 +1,14 @@
-//! Daemon-authoritative project snapshot reads and mutation.
+//! Node-authoritative project snapshot reads and mutation.
 //!
 //! The terminal tool is only a callback client. It never loads the node key,
 //! invents a trust store, reads authoritative refs, or publishes HEAD itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::fs;
-#[cfg(unix)]
-use std::fs::{File, OpenOptions};
-#[cfg(unix)]
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use lillux::cas::{CasStore, sha256_hex};
+use lillux::cas::CasStore;
+use lillux::time::{Duration, MonotonicDeadline, MonotonicTimer};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -60,18 +51,13 @@ struct ProjectParams {
 }
 
 struct SnapshotContext<'a> {
-    state: SnapshotState<'a>,
+    state: &'a AppState,
     ignore_matcher: &'a crate::ignore::IgnoreMatcher,
     project_path: PathBuf,
     project_hash: String,
     principal_key: String,
     authority: ryeos_state::PinnedStateAuthority,
     cas: CasStore,
-}
-
-enum SnapshotState<'a> {
-    Live(&'a AppState),
-    Offline(&'a ryeos_state::StateDb),
 }
 
 pub struct RuntimeProjectSnapshotService;
@@ -168,7 +154,7 @@ impl RuntimeProjectSnapshotService {
         let authority = state.state_store.pinned_state_authority()?;
         let cas = authority.cas_store()?;
         let ctx = SnapshotContext {
-            state: SnapshotState::Live(state),
+            state,
             ignore_matcher: state.ignore_matcher.as_ref(),
             project_hash: ryeos_state::refs::deployed_project_key(canonical),
             principal_key: ryeos_state::refs::principal_storage_key(&thread_auth.acting_principal)?
@@ -192,70 +178,43 @@ impl RuntimeProjectSnapshotService {
     }
 }
 
-/// Read snapshot status without a daemon thread. This uses the fail-only,
-/// non-repairing projection opener and the same shared CAS guard as the live
-/// service, preserving signed-head verification without requiring callback
-/// authority for a read-only command.
-pub fn offline_status(
-    app_root: &Path,
+/// Configured-local-operator status using the node's existing state owner.
+///
+/// The Both-mode service supplies live AppState or its normal
+/// read_only_existing standalone equivalent. Never recreate configuration,
+/// private identities, policy, or projection state in a terminal Tool merely
+/// to make offline status work. Runtime callers continue through execute()
+/// and its sealed project plus manifest-backed callback authority.
+pub fn local_operator_status(
+    state: &AppState,
+    caller: &crate::handler_context::HandlerContext,
     project_path: &Path,
     include_unchanged: bool,
     time_budget_ms: u64,
 ) -> Result<Value> {
-    let config = crate::config::Config::load(&crate::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..crate::config::ConfigSources::default()
-    })
-    .context("load local node configuration for snapshot status")?;
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
-        .context("load node identity for signed-head verification")?;
-    let mut head_trust = ryeos_state::refs::TrustStore::new();
-    head_trust.insert(
-        identity.fingerprint().to_string(),
-        *identity.verifying_key(),
-    );
-    let state_db = ryeos_state::StateDb::open_for_projection_verification(
-        &config.runtime_state_dir(),
-        std::sync::Arc::new(head_trust),
-    )
-    .context("open local snapshot projection for verification")?;
-    let authority = state_db.pinned_authority()?;
-    let cas = authority.cas_store()?;
-    let operator_key = lillux::crypto::load_signing_key(&config.operator_signing_key_path)
-        .context("load operator identity for principal snapshot head")?;
-    let principal = format!(
-        "fp:{}",
-        lillux::signature::compute_fingerprint(&operator_key.verifying_key())
-    );
+    crate::operator_authority::require_local_configured_operator(state, caller)
+        .context("snapshot status requires the configured local operator")?;
+    // Authenticate before canonicalization or any other path observation.
+    if !project_path.is_absolute() {
+        bail!("snapshot status project_path must be an absolute path");
+    }
     let project_path = canonical_project_path(project_path)?;
     let canonical = project_path
         .to_str()
         .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
-    let project_hash = ryeos_state::refs::deployed_project_key(canonical);
-    let node_trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config(),
-    )
-    .context("load node trust for exact ingest-ignore policy")?;
-    let node_policy = crate::node_policy::load_snapshot(
-        &config.app_root,
-        &node_trust_store,
-        &crate::node_policy::NodePolicyTable::new(),
-    )
-    .context("compile exact node policy generation for snapshot status")?;
-    let ignore_matcher = node_policy
-        .require::<crate::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
-        .matcher
-        .clone();
+    let authority = state.state_store.pinned_state_authority()?;
+    let cas = authority.cas_store()?;
     let ctx = SnapshotContext {
-        state: SnapshotState::Offline(&state_db),
-        ignore_matcher: &ignore_matcher,
+        state,
+        ignore_matcher: state.ignore_matcher.as_ref(),
+        project_hash: ryeos_state::refs::deployed_project_key(canonical),
+        principal_key: ryeos_state::refs::principal_storage_key(&caller.fingerprint)?.to_owned(),
         project_path,
-        project_hash,
-        principal_key: ryeos_state::refs::principal_storage_key(&principal)?.to_owned(),
         authority,
         cas,
     };
+    // Only the comparison is shared. This local-operator entry does not
+    // synthesize callback authority or expose snapshot mutation.
     status(
         &ctx,
         &ProjectParams {
@@ -278,34 +237,62 @@ fn heads(ctx: &SnapshotContext<'_>) -> Result<(Option<String>, Option<String>)> 
                 .map(|head| head.target_hash),
         ))
     };
-    match ctx.state {
-        SnapshotState::Live(state) => state.state_store.with_state_db(read),
-        SnapshotState::Offline(db) => read(db),
-    }
+    ctx.state.state_store.with_state_db(read)
 }
 
 fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
     let _cas_guard = acquire_cas_read_guard(ctx)?;
-    let started = Instant::now();
-    let deadline =
-        (params.time_budget_ms > 0).then(|| started + Duration::from_millis(params.time_budget_ms));
+    let started = MonotonicTimer::start();
+    let deadline = (params.time_budget_ms > 0)
+        .then(|| MonotonicDeadline::after(Duration::from_millis(params.time_budget_ms)));
     let (head_hash, deployed_hash) = heads(ctx)?;
-    let head_items = match head_hash.as_deref() {
-        Some(hash) => load_snapshot_and_manifest(&ctx.cas, hash)?.1.files,
-        None => BTreeMap::new(),
+    let (head_items, head_policy_hash) = match head_hash.as_deref() {
+        Some(hash) => {
+            let (snapshot, tree) = load_snapshot_and_manifest(&ctx.cas, hash)?;
+            (tree.files, Some(snapshot.effective_policy_hash))
+        }
+        None => (BTreeMap::new(), None),
     };
     let head_state = manifest_state_map(&ctx.cas, &head_items)?;
-    let mut worktree = BTreeMap::new();
-    // Status compares only snapshot-representable files. Symlinks and special
-    // entries fail loudly and are never followed.
-    let complete = walk_worktree(
-        &ctx.project_path,
-        &ctx.project_path,
-        Path::new(""),
+    let project_root = lillux::PinnedDirectory::open(&ctx.project_path)?
+        .context("snapshot status project root disappeared")?;
+    let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+        &project_root,
         ctx.ignore_matcher,
-        deadline,
-        &mut worktree,
+        ProjectSyncScope::FullProject,
     )?;
+    // Status is read-only: derive the same policy identity as create without
+    // storing an object, creating a thread, or changing any project ref.
+    let policy_hash = ryeos_state::objects::canonical_value_digest(&policy.to_value())?;
+    let policy_changed = head_policy_hash
+        .as_ref()
+        .is_some_and(|head| head != &policy_hash);
+    let mut worktree = BTreeMap::new();
+    let complete = visit_project_files(&project_root, &policy, deadline, |relative, file| {
+        // The traversal already opened this exact regular inode. Keep
+        // hashing and portable mode observation at the Lillux boundary;
+        // never reopen an ambient path or allocate the whole file here.
+        let observed = lillux::observe_open_regular_file(&file)?;
+        let (blob_hash, metadata) =
+            lillux::digest_open_regular_file_stable_exact(&file, observed.size())?;
+        let captured = ProjectFile {
+            blob_hash,
+            size: metadata.len(),
+            normalized_mode: lillux::normalized_portable_regular_mode(&metadata)?,
+        };
+        worktree.insert(relative.to_owned(), captured.clone());
+        Ok(captured)
+    })?;
+    validate_status_policy_source(&worktree, &policy, complete)?;
+    if ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+        &project_root,
+        ctx.ignore_matcher,
+        ProjectSyncScope::FullProject,
+    )? != policy
+    {
+        bail!("project snapshot policy changed during status inspection");
+    }
+    project_root.ensure_path_binding()?;
     let mut paths = BTreeSet::new();
     paths.extend(worktree.keys().cloned());
     if complete {
@@ -320,7 +307,7 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
     let mut changes = Vec::new();
     for path in paths {
         let head = head_state.get(&path);
-        let work = worktree.get(&path).map(|captured| &captured.state);
+        let work = worktree.get(&path);
         let status = match (head, work) {
             (None, Some(_)) => "added",
             (Some(_), None) => "deleted",
@@ -334,7 +321,7 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
                 "path": path.clone(),
                 "status": status,
                 "head_project_file_hash": head_items.get(&path),
-                "worktree_integrity": work.map(|state| state.integrity.as_str()),
+                "worktree_integrity": work.map(|state| state.blob_hash.as_str()),
             }));
         }
     }
@@ -346,9 +333,12 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
         "baseline": "principal_head",
         "head_snapshot_hash": head_hash,
         "deployed_snapshot_hash": deployed_hash,
-        "dirty": counts["added"] > 0 || counts["modified"] > 0 || counts["deleted"] > 0,
+        "effective_policy_hash": policy_hash,
+        "head_effective_policy_hash": head_policy_hash,
+        "policy_changed": policy_changed,
+        "dirty": policy_changed || counts["added"] > 0 || counts["modified"] > 0 || counts["deleted"] > 0,
         "scan_complete": complete,
-        "scan_elapsed_ms": started.elapsed().as_millis() as u64,
+        "scan_elapsed_ms": started.elapsed_millis(),
         "counts": counts,
         "changes": changes,
     }))
@@ -405,9 +395,7 @@ fn log(ctx: &SnapshotContext<'_>, limit: usize) -> Result<Value> {
 }
 
 fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool) -> Result<Value> {
-    let SnapshotState::Live(state) = ctx.state else {
-        bail!("snapshot creation requires live daemon authority");
-    };
+    let state = ctx.state;
     let guard = ctx.authority.acquire_shared_guard()?;
     let _permit = state
         .write_barrier
@@ -568,32 +556,38 @@ fn history_contains(cas: &CasStore, head: Option<&str>, wanted: &str) -> Result<
     Ok(false)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileState {
-    integrity: String,
-    mode: u32,
-    size: u64,
-}
+/// A soft status deadline stops the existing bounded traversal between entries.
+/// It is not a filesystem error, and must never turn an incomplete scan into
+/// evidence of deletion. File reads already in progress may finish first.
+#[derive(Debug, thiserror::Error)]
+#[error("snapshot status scan budget elapsed")]
+struct StatusScanBudgetElapsed;
 
-#[derive(Debug)]
-struct CapturedFile {
-    state: FileState,
-}
-
-fn build_project_tree(
-    ctx: &SnapshotContext<'_>,
-    project_root: &lillux::PinnedDirectory,
+/// Creation and preview have one path/policy/traversal contract. Do not add a
+/// status-only ignore table or raw filesystem walker here: the node matcher and
+/// project exclusions compose in project_sync; Lillux owns descriptor opening.
+/// The visitor receives only already-open byte transport, never path authority.
+fn visit_project_files<V>(
+    root: &lillux::PinnedDirectory,
     policy: &ProjectSnapshotPolicy,
-) -> Result<ProjectTree> {
+    deadline: Option<MonotonicDeadline>,
+    mut visit: V,
+) -> Result<bool>
+where
+    V: FnMut(&str, std::fs::File) -> Result<ProjectFile>,
+{
     let matcher = policy.matcher()?;
-    let mut files = BTreeMap::new();
+    let mut file_count = 0_usize;
     let mut descriptor_bytes = 0_u64;
-    project_root.visit_regular_files_bounded(
+    let traversal = root.visit_regular_files_bounded(
         lillux::DirectoryTraversalBudget::new(
             ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
             ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
         ),
         |relative, _is_directory| {
+            if deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+                return Err(StatusScanBudgetElapsed.into());
+            }
             let rel = canonical_relative_path(relative)?;
             Ok(
                 ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
@@ -601,52 +595,93 @@ fn build_project_tree(
             )
         },
         |relative, file| {
-            if files.len() >= ryeos_state::project_sync::MAX_PROJECT_TREE_FILES {
-                anyhow::bail!(
+            if file_count >= ryeos_state::project_sync::MAX_PROJECT_TREE_FILES {
+                bail!(
                     "project snapshot exceeds {} regular files",
                     ryeos_state::project_sync::MAX_PROJECT_TREE_FILES
                 );
             }
+            file_count += 1;
             let rel = canonical_relative_path(relative)?;
             ryeos_state::project_sync::validate_project_manifest_path(
                 &rel,
                 policy.sync_scope,
                 Some(&matcher),
             )?;
-            let blob = ctx
-                .cas
-                .put_blob_from_open_regular(file, &project_root.path().join(relative))?;
-            let project_file = ProjectFile {
-                blob_hash: blob.hash,
-                size: blob.size,
-                normalized_mode: blob.normalized_mode,
-            };
+            let project_file = visit(&rel, file)?;
             project_file.validate()?;
             let object_bytes = lillux::canonical_json(&project_file.to_value())?.len() as u64;
             descriptor_bytes = descriptor_bytes
                 .checked_add(object_bytes)
                 .and_then(|total| total.checked_add(rel.len() as u64))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("project snapshot descriptor byte count overflow")
-                })?;
+                .ok_or_else(|| anyhow!("project snapshot descriptor byte count overflow"))?;
             if descriptor_bytes
                 > ryeos_state::project_materialization::MAX_PROJECT_TREE_DESCRIPTOR_BYTES
             {
-                anyhow::bail!(
+                bail!(
                     "project snapshot exceeds {} descriptor bytes",
                     ryeos_state::project_materialization::MAX_PROJECT_TREE_DESCRIPTOR_BYTES
                 );
             }
-            let file_hash = ctx.cas.store_object(&project_file.to_value())?;
-            if files.insert(rel.clone(), file_hash).is_some() {
-                anyhow::bail!("duplicate canonical project path during snapshot: {rel}");
-            }
             Ok(())
         },
-    )?;
+    );
+    match traversal {
+        Ok(()) => Ok(true),
+        Err(error) if error.is::<StatusScanBudgetElapsed>() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn build_project_tree(
+    ctx: &SnapshotContext<'_>,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+) -> Result<ProjectTree> {
+    let mut files = BTreeMap::new();
+    visit_project_files(project_root, policy, None, |relative, file| {
+        let blob = ctx
+            .cas
+            .put_blob_from_open_regular(file, &project_root.path().join(relative))?;
+        let project_file = ProjectFile {
+            blob_hash: blob.hash,
+            size: blob.size,
+            normalized_mode: blob.normalized_mode,
+        };
+        project_file.validate()?;
+        let file_hash = ctx.cas.store_object(&project_file.to_value())?;
+        if files.insert(relative.to_owned(), file_hash).is_some() {
+            bail!("duplicate canonical project path during snapshot: {relative}");
+        }
+        Ok(project_file)
+    })?;
     let tree = ProjectTree { files };
     ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
     Ok(tree)
+}
+
+fn validate_status_policy_source(
+    files: &BTreeMap<String, ProjectFile>,
+    policy: &ProjectSnapshotPolicy,
+    complete: bool,
+) -> Result<()> {
+    let source_path = ryeos_state::project_sync::PROJECT_SNAPSHOT_CONFIG_RELATIVE;
+    let observed = files.get(source_path);
+    if !complete && observed.is_none() {
+        // An unvisited policy source is not evidence of absence. Its current
+        // descriptor-rooted policy is still rechecked before status returns.
+        return Ok(());
+    }
+    let mut tree = ProjectTree {
+        files: BTreeMap::new(),
+    };
+    if let Some(file) = observed {
+        tree.files.insert(
+            source_path.to_owned(),
+            ryeos_state::objects::canonical_value_digest(&file.to_value())?,
+        );
+    }
+    ryeos_state::project_sync::validate_captured_policy_source_from_files(&tree, policy, files)
 }
 
 fn canonical_relative_path(path: &Path) -> Result<String> {
@@ -658,92 +693,14 @@ fn canonical_relative_path(path: &Path) -> Result<String> {
     Ok(rel)
 }
 
-#[cfg(unix)]
-fn walk_worktree(
-    root: &Path,
-    dir: &Path,
-    relative_dir: &Path,
-    ignore: &crate::ignore::IgnoreMatcher,
-    deadline: Option<Instant>,
-    files: &mut BTreeMap<String, CapturedFile>,
-) -> Result<bool> {
-    let directory = open_directory_no_follow(root, dir)?;
-    let descriptor_dir = descriptor_path(&directory, dir)?.0;
-    let mut entries = fs::read_dir(&descriptor_dir)?.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Ok(false);
-        }
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            bail!(
-                "project snapshots do not support symlinks: {}",
-                entry.path().display()
-            );
-        }
-        let path = entry.path();
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| anyhow!("project snapshot path is not valid UTF-8"))?;
-        let relative_path = relative_dir.join(name);
-        let rel = relative_path
-            .to_str()
-            .ok_or_else(|| anyhow!("project snapshot path is not valid UTF-8"))?
-            .replace('\\', "/");
-        if rel == "state" || rel.starts_with("state/") || ignore.is_ignored(&rel) {
-            continue;
-        }
-        if file_type.is_dir() {
-            if !walk_worktree(root, &path, &relative_path, ignore, deadline, files)? {
-                return Ok(false);
-            }
-        } else if file_type.is_file() {
-            let Some(captured) = capture_regular_file_no_follow(root, &path)? else {
-                continue;
-            };
-            files.insert(rel, captured);
-        } else {
-            bail!(
-                "project snapshots support only regular files and directories: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(true)
-}
-
-#[cfg(not(unix))]
-fn walk_worktree(
-    _root: &Path,
-    dir: &Path,
-    _relative_dir: &Path,
-    _ignore: &crate::ignore::IgnoreMatcher,
-    _deadline: Option<Instant>,
-    _files: &mut BTreeMap<String, CapturedFile>,
-) -> Result<bool> {
-    bail!(
-        "secure no-follow project snapshot traversal is unavailable on this platform: {}",
-        dir.display()
-    )
-}
-
 fn manifest_state_map(
     cas: &CasStore,
     items: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, FileState>> {
+) -> Result<BTreeMap<String, ProjectFile>> {
     let mut states = BTreeMap::new();
     for (path, hash) in items {
         let item = ProjectFile::from_value(&load_verified_object(cas, hash)?)?;
-        states.insert(
-            path.clone(),
-            FileState {
-                integrity: item.blob_hash,
-                mode: item.normalized_mode,
-                size: item.size,
-            },
-        );
+        states.insert(path.clone(), item);
     }
     Ok(states)
 }
@@ -776,12 +733,11 @@ fn load_verified_object(cas: &CasStore, hash: &str) -> Result<Value> {
 }
 
 fn canonical_project_path(path: &Path) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
+    let canonical = lillux::canonicalize_existing_path(path)
         .with_context(|| format!("canonicalize project path {}", path.display()))?;
-    if !canonical.is_dir() {
-        bail!("project path is not a directory: {}", canonical.display());
-    }
+    let root = lillux::PinnedDirectory::open(&canonical)?
+        .with_context(|| format!("project directory disappeared: {}", canonical.display()))?;
+    root.ensure_path_binding()?;
     Ok(canonical)
 }
 
@@ -789,135 +745,10 @@ fn acquire_cas_read_guard(ctx: &SnapshotContext<'_>) -> Result<ryeos_state::CasM
     ctx.authority.acquire_shared_guard()
 }
 
-/// Capture one exact regular-file observation. The descriptor is opened with
-/// no-follow semantics, checked to resolve beneath the canonical capability
-/// root, and supplies both the bytes and mode used by the manifest.
-#[cfg(unix)]
-fn capture_regular_file_no_follow(root: &Path, path: &Path) -> Result<Option<CapturedFile>> {
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "open snapshot input without following links: {}",
-                    path.display()
-                )
-            });
-        }
-    };
-    let before = require_regular_metadata(&file, path)?;
-    descriptor_path(&file, path)
-        .and_then(|(_, resolved)| ensure_beneath_root(root, path, &resolved))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .with_context(|| format!("read snapshot input {}", path.display()))?;
-    let after = require_regular_metadata(&file, path)?;
-    if before.dev() != after.dev()
-        || before.ino() != after.ino()
-        || before.len() != after.len()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
-    {
-        bail!(
-            "snapshot input changed while it was being captured: {}",
-            path.display()
-        );
-    }
-    let raw_mode = after.permissions().mode() & 0o7777;
-    let mode = ProjectFile::normalize_mode(raw_mode);
-    Ok(Some(CapturedFile {
-        state: FileState {
-            integrity: sha256_hex(&bytes),
-            mode,
-            size: bytes.len() as u64,
-        },
-    }))
-}
-
-#[cfg(unix)]
-fn require_regular_metadata(file: &File, path: &Path) -> Result<fs::Metadata> {
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("inspect opened snapshot input {}", path.display()))?;
-    if !metadata.file_type().is_file() {
-        bail!("snapshot input is not a regular file: {}", path.display());
-    }
-    Ok(metadata)
-}
-
-#[cfg(unix)]
-fn open_directory_no_follow(root: &Path, path: &Path) -> Result<File> {
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "open snapshot directory without following links: {}",
-                path.display()
-            )
-        })?;
-    let metadata = directory
-        .metadata()
-        .with_context(|| format!("inspect opened snapshot directory {}", path.display()))?;
-    if !metadata.file_type().is_dir() {
-        bail!(
-            "snapshot traversal entry is not a directory: {}",
-            path.display()
-        );
-    }
-    let (_, resolved) = descriptor_path(&directory, path)?;
-    ensure_beneath_root(root, path, &resolved)?;
-    Ok(directory)
-}
-
-#[cfg(unix)]
-fn descriptor_path(file: &File, original: &Path) -> Result<(PathBuf, PathBuf)> {
-    let fd = file.as_raw_fd();
-    for path in [
-        PathBuf::from(format!("/proc/self/fd/{fd}")),
-        PathBuf::from(format!("/dev/fd/{fd}")),
-    ] {
-        if let Ok(resolved) = path.canonicalize() {
-            return Ok((path, resolved));
-        }
-    }
-    bail!(
-        "cannot resolve opened snapshot descriptor for {}",
-        original.display()
-    )
-}
-
-#[cfg(unix)]
-fn ensure_beneath_root(root: &Path, original: &Path, resolved: &Path) -> Result<()> {
-    if !resolved.starts_with(root) {
-        bail!(
-            "snapshot input escaped the project capability root: {} resolved to {}",
-            original.display(),
-            resolved.display()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn capture_regular_file_no_follow(_root: &Path, path: &Path) -> Result<Option<CapturedFile>> {
-    bail!(
-        "secure no-follow project snapshot capture is unavailable on this platform: {}",
-        path.display()
-    )
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::fs;
     use std::os::unix::fs::symlink;
 
     #[test]
@@ -960,6 +791,36 @@ mod tests {
             missing_runtime.contains("ryeos.create.project-snapshots.live"),
             "got: {missing_runtime}"
         );
+    }
+
+    #[test]
+    fn snapshot_status_callback_keeps_both_existing_authority_requirements() {
+        let authorizer = Authorizer::new();
+        let read_project = vec![LIVE_PROJECT_READ_CAPABILITY.to_owned()];
+        let status_runtime = vec![project_snapshot_cap(&ProjectSnapshotOperation::Status)];
+        assert!(
+            authorize_snapshot_operation(
+                &authorizer,
+                &read_project,
+                &status_runtime,
+                &ProjectSnapshotOperation::Status,
+            )
+            .is_ok()
+        );
+        for (project, runtime) in [
+            (Vec::new(), status_runtime.clone()),
+            (read_project.clone(), Vec::new()),
+        ] {
+            assert!(
+                authorize_snapshot_operation(
+                    &authorizer,
+                    &project,
+                    &runtime,
+                    &ProjectSnapshotOperation::Status,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1016,18 +877,108 @@ mod tests {
         symlink("/usr/bin/python", bin.join("python")).unwrap();
 
         let mut files = BTreeMap::new();
-        let complete = walk_worktree(
-            project.path(),
-            project.path(),
-            Path::new(""),
-            &crate::ignore::matcher_from_builtins(),
-            None,
-            &mut files,
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+            &root,
+            &crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+                patterns: vec![".venv/".to_owned()],
+            })
+            .unwrap(),
+            ProjectSyncScope::FullProject,
         )
+        .unwrap();
+        let complete = visit_project_files(&root, &policy, None, |relative, file| {
+            let observation = lillux::observe_open_regular_file(&file)?;
+            let (blob_hash, metadata) =
+                lillux::digest_open_regular_file_stable_exact(&file, observation.size())?;
+            let captured = ProjectFile {
+                blob_hash,
+                size: metadata.len(),
+                normalized_mode: lillux::normalized_portable_regular_mode(&metadata)?,
+            };
+            files.insert(relative.to_owned(), captured.clone());
+            Ok(captured)
+        })
         .unwrap();
 
         assert!(complete);
         assert!(files.contains_key("regular.txt"));
         assert!(!files.contains_key(".venv/bin/python"));
+    }
+
+    #[test]
+    fn status_deadline_stops_shared_traversal_without_claiming_completeness() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("file"), b"data").unwrap();
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let matcher = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+            &root,
+            &matcher,
+            ProjectSyncScope::FullProject,
+        )
+        .unwrap();
+        assert!(
+            !visit_project_files(
+                &root,
+                &policy,
+                Some(MonotonicDeadline::after(Duration::ZERO)),
+                |_, _| panic!("expired scan must not observe file bodies"),
+            )
+            .unwrap()
+        );
+        symlink("file", project.path().join("link")).unwrap();
+        let error = visit_project_files(&root, &policy, None, |_, _| {
+            Ok(ProjectFile {
+                blob_hash: "a".repeat(64),
+                size: 4,
+                normalized_mode: ProjectFile::REGULAR_MODE,
+            })
+        })
+        .unwrap_err();
+        assert!(!error.is::<StatusScanBudgetElapsed>(), "{error:#}");
+    }
+
+    #[test]
+    fn status_policy_source_uses_capture_proof_even_for_partial_observations() {
+        let project = tempfile::tempdir().unwrap();
+        let source = ryeos_state::project_sync::PROJECT_SNAPSHOT_CONFIG_RELATIVE;
+        let source_path = project.path().join(source);
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        let bytes = b"schema: 1\nexclusions: []\n";
+        fs::write(&source_path, bytes).unwrap();
+        let matcher = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let policy = ryeos_state::project_sync::capture_snapshot_policy(
+            project.path(),
+            &matcher,
+            ProjectSyncScope::FullProject,
+        )
+        .unwrap();
+        let mut files = BTreeMap::new();
+        assert!(validate_status_policy_source(&files, &policy, false).is_ok());
+        assert!(validate_status_policy_source(&files, &policy, true).is_err());
+        files.insert(
+            source.to_owned(),
+            ProjectFile {
+                blob_hash: lillux::sha256_hex(bytes),
+                size: bytes.len() as u64,
+                normalized_mode: ProjectFile::REGULAR_MODE,
+            },
+        );
+        assert!(validate_status_policy_source(&files, &policy, false).is_ok());
+        assert!(validate_status_policy_source(&files, &policy, true).is_ok());
+        files.get_mut(source).unwrap().blob_hash = "a".repeat(64);
+        assert!(validate_status_policy_source(&files, &policy, false).is_err());
+        assert!(validate_status_policy_source(&files, &policy, true).is_err());
     }
 }

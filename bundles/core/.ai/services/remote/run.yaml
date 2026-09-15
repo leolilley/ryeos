@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T22:45:17Z:8e2439ad472fa4eea9eaffd6e33697ffaebe95974db752b57db5e088375e9b58:DuEla6ic97QS+BPUswvmDzrFGKKdApVom1nDUcwWvFPBy2K/MSVWSkI0p+/AunAhd3cQzMpbh247/IKkPGKNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T18:38:44Z:bf4f8189fda7f6ee28ccd6093dbac75e79052399cccf5a09dbd27aa12bafe30b:Fosj2eXhuM0GusZSJybszPClygPgweZ9/iXC0+9NxRbuCZx/LaIqq2wjJGtMBLUqw9DKmcZ5zYIFnAEDsREFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.run
 required_caps: ["ryeos.execute.service.remote/admin"]
@@ -7,9 +7,10 @@ schema:
   remote: string?
   item_ref: string
   ref_bindings: object
+  product_selections: array?
   project: string?
   outbound_principal: string?
   parameters: object?
   execution_policy: object
   launch_id: string?
-description: "Execute an item on a configured remote using an explicit projectless or project-backed policy, optional configured-operator continuity, and an optional caller-retained launch coordinate"
+description: "Execute an item on a configured remote using an explicit projectless or project-backed policy, optional configured-operator continuity, and an optional caller-retained launch coordinate. Product selections explicitly name destination-local retained witnesses and qualifications; this operation does not transfer source-bound product authority."

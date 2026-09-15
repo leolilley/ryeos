@@ -34,13 +34,31 @@ const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;
 const DURABLE_UPLOAD_SCHEMA: u32 = 2;
 const MAX_RECOVERY_RECORD_BYTES: u64 = 1024 * 1024;
-const REMOTE_PULL_JOURNAL_KEY: &str = "remote-pull-journal.key";
+// Staging records carry roots, unlike small transition journals. This structural
+// envelope admits one maximum CAS upload plus one maximum large-content import.
+// It is not an admission allowance: node policy still bounds each operation.
+// Large-object roots have no aggregate ObjectClosureLimits bound, so count them
+// explicitly here rather than pretending they consume the CAS blob allowance.
+const MAX_STAGING_ROOTS: usize = crate::object_closure::REMOTE_CLOSURE_MAX_OBJECTS
+    + crate::object_closure::REMOTE_CLOSURE_MAX_BLOBS
+    + crate::objects::MAX_LARGE_CONTENT_MANIFEST_ENTRIES as usize
+    + 2; // completed manifest and publication binding during settlement
+// A canonical hash array element costs at most 67 bytes. Retain the existing
+// small-record envelope for metadata; never widen unrelated recovery journals.
+const MAX_STAGING_RECORD_BYTES: u64 = MAX_RECOVERY_RECORD_BYTES + MAX_STAGING_ROOTS as u64 * 67;
+// The authority predates its use by project snapshot apply. Keep the physical
+// coordinate stable while generalizing the API: changing the filename would
+// strand an authenticated remote-pull journal created by the immediately
+// preceding process. This is one authority, not a legacy-name fallback.
+const WORKSPACE_JOURNAL_KEY: &str = "remote-pull-journal.key";
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static SHARED_CAS_GUARD_DEPTH: Cell<usize> = const { Cell::new(0) };
     static EXCLUSIVE_CAS_GUARD_DEPTH: Cell<usize> = const { Cell::new(0) };
     static CAS_GUARD_FILE: RefCell<Option<Rc<File>>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static FAIL_AFTER_STAGING_PUBLICATION: Cell<bool> = const { Cell::new(false) };
 }
 
 #[derive(Clone, Copy)]
@@ -170,18 +188,17 @@ pub struct RecoveryStore {
     directory: std::sync::Arc<lillux::PinnedDirectory>,
 }
 
-fn read_remote_pull_journal_key(file: &mut File) -> Result<[u8; 32]> {
-    let mut bytes = Vec::with_capacity(33);
-    file.take(33).read_to_end(&mut bytes)?;
+fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 32]> {
+    let bytes = file.read_bounded(33)?;
     if bytes.len() != 32 {
         anyhow::bail!(
-            "node-owned remote pull journal key has invalid length {}",
+            "node-owned workspace journal key has invalid length {}",
             bytes.len()
         );
     }
     bytes
         .try_into()
-        .map_err(|_| anyhow::anyhow!("remote pull journal key length changed during validation"))
+        .map_err(|_| anyhow::anyhow!("workspace journal key length changed during validation"))
 }
 
 const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
@@ -284,6 +301,7 @@ pub struct StagedCasRootLease {
     directory: lillux::PinnedDirectory,
     record: StagedCasRootsRecord,
     lock_file: Option<File>,
+    publication_uncertain: Cell<bool>,
 }
 
 /// Descriptor-owned temporary bytes associated with one staged-root lease.
@@ -310,9 +328,20 @@ pub struct DurableCasUploadStage {
     directory: lillux::PinnedDirectory,
     record: DurableCasUploadRecord,
     lock_file: Option<File>,
+    publication_uncertain: Cell<bool>,
 }
 
 impl DurableCasUploadStage {
+    fn persist_record(&self, record: &DurableCasUploadRecord) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        let bytes = encode_durable_upload(record)?;
+        // Validation refusals are reusable. Once I/O starts, even a failed
+        // final directory sync may have published the new record. Keep the
+        // lock but fence this handle; normal reopen resolves actual state.
+        publish_staging_record(&self.directory, &record.staging_id, &bytes)
+            .inspect_err(|_| self.publication_uncertain.set(true))
+    }
+
     pub fn staging_id(&self) -> &str {
         &self.record.staging_id
     }
@@ -330,6 +359,7 @@ impl DurableCasUploadStage {
         publication_key: &DurableCasPublicationKey,
         expected_previous_hash: Option<&str>,
     ) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         if self.record.publication_key != *publication_key {
             anyhow::bail!("durable upload stage is bound to another publication target");
         }
@@ -518,16 +548,17 @@ impl DurableCasUploadStage {
         for hash in &blobs {
             validate_hash("durable staged blob root", hash)?;
         }
+        let mut candidate = self.record.clone();
         let mut changed = false;
         for hash in objects {
-            changed |= self.record.object_hashes.insert(hash.to_string());
+            changed |= candidate.object_hashes.insert(hash.to_string());
         }
         for hash in blobs {
-            changed |= self.record.blob_hashes.insert(hash.to_string());
+            changed |= candidate.blob_hashes.insert(hash.to_string());
         }
         if changed {
-            self.recovery
-                .write_durable_upload(&self.directory, &self.record)?;
+            self.persist_record(&candidate)?;
+            self.record = candidate;
         }
         Ok(())
     }
@@ -541,8 +572,10 @@ impl DurableCasUploadStage {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("durable staged large-object root", hash)?;
         if self.record.large_object_hashes.insert(hash.to_owned()) {
-            self.recovery
-                .write_durable_upload(&self.directory, &self.record)?;
+            if let Err(error) = self.persist_record(&self.record) {
+                self.record.large_object_hashes.remove(hash);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -558,13 +591,14 @@ impl DurableCasUploadStage {
         if !self.record.object_hashes.contains(admitted_target_hash) {
             anyhow::bail!("admitted publication target was not protected by the upload stage");
         }
-        self.record.admitted_target_hash = Some(admitted_target_hash.to_string());
-        self.record.admitted_at = Some(lillux::time::iso8601_now());
-        self.record.object_hashes.clear();
-        self.record.blob_hashes.clear();
-        self.record.large_object_hashes.clear();
-        self.recovery
-            .write_durable_upload(&self.directory, &self.record)?;
+        let mut candidate = self.record.clone();
+        candidate.admitted_target_hash = Some(admitted_target_hash.to_string());
+        candidate.admitted_at = Some(lillux::time::iso8601_now());
+        candidate.object_hashes.clear();
+        candidate.blob_hashes.clear();
+        candidate.large_object_hashes.clear();
+        self.persist_record(&candidate)?;
+        self.record = candidate;
         if let Err(error) = self
             .recovery
             .retire_durable_blob_parts(&self.record.staging_id)
@@ -580,6 +614,7 @@ impl DurableCasUploadStage {
     }
 
     fn ensure_active(&self) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         if let Some(target) = self.record.admitted_target_hash.as_deref() {
             anyhow::bail!(
                 "durable upload stage is an admitted receipt for publication target {target}"
@@ -589,19 +624,25 @@ impl DurableCasUploadStage {
     }
 
     fn protect_object_hash_admitted(&mut self, hash: &str) -> Result<()> {
+        self.ensure_active()?;
         validate_hash("durable staged object root", hash)?;
         if self.record.object_hashes.insert(hash.to_string()) {
-            self.recovery
-                .write_durable_upload(&self.directory, &self.record)?;
+            if let Err(error) = self.persist_record(&self.record) {
+                self.record.object_hashes.remove(hash);
+                return Err(error);
+            }
         }
         Ok(())
     }
 
     fn protect_blob_hash_admitted(&mut self, hash: &str) -> Result<()> {
+        self.ensure_active()?;
         validate_hash("durable staged blob root", hash)?;
         if self.record.blob_hashes.insert(hash.to_string()) {
-            self.recovery
-                .write_durable_upload(&self.directory, &self.record)?;
+            if let Err(error) = self.persist_record(&self.record) {
+                self.record.blob_hashes.remove(hash);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -614,7 +655,15 @@ impl Drop for DurableCasUploadStage {
 }
 
 impl StagedCasRootLease {
+    fn persist_record(&self, record: &StagedCasRootsRecord) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        let bytes = encode_staged_roots(record)?;
+        publish_staging_record(&self.directory, &record.lease_id, &bytes)
+            .inspect_err(|_| self.publication_uncertain.set(true))
+    }
+
     pub fn open_blob_part(&self, expected_hash: &str) -> Result<StagedBlobPart> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         validate_hash("staged blob part", expected_hash)?;
         let root = self
             .recovery
@@ -638,6 +687,7 @@ impl StagedCasRootLease {
         expected_hash: &str,
         expected_size: u64,
     ) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         part.file.sync_all()?;
         part.file.seek(std::io::SeekFrom::Start(0))?;
@@ -662,6 +712,7 @@ impl StagedCasRootLease {
         cas: &lillux::cas::CasStore,
         value: &serde_json::Value,
     ) -> Result<String> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         let canonical = lillux::canonical_json(value).context("canonicalize staged CAS object")?;
         let expected = lillux::sha256_hex(canonical.as_bytes());
@@ -679,6 +730,7 @@ impl StagedCasRootLease {
         cas: &lillux::cas::CasStore,
         bytes: &[u8],
     ) -> Result<String> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         let expected = lillux::sha256_hex(bytes);
         self.protect_blob_hash_admitted(cas_mutation_guard, &expected)?;
@@ -694,11 +746,14 @@ impl StagedCasRootLease {
         cas_mutation_guard: &CasMutationGuard,
         hash: &str,
     ) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS object root", hash)?;
         if self.record.object_hashes.insert(hash.to_string()) {
-            self.recovery
-                .write_staged_roots(&self.directory, &self.record)?;
+            if let Err(error) = self.persist_record(&self.record) {
+                self.record.object_hashes.remove(hash);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -708,11 +763,14 @@ impl StagedCasRootLease {
         cas_mutation_guard: &CasMutationGuard,
         hash: &str,
     ) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS blob root", hash)?;
         if self.record.blob_hashes.insert(hash.to_string()) {
-            self.recovery
-                .write_staged_roots(&self.directory, &self.record)?;
+            if let Err(error) = self.persist_record(&self.record) {
+                self.record.blob_hashes.remove(hash);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -722,11 +780,14 @@ impl StagedCasRootLease {
         cas_mutation_guard: &CasMutationGuard,
         hash: &str,
     ) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged large-object root", hash)?;
         if self.record.large_object_hashes.insert(hash.to_owned()) {
-            self.recovery
-                .write_staged_roots(&self.directory, &self.record)?;
+            if let Err(error) = self.persist_record(&self.record) {
+                self.record.large_object_hashes.remove(hash);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -745,6 +806,7 @@ impl StagedCasRootLease {
         O: IntoIterator<Item = &'a str>,
         B: IntoIterator<Item = &'a str>,
     {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
         let object_hashes = object_hashes.into_iter().collect::<Vec<_>>();
         let blob_hashes = blob_hashes.into_iter().collect::<Vec<_>>();
@@ -755,16 +817,17 @@ impl StagedCasRootLease {
             validate_hash("staged CAS blob root", hash)?;
         }
 
+        let mut candidate = self.record.clone();
         let mut changed = false;
         for hash in object_hashes {
-            changed |= self.record.object_hashes.insert(hash.to_string());
+            changed |= candidate.object_hashes.insert(hash.to_string());
         }
         for hash in blob_hashes {
-            changed |= self.record.blob_hashes.insert(hash.to_string());
+            changed |= candidate.blob_hashes.insert(hash.to_string());
         }
         if changed {
-            self.recovery
-                .write_staged_roots(&self.directory, &self.record)?;
+            self.persist_record(&candidate)?;
+            self.record = candidate;
         }
         Ok(())
     }
@@ -773,6 +836,7 @@ impl StagedCasRootLease {
     /// the admitted path for callers that also hold a later lock in the global
     /// mutation hierarchy (for example the daemon StateStore mutex).
     pub fn finish_admitted(&mut self, cas_mutation_guard: &CasMutationGuard) -> Result<()> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
         if let Err(error) = self.recovery.ensure_guard(cas_mutation_guard) {
             // Never let Drop reacquire the first lock while a caller may hold
             // later hierarchy locks. The durable record becomes an abandoned
@@ -1394,28 +1458,28 @@ impl RecoveryStore {
     /// journal itself lives beside the workspace bytes it describes so it can
     /// survive a daemon crash, but it is never trusted unless its canonical
     /// body authenticates under this key held outside project space.
-    pub fn remote_pull_journal_auth_key(&self) -> Result<[u8; 32]> {
+    pub fn workspace_journal_auth_key(&self) -> Result<[u8; 32]> {
         use rand::RngCore as _;
 
-        let name = std::ffi::OsStr::new(REMOTE_PULL_JOURNAL_KEY);
-        if let Some(mut file) = self.directory.open_regular(name, false)? {
-            return read_remote_pull_journal_key(&mut file);
+        let name = std::ffi::OsStr::new(WORKSPACE_JOURNAL_KEY);
+        if let Some(file) = self.directory.open_pinned_regular(name, false)? {
+            return read_workspace_journal_key(&file);
         }
 
         let mut generated = [0_u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut generated);
-        if let Some(created) = self
+        if self
             .directory
-            .atomic_create_regular(name, &generated, 0o600)?
+            .atomic_create_pinned_regular(name, &generated, 0o600)?
+            .is_some()
         {
-            created.sync_all()?;
-            self.directory.try_clone_descriptor()?.sync_all()?;
             return Ok(generated);
         }
-        let mut existing = self.directory.open_regular(name, false)?.ok_or_else(|| {
-            anyhow::anyhow!("remote pull journal key creation raced with removal")
-        })?;
-        read_remote_pull_journal_key(&mut existing)
+        let existing = self
+            .directory
+            .open_pinned_regular(name, false)?
+            .ok_or_else(|| anyhow::anyhow!("workspace journal key creation raced with removal"))?;
+        read_workspace_journal_key(&existing)
     }
 
     pub(crate) fn runtime_directory(&self) -> &lillux::PinnedDirectory {
@@ -1599,6 +1663,7 @@ impl RecoveryStore {
             directory: staged_directory,
             record,
             lock_file: Some(lock_file),
+            publication_uncertain: Cell::new(false),
         })
     }
 
@@ -1652,6 +1717,7 @@ impl RecoveryStore {
             directory: durable_directory,
             record,
             lock_file: Some(lock_file),
+            publication_uncertain: Cell::new(false),
         })
     }
 
@@ -1688,123 +1754,8 @@ impl RecoveryStore {
             directory,
             record,
             lock_file: Some(lock_file),
+            publication_uncertain: Cell::new(false),
         })
-    }
-
-    /// Settle every retained upload for one exact, already-proved
-    /// publication. The caller must first verify that `admitted_target_hash`
-    /// is the authoritative current target for this owner/publication key
-    /// while holding the same CAS guard and the publication barrier that
-    /// serializes upload creation and head advance. This closes duplicate
-    /// retry stages without age-based retirement or touching unrelated
-    /// uploads.
-    pub fn settle_durable_cas_uploads_for_existing_publication(
-        &self,
-        cas_mutation_guard: &CasMutationGuard,
-        owner_principal: &str,
-        purpose: &str,
-        publication_key: &DurableCasPublicationKey,
-        admitted_target_hash: &str,
-    ) -> Result<usize> {
-        validate_upload_owner(owner_principal)?;
-        validate_staging_purpose(purpose)?;
-        publication_key.validate()?;
-        validate_hash(
-            "existing durable upload publication target",
-            admitted_target_hash,
-        )?;
-        self.ensure_guard(cas_mutation_guard)?;
-        let Some(directory) = self.open_child_directory("durable-cas-uploads")? else {
-            return Ok(0);
-        };
-        let mut records = Vec::new();
-        let mut locks = BTreeMap::new();
-        for entry in directory.regular_files()? {
-            match entry.path().extension().and_then(|value| value.to_str()) {
-                Some("json") => records.push(entry),
-                Some("lock") => {
-                    locks.insert(entry.name().to_os_string(), entry);
-                }
-                _ => anyhow::bail!(
-                    "unexpected durable CAS upload entry: {}",
-                    entry.path().display()
-                ),
-            }
-        }
-
-        let mut settled = 0;
-        for record_entry in records {
-            let observed = self.read_durable_upload_pinned(&record_entry)?;
-            // Upload identity is immutable after creation. Filter on the
-            // enumerated inode before taking a stage lock so this exact
-            // publication cannot block behind unrelated project/import work.
-            // The current inode is still reopened and checked below before a
-            // matching stage is settled.
-            if observed.owner_principal != owner_principal
-                || observed.purpose != purpose
-                || observed.publication_key != *publication_key
-            {
-                let lock_name = std::ffi::OsString::from(format!("{}.lock", observed.staging_id));
-                locks.remove(&lock_name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "durable CAS upload {} has no lock file",
-                        observed.staging_id
-                    )
-                })?;
-                continue;
-            }
-            let lock_name = std::ffi::OsString::from(format!("{}.lock", observed.staging_id));
-            let lock_entry = locks.remove(&lock_name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "durable CAS upload {} has no lock file",
-                    observed.staging_id
-                )
-            })?;
-            lock_entry
-                .lock_exclusive()
-                .context("lock durable upload for publication settlement")?;
-            // The record is atomically replaced as it advances. Re-open it
-            // only after acquiring the stage lock so settlement never acts on
-            // the stale inode observed during namespace enumeration.
-            let current_file = directory
-                .open_pinned_regular(record_entry.name(), false)?
-                .ok_or_else(|| anyhow::anyhow!("durable CAS upload record disappeared"))?;
-            let record = self.read_durable_upload_pinned(&current_file)?;
-            if record.owner_principal != owner_principal
-                || record.purpose != purpose
-                || record.publication_key != *publication_key
-            {
-                continue;
-            }
-            if let Some(target) = record.admitted_target_hash.as_deref() {
-                if target != admitted_target_hash {
-                    anyhow::bail!(
-                        "matching durable upload receipt contradicts the existing publication target"
-                    );
-                }
-                continue;
-            }
-            let mut stage = DurableCasUploadStage {
-                recovery: self.clone(),
-                directory: directory.try_clone()?,
-                record,
-                lock_file: Some(lock_entry.try_clone_descriptor()?),
-            };
-            stage.protect_cas_closure(
-                cas_mutation_guard,
-                std::iter::once(admitted_target_hash),
-                std::iter::empty(),
-            )?;
-            stage.finish_admitted(cas_mutation_guard, admitted_target_hash)?;
-            settled += 1;
-        }
-        if let Some((_name, orphan)) = locks.into_iter().next() {
-            anyhow::bail!(
-                "orphan durable CAS upload lock: {}",
-                orphan.path().display()
-            );
-        }
-        Ok(settled)
     }
 
     /// Retire abandoned durable upload stages selected by an authoritative
@@ -2440,39 +2391,15 @@ impl RecoveryStore {
         directory: &lillux::PinnedDirectory,
         record: &StagedCasRootsRecord,
     ) -> Result<()> {
-        if record.schema != STAGED_ROOTS_SCHEMA
-            || record.owner_pid == 0
-            || record.purpose.is_empty()
-        {
-            anyhow::bail!("invalid staged CAS root record");
-        }
-        crate::objects::parse_canonical_timestamp(&record.created_at)
-            .context("staged CAS root created_at is not canonical")?;
-        validate_instance_id(&record.lease_id)?;
-        for hash in &record.object_hashes {
-            validate_hash("staged CAS object root", hash)?;
-        }
-        for hash in &record.blob_hashes {
-            validate_hash("staged CAS blob root", hash)?;
-        }
-        for hash in &record.large_object_hashes {
-            validate_hash("staged large-object root", hash)?;
-        }
-        let value = serde_json::to_value(record)?;
-        let bytes = lillux::canonical_json(&value).context("canonicalize staged CAS roots")?;
-        let name = format!("{}.json", record.lease_id);
-        let name = std::ffi::OsStr::new(&name);
-        let expected = directory.open_regular(name, false)?;
-        directory
-            .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
-            .context("durably write staged CAS roots")
+        let bytes = encode_staged_roots(record)?;
+        publish_staging_record(directory, &record.lease_id, &bytes)
     }
 
     fn read_staged_roots_pinned(
         &self,
         file: &lillux::PinnedRegularFile,
     ) -> Result<StagedCasRootsRecord> {
-        let bytes = file.read_bounded(MAX_RECOVERY_RECORD_BYTES)?;
+        let bytes = file.read_bounded(MAX_STAGING_RECORD_BYTES)?;
         decode_staged_roots_bytes(&bytes, file.path())
     }
 
@@ -2481,16 +2408,8 @@ impl RecoveryStore {
         directory: &lillux::PinnedDirectory,
         record: &DurableCasUploadRecord,
     ) -> Result<()> {
-        validate_durable_upload_record(record)?;
-        let value = serde_json::to_value(record)?;
-        let bytes =
-            lillux::canonical_json(&value).context("canonicalize durable CAS upload stage")?;
-        let name = format!("{}.json", record.staging_id);
-        let name = std::ffi::OsStr::new(&name);
-        let expected = directory.open_regular(name, false)?;
-        directory
-            .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
-            .context("durably write CAS upload stage")
+        let bytes = encode_durable_upload(record)?;
+        publish_staging_record(directory, &record.staging_id, &bytes)
     }
 
     fn read_durable_upload_file(&self, file: File, path: &Path) -> Result<DurableCasUploadRecord> {
@@ -2501,41 +2420,88 @@ impl RecoveryStore {
         &self,
         file: &lillux::PinnedRegularFile,
     ) -> Result<DurableCasUploadRecord> {
-        let bytes = file.read_bounded(MAX_RECOVERY_RECORD_BYTES)?;
+        let bytes = file.read_bounded(MAX_STAGING_RECORD_BYTES)?;
         decode_durable_upload_bytes(&bytes, file.path())
     }
 }
 
+fn encode_staged_roots(record: &StagedCasRootsRecord) -> Result<String> {
+    validate_staged_roots_record(record)?;
+    let bytes = lillux::canonical_json(&serde_json::to_value(record)?)?;
+    validate_staging_record_bytes(bytes.len())?;
+    Ok(bytes)
+}
+
+fn encode_durable_upload(record: &DurableCasUploadRecord) -> Result<String> {
+    validate_durable_upload_record(record)?;
+    let bytes = lillux::canonical_json(&serde_json::to_value(record)?)?;
+    validate_staging_record_bytes(bytes.len())?;
+    Ok(bytes)
+}
+
+fn publish_staging_record(
+    directory: &lillux::PinnedDirectory,
+    id: &str,
+    bytes: &str,
+) -> Result<()> {
+    let name = format!("{id}.json");
+    let name = std::ffi::OsStr::new(&name);
+    let expected = directory.open_regular(name, false)?;
+    directory
+        .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
+        .context("durably write staging roots")?;
+    #[cfg(test)]
+    if FAIL_AFTER_STAGING_PUBLICATION.with(|fail| fail.replace(false)) {
+        anyhow::bail!("injected post-publication sync failure");
+    }
+    Ok(())
+}
+
+fn ensure_staging_publication_certain(uncertain: &Cell<bool>) -> Result<()> {
+    if uncertain.get() {
+        anyhow::bail!(
+            "staging publication outcome is uncertain; drop this handle and reopen recovery state"
+        );
+    }
+    Ok(())
+}
+
 fn decode_staged_roots_bytes(bytes: &[u8], path: &Path) -> Result<StagedCasRootsRecord> {
+    validate_staging_record_bytes(bytes.len())?;
     let record: StagedCasRootsRecord =
         serde_json::from_slice(bytes).context("decode staged CAS roots")?;
-    if record.schema != STAGED_ROOTS_SCHEMA {
-        anyhow::bail!("unsupported staged CAS roots schema: {}", record.schema);
-    }
-    validate_instance_id(&record.lease_id)?;
+    validate_staged_roots_record(&record)?;
     if path.file_stem().and_then(|value| value.to_str()) != Some(record.lease_id.as_str()) {
         anyhow::bail!("staged CAS root path/record mismatch");
-    }
-    if record.owner_pid == 0 || record.purpose.is_empty() {
-        anyhow::bail!("invalid staged CAS root record");
-    }
-    crate::objects::parse_canonical_timestamp(&record.created_at)
-        .context("staged CAS root created_at is not canonical")?;
-    for hash in &record.object_hashes {
-        validate_hash("staged CAS object root", hash)?;
-    }
-    for hash in &record.blob_hashes {
-        validate_hash("staged CAS blob root", hash)?;
     }
     Ok(record)
 }
 
+fn validate_staged_roots_record(record: &StagedCasRootsRecord) -> Result<()> {
+    if record.schema != STAGED_ROOTS_SCHEMA {
+        anyhow::bail!("unsupported staged CAS roots schema: {}", record.schema);
+    }
+    validate_instance_id(&record.lease_id)?;
+    validate_staging_purpose(&record.purpose)?;
+    if record.owner_pid == 0 {
+        anyhow::bail!("invalid staged CAS root record");
+    }
+    crate::objects::parse_canonical_timestamp(&record.created_at)
+        .context("staged CAS root created_at is not canonical")?;
+    validate_staging_roots(
+        &record.object_hashes,
+        &record.blob_hashes,
+        &record.large_object_hashes,
+    )
+}
+
 fn decode_durable_upload(file: File, path: &Path) -> Result<DurableCasUploadRecord> {
-    let bytes = lillux::read_open_regular_file_bounded(file, MAX_RECOVERY_RECORD_BYTES)?;
+    let bytes = lillux::read_open_regular_file_bounded(file, MAX_STAGING_RECORD_BYTES)?;
     decode_durable_upload_bytes(&bytes, path)
 }
 
 fn decode_durable_upload_bytes(bytes: &[u8], path: &Path) -> Result<DurableCasUploadRecord> {
+    validate_staging_record_bytes(bytes.len())?;
     let record: DurableCasUploadRecord =
         serde_json::from_slice(bytes).context("decode durable CAS upload stage")?;
     validate_durable_upload_record(&record)?;
@@ -2614,14 +2580,35 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
     }
     crate::objects::parse_canonical_timestamp(&record.created_at)
         .context("durable CAS upload created_at is not canonical")?;
-    for hash in &record.object_hashes {
-        validate_hash("durable staged object root", hash)?;
+    validate_staging_roots(
+        &record.object_hashes,
+        &record.blob_hashes,
+        &record.large_object_hashes,
+    )
+}
+
+fn validate_staging_roots(
+    objects: &BTreeSet<String>,
+    blobs: &BTreeSet<String>,
+    large_objects: &BTreeSet<String>,
+) -> Result<()> {
+    // Coordinates in different stores remain distinct even with equal hashes.
+    let count = objects
+        .len()
+        .checked_add(blobs.len())
+        .and_then(|n| n.checked_add(large_objects.len()));
+    if count.is_none_or(|count| count > MAX_STAGING_ROOTS) {
+        anyhow::bail!("staging roots exceed the recovery record root capacity {MAX_STAGING_ROOTS}");
     }
-    for hash in &record.blob_hashes {
-        validate_hash("durable staged blob root", hash)?;
+    for hash in objects.iter().chain(blobs).chain(large_objects) {
+        validate_hash("staged root", hash)?;
     }
-    for hash in &record.large_object_hashes {
-        validate_hash("durable staged large-object root", hash)?;
+    Ok(())
+}
+
+fn validate_staging_record_bytes(len: usize) -> Result<()> {
+    if len as u64 > MAX_STAGING_RECORD_BYTES {
+        anyhow::bail!("staging record exceeds readable record bound {MAX_STAGING_RECORD_BYTES}");
     }
     Ok(())
 }
@@ -2786,6 +2773,185 @@ mod tests {
     }
 
     #[test]
+    fn staging_record_envelope_reopens_large_current_upload_and_preserves_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let key = DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(&guard, &hash("c"), "large-import", &key, None)
+            .unwrap();
+        let blobs = (0..20_000).map(|n| format!("{n:064x}")).collect::<Vec<_>>();
+        stage
+            .protect_cas_closure(
+                &guard,
+                [hash("b").as_str()],
+                blobs.iter().map(String::as_str),
+            )
+            .unwrap();
+        stage.protect_large_object_hash(&guard, &hash("d")).unwrap();
+        let bytes = lillux::canonical_json(&serde_json::to_value(&stage.record).unwrap()).unwrap();
+        assert!(bytes.len() as u64 > MAX_RECOVERY_RECORD_BYTES);
+        let id = stage.staging_id().to_owned();
+        drop(stage);
+        let mut reopened = store
+            .open_durable_cas_upload_admitted(&guard, &id, &hash("c"))
+            .unwrap();
+        assert_eq!(reopened.record.blob_hashes.len(), blobs.len());
+        let roots = store.inspect_staged_cas_root_hashes_read_only().unwrap();
+        assert_eq!(roots.blob_hashes.len(), blobs.len());
+        assert_eq!(roots.large_object_hashes, vec![hash("d")]);
+        reopened.finish_admitted(&guard, &hash("b")).unwrap();
+        assert!(
+            store
+                .inspect_staged_cas_root_hashes_read_only()
+                .unwrap()
+                .blob_hashes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn staging_record_capacity_refusal_keeps_upload_and_lease_reusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let key = DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(&guard, &hash("c"), "bounded-import", &key, None)
+            .unwrap();
+        let mut lease = store
+            .begin_staged_cas_roots_admitted(&guard, "bounded-lease")
+            .unwrap();
+        let blobs = (0..=MAX_STAGING_ROOTS)
+            .map(|n| format!("{n:064x}"))
+            .collect::<Vec<_>>();
+        assert!(
+            stage
+                .protect_cas_closure(&guard, [], blobs.iter().map(String::as_str))
+                .unwrap_err()
+                .to_string()
+                .contains("root capacity")
+        );
+        assert!(
+            lease
+                .protect_cas_closure_admitted(&guard, [], blobs.iter().map(String::as_str))
+                .is_err()
+        );
+        assert!(stage.record.blob_hashes.is_empty());
+        assert!(lease.record.blob_hashes.is_empty());
+        assert!(
+            store
+                .inspect_staged_cas_root_hashes_read_only()
+                .unwrap()
+                .blob_hashes
+                .is_empty()
+        );
+        stage
+            .protect_cas_closure(&guard, [hash("b").as_str()], [])
+            .unwrap();
+        lease
+            .protect_object_hash_admitted(&guard, &hash("b"))
+            .unwrap();
+        stage.finish_admitted(&guard, &hash("b")).unwrap();
+        lease.finish_admitted(&guard).unwrap();
+    }
+
+    #[test]
+    fn staging_record_ambiguous_publication_fences_handle_until_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let key = DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(&guard, &hash("c"), "ambiguous-import", &key, None)
+            .unwrap();
+        stage
+            .protect_cas_closure(&guard, [hash("b").as_str()], [])
+            .unwrap();
+        FAIL_AFTER_STAGING_PUBLICATION.with(|fail| fail.set(true));
+        assert!(stage.finish_admitted(&guard, &hash("b")).is_err());
+        assert!(stage.lock_file.is_some());
+        assert!(stage.ensure_protects_object(&hash("b")).is_err());
+        assert!(stage.ensure_publication_contract(&key, None).is_err());
+        assert!(
+            stage
+                .protect_cas_closure(&guard, [hash("b").as_str()], [])
+                .is_err()
+        );
+        assert!(stage.finish_admitted(&guard, &hash("b")).is_err());
+        let id = stage.staging_id().to_owned();
+        drop(stage);
+        let reopened = store
+            .open_durable_cas_upload_admitted(&guard, &id, &hash("c"))
+            .unwrap();
+        assert_eq!(reopened.admitted_target_hash(), Some(hash("b").as_str()));
+
+        let mut lease = store
+            .begin_staged_cas_roots_admitted(&guard, "ambiguous-lease")
+            .unwrap();
+        FAIL_AFTER_STAGING_PUBLICATION.with(|fail| fail.set(true));
+        assert!(
+            lease
+                .protect_object_hash_admitted(&guard, &hash("d"))
+                .is_err()
+        );
+        assert!(lease.protect_cas_closure_admitted(&guard, [], []).is_err());
+        assert!(lease.finish_admitted(&guard).is_err());
+        assert!(lease.lock_file.is_some());
+        drop(lease);
+        // Drop must not erase the successfully published but unacknowledged
+        // lease. Existing abandoned-lease recovery owns its eventual retirement.
+        assert_eq!(
+            store
+                .inspect_staged_cas_root_hashes_read_only()
+                .unwrap()
+                .object_hashes,
+            vec![hash("d")]
+        );
+    }
+
+    #[test]
+    fn staging_record_readers_and_writers_share_byte_and_hash_validation() {
+        let mut record: DurableCasUploadRecord =
+            serde_json::from_value(durable_upload_wire()).unwrap();
+        record.blob_hashes = (0..=MAX_STAGING_ROOTS)
+            .map(|n| format!("{n:064x}"))
+            .collect();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert!(decode_durable_upload_bytes(&bytes, Path::new("stage-1.json")).is_err());
+        assert!(validate_staging_record_bytes(MAX_STAGING_RECORD_BYTES as usize).is_ok());
+        assert!(validate_staging_record_bytes(MAX_STAGING_RECORD_BYTES as usize + 1).is_err());
+        let invalid = StagedCasRootsRecord {
+            schema: STAGED_ROOTS_SCHEMA,
+            lease_id: "lease-1".into(),
+            owner_pid: 1,
+            purpose: "test".into(),
+            created_at: "2026-07-14T12:00:00Z".into(),
+            object_hashes: BTreeSet::new(),
+            blob_hashes: BTreeSet::new(),
+            large_object_hashes: BTreeSet::from(["not-a-hash".into()]),
+        };
+        assert!(validate_staged_roots_record(&invalid).is_err());
+        assert!(
+            decode_staged_roots_bytes(
+                &serde_json::to_vec(&invalid).unwrap(),
+                Path::new("lease-1.json")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn durable_upload_can_settle_an_already_current_publication_root() {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
@@ -2831,125 +2997,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("admitted receipt")
-        );
-    }
-
-    #[test]
-    fn existing_publication_settles_only_its_exact_duplicate_uploads() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
-        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
-        let guard =
-            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
-                .unwrap();
-        let owner = hash("a");
-        let publication_key =
-            DurableCasPublicationKey::external_content_import(&hash("b")).unwrap();
-        let other_key = DurableCasPublicationKey::external_content_import(&hash("c")).unwrap();
-        let target_hash = hash("d");
-        let first = store
-            .begin_durable_cas_upload_admitted(
-                &guard,
-                &owner,
-                "managed-external-content-import",
-                &publication_key,
-                None,
-            )
-            .unwrap();
-        let first_id = first.staging_id().to_owned();
-        drop(first);
-        let second = store
-            .begin_durable_cas_upload_admitted(
-                &guard,
-                &owner,
-                "managed-external-content-import",
-                &publication_key,
-                None,
-            )
-            .unwrap();
-        let second_id = second.staging_id().to_owned();
-        drop(second);
-        let other = store
-            .begin_durable_cas_upload_admitted(
-                &guard,
-                &owner,
-                "managed-external-content-import",
-                &other_key,
-                None,
-            )
-            .unwrap();
-        let other_id = other.staging_id().to_owned();
-        drop(other);
-
-        assert_eq!(
-            store
-                .settle_durable_cas_uploads_for_existing_publication(
-                    &guard,
-                    &owner,
-                    "managed-external-content-import",
-                    &publication_key,
-                    &target_hash,
-                )
-                .unwrap(),
-            2
-        );
-        for staging_id in [first_id, second_id] {
-            let stage = store
-                .open_durable_cas_upload_admitted(&guard, &staging_id, &owner)
-                .unwrap();
-            assert_eq!(stage.admitted_target_hash(), Some(target_hash.as_str()));
-        }
-        let other = store
-            .open_durable_cas_upload_admitted(&guard, &other_id, &owner)
-            .unwrap();
-        assert_eq!(other.admitted_target_hash(), None);
-    }
-
-    #[test]
-    fn existing_publication_refuses_a_contradictory_duplicate_receipt() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
-        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
-        let guard =
-            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
-                .unwrap();
-        let owner = hash("a");
-        let publication_key =
-            DurableCasPublicationKey::external_content_import(&hash("b")).unwrap();
-        let admitted_target = hash("c");
-        let requested_target = hash("d");
-        let mut stage = store
-            .begin_durable_cas_upload_admitted(
-                &guard,
-                &owner,
-                "managed-external-content-import",
-                &publication_key,
-                None,
-            )
-            .unwrap();
-        stage
-            .protect_cas_closure(
-                &guard,
-                std::iter::once(admitted_target.as_str()),
-                std::iter::empty(),
-            )
-            .unwrap();
-        stage.finish_admitted(&guard, &admitted_target).unwrap();
-        drop(stage);
-
-        let error = store
-            .settle_durable_cas_uploads_for_existing_publication(
-                &guard,
-                &owner,
-                "managed-external-content-import",
-                &publication_key,
-                &requested_target,
-            )
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("contradicts the existing publication target")
         );
     }
 

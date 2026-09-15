@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:20Z:6de7793f0194443d3fc0d4365097fe78ea1d2b754178737780da9518494fb9f5:asMWLCVLFPfuUV1Dobdh45U5jRnfxU/SsK69jovIjWnYy3V22wGiyo36TvsRTQyihe5qgQsLUMd3SImFMUYhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:20Z:f707db0478788b0a89a03dab24f5721517e8ff8ad575469448cbe0959266186f:CaJcbA1b1l6Uaz6GS8vxsqJEmkv8b5lzN0zySWSoBgbuS0jD845CbMej/vKgmPcs0xAzQiJiMJkJXQQOkPVWCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "manifest-sign"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: []
 description: "Generate and sign .ai/manifest.yaml from .ai/manifest.source.yaml without running the full publish pipeline."
 

@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "properties": {
+    "timestamp": {
+      "type": "number"
+    },
+    "sessionID": {
+      "type": "string",
+      "pattern": "^ses"
+    },
+    "assistantMessageID": {
+      "type": "string",
+      "pattern": "^msg_"
+    },
+    "textID": {
+      "type": "string"
+    },
+    "delta": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "timestamp",
+    "sessionID",
+    "assistantMessageID",
+    "textID",
+    "delta"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

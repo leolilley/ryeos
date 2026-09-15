@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-03T11:56:15Z:e076a13c3bd4a32c17ed34cabbd151ce7a7521f6a27d92e3ffe0905bce3962c3:HtykOldLkr2yiHgxVANtHhhJWZL4csHCyWWl8DZXVPVFMH0POJDtxlaGX0FUdpMNmgMtiB6nJJ9Afj6LjOPpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T12:59:28Z:7d5a6d5b08b2c313ee5aa9c29964c2a2de651e4d05aa7565799f38635affb9c7:WhT0NiE+iXf9pH7RNIxPcT3KXBwR0Ie2Oi+40Ht1uBhToOsVfvlP5rZOsTzYNEBkTTDi9sa2Jc7Lua5ougSPCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -88,10 +88,11 @@ policies:
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
-    schema: 1
+    schema: 2
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
+    workload_client: null
   object_closure:
     schema: 1
     max_roots: 256
@@ -142,10 +143,18 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 1
+      version: 6
+      process_scopes:
+        mode: unconfigured
       mode: disabled
       backend: null
       filesystem:
+        proc_filesystem: empty
+        live_project:
+          mode: fixed_parents
+          limits:
+            max_entries: 2048
+            max_depth: 64
         readable:
           - "{node_public_identity}"
           - "{daemon_socket}"
@@ -157,6 +166,7 @@ policies:
           - "{checkpoint_dir}"
       network:
         mode: host
+        runtime_files: []
       environment:
         allow:
           - "*"
@@ -168,8 +178,19 @@ policies:
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
   ingest_ignore:
-    schema: 1
-    additional_patterns: []
+    schema: 2
+    patterns:
+      - "*.pyc"
+      - ".DS_Store"
+      - ".env"
+      - ".git/"
+      - ".hg/"
+      - ".svn/"
+      - ".venv/"
+      - "/.ai/config/remotes/"
+      - "__pycache__/"
+      - "node_modules/"
+      - "target/"
   external_content:
     schema: 1
     roots: {}

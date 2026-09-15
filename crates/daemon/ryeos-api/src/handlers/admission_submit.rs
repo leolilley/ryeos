@@ -9,7 +9,7 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-pub(crate) const LOCAL_ADMISSION_POLICY: &str = "local-node-v2";
+pub(crate) use ryeos_state::admission::LOCAL_ADMISSION_POLICY;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

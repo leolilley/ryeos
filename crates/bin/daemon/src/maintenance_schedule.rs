@@ -9,8 +9,8 @@
 //! other schedule.
 //!
 //! Why policy + init-time reconcile instead of storing only the final spec:
-//! the node spec must carry `execution.requester_fingerprint` (the acting
-//! principal at dispatch) and a node signature. Those are per-install, so they
+//! the node spec must carry the acting node authority and a node signature.
+//! Those are per-install, so they
 //! cannot be supplied by an init profile — the daemon fills its own identity.
 //!
 //! Ownership & operator control: generated specs carry a specific `managed_by`
@@ -23,7 +23,6 @@
 //! this adapter supplies no behavioral defaults.
 
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -80,7 +79,8 @@ fn apply_maintenance_schedules(
     let _schedules_lock = schedules_directory.lock_exclusive()?;
     let schedules_dir = schedules_directory.path();
     let existing_files = scan_schedule_files(&schedules_directory)?;
-    let managed_specs = load_managed_specs(&schedules_directory, &existing_files, trust_store)?;
+    let managed_specs =
+        load_managed_specs(&schedules_directory, &existing_files, trust_store, identity)?;
 
     for decl in declarations {
         let target = schedules_dir.join(format!("{}.yaml", decl.schedule_id));
@@ -126,12 +126,13 @@ fn apply_maintenance_schedules(
         let target_name = target
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("schedule target has no filename"))?;
-        let current_file = schedules_directory.open_regular(target_name, false)?;
+        let current_file = schedules_directory.open_pinned_regular(target_name, false)?;
         let current = match current_file.as_ref() {
             Some(file) => Some(load_managed_spec_file(
                 &target,
-                file.try_clone()?,
+                file,
                 trust_store,
+                identity,
             )?
             .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -146,6 +147,9 @@ fn apply_maintenance_schedules(
             .map(|managed| (managed.enabled, managed.registered_at))
             .unwrap_or((initial_enabled, initial_registered_at));
         let desired_body = maintenance_spec_body(decl, enabled, registered_at, identity);
+        let desired: ryeos_scheduler::types::ScheduleSourceRecord =
+            serde_json::from_value(desired_body.clone())?;
+        desired.validate(Some(&decl.schedule_id))?;
         if current
             .as_ref()
             .is_some_and(|managed| managed.body == desired_body)
@@ -183,10 +187,10 @@ fn apply_maintenance_schedules(
             .path
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("managed schedule path has no filename"))?;
-        let Some(file) = schedules_directory.open_regular(name, false)? else {
+        let Some(file) = schedules_directory.open_pinned_regular(name, false)? else {
             continue;
         };
-        if load_managed_spec_file(&managed.path, file.try_clone()?, trust_store)?.is_none() {
+        if load_managed_spec_file(&managed.path, &file, trust_store, identity)?.is_none() {
             bail!(
                 "managed maintenance schedule '{}' changed ownership during reconciliation; refusing to remove {}",
                 schedule_id,
@@ -194,7 +198,7 @@ fn apply_maintenance_schedules(
             );
         }
         schedules_directory
-            .remove_if_same(name, &file)
+            .remove_pinned_regular_if_same(&file)
             .with_context(|| {
                 format!(
                     "remove undeclared maintenance schedule {}",
@@ -253,6 +257,7 @@ fn load_managed_specs(
     schedules_dir: &lillux::PinnedDirectory,
     files: &BTreeMap<String, Vec<PathBuf>>,
     trust_store: &ryeos_engine::trust::TrustStore,
+    identity: &NodeIdentity,
 ) -> Result<BTreeMap<String, ManagedSpec>> {
     let mut managed = BTreeMap::new();
     for paths in files.values() {
@@ -261,9 +266,9 @@ fn load_managed_specs(
                 .file_name()
                 .ok_or_else(|| anyhow::anyhow!("schedule path has no filename"))?;
             let file = schedules_dir
-                .open_regular(name, false)?
+                .open_pinned_regular(name, false)?
                 .ok_or_else(|| anyhow::anyhow!("schedule disappeared during reconciliation"))?;
-            let Some(loaded) = load_managed_spec_file(path, file, trust_store)? else {
+            let Some(loaded) = load_managed_spec_file(path, &file, trust_store, identity)? else {
                 continue;
             };
             let schedule_id = loaded_id(&loaded.body, path)?.to_string();
@@ -280,18 +285,33 @@ fn load_managed_specs(
 
 fn load_managed_spec_file(
     path: &Path,
-    mut file: std::fs::File,
+    file: &lillux::PinnedRegularFile,
     trust_store: &ryeos_engine::trust::TrustStore,
+    identity: &NodeIdentity,
 ) -> Result<Option<ManagedSpec>> {
-    let mut content = String::new();
-    file.read_to_string(&mut content)
-        .with_context(|| format!("read pinned schedule {}", path.display()))?;
-    let verified =
-        ryeos_scheduler::projection::verify_schedule_source_content(path, &content, trust_store)
-            .with_context(|| format!("verify existing schedule {}", path.display()))?;
-    let body = serde_json::to_value(verified.record)?;
+    // This is ownership reconciliation, not schedule admission. Authenticate
+    // the existing node document without decoding its disposable execution
+    // payload. Only pause and registration metadata survive regeneration;
+    // all execution authority comes from the current signed node policy.
+    let verified = node_document::verify_pinned_signed_yaml(file, trust_store)
+        .with_context(|| format!("verify existing schedule {}", path.display()))?;
+    let body = verified.body;
     if !is_managed_maintenance_spec(&body) {
         return Ok(None);
+    }
+    if verified.signer_fingerprint != identity.fingerprint() {
+        bail!(
+            "managed maintenance schedule {} is not signed by this node",
+            path.display()
+        );
+    }
+    let ownership: MaintenanceScheduleOwnership = serde_json::from_value(body.clone())
+        .context("decode maintenance schedule ownership metadata")?;
+    if ownership.spec_version == 0 || ownership.spec_version > 2 {
+        bail!(
+            "unsupported managed schedule source version {}",
+            ownership.spec_version
+        );
     }
     let schedule_id = loaded_id(&body, path)?;
     let file_id = path
@@ -305,27 +325,29 @@ fn load_managed_spec_file(
             path.display()
         );
     }
-    let enabled = body
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            anyhow::anyhow!("managed schedule '{}' has no boolean enabled", schedule_id)
-        })?;
-    let registered_at = body
-        .get("registered_at")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "managed schedule '{}' has no integer registered_at",
-                schedule_id
-            )
-        })?;
+    if ownership.registered_at < 0 {
+        bail!(
+            "managed schedule '{}' has negative registered_at",
+            schedule_id
+        );
+    }
     Ok(Some(ManagedSpec {
         path: path.to_path_buf(),
         body,
-        enabled,
-        registered_at,
+        enabled: ownership.enabled,
+        registered_at: ownership.registered_at,
     }))
+}
+
+/// Stable, signed ownership metadata; never an executable schedule reader.
+#[derive(serde::Deserialize)]
+struct MaintenanceScheduleOwnership {
+    spec_version: u32,
+    enabled: bool,
+    registered_at: i64,
+    // The shared tagged type rejects unknown ownership fields.
+    #[serde(rename = "managed_by")]
+    _managed_by: ryeos_scheduler::types::ScheduleManagedBy,
 }
 
 fn loaded_id<'a>(body: &'a Value, path: &Path) -> Result<&'a str> {
@@ -357,7 +379,7 @@ fn maintenance_spec_body(
 ) -> Value {
     // The node is both signer and acting principal for its own maintenance.
     serde_json::json!({
-        "spec_version": 1,
+        "spec_version": 2,
         "schedule_id": decl.schedule_id,
         "item_ref": decl.item_ref,
         "ref_bindings": decl.ref_bindings,
@@ -372,8 +394,15 @@ fn maintenance_spec_body(
         "params": decl.params,
         "project_root": Value::Null,
         "execution": {
-            "requester_fingerprint": identity.fingerprint(),
+            "authority": {
+                "kind": "node",
+                "principal_id": identity.principal_id(),
+                "effective_origin_site_id": identity.site_id(),
+            },
             "capabilities": decl.capabilities,
+            "policy": ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
         },
         "managed_by": {
             "type": MANAGED_BY_TYPE,
@@ -387,11 +416,11 @@ fn write_maintenance_spec(
     decl: &NodeMaintenanceSchedulePolicy,
     body: &Value,
     identity: &NodeIdentity,
-    expected: Option<&std::fs::File>,
+    expected: Option<&lillux::PinnedRegularFile>,
 ) -> Result<()> {
     let bytes = node_document::render_signed_item("schedules", &decl.schedule_id, body, identity)?;
     let name = format!("{}.yaml", decl.schedule_id);
-    schedules_dir.atomic_write_if_same(std::ffi::OsStr::new(&name), expected, &bytes, 0o600)
+    schedules_dir.atomic_write_pinned_if_same(std::ffi::OsStr::new(&name), expected, &bytes, 0o600)
 }
 
 #[cfg(test)]
@@ -437,7 +466,7 @@ mod tests {
             "schedules",
             schedule_id,
             &serde_json::json!({
-                "spec_version": 1,
+                "spec_version": 2,
                 "schedule_id": schedule_id,
                 "item_ref": "service:operator/task",
                 "ref_bindings": {},
@@ -452,8 +481,15 @@ mod tests {
                 "project_root": null,
                 "registered_at": 1234,
                 "execution": {
-                    "requester_fingerprint": identity.fingerprint(),
+                    "authority": {
+                        "kind": "node",
+                        "principal_id": identity.principal_id(),
+                        "effective_origin_site_id": identity.site_id(),
+                    },
                     "capabilities": ["ryeos.execute.service.operator/task"],
+                    "policy": ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                        ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                    ),
                 },
                 "managed_by": null,
             }),
@@ -512,8 +548,8 @@ schedules:
         assert_eq!(parsed["params"]["sync_job_retention_days"], 14);
         assert_eq!(parsed["params"]["seat_lease_grace_seconds"], 600);
         assert_eq!(
-            parsed["execution"]["requester_fingerprint"],
-            id.fingerprint()
+            parsed["execution"]["authority"]["principal_id"],
+            id.principal_id()
         );
         assert_eq!(
             parsed["execution"]["capabilities"][0],
@@ -581,6 +617,126 @@ schedules:
             before,
             "unowned schedule must not be clobbered"
         );
+    }
+
+    #[test]
+    fn regenerates_owned_schedule_without_reusing_predecessor_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai/node");
+        let id = identity();
+        let trust = trust_store(&id);
+        let policy = policy(POLICY);
+        let mut predecessor = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
+        predecessor["spec_version"] = serde_json::json!(1);
+        predecessor["execution"] = serde_json::json!({
+            "requester_fingerprint": id.fingerprint(),
+            "capabilities": ["ryeos.execute.service.unwanted/task"],
+        });
+        let path = node_document::write_signed_item(
+            &node_dir,
+            "schedules",
+            "maintenance-gc",
+            &predecessor,
+            &id,
+        )
+        .unwrap();
+        assert!(ryeos_scheduler::projection::load_verified_schedule_source(&path, &trust).is_err());
+
+        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
+        let verified =
+            ryeos_scheduler::projection::load_verified_schedule_source(&path, &trust).unwrap();
+        assert!(
+            !verified.record.enabled,
+            "operator pause must survive regeneration"
+        );
+        assert_eq!(verified.record.registered_at, 1234);
+        assert_eq!(
+            serde_json::to_value(verified.record).unwrap(),
+            maintenance_spec_body(&policy.schedules[0], false, 1234, &id)
+        );
+        let regenerated = std::fs::read(&path).unwrap();
+        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), regenerated);
+    }
+
+    #[test]
+    fn refuses_managed_marker_signed_by_another_trusted_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai/node");
+        let id = identity();
+        let other = identity();
+        let trust = ryeos_engine::trust::TrustStore::from_signers(
+            [&id, &other]
+                .into_iter()
+                .map(|id| ryeos_engine::trust::TrustedSigner {
+                    fingerprint: id.fingerprint().to_owned(),
+                    verifying_key: *id.verifying_key(),
+                    label: None,
+                })
+                .collect(),
+        );
+        let policy = policy(POLICY);
+        let body = maintenance_spec_body(&policy.schedules[0], false, 1234, &other);
+        let path = node_document::write_signed_item(
+            &node_dir,
+            "schedules",
+            "maintenance-gc",
+            &body,
+            &other,
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
+        assert!(format!("{error:#}").contains("not signed by this node"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn refuses_tampered_or_invalid_ownership_metadata_without_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai/node");
+        let id = identity();
+        let trust = trust_store(&id);
+        let policy = policy(POLICY);
+        for (field, value) in [
+            ("enabled", serde_json::json!("false")),
+            ("registered_at", serde_json::json!(-1)),
+            ("schedule_id", serde_json::json!("different-id")),
+            ("spec_version", serde_json::json!(3)),
+            (
+                "managed_by",
+                serde_json::json!({
+                    "type": MANAGED_BY_TYPE, "source": MANAGED_BY_SOURCE, "extra": true,
+                }),
+            ),
+        ] {
+            let mut body = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
+            body[field] = value;
+            let path = node_document::write_signed_item(
+                &node_dir,
+                "schedules",
+                "maintenance-gc",
+                &body,
+                &id,
+            )
+            .unwrap();
+            let before = std::fs::read(&path).unwrap();
+            assert!(
+                apply_maintenance_schedules(&node_dir, &id, &trust, &policy).is_err(),
+                "{field}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let body = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
+        let path =
+            node_document::write_signed_item(&node_dir, "schedules", "maintenance-gc", &body, &id)
+                .unwrap();
+        let tampered = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("enabled: false", "enabled: true");
+        std::fs::write(&path, &tampered).unwrap();
+        assert!(apply_maintenance_schedules(&node_dir, &id, &trust, &policy).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), tampered);
     }
 
     #[test]

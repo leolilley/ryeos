@@ -981,9 +981,16 @@ impl CheckedEngineGeneration<'_> {
         parameters: &Value,
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+        filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     ) -> Result<ExecutionPlan, EngineError> {
-        self.engine
-            .build_plan_current(ctx, item, parameters, hints, sealed_content)
+        self.engine.build_plan_current(
+            ctx,
+            item,
+            parameters,
+            hints,
+            sealed_content,
+            filesystem_authority_ceiling,
+        )
     }
 
     /// Resolve independent canonical items concurrently while retaining this
@@ -3110,6 +3117,9 @@ impl Engine {
     /// Uses system-only kind schemas and system+user trust.
     /// `sealed_content`, when present, answers dependency verification for
     /// paths an admitted realization covers; live bytes answer the rest.
+    /// The filesystem ceiling includes composed-subject and parent admission
+    /// restrictions. Supply it before compilation: narrowing a completed plan
+    /// cannot erase host values already expanded by runtime templates.
     pub fn build_plan(
         &self,
         ctx: &PlanContext,
@@ -3117,9 +3127,17 @@ impl Engine {
         parameters: &Value,
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+        filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
-            self.build_plan_current(ctx, item, parameters, hints, sealed_content)
+            self.build_plan_current(
+                ctx,
+                item,
+                parameters,
+                hints,
+                sealed_content,
+                filesystem_authority_ceiling,
+            )
         })
     }
 
@@ -3130,6 +3148,7 @@ impl Engine {
         parameters: &Value,
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+        filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     ) -> Result<ExecutionPlan, EngineError> {
         crate::scope::check_execution_scope(&ctx.requested_by)?;
 
@@ -3161,6 +3180,7 @@ impl Engine {
             trust_store: &request_snapshot.trust_store,
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
+            filesystem_authority_ceiling,
             project_authority: None,
             sealed_content,
         })
@@ -3179,6 +3199,7 @@ impl Engine {
         parameters: &Value,
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+        filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -3204,9 +3225,55 @@ impl Engine {
                 trust_store: &request_snapshot.trust_store,
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
+                filesystem_authority_ceiling,
                 project_authority: None,
                 sealed_content,
             })
+        })
+    }
+
+    /// Compile current captured Bundle source with its retained logical
+    /// execution-root coordinate. Program and executor lookup remains
+    /// projectless; the logical root only supplies process-path templates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_bundle_plan_from_captured_root_with_logical_project_root(
+        &self,
+        ctx: &PlanContext,
+        item: &VerifiedItem,
+        root_source: &str,
+        parameters: &Value,
+        hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+        filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        logical_project_root: Option<&Path>,
+    ) -> Result<ExecutionPlan, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::scope::check_execution_scope(&ctx.requested_by)?;
+            let roots = self.resolution_roots(None);
+            let request_snapshot = self.effective_request_snapshot_current(
+                None,
+                &crate::contracts::SubjectResolutionAuthority::Projectless,
+            )?;
+            crate::plan_builder::build_bundle_plan_with_logical_project_root(
+                crate::plan_builder::BuildPlanInput {
+                    item,
+                    root_source: Some(root_source),
+                    parameters,
+                    hints,
+                    ctx,
+                    kinds: &self.kinds,
+                    parsers: &request_snapshot.parser_dispatcher,
+                    roots: &roots,
+                    registry_fingerprint: &request_snapshot.registry_fingerprint,
+                    trust_store: &request_snapshot.trust_store,
+                    node_trust_store: &self.node_trust_store,
+                    host_env: &self.host_env,
+                    filesystem_authority_ceiling,
+                    project_authority: None,
+                    sealed_content,
+                },
+                logical_project_root,
+            )
         })
     }
 
@@ -3223,6 +3290,7 @@ impl Engine {
         project_root: &Path,
         admitted: &AdmittedRequestAuthoritySnapshot,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+        filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -3273,6 +3341,7 @@ impl Engine {
                 trust_store: &request_snapshot.trust_store,
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
+                filesystem_authority_ceiling,
                 project_authority: Some((project_root, project_content)),
                 sealed_content,
             })
@@ -3384,6 +3453,20 @@ impl Engine {
         self.checked_bundle_generation(|| {
             tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
             crate::dispatch::spawn_plan(plan, ctx)
+        })
+    }
+
+    /// Spawn through a scope already retained by the caller's durable launch
+    /// owner. It is not selected by
+    /// executable name, kind, or a fallback after ordinary spawn fails.
+    pub fn spawn_plan_in_scope(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        scope: lillux::ProcessScope,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_scope(plan, ctx, Some(scope))
         })
     }
 
@@ -3711,6 +3794,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         }
     }
@@ -4041,6 +4125,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -4134,6 +4219,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -4178,6 +4264,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -4219,6 +4306,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
         let resolved = engine
@@ -4265,6 +4353,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
         let resolved = engine
@@ -4328,6 +4417,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
         let mut resolved = engine
@@ -4375,6 +4465,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -4444,6 +4535,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -4500,6 +4592,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -4756,6 +4849,7 @@ formats:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 

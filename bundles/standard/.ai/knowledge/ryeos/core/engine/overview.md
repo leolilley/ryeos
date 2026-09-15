@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:dc04c6f6e139d322077100a898902acbf078b761dfc477a15c5f0799d65673b4:geO0JMUHjT2TNNhFsnlX3gVhsuCaRgjSG2zBJFSH2Y+3VSbFi+HQvFk6MTfa6EhfpZToFB1zJKRXaz5udXY0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T01:55:09Z:e160792e048844496a4ea32e12dd0e6d7d357041b1f3577a3fa445077ef31b2e:TCtrq81UVambG3auHfPNwnFJ+Ewqq5Vn4w2PApGTtVh8QVe3/VNtqjO3CNjrPdZs/SskmKulRM0AXuHZLLH0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, architecture, parse, compose, execute]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   Engine architecture and the parse → compose → plan → execute pipeline.
 ---
@@ -23,7 +23,7 @@ Invariant: the engine turns a canonical ref into a verified, composed item and a
 8. For executable tool/runtime plans, apply the immutable node isolation snapshot
    before the Lillux spawn boundary.
 
-Core owns the generic machine: config, handler, parser, protocol, runtime, service, node, tool, and streaming_tool kinds. Standard contributes workflow kinds and runtimes such as directive, graph, and knowledge.
+Core owns the generic machine: config, handler, parser, protocol, runtime, service, node, tool, worker, and worker_execution kinds. Standard contributes workflow kinds and runtimes such as directive, graph, and knowledge.
 
 ## Extension points
 

@@ -35,7 +35,8 @@ mkdir -p "$source_dir/.ai/node/init/profiles"
 while IFS= read -r node_init_profile; do
     {
         printf 'schema: 1\nexact_bundles:\n'
-        ryeos_bundle_set_names "$node_init_profile" | sort | sed 's/^/  - /'
+        ryeos_bundle_set_names "$(ryeos_node_init_profile_bundle_set "$node_init_profile")" \
+            | sort | sed 's/^/  - /'
         # This fixture exercises shell packaging structure. The fake RyeOS
         # below is its type oracle; production packaging uses the real release
         # binary and therefore the live Rust node-policy registry/cardinalities.

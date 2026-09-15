@@ -1,0 +1,27 @@
+# ryeos:signed:2026-09-11T11:45:13Z:d90076178b234644b2bf27e9d75d72db08ad33e75a4590c622e8d39c0b563a80:k12L03GmYkstyV78rMKRS/InVi8pEcrOWTpzxxfCE0100p+uScRHByTWxDTUSEkEr1EMPDJ/mu3tvejTM3rmDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/development
+name: platform-inspect
+version: "1.0.0"
+description: Inspect the exact admitted Rust platform, without host tools or network access
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: immutable_current_generation
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content: []
+external_product_slots:
+  - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_inspect
+    kind: tree
+    mount_root: execution_runtime
+    mount: platform
+config:
+  command: realization:platform/rust/bin/rustc
+  args: [--version, --verbose]
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

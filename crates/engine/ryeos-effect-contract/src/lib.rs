@@ -9,7 +9,7 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const EFFECT_RECORD_SCHEMA_VERSION: u32 = 4;
+pub const EFFECT_RECORD_SCHEMA_VERSION: u32 = 5;
 pub const EFFECT_KEY_SCHEMA: &str = "ryeos.dispatch_effect.key.v4";
 pub const EFFECT_RECORD_KIND: &str = "dispatch_effect_record";
 pub const EFFECT_REPLAY_NAMESPACE: &str = "dispatch.effect";
@@ -123,8 +123,11 @@ pub struct AdmittedEffectAuthorization {
     pub class: EffectClass,
 }
 
-/// Callback-bound authority ready for exact callee preparation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Callback-bound authority ready for exact callee preparation. Its serialized
+/// form belongs only to sealed launch recovery; decoding does not authenticate
+/// a caller or replace comparison with the originating admitted capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedEffectDispatchAuthority {
     pub authorization: AdmittedEffectAuthorization,
     pub action_digest: String,
@@ -251,6 +254,55 @@ pub enum DispatchEffectAnswer {
         outputs: Value,
         warnings: Vec<String>,
     },
+    /// Constructed by an accepting daemon operation, never by normalizing a
+    /// subprocess's stdout. The reference owns the bytes behind the answer;
+    /// the owning application must verify `result` against that exact object.
+    Retained {
+        result: Value,
+        retained_result: RetainedEffectResult,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RetainedEffectResult {
+    ProductBuildAcceptedResult { object_hash: String },
+}
+
+impl RetainedEffectResult {
+    pub fn object_hash(&self) -> &str {
+        match self {
+            Self::ProductBuildAcceptedResult { object_hash } => object_hash,
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        require_hex64("retained effect result object hash", self.object_hash())
+    }
+}
+
+/// Daemon-authoritative projection applied to one callback-dispatch result.
+///
+/// Ordinary dispatches retain the result contract of the dispatched subject.
+/// A retained effect is different: its visible value was constructed and
+/// accepted by the daemon, and is bound to the exact retained object named
+/// here. Kind runtimes must never infer this projection from result JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DispatchResultProjection {
+    DispatchedSubject,
+    RetainedEffect {
+        retained_result: RetainedEffectResult,
+    },
+}
+
+impl DispatchResultProjection {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            Self::DispatchedSubject => Ok(()),
+            Self::RetainedEffect { retained_result } => retained_result.validate(),
+        }
+    }
 }
 
 impl DispatchEffectAnswer {
@@ -258,6 +310,12 @@ impl DispatchEffectAnswer {
         let warnings: &[String] = match self {
             Self::Native { warnings, .. } => warnings,
             Self::Bare { .. } | Self::Subprocess { .. } => &[],
+            Self::Retained {
+                retained_result, ..
+            } => {
+                retained_result.validate()?;
+                &[]
+            }
         };
         validate_warnings(warnings)?;
         validate_bounded_value("dispatch-effect answer", &serde_json::to_value(self)?)
@@ -268,17 +326,32 @@ impl DispatchEffectAnswer {
         canonical_digest(self)
     }
 
+    pub fn result_projection(&self) -> DispatchResultProjection {
+        match self {
+            Self::Retained {
+                retained_result, ..
+            } => DispatchResultProjection::RetainedEffect {
+                retained_result: retained_result.clone(),
+            },
+            Self::Bare { .. } | Self::Subprocess { .. } | Self::Native { .. } => {
+                DispatchResultProjection::DispatchedSubject
+            }
+        }
+    }
+
     pub fn replay_leaf_envelope(&self, record_hash: &str) -> anyhow::Result<Value> {
         require_hex64("dispatch-effect record hash", record_hash)?;
         self.validate()?;
         Ok(match self {
-            Self::Bare { result } | Self::Subprocess { result } => serde_json::json!({
-                "outcome_code": null,
-                "result": result,
-                "error": null,
-                "artifacts": [],
-                "replayed_from": record_hash,
-            }),
+            Self::Bare { result } | Self::Subprocess { result } | Self::Retained { result, .. } => {
+                serde_json::json!({
+                    "outcome_code": null,
+                    "result": result,
+                    "error": null,
+                    "artifacts": [],
+                    "replayed_from": record_hash,
+                })
+            }
             Self::Native {
                 result,
                 outputs,
@@ -598,6 +671,51 @@ mod tests {
         assert_eq!(replay["result"], serde_json::json!({"answer": 42}));
         assert_eq!(answer.digest().unwrap(), digest);
         assert_eq!(replay["replayed_from"], "ab".repeat(32));
+    }
+
+    #[test]
+    fn retained_result_is_part_of_answer_identity_without_mutating_replay_value() {
+        let answer = |hash: &str| DispatchEffectAnswer::Retained {
+            result: serde_json::json!({"products": []}),
+            retained_result: RetainedEffectResult::ProductBuildAcceptedResult {
+                object_hash: hash.to_owned(),
+            },
+        };
+        let first = answer(&"ab".repeat(32));
+        assert_ne!(
+            first.digest().unwrap(),
+            answer(&"cd".repeat(32)).digest().unwrap()
+        );
+        assert!(answer("not-a-hash").validate().is_err());
+        let replay = first.replay_leaf_envelope(&"ef".repeat(32)).unwrap();
+        assert_eq!(replay["result"], serde_json::json!({"products": []}));
+        assert_eq!(
+            first.result_projection(),
+            DispatchResultProjection::RetainedEffect {
+                retained_result: RetainedEffectResult::ProductBuildAcceptedResult {
+                    object_hash: "ab".repeat(32),
+                },
+            }
+        );
+        assert!(
+            serde_json::from_value::<RetainedEffectResult>(serde_json::json!({
+                "kind": "product_build_accepted_result",
+                "object_hash": "ab".repeat(32),
+                "path": "/untrusted"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<DispatchResultProjection>(serde_json::json!({
+                "kind": "retained_effect",
+                "retained_result": {
+                    "kind": "product_build_accepted_result",
+                    "object_hash": "ab".repeat(32),
+                },
+                "caller_projection": "graph_return",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

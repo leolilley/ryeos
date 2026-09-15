@@ -8,18 +8,13 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
-
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v3";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v10";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+/// One closed digest receipt fits atomically beside exactly one view descriptor.
+/// Full workspace mutation JSON remains on the bounded stdout response channel.
+pub const MAX_WORKSPACE_VIEW_RECEIPT_BYTES: usize = 512;
 pub const MAX_AUTHORITIES: usize = 4096;
 pub const MAX_MOUNTS: usize = 4096;
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 4096;
@@ -27,6 +22,7 @@ pub const MAX_ARGUMENTS: usize = 4096;
 pub const MAX_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_DETAILS: usize = 128;
 pub const MAX_WORKSPACE_MUTATIONS: usize = 100_000;
+pub const MAX_WORKSPACE_SYMLINK_TARGET_BYTES: usize = 4096;
 pub const MAX_JSON_DEPTH: usize = 64;
 
 /// Decode an isolation protocol document while rejecting duplicate object
@@ -156,7 +152,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v3")]
+    #[serde(rename = "ryeos.isolation-adapter/v10")]
     Current,
 }
 
@@ -202,12 +198,16 @@ pub enum IsolationCapability {
     FilesystemFdWritable,
     #[serde(rename = "filesystem.ordered_overlays")]
     FilesystemOrderedOverlays,
+    #[serde(rename = "filesystem.fixed_parent_views")]
+    FilesystemFixedParentViews,
     #[serde(rename = "filesystem.project_workspace_cow")]
     FilesystemProjectWorkspaceCow,
     #[serde(rename = "filesystem.workspace_delta")]
     FilesystemWorkspaceDelta,
     #[serde(rename = "filesystem.private_tmp")]
     FilesystemPrivateTmp,
+    #[serde(rename = "filesystem.pid_namespace_proc")]
+    FilesystemPidNamespaceProc,
     #[serde(rename = "devices.minimal")]
     DevicesMinimal,
     #[serde(rename = "environment.exact")]
@@ -218,10 +218,14 @@ pub enum IsolationCapability {
     NetworkIsolated,
     #[serde(rename = "process.host_pid_namespace")]
     ProcessHostPidNamespace,
+    #[serde(rename = "process.isolated_pid_namespace")]
+    ProcessIsolatedPidNamespace,
     #[serde(rename = "process.target_pid_reporting")]
     ProcessTargetPidReporting,
     #[serde(rename = "lifecycle.shared_process_group")]
     LifecycleSharedProcessGroup,
+    #[serde(rename = "process.nested_sandbox")]
+    ProcessNestedSandbox,
     #[serde(rename = "ipc.target_unix_stream")]
     IpcTargetUnixStream,
 }
@@ -318,14 +322,6 @@ impl IsolationBackendDeclaration {
                 "isolation backend must declare capabilities",
             ));
         }
-        if !self
-            .artifacts
-            .contains_key(&IsolationArtifactRole::Launcher)
-        {
-            return Err(ProtocolValidationError::new(
-                "isolation backend must declare a launcher artifact",
-            ));
-        }
         let mut names = BTreeSet::new();
         names.insert(self.adapter.as_str());
         for name in self.artifacts.values() {
@@ -359,6 +355,8 @@ pub enum IsolationAuthorityPurpose {
     RuntimeLibraryDirectory,
     WorkspaceProject,
     WorkspaceBackendState,
+    WorkspaceView,
+    WorkspaceViewDescendant,
     TargetDuplexChannel,
 }
 
@@ -386,22 +384,118 @@ pub struct IsolationMount {
     pub layer: u32,
 }
 
-/// One verified writable project view. RyeOS owns the canonical project
-/// generation while the signed adapter exclusively interprets its opaque
-/// backend state. The adapter must compose the view at `destination`;
-/// ordinary writable mounts may not target the same path.
+/// Mechanical bounds selected by node policy. The wire has no fallback values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedParentViewLimits {
+    pub max_entries: usize,
+    pub max_depth: usize,
+}
+
+impl FixedParentViewLimits {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        if self.max_entries == 0
+            || self.max_entries > MAX_MOUNTS
+            || self.max_depth == 0
+            || self.max_depth > MAX_JSON_DEPTH
+        {
+            return Err(ProtocolValidationError::new(
+                "fixed-parent view bounds exceed the wire contract",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Restriction on an existing exact directory mount. Connector entry membership
+/// is fixed; allowed child mounts retain that directory's admitted RO/RW access.
+/// Denied paths are authority input, not paths discovered by an adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationFixedParentView {
+    pub destination: IsolationPath,
+    pub denied_paths: Vec<String>,
+    pub limits: FixedParentViewLimits,
+}
+
+impl IsolationFixedParentView {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        self.limits.validate()?;
+        if self.denied_paths.is_empty() || self.denied_paths.len() > self.limits.max_entries {
+            return Err(ProtocolValidationError::new(
+                "fixed-parent view requires a bounded denial set",
+            ));
+        }
+        let mut previous: Option<&str> = None;
+        let mut denied = BTreeSet::new();
+        let mut prefixes = BTreeSet::new();
+        for path in &self.denied_paths {
+            validate_string("fixed-parent denied path", path)?;
+            let count = path.split('/').count();
+            if count < 2
+                || count > self.limits.max_depth
+                || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+                || previous.is_some_and(|prev| prev >= path.as_str())
+            {
+                return Err(ProtocolValidationError::new(
+                    "fixed-parent denied paths must be normalized, nonoverlapping and sorted beneath an ancestor",
+                ));
+            }
+            for (offset, _) in path.match_indices('/') {
+                let prefix = &path[..offset];
+                if denied.contains(prefix) {
+                    return Err(ProtocolValidationError::new(
+                        "fixed-parent denied paths overlap",
+                    ));
+                }
+                prefixes.insert(prefix);
+            }
+            denied.insert(path.as_str());
+            prefixes.insert(path.as_str());
+            if prefixes.len() > self.limits.max_entries {
+                return Err(ProtocolValidationError::new(
+                    "fixed-parent path tree exceeds entry bound",
+                ));
+            }
+            previous = Some(path);
+        }
+        Ok(())
+    }
+}
+
+/// One retained writable project view. Construction already happened once
+/// under its workspace owner. A borrower clones this exact descriptor into
+/// its fresh confinement namespace; it must not construct another filesystem
+/// from lower/state paths. Ordinary mounts may not target the same path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolationProjectWorkspace {
     pub workspace_id: String,
-    pub project: IsolationAuthorityId,
-    pub backend_state: IsolationAuthorityId,
+    pub view: IsolationAuthorityId,
+    /// Digest of the exact descriptor's existing opaque directory identity.
+    pub view_descriptor_identity: String,
+    pub destination: IsolationPath,
+    /// Exact writable aliases of directories belonging to this retained view.
+    /// They are not host-located ordinary mount sources.
+    pub writable_descendant_mounts: Vec<IsolationWorkspaceDescendantMount>,
+}
+
+/// One descriptor-proven member of the enclosing workspace. Access is always
+/// writable at layer 10; callers cannot turn this relationship into another
+/// mount class or select a different overlay ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationWorkspaceDescendantMount {
+    pub source: IsolationAuthorityId,
+    pub relative_path: String,
     pub destination: IsolationPath,
 }
 
 /// One daemon-owned connected duplex channel delivered at a fixed target
 /// descriptor. The source authority is operational; the target descriptor and
-/// environment name are the complete admitted target-side contract.
+/// environment name are the complete admitted target-side contract. A plan's
+/// collection is target-fd sorted: fd 0 may carry a primary control stream,
+/// while auxiliary channels use descriptors above stderr.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolationTargetChannel {
@@ -419,8 +513,27 @@ pub enum IsolationNetwork {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum IsolationPidNamespace {
+    Host,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IsolationDeviceSurface {
     Minimal,
+}
+
+/// Finite node-owned process-filesystem surface, never an arbitrary host
+/// mount. PID-only procfs requires an isolated PID namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationProcFilesystem {
+    Empty,
+    PidNamespace,
+    /// Explicit broader kernel metadata and writable namespace maps. Host
+    /// tasks remain invisible; requires the scoped nested-sandbox contract.
+    PidNamespaceNested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,16 +556,20 @@ pub struct IsolationTarget {
 pub struct IsolationPlan {
     pub target: IsolationTarget,
     pub mounts: Vec<IsolationMount>,
+    pub fixed_parent_views: Vec<IsolationFixedParentView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_workspace: Option<IsolationProjectWorkspace>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub target_channel: Option<IsolationTargetChannel>,
+    pub target_channels: Vec<IsolationTargetChannel>,
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
     pub devices: IsolationDeviceSurface,
     pub private_tmp: bool,
-    pub host_pid_namespace: bool,
+    pub proc_filesystem: IsolationProcFilesystem,
+    pub pid_namespace: IsolationPidNamespace,
     pub shared_process_group: bool,
+    /// Explicit child-sandbox authority. Requires external whole-execution
+    /// containment and PID-local proc; permits child namespace maps there.
+    pub nested_sandbox: bool,
 }
 
 impl IsolationPlan {
@@ -463,8 +580,116 @@ impl IsolationPlan {
         if authorities.len() > MAX_AUTHORITIES {
             return Err(ProtocolValidationError::new("too many authorities"));
         }
-        if self.mounts.len() > MAX_MOUNTS {
+        let descendant_count = self
+            .project_workspace
+            .as_ref()
+            .map_or(0, |workspace| workspace.writable_descendant_mounts.len());
+        if self.mounts.len().saturating_add(descendant_count) > MAX_MOUNTS {
             return Err(ProtocolValidationError::new("too many mounts"));
+        }
+        if self.nested_sandbox
+            && (self.shared_process_group
+                || self.proc_filesystem != IsolationProcFilesystem::PidNamespaceNested
+                || self.pid_namespace != IsolationPidNamespace::Isolated)
+        {
+            return Err(ProtocolValidationError::new(
+                "nested sandbox requires external whole-execution containment and isolated PID proc",
+            ));
+        }
+        if !self.nested_sandbox
+            && self.proc_filesystem == IsolationProcFilesystem::PidNamespaceNested
+        {
+            return Err(ProtocolValidationError::new(
+                "nested proc requires explicit nested sandbox authority",
+            ));
+        }
+        if self.fixed_parent_views.len() > MAX_MOUNTS {
+            return Err(ProtocolValidationError::new("too many fixed-parent views"));
+        }
+        if self.proc_filesystem != IsolationProcFilesystem::Empty
+            && self.pid_namespace != IsolationPidNamespace::Isolated
+        {
+            return Err(ProtocolValidationError::new(
+                "PID procfs requires isolated PID namespace",
+            ));
+        }
+        // Empty also means an empty surface, not permission to substitute an
+        // arbitrary (possibly host) proc filesystem through ordinary mounts.
+        {
+            let proc_path = std::path::Path::new("/proc");
+            if self.mounts.iter().any(|mount| {
+                std::path::Path::new(mount.destination.as_str()).starts_with(proc_path)
+            }) || self.project_workspace.as_ref().is_some_and(|workspace| {
+                let destination = std::path::Path::new(workspace.destination.as_str());
+                destination.starts_with(proc_path) || proc_path.starts_with(destination)
+            }) {
+                return Err(ProtocolValidationError::new(
+                    "mount conflicts with reserved PID procfs",
+                ));
+            }
+        }
+        let mut destinations = BTreeSet::new();
+        for mount in &self.mounts {
+            if mount.destination.as_str() == "/" || !destinations.insert(&mount.destination) {
+                return Err(ProtocolValidationError::new(
+                    "mount destinations must be unique and cannot replace the private root",
+                ));
+            }
+            for ancestor in &self.mounts {
+                if mount.destination != ancestor.destination
+                    && std::path::Path::new(mount.destination.as_str())
+                        .starts_with(ancestor.destination.as_str())
+                    && ancestor.layer > mount.layer
+                {
+                    return Err(ProtocolValidationError::new(
+                        "mount ancestor would hide a child layer",
+                    ));
+                }
+            }
+            if self.project_workspace.as_ref().is_some_and(|workspace| {
+                std::path::Path::new(workspace.destination.as_str())
+                    .starts_with(mount.destination.as_str())
+            }) {
+                return Err(ProtocolValidationError::new(
+                    "ordinary mount would hide the private workspace",
+                ));
+            }
+        }
+        let mut view_destinations = BTreeSet::new();
+        let mut view_budget = 0usize;
+        for view in &self.fixed_parent_views {
+            view.validate()?;
+            view_budget = view_budget
+                .checked_add(view.limits.max_entries)
+                .ok_or_else(|| ProtocolValidationError::new("fixed-parent budget overflow"))?;
+            if view_budget > MAX_MOUNTS
+                || !view_destinations.insert(&view.destination)
+                || !self
+                    .mounts
+                    .iter()
+                    .any(|mount| mount.destination == view.destination)
+            {
+                return Err(ProtocolValidationError::new(
+                    "fixed-parent view lacks a unique mount or exceeds aggregate bounds",
+                ));
+            }
+            for mount in &self.mounts {
+                if mount.destination == view.destination {
+                    continue;
+                }
+                for path in &view.denied_paths {
+                    let denied = std::path::Path::new(view.destination.as_str()).join(path);
+                    let destination = std::path::Path::new(mount.destination.as_str());
+                    if destination.starts_with(&denied)
+                        || (denied.starts_with(destination)
+                            && destination.starts_with(view.destination.as_str()))
+                    {
+                        return Err(ProtocolValidationError::new(
+                            "positive mount conflicts with fixed-parent restriction",
+                        ));
+                    }
+                }
+            }
         }
         if self.environment.values.len() > MAX_ENVIRONMENT_ENTRIES {
             return Err(ProtocolValidationError::new("too many environment entries"));
@@ -474,11 +699,11 @@ impl IsolationPlan {
         }
         validate_string("argv0", &self.target.argv0)?;
         for argument in &self.target.arguments {
-            validate_string("target argument", argument)?;
+            validate_process_value("target argument", argument)?;
         }
         for (name, value) in &self.environment.values {
             validate_environment_name(name)?;
-            validate_string("environment value", value)?;
+            validate_process_value("environment value", value)?;
         }
 
         let mut authority_ids = BTreeMap::new();
@@ -553,22 +778,54 @@ impl IsolationPlan {
         }
         if let Some(workspace) = &self.project_workspace {
             validate_identifier("workspace id", &workspace.workspace_id)?;
-            for (authority, expected) in [
-                (
-                    &workspace.project,
-                    IsolationAuthorityPurpose::WorkspaceProject,
-                ),
-                (
-                    &workspace.backend_state,
-                    IsolationAuthorityPurpose::WorkspaceBackendState,
-                ),
-            ] {
-                if authority_ids.get(authority) != Some(&expected) {
+            validate_sha256(
+                "workspace descriptor identity",
+                &workspace.view_descriptor_identity,
+            )?;
+            if authority_ids.get(&workspace.view) != Some(&IsolationAuthorityPurpose::WorkspaceView)
+            {
+                return Err(ProtocolValidationError::new(
+                    "workspace view authority is missing or has the wrong purpose",
+                ));
+            }
+            used_authorities.insert(workspace.view.clone());
+            let mut previous_destination = None;
+            let mut descendant_sources = BTreeSet::new();
+            for descendant in &workspace.writable_descendant_mounts {
+                validate_relative_path("workspace descendant", &descendant.relative_path)?;
+                if authority_ids.get(&descendant.source)
+                    != Some(&IsolationAuthorityPurpose::WorkspaceViewDescendant)
+                    || !descendant_sources.insert(&descendant.source)
+                {
                     return Err(ProtocolValidationError::new(
-                        "workspace authority is missing or has the wrong purpose",
+                        "workspace descendant requires one unique descendant authority",
                     ));
                 }
-                used_authorities.insert(authority.clone());
+                if previous_destination.is_some_and(|previous| previous >= &descendant.destination)
+                {
+                    return Err(ProtocolValidationError::new(
+                        "workspace descendants must have unique destination-sorted entries",
+                    ));
+                }
+                previous_destination = Some(&descendant.destination);
+                let destination = std::path::Path::new(descendant.destination.as_str());
+                let overlaps = |other: &IsolationPath| {
+                    let other = std::path::Path::new(other.as_str());
+                    destination.starts_with(other) || other.starts_with(destination)
+                };
+                if destination == std::path::Path::new("/")
+                    || destination.starts_with("/proc")
+                    || overlaps(&workspace.destination)
+                    || self.mounts.iter().any(|mount| overlaps(&mount.destination))
+                    || workspace.writable_descendant_mounts.iter().any(|other| {
+                        other.source != descendant.source && overlaps(&other.destination)
+                    })
+                {
+                    return Err(ProtocolValidationError::new(
+                        "workspace descendant destination conflicts with another namespace authority",
+                    ));
+                }
+                used_authorities.insert(descendant.source.clone());
             }
             if self
                 .mounts
@@ -580,7 +837,13 @@ impl IsolationPlan {
                 ));
             }
         }
-        if let Some(channel) = &self.target_channel {
+        if self.target_channels.len() > MAX_AUTHORITIES {
+            return Err(ProtocolValidationError::new("too many target channels"));
+        }
+        let mut previous_target_fd = None;
+        let mut channel_sources = BTreeSet::new();
+        let mut channel_environment = BTreeSet::new();
+        for channel in &self.target_channels {
             if authority_ids.get(&channel.source)
                 != Some(&IsolationAuthorityPurpose::TargetDuplexChannel)
             {
@@ -588,21 +851,38 @@ impl IsolationPlan {
                     "target channel authority is missing or has the wrong purpose",
                 ));
             }
-            if channel.target_fd != 0 {
+            if matches!(channel.target_fd, 1 | 2) {
                 return Err(ProtocolValidationError::new(
-                    "target channel descriptor must be stdin (fd 0)",
+                    "target channel cannot replace stdout or stderr",
+                ));
+            }
+            if previous_target_fd.is_some_and(|previous| previous >= channel.target_fd) {
+                return Err(ProtocolValidationError::new(
+                    "target channels must be unique and sorted by target descriptor",
+                ));
+            }
+            previous_target_fd = Some(channel.target_fd);
+            if !channel_sources.insert(channel.source.clone()) {
+                return Err(ProtocolValidationError::new(
+                    "target channel source authority is duplicated",
                 ));
             }
             validate_environment_name(&channel.env_name)?;
+            if !channel_environment.insert(channel.env_name.as_str()) {
+                return Err(ProtocolValidationError::new(
+                    "target channel environment name is duplicated",
+                ));
+            }
+            let expected_target_fd = channel.target_fd.to_string();
             if self
                 .environment
                 .values
                 .get(&channel.env_name)
                 .map(String::as_str)
-                != Some("0")
+                != Some(expected_target_fd.as_str())
             {
                 return Err(ProtocolValidationError::new(
-                    "target channel environment must name target descriptor 0",
+                    "target channel environment must name its exact target descriptor",
                 ));
             }
             if self
@@ -610,9 +890,10 @@ impl IsolationPlan {
                 .iter()
                 .any(|mount| mount.source == channel.source)
                 || self.target.executable == channel.source
-                || self.project_workspace.as_ref().is_some_and(|workspace| {
-                    workspace.project == channel.source || workspace.backend_state == channel.source
-                })
+                || self
+                    .project_workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.view == channel.source)
             {
                 return Err(ProtocolValidationError::new(
                     "target channel authority cannot supply filesystem or executable authority",
@@ -653,6 +934,10 @@ impl IsolationPlan {
             .mounts
             .iter()
             .any(|mount| mount.access == IsolationMountAccess::Writable)
+            || self
+                .project_workspace
+                .as_ref()
+                .is_some_and(|workspace| !workspace.writable_descendant_mounts.is_empty())
         {
             capabilities.insert(IsolationCapability::FilesystemFdWritable);
         }
@@ -660,21 +945,31 @@ impl IsolationPlan {
             capabilities.insert(IsolationCapability::FilesystemProjectWorkspaceCow);
             capabilities.insert(IsolationCapability::FilesystemWorkspaceDelta);
         }
-        if self.target_channel.is_some() {
+        if !self.fixed_parent_views.is_empty() {
+            capabilities.insert(IsolationCapability::FilesystemFixedParentViews);
+        }
+        if !self.target_channels.is_empty() {
             capabilities.insert(IsolationCapability::IpcTargetUnixStream);
         }
         if self.private_tmp {
             capabilities.insert(IsolationCapability::FilesystemPrivateTmp);
         }
+        if self.proc_filesystem != IsolationProcFilesystem::Empty {
+            capabilities.insert(IsolationCapability::FilesystemPidNamespaceProc);
+        }
         capabilities.insert(match self.network {
             IsolationNetwork::Host => IsolationCapability::NetworkHost,
             IsolationNetwork::Isolated => IsolationCapability::NetworkIsolated,
         });
-        if self.host_pid_namespace {
-            capabilities.insert(IsolationCapability::ProcessHostPidNamespace);
-        }
+        capabilities.insert(match self.pid_namespace {
+            IsolationPidNamespace::Host => IsolationCapability::ProcessHostPidNamespace,
+            IsolationPidNamespace::Isolated => IsolationCapability::ProcessIsolatedPidNamespace,
+        });
         if self.shared_process_group {
             capabilities.insert(IsolationCapability::LifecycleSharedProcessGroup);
+        }
+        if self.nested_sandbox {
+            capabilities.insert(IsolationCapability::ProcessNestedSandbox);
         }
         capabilities
     }
@@ -711,14 +1006,6 @@ impl AdapterInspectionResponse {
         if self.effective_capabilities.is_empty() {
             return Err(ProtocolValidationError::new(
                 "adapter inspection must report capabilities",
-            ));
-        }
-        if !self
-            .artifacts
-            .contains_key(&IsolationArtifactRole::Launcher)
-        {
-            return Err(ProtocolValidationError::new(
-                "adapter inspection must report the launcher artifact",
             ));
         }
         for artifact in self.artifacts.values() {
@@ -811,6 +1098,13 @@ pub struct AdapterWorkspaceRequest {
     pub launch_owner: String,
     pub base_snapshot: String,
     pub authorities: Vec<IsolationAuthority>,
+    /// Only Create may supply the one-shot descriptor-transfer endpoint.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub transfer_fd: Option<u32>,
+    /// Existing bound incarnation. Null only for Create or separately proved
+    /// cleanup of a construction which never acquired a bound view.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub mount_identity: Option<String>,
 }
 
 impl AdapterWorkspaceRequest {
@@ -842,7 +1136,64 @@ impl AdapterWorkspaceRequest {
                 ));
             }
         }
+        if let Some(identity) = &self.mount_identity {
+            validate_sha256("workspace mount identity", identity)?;
+        }
+        match self.operation {
+            WorkspaceLifecycleOperation::Create => {
+                if self.mount_identity.is_some()
+                    || self
+                        .transfer_fd
+                        .is_none_or(|fd| fd <= 2 || descriptors.contains(&fd))
+                {
+                    return Err(ProtocolValidationError::new(
+                        "workspace Create requires one distinct transfer endpoint and no prior mount identity",
+                    ));
+                }
+            }
+            WorkspaceLifecycleOperation::FreezeAndDiff => {
+                if self.transfer_fd.is_some() || self.mount_identity.is_none() {
+                    return Err(ProtocolValidationError::new(
+                        "workspace diff requires a bound mount identity and cannot transfer a new view",
+                    ));
+                }
+            }
+            WorkspaceLifecycleOperation::Destroy => {
+                if self.transfer_fd.is_some() {
+                    return Err(ProtocolValidationError::new(
+                        "workspace destruction cannot transfer a new view",
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+/// Explicit null is part of the current protocol, not a missing-field predecessor fallback.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// The payload in the one-shot Create packet. Both digests are bare lowercase
+/// SHA-256 over Lillux canonical JSON of the respective typed protocol value.
+/// The packet is also canonical JSON and must carry exactly one descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceViewTransferReceipt {
+    pub protocol: IsolationAdapterProtocolVersion,
+    pub request_digest: String,
+    pub response_digest: String,
+}
+
+impl WorkspaceViewTransferReceipt {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_sha256("workspace request digest", &self.request_digest)?;
+        validate_sha256("workspace response digest", &self.response_digest)
     }
 }
 
@@ -850,6 +1201,7 @@ impl AdapterWorkspaceRequest {
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceMutationKind {
     UpsertRegular,
+    UpsertSymlink,
     DeletePath,
     EnsureDirectory,
     OpaqueDirectory,
@@ -866,6 +1218,10 @@ pub struct WorkspaceMutation {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    /// Exact relative link bytes, never a followed target or a content digest.
+    /// Required-null on every non-symlink mutation in the current protocol.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target: Option<String>,
 }
 
 impl WorkspaceMutation {
@@ -874,6 +1230,7 @@ impl WorkspaceMutation {
         match self.kind {
             WorkspaceMutationKind::UpsertRegular => {
                 if !matches!(self.normalized_mode, Some(0o644 | 0o755))
+                    || self.target.is_some()
                     || self.size.is_none()
                     || self
                         .content_hash
@@ -886,9 +1243,31 @@ impl WorkspaceMutation {
                 }
                 Ok(())
             }
+            WorkspaceMutationKind::UpsertSymlink => {
+                let target = self.target.as_deref().ok_or_else(|| {
+                    ProtocolValidationError::new("symlink workspace mutation requires target bytes")
+                })?;
+                // Containment belongs to the declared output root, not the
+                // overlay's project-relative path. Preserve '..' for that
+                // owner to resolve within the selected product subtree.
+                if target.is_empty()
+                    || target.len() > MAX_WORKSPACE_SYMLINK_TARGET_BYTES
+                    || target.starts_with('/')
+                    || target.as_bytes().contains(&0)
+                    || self.normalized_mode.is_some()
+                    || self.size.is_some()
+                    || self.content_hash.is_some()
+                {
+                    return Err(ProtocolValidationError::new(
+                        "invalid symlink workspace mutation",
+                    ));
+                }
+                Ok(())
+            }
             _ if self.normalized_mode.is_none()
                 && self.size.is_none()
-                && self.content_hash.is_none() =>
+                && self.content_hash.is_none()
+                && self.target.is_none() =>
             {
                 Ok(())
             }
@@ -909,7 +1288,11 @@ pub struct AdapterWorkspaceResponse {
     pub backend_id: String,
     pub backend_version: String,
     pub pinned_root_identities: BTreeMap<String, String>,
-    pub mount_identity: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub mount_identity: Option<String>,
+    /// Present only when Create delivers an exact newly constructed view.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub view_descriptor_identity: Option<String>,
     /// Adapter-declared, backend-relative root containing the bytes named by
     /// `mutations`. Present only for `freeze_and_diff`; RyeOS resolves and pins
     /// it below the still-open opaque backend-state authority.
@@ -920,6 +1303,38 @@ pub struct AdapterWorkspaceResponse {
 }
 
 impl AdapterWorkspaceResponse {
+    /// Sole field-level encoding for the created mount incarnation. Callers
+    /// hash this value with the existing Lillux canonical JSON/SHA-256 owner.
+    /// The mutable directory metadata and the response's own digest are not
+    /// identity inputs. Construction ownership prevents a later directory/
+    /// kernel-coordinate reuse from masquerading as the accepted incarnation.
+    pub fn mount_identity_value(
+        &self,
+        request: &AdapterWorkspaceRequest,
+    ) -> Result<Value, ProtocolValidationError> {
+        if self.operation != WorkspaceLifecycleOperation::Create
+            || request.operation != WorkspaceLifecycleOperation::Create
+        {
+            return Err(ProtocolValidationError::new(
+                "only Create constructs a mount identity",
+            ));
+        }
+        let identity = self.view_descriptor_identity.as_deref().ok_or_else(|| {
+            ProtocolValidationError::new("created view lacks descriptor identity")
+        })?;
+        validate_sha256("workspace descriptor identity", identity)?;
+        Ok(serde_json::json!({
+            "protocol": request.protocol,
+            "workspace_id": request.workspace_id,
+            "launch_owner": request.launch_owner,
+            "base_snapshot": request.base_snapshot,
+            "backend_id": self.backend_id,
+            "backend_version": self.backend_version,
+            "pinned_root_identities": self.pinned_root_identities,
+            "view_descriptor_identity": identity,
+        }))
+    }
+
     pub fn validate_for(
         &self,
         request: &AdapterWorkspaceRequest,
@@ -935,7 +1350,30 @@ impl AdapterWorkspaceResponse {
         }
         validate_identifier("workspace backend id", &self.backend_id)?;
         validate_string("workspace backend version", &self.backend_version)?;
-        validate_string("workspace mount identity", &self.mount_identity)?;
+        if let Some(identity) = &self.mount_identity {
+            validate_sha256("workspace mount identity", identity)?;
+        }
+        if self.operation == WorkspaceLifecycleOperation::Create {
+            if self.mount_identity.is_none() {
+                return Err(ProtocolValidationError::new(
+                    "created workspace must identify its mount incarnation",
+                ));
+            }
+            validate_sha256(
+                "workspace descriptor identity",
+                self.view_descriptor_identity.as_deref().ok_or_else(|| {
+                    ProtocolValidationError::new(
+                        "created workspace must identify its transferred descriptor",
+                    )
+                })?,
+            )?;
+        } else if self.view_descriptor_identity.is_some()
+            || self.mount_identity != request.mount_identity
+        {
+            return Err(ProtocolValidationError::new(
+                "workspace operation cannot introduce or replace a view identity",
+            ));
+        }
         if self.pinned_root_identities.len() != 2
             || !["project", "backend_state"]
                 .iter()
@@ -973,7 +1411,9 @@ impl AdapterWorkspaceResponse {
             }
             if matches!(
                 mutation.kind,
-                WorkspaceMutationKind::UpsertRegular | WorkspaceMutationKind::DeletePath
+                WorkspaceMutationKind::UpsertRegular
+                    | WorkspaceMutationKind::UpsertSymlink
+                    | WorkspaceMutationKind::DeletePath
             ) {
                 non_directory_paths.insert(mutation.path.clone());
             }
@@ -1044,6 +1484,26 @@ impl AdapterLaunchRequest {
             if !descriptors.insert(authority.inherited_fd) {
                 return Err(ProtocolValidationError::new(
                     "descriptor is reused across isolation protocol roles",
+                ));
+            }
+        }
+        for channel in &self.plan.target_channels {
+            let source_fd = self
+                .authorities
+                .iter()
+                .find(|authority| authority.id == channel.source)
+                .map(|authority| authority.inherited_fd)
+                .ok_or_else(|| {
+                    ProtocolValidationError::new(
+                        "target channel source disappeared after plan validation",
+                    )
+                })?;
+            if channel.target_fd > 2
+                && channel.target_fd != source_fd
+                && descriptors.contains(&channel.target_fd)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target channel destination aliases an inherited protocol descriptor",
                 ));
             }
         }
@@ -1122,6 +1582,14 @@ fn validate_string(kind: &str, value: &str) -> Result<(), ProtocolValidationErro
             "{kind} cannot be empty"
         )));
     }
+    validate_process_value(kind, value)
+}
+
+// argv entries and environment values are exact process data, not identifiers.
+// Empty is meaningful (including an explicitly empty PATH) and must not be
+// replaced with absence, an inherited value, or a fabricated sentinel. Names,
+// argv0 and authority coordinates still use the nonempty validator above.
+fn validate_process_value(kind: &str, value: &str) -> Result<(), ProtocolValidationError> {
     if value.len() > MAX_STRING_BYTES {
         return Err(ProtocolValidationError::new(format!(
             "{kind} exceeds {MAX_STRING_BYTES} bytes"
@@ -1201,11 +1669,6 @@ fn validate_artifact_descriptors(
     artifacts: &BTreeMap<IsolationArtifactRole, u32>,
     reserved: Option<u32>,
 ) -> Result<BTreeSet<u32>, ProtocolValidationError> {
-    if !artifacts.contains_key(&IsolationArtifactRole::Launcher) {
-        return Err(ProtocolValidationError::new(
-            "isolation request is missing the launcher artifact",
-        ));
-    }
     let mut descriptors = reserved.into_iter().collect::<BTreeSet<_>>();
     for descriptor in artifacts.values().copied() {
         if descriptor <= 2 {
@@ -1270,16 +1733,19 @@ mod tests {
                         layer: 2,
                     },
                 ],
+                fixed_parent_views: Vec::new(),
                 project_workspace: None,
-                target_channel: None,
+                target_channels: Vec::new(),
                 environment: IsolationEnvironment {
                     values: BTreeMap::from([("PATH".to_string(), "/bin".to_string())]),
                 },
                 network: IsolationNetwork::Isolated,
                 devices: IsolationDeviceSurface::Minimal,
                 private_tmp: true,
-                host_pid_namespace: true,
+                proc_filesystem: IsolationProcFilesystem::Empty,
+                pid_namespace: IsolationPidNamespace::Host,
                 shared_process_group: true,
+                nested_sandbox: false,
             },
             vec![
                 authority("target", 3, IsolationAuthorityPurpose::Executable),
@@ -1297,7 +1763,299 @@ mod tests {
     }
 
     #[test]
-    fn declaration_requires_distinct_launcher() {
+    fn project_workspace_requires_one_retained_view_role() {
+        let (mut plan, mut authorities) = complete_plan();
+        let view = IsolationAuthorityId::new("workspace-view").unwrap();
+        plan.mounts
+            .retain(|mount| mount.destination.as_str() != "/workspace");
+        authorities.retain(|authority| authority.id.as_str() != "workspace");
+        authorities.push(authority(
+            "workspace-view",
+            5,
+            IsolationAuthorityPurpose::WorkspaceView,
+        ));
+        plan.project_workspace = Some(IsolationProjectWorkspace {
+            workspace_id: "workspace-one".to_string(),
+            view,
+            view_descriptor_identity: "c".repeat(64),
+            destination: IsolationPath::new("/workspace").unwrap(),
+            writable_descendant_mounts: Vec::new(),
+        });
+        plan.validate(&authorities).unwrap();
+        authorities.last_mut().unwrap().purpose = IsolationAuthorityPurpose::WorkspaceProject;
+        assert!(plan.validate(&authorities).is_err());
+        authorities.last_mut().unwrap().purpose = IsolationAuthorityPurpose::WorkspaceView;
+        plan.project_workspace
+            .as_mut()
+            .unwrap()
+            .view_descriptor_identity = "not-a-digest".into();
+        assert!(plan.validate(&authorities).is_err());
+    }
+
+    fn workspace_descendant_plan() -> (IsolationPlan, Vec<IsolationAuthority>) {
+        let (mut plan, mut authorities) = complete_plan();
+        plan.mounts
+            .retain(|mount| mount.destination.as_str() != "/workspace");
+        authorities.retain(|authority| authority.id.as_str() != "workspace");
+        authorities.push(authority(
+            "view",
+            5,
+            IsolationAuthorityPurpose::WorkspaceView,
+        ));
+        authorities.push(authority(
+            "cache",
+            6,
+            IsolationAuthorityPurpose::WorkspaceViewDescendant,
+        ));
+        plan.project_workspace = Some(IsolationProjectWorkspace {
+            workspace_id: "workspace-one".into(),
+            view: IsolationAuthorityId::new("view").unwrap(),
+            view_descriptor_identity: "c".repeat(64),
+            destination: IsolationPath::new("/workspace").unwrap(),
+            writable_descendant_mounts: vec![IsolationWorkspaceDescendantMount {
+                source: IsolationAuthorityId::new("cache").unwrap(),
+                relative_path: "cache/one".into(),
+                destination: IsolationPath::new("/runtime/cache").unwrap(),
+            }],
+        });
+        (plan, authorities)
+    }
+
+    #[test]
+    fn workspace_descendants_require_explicit_closed_wire_and_writable_capability() {
+        let (plan, authorities) = workspace_descendant_plan();
+        assert!(
+            plan.mounts
+                .iter()
+                .all(|mount| mount.access == IsolationMountAccess::ReadOnly)
+        );
+        let capabilities = plan.validate(&authorities).unwrap();
+        assert!(capabilities.contains(&IsolationCapability::FilesystemFdWritable));
+        let encoded = serde_json::to_value(&plan).unwrap();
+        let decoded: IsolationPlan = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, plan);
+        for field in ["access", "layer"] {
+            let mut malformed = encoded.clone();
+            malformed["project_workspace"]["writable_descendant_mounts"][0][field] =
+                serde_json::json!("not-authorable");
+            assert!(serde_json::from_value::<IsolationPlan>(malformed).is_err());
+        }
+        let mut missing = encoded;
+        missing["project_workspace"]
+            .as_object_mut()
+            .unwrap()
+            .remove("writable_descendant_mounts");
+        assert!(serde_json::from_value::<IsolationPlan>(missing).is_err());
+    }
+
+    #[test]
+    fn workspace_descendants_refuse_role_reuse_or_orphan_authority() {
+        let (plan, authorities) = workspace_descendant_plan();
+        plan.validate(&authorities).unwrap();
+        for purpose in [
+            IsolationAuthorityPurpose::WritableMount,
+            IsolationAuthorityPurpose::ReadOnlyMount,
+            IsolationAuthorityPurpose::WorkspaceView,
+            IsolationAuthorityPurpose::TargetDuplexChannel,
+        ] {
+            let mut wrong = authorities.clone();
+            wrong.last_mut().unwrap().purpose = purpose;
+            assert!(plan.validate(&wrong).is_err());
+        }
+        let mut wrong = authorities.clone();
+        wrong.last_mut().unwrap().inherited_fd = 3;
+        assert!(plan.validate(&wrong).is_err());
+        let mut orphan = plan.clone();
+        orphan.project_workspace = None;
+        assert!(orphan.validate(&authorities).is_err());
+        let mut unused = plan.clone();
+        unused
+            .project_workspace
+            .as_mut()
+            .unwrap()
+            .writable_descendant_mounts
+            .clear();
+        assert!(unused.validate(&authorities).is_err());
+        let mut unknown = plan.clone();
+        unknown
+            .project_workspace
+            .as_mut()
+            .unwrap()
+            .writable_descendant_mounts[0]
+            .source = IsolationAuthorityId::new("unknown").unwrap();
+        assert!(unknown.validate(&authorities).is_err());
+        let mut ordinary = plan;
+        ordinary.mounts.push(IsolationMount {
+            source: IsolationAuthorityId::new("cache").unwrap(),
+            destination: IsolationPath::new("/ordinary-cache").unwrap(),
+            access: IsolationMountAccess::Writable,
+            layer: 10,
+        });
+        assert!(ordinary.validate(&authorities).is_err());
+    }
+
+    #[test]
+    fn workspace_descendants_refuse_unsafe_paths_and_namespace_conflicts() {
+        let (plan, authorities) = workspace_descendant_plan();
+        for relative in [
+            "", ".", "../x", "a/../b", "a/./b", "a//b", "a/", "/a", "a\nb",
+        ] {
+            let mut invalid = plan.clone();
+            invalid
+                .project_workspace
+                .as_mut()
+                .unwrap()
+                .writable_descendant_mounts[0]
+                .relative_path = relative.into();
+            assert!(invalid.validate(&authorities).is_err(), "{relative:?}");
+        }
+        for destination in [
+            "/",
+            "/proc",
+            "/proc/x",
+            "/workspace",
+            "/workspace/child",
+            "/project",
+            "/project/hidden",
+            "/bin",
+            "/bin/python",
+            "/bin/python/child",
+        ] {
+            let mut invalid = plan.clone();
+            invalid
+                .project_workspace
+                .as_mut()
+                .unwrap()
+                .writable_descendant_mounts[0]
+                .destination = IsolationPath::new(destination).unwrap();
+            assert!(invalid.validate(&authorities).is_err(), "{destination}");
+        }
+        let mut excessive = plan;
+        excessive
+            .mounts
+            .resize(MAX_MOUNTS, excessive.mounts[0].clone());
+        assert!(
+            excessive
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("too many mounts")
+        );
+    }
+
+    #[test]
+    fn workspace_descendants_require_disjoint_sorted_unique_mounts() {
+        let (plan, mut authorities) = workspace_descendant_plan();
+        authorities.push(authority(
+            "cache-two",
+            7,
+            IsolationAuthorityPurpose::WorkspaceViewDescendant,
+        ));
+        for destination in [
+            "/runtime/cache",
+            "/runtime/cache/child",
+            "/runtime",
+            "/runtime/aaa",
+        ] {
+            let mut invalid = plan.clone();
+            invalid
+                .project_workspace
+                .as_mut()
+                .unwrap()
+                .writable_descendant_mounts
+                .push(IsolationWorkspaceDescendantMount {
+                    source: IsolationAuthorityId::new("cache-two").unwrap(),
+                    relative_path: "cache/two".into(),
+                    destination: IsolationPath::new(destination).unwrap(),
+                });
+            assert!(invalid.validate(&authorities).is_err(), "{destination}");
+        }
+        let mut valid = plan;
+        valid
+            .project_workspace
+            .as_mut()
+            .unwrap()
+            .writable_descendant_mounts
+            .push(IsolationWorkspaceDescendantMount {
+                source: IsolationAuthorityId::new("cache-two").unwrap(),
+                relative_path: "cache/two".into(),
+                destination: IsolationPath::new("/runtime/zzz").unwrap(),
+            });
+        valid.validate(&authorities).unwrap();
+        valid
+            .project_workspace
+            .as_mut()
+            .unwrap()
+            .writable_descendant_mounts[1]
+            .source = IsolationAuthorityId::new("cache").unwrap();
+        assert!(valid.validate(&authorities).is_err());
+    }
+
+    #[test]
+    fn exact_process_values_allow_empty_without_relaxing_identity_or_byte_bounds() {
+        let (mut plan, authorities) = complete_plan();
+        plan.target.arguments.push(String::new());
+        plan.environment.values.insert("PATH".into(), String::new());
+        plan.environment
+            .values
+            .insert("PYTHONPATH".into(), String::new());
+        plan.validate(&authorities).unwrap();
+        let roundtrip: IsolationPlan =
+            serde_json::from_slice(&serde_json::to_vec(&plan).unwrap()).unwrap();
+        assert_eq!(roundtrip.target.arguments.last().unwrap(), "");
+        assert_eq!(roundtrip.environment.values.get("PATH").unwrap(), "");
+        roundtrip.validate(&authorities).unwrap();
+
+        let mut unnamed = plan.clone();
+        unnamed
+            .environment
+            .values
+            .insert(String::new(), "value".into());
+        assert!(
+            unnamed
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("environment name cannot be empty")
+        );
+        let mut no_argv0 = plan.clone();
+        no_argv0.target.argv0.clear();
+        assert!(
+            no_argv0
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("argv0 cannot be empty")
+        );
+
+        for invalid in ["bad\0value".to_owned(), "x".repeat(MAX_STRING_BYTES + 1)] {
+            let mut argument = plan.clone();
+            argument.target.arguments.push(invalid.clone());
+            assert!(argument.validate(&authorities).is_err());
+            let mut environment = plan.clone();
+            environment
+                .environment
+                .values
+                .insert("VALUE".into(), invalid);
+            assert!(environment.validate(&authorities).is_err());
+        }
+    }
+
+    #[test]
+    fn declaration_allows_a_self_contained_adapter() {
+        let declaration = IsolationBackendDeclaration {
+            id: "example".to_string(),
+            protocol: IsolationAdapterProtocolVersion::Current,
+            targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
+            adapter: "adapter".to_string(),
+            artifacts: BTreeMap::new(),
+            capabilities: BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]),
+        };
+        declaration.validate().unwrap();
+    }
+
+    #[test]
+    fn declaration_requires_external_artifacts_to_be_distinct_from_adapter() {
         let declaration = IsolationBackendDeclaration {
             id: "example".to_string(),
             protocol: IsolationAdapterProtocolVersion::Current,
@@ -1374,8 +2132,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v3","protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v10","protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -1384,7 +2142,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -1392,7 +2150,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -1415,9 +2173,13 @@ mod tests {
 
     #[test]
     fn predecessor_adapter_protocol_is_refused() {
-        let predecessor = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let error = from_json_str_strict::<AdapterInspectionRequest>(predecessor).unwrap_err();
-        assert!(error.to_string().contains("unknown variant"));
+        for version in [8, 9] {
+            let predecessor = format!(
+                r#"{{"protocol":"ryeos.isolation-adapter/v{version}","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{{"launcher":3}}}}"#
+            );
+            let error = from_json_str_strict::<AdapterInspectionRequest>(&predecessor).unwrap_err();
+            assert!(error.to_string().contains("unknown variant"));
+        }
     }
 
     #[test]
@@ -1439,6 +2201,199 @@ mod tests {
                 IsolationCapability::LifecycleSharedProcessGroup,
             ])
         );
+    }
+
+    fn fixed_view() -> IsolationFixedParentView {
+        IsolationFixedParentView {
+            destination: IsolationPath::new("/project").unwrap(),
+            denied_paths: vec!["control/secret".to_string()],
+            limits: FixedParentViewLimits {
+                max_entries: 32,
+                max_depth: 4,
+            },
+        }
+    }
+
+    #[test]
+    fn nested_sandbox_requires_explicit_scoped_pid_contract() {
+        let (mut plan, authorities) = complete_plan();
+        let mut missing = serde_json::to_value(&plan).unwrap();
+        missing.as_object_mut().unwrap().remove("nested_sandbox");
+        assert!(serde_json::from_value::<IsolationPlan>(missing).is_err());
+        plan.nested_sandbox = true;
+        assert!(plan.validate(&authorities).is_err());
+        plan.pid_namespace = IsolationPidNamespace::Isolated;
+        plan.proc_filesystem = IsolationProcFilesystem::PidNamespaceNested;
+        assert!(
+            plan.validate(&authorities).is_err(),
+            "a shared group cannot contain nested execution"
+        );
+        plan.shared_process_group = false;
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::ProcessNestedSandbox)
+        );
+        plan.nested_sandbox = false;
+        assert!(plan.validate(&authorities).is_err());
+        plan.proc_filesystem = IsolationProcFilesystem::PidNamespace;
+        assert!(
+            !plan
+                .validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::ProcessNestedSandbox),
+            "scope containment alone does not permit nested sandboxing"
+        );
+    }
+
+    #[test]
+    fn pid_proc_is_explicit_capability_gated_and_cannot_be_replaced() {
+        let (mut plan, authorities) = complete_plan();
+        let mut missing = serde_json::to_value(&plan).unwrap();
+        missing.as_object_mut().unwrap().remove("proc_filesystem");
+        assert!(serde_json::from_value::<IsolationPlan>(missing).is_err());
+        plan.proc_filesystem = IsolationProcFilesystem::PidNamespace;
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("isolated PID")
+        );
+        plan.pid_namespace = IsolationPidNamespace::Isolated;
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::FilesystemPidNamespaceProc)
+        );
+        for path in ["/proc", "/proc/self", "/proc/1/fd"] {
+            plan.mounts[1].destination = IsolationPath::new(path).unwrap();
+            assert!(
+                plan.validate(&authorities)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reserved PID procfs")
+            );
+        }
+        plan.mounts[1].destination = IsolationPath::new("/process-inputs").unwrap();
+        assert!(plan.validate(&authorities).is_ok());
+        plan.proc_filesystem = IsolationProcFilesystem::Empty;
+        plan.mounts[1].destination = IsolationPath::new("/proc/self").unwrap();
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("reserved PID procfs")
+        );
+    }
+
+    #[test]
+    fn fixed_parent_views_are_required_explicit_and_capability_gated() {
+        let (mut plan, authorities) = complete_plan();
+        let mut encoded = serde_json::to_value(&plan).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("fixed_parent_views");
+        assert!(serde_json::from_value::<IsolationPlan>(encoded).is_err());
+        assert!(
+            !plan
+                .validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::FilesystemFixedParentViews)
+        );
+        plan.fixed_parent_views.push(fixed_view());
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::FilesystemFixedParentViews)
+        );
+        let mut encoded = serde_json::to_value(fixed_view()).unwrap();
+        encoded.as_object_mut().unwrap().remove("limits");
+        assert!(serde_json::from_value::<IsolationFixedParentView>(encoded).is_err());
+    }
+
+    #[test]
+    fn fixed_parent_plan_rejects_conflicting_topology_and_bounds() {
+        let (base, authorities) = complete_plan();
+        let mut interleaved = fixed_view();
+        interleaved.denied_paths = vec![
+            "control/a".into(),
+            "control/a-b".into(),
+            "control/a/secret".into(),
+        ];
+        assert!(
+            interleaved
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("overlap")
+        );
+        let mut bounded = fixed_view();
+        bounded.limits.max_entries = 1;
+        assert!(
+            bounded
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("entry bound")
+        );
+        for path in [
+            "control",
+            "control/../secret",
+            "control//secret",
+            "/control/secret",
+        ] {
+            let mut plan = base.clone();
+            let mut view = fixed_view();
+            view.denied_paths = vec![path.to_string()];
+            plan.fixed_parent_views = vec![view];
+            assert!(plan.validate(&authorities).is_err(), "{path}");
+        }
+        for bound in [0, MAX_MOUNTS + 1] {
+            let mut plan = base.clone();
+            let mut view = fixed_view();
+            view.limits.max_entries = bound;
+            plan.fixed_parent_views = vec![view];
+            assert!(plan.validate(&authorities).is_err());
+        }
+        for destination in [
+            "/project/control",
+            "/project/control/secret",
+            "/project/control/secret/child",
+        ] {
+            let mut plan = base.clone();
+            plan.fixed_parent_views = vec![fixed_view()];
+            let mut mount = plan.mounts[1].clone();
+            mount.layer = 3;
+            mount.destination = IsolationPath::new(destination).unwrap();
+            plan.mounts.push(mount);
+            assert!(
+                plan.validate(&authorities)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("conflicts")
+            );
+        }
+        let mut plan = base.clone();
+        plan.fixed_parent_views = vec![fixed_view(), fixed_view()];
+        assert!(plan.validate(&authorities).is_err());
+        let mut plan = base;
+        plan.mounts[1].destination = IsolationPath::new("/workspace/child").unwrap();
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("ancestor")
+        );
+    }
+
+    #[test]
+    fn pid_namespace_choice_is_an_explicit_capability() {
+        let (mut plan, authorities) = complete_plan();
+        plan.pid_namespace = IsolationPidNamespace::Isolated;
+        let capabilities = plan.validate(&authorities).unwrap();
+        assert!(capabilities.contains(&IsolationCapability::ProcessIsolatedPidNamespace));
+        assert!(!capabilities.contains(&IsolationCapability::ProcessHostPidNamespace));
     }
 
     #[test]
@@ -1498,20 +2453,36 @@ mod tests {
     }
 
     #[test]
-    fn target_channel_is_required_nullable_and_derives_exact_ipc_capability() {
+    fn target_channels_are_required_sorted_and_derive_exact_ipc_capability() {
         let (mut plan, mut authorities) = complete_plan();
         let source = IsolationAuthorityId::new("session-channel").unwrap();
-        plan.target_channel = Some(IsolationTargetChannel {
-            source: source.clone(),
-            target_fd: 0,
-            env_name: "RYEOS_SESSION_FD".to_owned(),
-        });
+        let auxiliary = IsolationAuthorityId::new("workload-client-channel").unwrap();
+        plan.target_channels = vec![
+            IsolationTargetChannel {
+                source: source.clone(),
+                target_fd: 0,
+                env_name: "RYEOS_SESSION_FD".to_owned(),
+            },
+            IsolationTargetChannel {
+                source: auxiliary.clone(),
+                target_fd: 3,
+                env_name: "RYEOS_WORKLOAD_CLIENT_FD".to_owned(),
+            },
+        ];
         plan.environment
             .values
             .insert("RYEOS_SESSION_FD".to_owned(), "0".to_owned());
+        plan.environment
+            .values
+            .insert("RYEOS_WORKLOAD_CLIENT_FD".to_owned(), "3".to_owned());
         authorities.push(IsolationAuthority {
             id: source,
             inherited_fd: 6,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        authorities.push(IsolationAuthority {
+            id: auxiliary,
+            inherited_fd: 7,
             purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
         });
         assert!(
@@ -1521,20 +2492,23 @@ mod tests {
         );
 
         let mut value = serde_json::to_value(&plan).unwrap();
-        assert!(value.get("target_channel").is_some());
-        value.as_object_mut().unwrap().remove("target_channel");
+        assert!(value.get("target_channels").is_some());
+        value.as_object_mut().unwrap().remove("target_channels");
         assert!(serde_json::from_value::<IsolationPlan>(value).is_err());
+
+        plan.target_channels.swap(0, 1);
+        assert!(plan.validate(&authorities).is_err());
     }
 
     #[test]
     fn target_channel_rejects_wrong_target_environment_and_authority_use() {
         let (mut plan, mut authorities) = complete_plan();
         let source = IsolationAuthorityId::new("session-channel").unwrap();
-        plan.target_channel = Some(IsolationTargetChannel {
+        plan.target_channels = vec![IsolationTargetChannel {
             source: source.clone(),
-            target_fd: 3,
+            target_fd: 1,
             env_name: "RYEOS_SESSION_FD".to_owned(),
-        });
+        }];
         plan.environment
             .values
             .insert("RYEOS_SESSION_FD".to_owned(), "3".to_owned());
@@ -1545,7 +2519,7 @@ mod tests {
         });
         assert!(plan.validate(&authorities).is_err());
 
-        plan.target_channel.as_mut().unwrap().target_fd = 0;
+        plan.target_channels[0].target_fd = 0;
         plan.environment
             .values
             .insert("RYEOS_SESSION_FD".to_owned(), "0".to_owned());
@@ -1589,6 +2563,51 @@ mod tests {
                 .to_string()
                 .contains("adapter descriptor overlaps stdio or another isolation protocol role")
         );
+    }
+
+    #[test]
+    fn self_contained_launch_has_no_artifact_descriptor_requirement() {
+        let (plan, authorities) = complete_plan();
+        let request = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities,
+            artifacts: BTreeMap::new(),
+            adapter_fd: 10,
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::Run,
+        };
+        request.validate().unwrap();
+    }
+
+    #[test]
+    fn target_channel_may_already_occupy_its_exact_target_descriptor() {
+        let (mut plan, mut authorities) = complete_plan();
+        let source = IsolationAuthorityId::new("session-channel").unwrap();
+        plan.target_channels.push(IsolationTargetChannel {
+            source: source.clone(),
+            target_fd: 9,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        });
+        plan.environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "9".to_owned());
+        authorities.push(IsolationAuthority {
+            id: source,
+            inherited_fd: 9,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities,
+            artifacts: BTreeMap::new(),
+            adapter_fd: 10,
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::Run,
+        }
+        .validate()
+        .unwrap();
     }
 
     #[test]
@@ -1742,6 +2761,22 @@ mod tests {
                 .to_string()
                 .contains("lowercase SHA-256")
         );
+
+        let self_contained_request = AdapterInspectionRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            target: IsolationTargetTriple::X86_64UnknownLinuxGnu,
+            backend_id: "native-linux".to_string(),
+            artifacts: BTreeMap::new(),
+        };
+        self_contained_request.validate().unwrap();
+        AdapterInspectionResponse {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            adapter_build: "0.1.0".to_string(),
+            effective_capabilities: BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]),
+            artifacts: BTreeMap::new(),
+        }
+        .validate()
+        .unwrap();
     }
 
     fn workspace_request(operation: WorkspaceLifecycleOperation) -> AdapterWorkspaceRequest {
@@ -1751,6 +2786,9 @@ mod tests {
             workspace_id: "workspace-one".to_string(),
             launch_owner: "{\"attempt\":1}".to_string(),
             base_snapshot: "a".repeat(64),
+            transfer_fd: (operation == WorkspaceLifecycleOperation::Create).then_some(12),
+            mount_identity: (operation != WorkspaceLifecycleOperation::Create)
+                .then(|| "b".repeat(64)),
             authorities: vec![
                 IsolationAuthority {
                     id: IsolationAuthorityId::new("workspace-project").unwrap(),
@@ -1767,11 +2805,11 @@ mod tests {
     }
 
     #[test]
-    fn workspace_v3_exposes_only_project_and_opaque_backend_state() {
+    fn workspace_exposes_only_project_and_opaque_backend_state() {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v3");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v10");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -1800,7 +2838,8 @@ mod tests {
                 ("project".to_string(), "dev1-ino2".to_string()),
                 ("backend_state".to_string(), "dev1-ino3".to_string()),
             ]),
-            mount_identity: "example-mount".to_string(),
+            mount_identity: request.mount_identity.clone(),
+            view_descriptor_identity: None,
             mutation_content_root: Some("backend-output".to_string()),
             mutations: Vec::new(),
             destroyed: false,
@@ -1810,5 +2849,236 @@ mod tests {
         assert!(response.validate_for(&request).is_err());
         response.mutation_content_root = None;
         assert!(response.validate_for(&request).is_err());
+    }
+
+    fn workspace_response(request: &AdapterWorkspaceRequest) -> AdapterWorkspaceResponse {
+        AdapterWorkspaceResponse {
+            protocol: request.protocol,
+            operation: request.operation,
+            workspace_id: request.workspace_id.clone(),
+            launch_owner: request.launch_owner.clone(),
+            backend_id: "example-backend".to_string(),
+            backend_version: "1".to_string(),
+            pinned_root_identities: BTreeMap::from([
+                ("project".to_string(), "dev1-ino2".to_string()),
+                ("backend_state".to_string(), "dev1-ino3".to_string()),
+            ]),
+            mount_identity: if request.operation == WorkspaceLifecycleOperation::Create {
+                Some("b".repeat(64))
+            } else {
+                request.mount_identity.clone()
+            },
+            view_descriptor_identity: (request.operation == WorkspaceLifecycleOperation::Create)
+                .then(|| "c".repeat(64)),
+            mutation_content_root: (request.operation
+                == WorkspaceLifecycleOperation::FreezeAndDiff)
+                .then(|| "output".to_string()),
+            mutations: Vec::new(),
+            destroyed: request.operation == WorkspaceLifecycleOperation::Destroy,
+        }
+    }
+
+    #[test]
+    fn workspace_symlink_mutation_is_bounded_exact_and_closed() {
+        let original = WorkspaceMutation {
+            path: "products/runtime/bin/program".into(),
+            kind: WorkspaceMutationKind::UpsertSymlink,
+            normalized_mode: None,
+            size: None,
+            content_hash: None,
+            target: Some("../lib/program".into()),
+        };
+        original.validate().unwrap();
+        let wire = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkspaceMutation>(wire.clone()).unwrap(),
+            original
+        );
+        for target in [
+            None,
+            Some("".into()),
+            Some("/host/bin/program".into()),
+            Some("bad\0target".into()),
+            Some("x".repeat(MAX_WORKSPACE_SYMLINK_TARGET_BYTES + 1)),
+        ] {
+            let mut mutation = original.clone();
+            mutation.target = target;
+            assert!(mutation.validate().is_err());
+        }
+        let mut at_bound = original.clone();
+        at_bound.target = Some("x".repeat(MAX_WORKSPACE_SYMLINK_TARGET_BYTES));
+        at_bound.validate().unwrap();
+        for field in ["normalized_mode", "size", "content_hash"] {
+            let mut changed = wire.clone();
+            changed[field] = if field == "content_hash" {
+                serde_json::json!("a".repeat(64))
+            } else {
+                serde_json::json!(1)
+            };
+            assert!(
+                serde_json::from_value::<WorkspaceMutation>(changed)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("target");
+        assert!(serde_json::from_value::<WorkspaceMutation>(missing).is_err());
+        let mut unknown = wire;
+        unknown["follow_target"] = true.into();
+        assert!(serde_json::from_value::<WorkspaceMutation>(unknown).is_err());
+        for kind in [
+            WorkspaceMutationKind::DeletePath,
+            WorkspaceMutationKind::EnsureDirectory,
+            WorkspaceMutationKind::OpaqueDirectory,
+        ] {
+            let mut mutation = original.clone();
+            mutation.kind = kind;
+            assert!(mutation.validate().is_err());
+            mutation.target = None;
+            mutation.validate().unwrap();
+        }
+        let mut regular = original;
+        regular.kind = WorkspaceMutationKind::UpsertRegular;
+        regular.normalized_mode = Some(0o755);
+        regular.size = Some(1);
+        regular.content_hash = Some("a".repeat(64));
+        assert!(regular.validate().is_err());
+        regular.target = None;
+        regular.validate().unwrap();
+    }
+
+    #[test]
+    fn workspace_mutations_cannot_descend_through_a_symlink() {
+        let request = workspace_request(WorkspaceLifecycleOperation::FreezeAndDiff);
+        let mut response = workspace_response(&request);
+        response.mutations = vec![
+            WorkspaceMutation {
+                path: "products/link".into(),
+                kind: WorkspaceMutationKind::UpsertSymlink,
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: Some("real".into()),
+            },
+            WorkspaceMutation {
+                path: "products/link/child".into(),
+                kind: WorkspaceMutationKind::EnsureDirectory,
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            },
+        ];
+        assert!(response.validate_for(&request).is_err());
+        response.mutations.pop();
+        response.validate_for(&request).unwrap();
+    }
+
+    #[test]
+    fn workspace_create_requires_exact_transfer_and_no_previous_view() {
+        let original = workspace_request(WorkspaceLifecycleOperation::Create);
+        for descriptor in [None, Some(0), Some(2), Some(10), Some(11)] {
+            let mut request = original.clone();
+            request.transfer_fd = descriptor;
+            assert!(request.validate().is_err());
+        }
+        let mut request = original;
+        request.mount_identity = Some("b".repeat(64));
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn workspace_noncreate_cannot_introduce_a_view() {
+        for operation in [
+            WorkspaceLifecycleOperation::FreezeAndDiff,
+            WorkspaceLifecycleOperation::Destroy,
+        ] {
+            let mut request = workspace_request(operation);
+            request.validate().unwrap();
+            let mut response = workspace_response(&request);
+            response.validate_for(&request).unwrap();
+            request.transfer_fd = Some(12);
+            assert!(request.validate().is_err());
+            request.transfer_fd = None;
+            response.view_descriptor_identity = Some("c".repeat(64));
+            assert!(response.validate_for(&request).is_err());
+            response.view_descriptor_identity = None;
+            response.mount_identity = Some("d".repeat(64));
+            assert!(response.validate_for(&request).is_err());
+        }
+        let mut request = workspace_request(WorkspaceLifecycleOperation::FreezeAndDiff);
+        request.mount_identity = None;
+        assert!(request.validate().is_err());
+        request.operation = WorkspaceLifecycleOperation::Destroy;
+        request.validate().unwrap();
+        let response = workspace_response(&request);
+        assert!(response.mount_identity.is_none());
+        response.validate_for(&request).unwrap();
+    }
+
+    #[test]
+    fn workspace_nullable_identity_fields_must_be_explicit() {
+        let request = workspace_request(WorkspaceLifecycleOperation::Create);
+        for field in ["transfer_fd", "mount_identity"] {
+            let mut encoded = serde_json::to_value(&request).unwrap();
+            encoded.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AdapterWorkspaceRequest>(encoded).is_err(),
+                "{field}"
+            );
+        }
+        let request = workspace_request(WorkspaceLifecycleOperation::Destroy);
+        let response = workspace_response(&request);
+        for field in ["mount_identity", "view_descriptor_identity"] {
+            let mut encoded = serde_json::to_value(&response).unwrap();
+            encoded.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AdapterWorkspaceResponse>(encoded).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_creation_identity_commits_owner_roots_and_actual_view() {
+        let request = workspace_request(WorkspaceLifecycleOperation::Create);
+        let response = workspace_response(&request);
+        response.validate_for(&request).unwrap();
+        let identity = response.mount_identity_value(&request).unwrap();
+        assert_eq!(identity["view_descriptor_identity"], "c".repeat(64));
+        assert_eq!(
+            identity["pinned_root_identities"],
+            serde_json::to_value(&response.pinned_root_identities).unwrap()
+        );
+        let mut changed = request.clone();
+        changed.launch_owner = "{\"attempt\":2}".to_string();
+        assert_ne!(identity, response.mount_identity_value(&changed).unwrap());
+        changed = request.clone();
+        changed.base_snapshot = "d".repeat(64);
+        assert_ne!(identity, response.mount_identity_value(&changed).unwrap());
+        let mut changed = response.clone();
+        changed.view_descriptor_identity = Some("e".repeat(64));
+        assert_ne!(identity, changed.mount_identity_value(&request).unwrap());
+        changed.view_descriptor_identity = None;
+        assert!(changed.validate_for(&request).is_err());
+        assert!(changed.mount_identity_value(&request).is_err());
+    }
+
+    #[test]
+    fn workspace_transfer_receipt_is_closed_and_bounded() {
+        let mut receipt = WorkspaceViewTransferReceipt {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            request_digest: "a".repeat(64),
+            response_digest: "b".repeat(64),
+        };
+        receipt.validate().unwrap();
+        assert!(serde_json::to_vec(&receipt).unwrap().len() < MAX_WORKSPACE_VIEW_RECEIPT_BYTES);
+        let mut value = serde_json::to_value(&receipt).unwrap();
+        value["descriptor"] = serde_json::json!(3);
+        assert!(serde_json::from_value::<WorkspaceViewTransferReceipt>(value).is_err());
+        receipt.response_digest = "B".repeat(64);
+        assert!(receipt.validate().is_err());
     }
 }

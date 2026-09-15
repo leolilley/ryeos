@@ -103,6 +103,7 @@ fn state_store_write_path_emits_state_spans() {
                 222,
                 &ryeos_app::process::ExecutionProcessIdentity {
                     schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    process_scope: None,
                     boot_id: "test-boot".to_string(),
                     target_pid: 111,
                     target_start_time_ticks: 10,
@@ -125,6 +126,7 @@ fn state_store_write_path_emits_state_spans() {
                     final_cost: None,
                     managed_envelope: None,
                     result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
                 },
             )
             .expect("finalize_thread");

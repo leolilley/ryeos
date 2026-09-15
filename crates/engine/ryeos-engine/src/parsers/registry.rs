@@ -225,6 +225,12 @@ impl ParserRegistry {
             &tools_root,
         )?;
 
+        // An overlay with no selected descriptors is the base registry,
+        // regardless of whether an empty directory or ignored files exist.
+        // Decide only after the bounded traversal has validated its inputs.
+        if origin_paths.is_empty() {
+            return Ok(self.clone());
+        }
         let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);
         Ok(Self {
             descriptors,
@@ -334,6 +340,12 @@ impl ParserRegistry {
             extend_overlay_fingerprint(&mut fingerprint_data, &canonical_ref, content);
         }
 
+        // Match the live overlay owner: no selected descriptors must not
+        // create a distinct registry (and therefore execution-plan) identity.
+        // In particular, do not return before validating ignored entry paths.
+        if origin_paths.is_empty() {
+            return Ok(self.clone());
+        }
         Ok(Self {
             descriptors,
             fingerprint: lillux::cas::sha256_hex(&fingerprint_data),
@@ -907,6 +919,127 @@ formats:
 
     fn default_parser_kinds(sk: &SigningKey, ts: &TrustStore) -> KindRegistry {
         parser_kinds(DEFAULT_PARSER_KIND_SCHEMA, sk, ts)
+    }
+
+    struct AdmittedParserFiles(Vec<(PathBuf, Vec<u8>)>);
+
+    impl crate::project_content::AuthoritativeProjectContent for AdmittedParserFiles {
+        fn list_files(
+            &self,
+            prefix: &Path,
+            recursive: bool,
+            max_entries: usize,
+        ) -> Result<Vec<crate::project_content::ProjectContentEntry>, EngineError> {
+            assert_eq!(prefix, Path::new(".ai/parsers"));
+            assert!(recursive);
+            assert!(self.0.len() <= max_entries);
+            Ok(self
+                .0
+                .iter()
+                .map(
+                    |(path, bytes)| crate::project_content::ProjectContentEntry {
+                        relative_path: path.clone(),
+                        content_hash: lillux::cas::sha256_hex(bytes),
+                        size: bytes.len() as u64,
+                        normalized_mode: 0o644,
+                    },
+                )
+                .collect())
+        }
+
+        fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, EngineError> {
+            let bytes = self.0.iter().find_map(|(relative, bytes)| {
+                (Path::new(".ai/parsers").join(relative) == path).then_some(bytes)
+            });
+            assert!(bytes.is_none_or(|bytes| bytes.len() as u64 <= max_bytes));
+            Ok(bytes.cloned())
+        }
+
+        fn validates_file(&self, _path: &Path, _hash: &str) -> Result<bool, EngineError> {
+            panic!("parser discovery must read the bounded authoritative bytes")
+        }
+
+        fn validates_absence(&self, _path: &Path) -> Result<bool, EngineError> {
+            panic!("parser discovery must enumerate the authoritative prefix")
+        }
+    }
+
+    #[test]
+    fn empty_and_ignored_parser_overlays_preserve_base_identity() {
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let kinds = default_parser_kinds(&sk, &ts);
+        let (base, _) = ParserRegistry::load_base(&[], &ts, &kinds).unwrap();
+        let root = tempdir();
+        fs::create_dir_all(root.join(".ai/parsers")).unwrap();
+        for files in [
+            vec![],
+            vec![(PathBuf::from("README.txt"), b"not a parser".to_vec())],
+        ] {
+            for (path, bytes) in &files {
+                fs::write(root.join(".ai/parsers").join(path), bytes).unwrap();
+            }
+            let admitted = base
+                .with_project_overlay_from_content(&AdmittedParserFiles(files), &ts, &kinds)
+                .unwrap();
+            let live = base.with_project_overlay(&root, &ts, &kinds).unwrap();
+            assert_eq!(admitted.fingerprint(), base.fingerprint());
+            assert_eq!(live.fingerprint(), base.fingerprint());
+            assert_eq!(admitted.refs().count(), base.refs().count());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn signed_parser_overlay_identity_matches_live_and_tracks_changes() {
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let kinds = default_parser_kinds(&sk, &ts);
+        let (base, _) = ParserRegistry::load_base(&[], &ts, &kinds).unwrap();
+        let root = tempdir();
+        let path = root.join(".ai/parsers/example.yaml");
+        let mut previous = base.fingerprint().to_owned();
+        for version in ["1.0.0", "2.0.0"] {
+            write_signed(
+                &path,
+                &format!(
+                    "version: '{version}'\nhandler: handler:ryeos/core/yaml-document\nparser_api_version: 1\nparser_config: {{}}\n"
+                ),
+                &sk,
+            );
+            let admitted = base
+                .with_project_overlay_from_content(
+                    &AdmittedParserFiles(vec![(
+                        PathBuf::from("example.yaml"),
+                        fs::read(&path).unwrap(),
+                    )]),
+                    &ts,
+                    &kinds,
+                )
+                .unwrap();
+            let live = base.with_project_overlay(&root, &ts, &kinds).unwrap();
+            assert_eq!(admitted.fingerprint(), live.fingerprint());
+            assert_ne!(admitted.fingerprint(), base.fingerprint());
+            assert_ne!(admitted.fingerprint(), previous);
+            assert_eq!(admitted.get("parser:example").unwrap().version, version);
+            previous = admitted.fingerprint().to_owned();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ignored_admitted_parser_entry_still_requires_a_safe_path() {
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let kinds = default_parser_kinds(&sk, &ts);
+        let files = AdmittedParserFiles(vec![(PathBuf::from("../README.txt"), vec![])]);
+        assert!(
+            ParserRegistry::empty()
+                .with_project_overlay_from_content(&files, &ts, &kinds)
+                .unwrap_err()
+                .to_string()
+                .contains("unsafe admitted parser overlay path")
+        );
     }
 
     #[test]

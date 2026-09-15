@@ -1,6 +1,9 @@
+pub mod direct_execution_evidence;
 pub mod directive_launch;
 pub mod extends_chain;
 pub mod graph_effective_validator;
+pub mod graph_execution_evidence;
+pub mod graph_launch;
 pub mod identity;
 pub mod regex_kv;
 pub mod yaml_document;

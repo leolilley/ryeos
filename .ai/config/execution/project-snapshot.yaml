@@ -1,0 +1,66 @@
+# ryeos:signed:2026-09-11T11:37:14Z:c01297654227ce58ea3fb47722d8da3ee580621d247e50c7cff9aefe9f33c06e:vy0cn2SUWXqFO9Zp2TOquokj6KM4DCdrnwfzwGruZ6If16wN6aH7L1tD3yRjdHYzyZ6kEqL5Mha5FTZKKHQoAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Repository capture intent, composed with the target's signed node patterns.
+# Git ignores are not snapshot authority. Keep source and the public developer
+# signing fixture, but never send local artifacts or nested worktrees as source.
+schema: 1
+exclusions:
+  - "/.local/"
+  - "/.tmp/"
+  - "/.worktrees/"
+  - "/nvim.log"
+  # Retired local smoke items are not the source-local development bundle.
+  # Keep their files on disk; exclude them rather than inheriting Git ignores.
+  - "/.ai/directives/test/replay-smoke.md"
+  - "/.ai/tools/test/echo.yaml"
+  - "/.ai/surfaces/ryeos/ui/atlas.yaml"
+  # Nested fixture nodes and generated runs are not authored test inputs.
+  # Preserve the surrounding fixture Tools, directives, and test sources.
+  - "/tests/e2e/execute-stream-latency/.ai/state/"
+  - "/tests/e2e/execute-stream-latency/outputs/"
+  - "/tests/e2e/manual-directives/.ai/state/"
+  - "/tests/e2e/manual-directives/.ai/knowledge/agent/"
+  # This retired bundle has no tracked source in the repository.
+  - "/bundles/sandbox-linux-bubblewrap/"
+  # The source-local development bundle is also published during qualification.
+  # Its derived payload/CAS/ref trees are not repository authoring inputs.
+  - "/.ai/bin/"
+  - "/.ai/objects/"
+  - "/.ai/refs/"
+  # These are literal anchored prefixes in RyeOS's existing policy language,
+  # not Git-style path globs. Add a source bundle's generated roots here when
+  # adding that bundle; retain its authored descriptors and implementation.
+  - "/bundles/.publisher-locks/"
+  - "/bundles/browser/.ai/bin/"
+  - "/bundles/browser/.ai/objects/"
+  - "/bundles/browser/.ai/refs/"
+  - "/bundles/central-auth/.ai/bin/"
+  - "/bundles/central-auth/.ai/objects/"
+  - "/bundles/central-auth/.ai/refs/"
+  - "/bundles/codex/.ai/bin/"
+  - "/bundles/codex/.ai/objects/"
+  - "/bundles/codex/.ai/refs/"
+  - "/bundles/core/.ai/bin/"
+  - "/bundles/core/.ai/objects/"
+  - "/bundles/core/.ai/refs/"
+  - "/bundles/hosted-node/.ai/bin/"
+  - "/bundles/hosted-node/.ai/objects/"
+  - "/bundles/hosted-node/.ai/refs/"
+  - "/bundles/local-inference/.ai/bin/"
+  - "/bundles/local-inference/.ai/objects/"
+  - "/bundles/local-inference/.ai/refs/"
+  - "/bundles/opencode/.ai/bin/"
+  - "/bundles/opencode/.ai/objects/"
+  - "/bundles/opencode/.ai/refs/"
+  - "/bundles/ryeos-ui/.ai/bin/"
+  - "/bundles/ryeos-ui/.ai/objects/"
+  - "/bundles/ryeos-ui/.ai/refs/"
+  - "/bundles/standard/.ai/bin/"
+  - "/bundles/standard/.ai/objects/"
+  - "/bundles/standard/.ai/refs/"
+  - "/bundles/tv-tracker-authoring/.ai/bin/"
+  - "/bundles/tv-tracker-authoring/.ai/objects/"
+  - "/bundles/tv-tracker-authoring/.ai/refs/"
+  - "/bundles/tv-tracker-authoring/PUBLISHER_TRUST.toml"
+  - "/bundles/web/.ai/bin/"
+  - "/bundles/web/.ai/objects/"
+  - "/bundles/web/.ai/refs/"

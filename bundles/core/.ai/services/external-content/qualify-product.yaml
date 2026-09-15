@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-08T13:46:54Z:30edc5eed8782fecf5c3805c729a0577fa75193ce03bbee15a3990015003a052:nxAOEm1TnxZKR2Z4pvjSrzQyjwaB3BDf7lDnxMOqbJHImXbjV0C+U/7iGtvLug8w9K0RyEh55/d+fK5VeQsoCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.qualify-product
+required_caps: ["ryeos.execute.service.external-content/qualify-product"]
+schema:
+  witness_hash: string
+  witness_source: object
+  relationship_name: string
+  verifier_chain_root_id: string
+  verifier_thread_id: string
+description: Publish exact product qualification from an independently completed admitted verifier; claims and policy are never supplied by the caller

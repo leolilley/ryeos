@@ -205,6 +205,7 @@ fn build_action_payload(
             .map(str::to_owned),
         item_id: item_id.to_owned(),
         ref_bindings,
+        product_selections: product_selections_from_action(action)?,
         params: action.get("params").cloned().unwrap_or_else(|| json!({})),
         thread: action
             .get("thread")
@@ -215,6 +216,22 @@ fn build_action_payload(
         facets: action.get("facets").cloned(),
         launch_window,
     })
+}
+
+/// Parse the ordinary action product-selection contract for every Graph
+/// dispatch shape. Follow is a lifecycle choice, not a second selection
+/// authority, so it must use the same typed canonicalization as inline and
+/// detached actions.
+pub(crate) fn product_selections_from_action(
+    action: &Value,
+) -> anyhow::Result<ryeos_runtime::callback::ProductSelectionInputs> {
+    ryeos_runtime::callback::canonicalize_product_selection_inputs(
+        action
+            .get("product_selections")
+            .map(|value| serde_json::from_value(value.clone()).map_err(anyhow::Error::from))
+            .transpose()?
+            .unwrap_or_default(),
+    )
 }
 
 pub(crate) fn rendered_action_digest(action: &Value) -> Result<String, ActionDispatchError> {
@@ -282,8 +299,25 @@ pub async fn dispatch_action(
             retryable: false,
             outcome_unknown: false,
         })?;
+    let retained_effect_result = response
+        .dispatch
+        .retained_effect_result(&response.result)
+        .map_err(|error| ActionDispatchError {
+            diagnostic: format!("invalid daemon retained-result projection: {error:#}"),
+            retryable: false,
+            outcome_unknown: false,
+        })?;
     let daemon_dispatch = response.dispatch;
-    let classified_result = classify_callback_result(response.result, item_id, &response.thread);
+    let classified_result = match retained_effect_result {
+        Some(retained) => ActionOutcome::Success(ActionSuccess {
+            result: retained.result,
+            cost: None,
+            child_thread_id: None,
+            replayed_from: retained.replayed_from,
+            dispatch: None,
+        }),
+        None => classify_callback_result(response.result, item_id, &response.thread),
+    };
     match classified_result {
         ActionOutcome::Failure(mut failure) => {
             failure.dispatch = Some(daemon_dispatch);
@@ -1141,6 +1175,8 @@ mod tests {
                 ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
             record_hash: None,
             replayed_from: None,
+            result_projection:
+                ryeos_runtime::callback_contract::DispatchResultProjection::DispatchedSubject,
         })
         .unwrap()
     }
@@ -1186,6 +1222,7 @@ mod tests {
     struct MockClient {
         results: Mutex<Vec<Value>>,
         child_thread_id: Option<String>,
+        dispatch: Value,
     }
 
     impl MockClient {
@@ -1193,6 +1230,7 @@ mod tests {
             Self {
                 results: Mutex::new(results),
                 child_thread_id: None,
+                dispatch: live_dispatch_value(),
             }
         }
 
@@ -1200,6 +1238,19 @@ mod tests {
             Self {
                 results: Mutex::new(results),
                 child_thread_id: Some(child_thread_id.to_string()),
+                dispatch: live_dispatch_value(),
+            }
+        }
+
+        fn with_dispatch(
+            results: Vec<Value>,
+            child_thread_id: Option<&str>,
+            dispatch: Value,
+        ) -> Self {
+            Self {
+                results: Mutex::new(results),
+                child_thread_id: child_thread_id.map(str::to_owned),
+                dispatch,
             }
         }
     }
@@ -1214,7 +1265,7 @@ mod tests {
             // Strict typed contract: daemon evidence is always present and
             // separate from the authored leaf result.
             if results.is_empty() {
-                Ok(json!({"thread": {}, "result": {}, "dispatch": live_dispatch_value()}))
+                Ok(json!({"thread": {}, "result": {}, "dispatch": self.dispatch.clone()}))
             } else {
                 Ok(json!({
                     "thread": self
@@ -1223,11 +1274,11 @@ mod tests {
                         .map(|id| json!({"thread_id": id}))
                         .unwrap_or_else(|| json!({})),
                     "result": results.remove(0),
-                    "dispatch": live_dispatch_value(),
+                    "dispatch": self.dispatch.clone(),
                 }))
             }
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
@@ -1332,7 +1383,7 @@ mod tests {
                 "dispatch": live_dispatch_value(),
             }))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
@@ -1746,6 +1797,78 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn graph_item_uses_only_authoritative_retained_effect_projection() {
+        let accepted = json!({
+            "schema": 1,
+            "kind": "product_build_accepted_result",
+            "products": [{"name": "runtime"}],
+        });
+        let object_hash = lillux::sha256_hex(
+            lillux::canonical_json(&accepted)
+                .expect("accepted fixture is canonical JSON")
+                .as_bytes(),
+        );
+        let record_hash = "cd".repeat(32);
+
+        for replayed in [false, true] {
+            let evidence = ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                source: if replayed {
+                    ryeos_runtime::callback_contract::RuntimeDispatchSource::EffectRecord
+                } else {
+                    ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed
+                },
+                effect_class:
+                    ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Recorded,
+                action_digest: "ab".repeat(32),
+                effect_identity: Some("bc".repeat(32)),
+                publication: if replayed {
+                    ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable
+                } else {
+                    ryeos_runtime::callback_contract::RuntimeDispatchPublication::Inserted
+                },
+                record_hash: Some(record_hash.clone()),
+                replayed_from: replayed.then_some(record_hash.clone()),
+                result_projection:
+                    ryeos_runtime::callback_contract::DispatchResultProjection::RetainedEffect {
+                        retained_result: ryeos_runtime::callback_contract::RetainedEffectResult::ProductBuildAcceptedResult {
+                            object_hash: object_hash.clone(),
+                        },
+                    },
+            };
+            let mut retained_envelope = json!({
+                "outcome_code": null,
+                "result": accepted,
+                "error": null,
+                "artifacts": [],
+            });
+            if replayed {
+                retained_envelope["replayed_from"] = json!(record_hash);
+            }
+            let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+                Arc::new(MockClient::with_dispatch(
+                    vec![retained_envelope],
+                    (!replayed).then_some("T-product-producer"),
+                    serde_json::to_value(&evidence).unwrap(),
+                ));
+            let client = CallbackClient::from_inner(inner, "T-parent", "/project", "tat-test");
+            let action = json!({"item_id": "graph:test/recorded-producer", "ref_bindings": {}});
+            let success = expect_action_success(
+                dispatch_action(&client, &action, "T-parent", "/project", None, None)
+                    .await
+                    .expect("retained graph dispatch"),
+            );
+
+            assert_eq!(success.result, accepted);
+            assert_eq!(success.replayed_from, evidence.replayed_from);
+            assert_eq!(
+                success.child_thread_id.as_deref(),
+                (!replayed).then_some("T-product-producer")
+            );
+            assert_eq!(success.dispatch.as_ref(), Some(&evidence));
+        }
+    }
+
     #[test]
     fn single_graph_follow_projects_authored_return() {
         let authored = json!({"child_ran": "sentinel"});
@@ -1923,7 +2046,16 @@ mod tests {
 
     #[test]
     fn graph_item_requires_native_envelope_and_graph_definition_ref() {
-        for bare in [json!("bare"), json!({"child_ran": true})] {
+        for bare in [
+            json!("bare"),
+            json!({"child_ran": true}),
+            json!({
+                "outcome_code": null,
+                "result": {"products": []},
+                "error": null,
+                "artifacts": [],
+            }),
+        ] {
             let failure =
                 expect_action_failure(classify_envelope_for_item(bare, "graph:test/child"));
             assert!(failure.integrity);

@@ -1,0 +1,34 @@
+version: "2.0.0"
+category: test
+description: Record the accepted immutable products of an ordinary producer Graph
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.test/two-products
+      - ryeos.execute.config.test/two-products
+      - ryeos.execute.tool.test/produce
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:test/two-products
+        ref_bindings: {}
+        params: {}
+      assign:
+        accepted_products: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.accepted_products}"

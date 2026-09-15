@@ -199,6 +199,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn authored_get_schema_matches_typed_request_namespaces() {
+        let descriptor: Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/services/objects/get.yaml"
+        )))
+        .unwrap();
+        assert_eq!(descriptor["endpoint"], DESCRIPTOR.endpoint);
+        assert_eq!(
+            descriptor["schema"],
+            serde_json::json!({
+                "object_hashes": "string[]?",
+                "blob_hashes": "string[]?",
+                "blob_chunk": "object?",
+            })
+        );
+        let hash = "ab".repeat(32);
+        let batch: Request = serde_json::from_value(serde_json::json!({
+            "object_hashes": [hash.clone()], "blob_hashes": [hash.clone()]
+        }))
+        .unwrap();
+        assert_eq!(batch.object_hashes, [hash.clone()]);
+        assert_eq!(batch.blob_hashes, [hash.clone()]);
+        assert!(batch.blob_chunk.is_none());
+        let chunk: Request = serde_json::from_value(serde_json::json!({
+            "blob_chunk": {"hash": hash, "offset": 0, "length": 64}
+        }))
+        .unwrap();
+        assert!(chunk.object_hashes.is_empty() && chunk.blob_hashes.is_empty());
+        assert_eq!(chunk.blob_chunk.unwrap().length, 64);
+    }
+
+    #[test]
     fn typed_hash_requests_require_canonical_lowercase_sha256() {
         let lower = "ab".repeat(32);
         let upper = lower.to_ascii_uppercase();

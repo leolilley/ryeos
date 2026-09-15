@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:08Z:e512fb54b3b73a20a0d4d8c4ba66a1033ae7d707ced0fd471b527d0e0f83616c:77Uiv0bGEzF2iAXj6VBGNHgXkxBWJlCN/aDHecBBmrtyLP/dmv0+PfFnVmmP8ANhL9vcoIgJAaHgK0RxdI5WAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:39Z:de5e07fd4d92a382149d962805bca1dbd82729f0951429330a74773df5afb008:emNct4QmLK0myBnt+nYd/YOhNQMHFrIMTYZgzQnB8KsKg2tJzk+PX+Lbm4atKX9NMCiXmbGeU7RvyjTJKyHsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Search the web and return ranked result titles, URLs, and snippets"
 
 config:

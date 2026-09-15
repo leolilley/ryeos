@@ -297,6 +297,31 @@ impl From<ryeos_engine::error::EngineError> for BuildAndLaunchError {
 }
 
 impl BuildAndLaunchError {
+    /// Preserve typed launch failure classification at the dispatch boundary.
+    pub(crate) fn into_dispatch_error(self, executor_ref: &str) -> DispatchError {
+        match self {
+            Self::LaunchPreparation(error) => *error,
+            Self::MissingSecrets { item_ref, secrets } => {
+                let first = secrets.first().expect("missing secret error has a secret");
+                let source = first.primary_source();
+                DispatchError::RequiredSecretMissing {
+                    item_ref,
+                    env_var: first.name.clone(),
+                    source_kind: source.kind_for_wire().to_owned(),
+                    source_name: source.name_for_wire(),
+                    remediation: crate::dispatch_error::required_secret_remediation(&first.name),
+                }
+            }
+            Self::CapabilityRejected { reason } => DispatchError::CapabilityRejected { reason },
+            Self::LaunchCancelled { stage, .. } => DispatchError::LaunchCancelled { stage },
+            Self::Materialization(error) => DispatchError::RuntimeMaterializationFailed {
+                executor_ref: executor_ref.to_owned(),
+                detail: error.to_string(),
+            },
+            Self::Internal(error) => DispatchError::Internal(error),
+        }
+    }
+
     pub fn diagnostic_message(&self) -> String {
         match self {
             Self::Internal(error) => format!("{error:#}"),
@@ -327,6 +352,54 @@ impl BuildAndLaunchError {
             Self::LaunchPreparation(error) => error.retryable(),
         }
     }
+}
+
+const MAX_RETAINED_LAUNCH_ERROR_BYTES: usize = 2048;
+
+/// Project an unexpected launch failure into the closed durable diagnostic
+/// contract. Arbitrary error text remains available to bounded local tracing;
+/// only explicitly typed, reviewed stage labels may enter root testimony.
+fn retained_launch_preparation_error(error: &BuildAndLaunchError) -> Value {
+    let mut stages = Vec::new();
+    if let BuildAndLaunchError::Internal(internal) = error
+        && let Some(stage) =
+            internal.downcast_ref::<super::persistent_session::SessionCapsuleVerificationStage>()
+    {
+        stages.push(stage.stable_label());
+    }
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = current {
+        if let Some(stage) =
+            cause.downcast_ref::<super::persistent_session::SessionCapsuleVerificationStage>()
+        {
+            let label = stage.stable_label();
+            if !stages.contains(&label) {
+                stages.push(label);
+            }
+        }
+        current = cause.source();
+    }
+    let mut retained = json!({
+        "code": "launch_preparation_failed",
+        "retryable": error.retryable_launch_interruption(),
+    });
+    if !stages.is_empty() {
+        retained["stages"] = json!(stages);
+    }
+    if lillux::canonical_json(&retained)
+        .map(|encoded| encoded.len() > MAX_RETAINED_LAUNCH_ERROR_BYTES)
+        .unwrap_or(true)
+    {
+        retained = json!({
+            "code": "launch_preparation_failed",
+            "retryable": error.retryable_launch_interruption(),
+        });
+    }
+    debug_assert!(
+        lillux::canonical_json(&retained)
+            .is_ok_and(|encoded| encoded.len() <= MAX_RETAINED_LAUNCH_ERROR_BYTES)
+    );
+    retained
 }
 
 impl From<serde_json::Error> for BuildAndLaunchError {
@@ -1495,7 +1568,7 @@ struct ExecutorCacheLayout {
 }
 
 struct VerifiedOpenedExecutor {
-    handle: Arc<std::fs::File>,
+    handle: lillux::InheritedDescriptorAuthority,
     identity: ExecutorFileIdentity,
 }
 
@@ -1549,19 +1622,17 @@ fn validate_secure_cache_directory(
 }
 
 #[cfg(unix)]
-fn executor_file_identity(metadata: &std::fs::Metadata) -> ExecutorFileIdentity {
-    use std::os::unix::fs::MetadataExt as _;
-
+fn executor_file_identity(metadata: &lillux::OpenFileIdentity) -> ExecutorFileIdentity {
     ExecutorFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        changed_seconds: metadata.ctime(),
-        changed_nanoseconds: metadata.ctime_nsec(),
+        device: metadata.device(),
+        inode: metadata.inode(),
+        size: metadata.size(),
+        modified_seconds: metadata.modified_seconds(),
+        modified_nanoseconds: metadata.modified_nanoseconds(),
+        changed_seconds: metadata.changed_seconds(),
+        changed_nanoseconds: metadata.changed_nanoseconds(),
         mode: metadata.mode(),
-        file_type: metadata.mode() & libc::S_IFMT,
+        file_type: metadata.file_type(),
     }
 }
 
@@ -1618,7 +1689,7 @@ enum MaterializedArtifactInspection {
 }
 
 fn verify_opened_executor_file(
-    mut file: std::fs::File,
+    file: lillux::InheritedDescriptorAuthority,
     expected_hash: &str,
     expected_len: u64,
     expected_mode: u32,
@@ -1631,21 +1702,9 @@ fn verify_opened_executor_file(
     }
     #[cfg(unix)]
     let before_identity = {
-        use std::os::unix::fs::MetadataExt as _;
-
         let metadata = file
-            .metadata()
+            .require_owned_regular()
             .map_err(|error| format!("failed to inspect opened executor: {error}"))?;
-        if !metadata.file_type().is_file() {
-            return Err("opened executor is not a regular file".to_string());
-        }
-        let daemon_uid = unsafe { libc::geteuid() };
-        if metadata.uid() != daemon_uid {
-            return Err(format!(
-                "opened executor is owned by uid {}, expected daemon uid {daemon_uid}",
-                metadata.uid()
-            ));
-        }
         let actual_mode = metadata.mode() & 0o7777;
         if actual_mode & !0o777 != 0 {
             return Err(format!(
@@ -1662,10 +1721,10 @@ fn verify_opened_executor_file(
                 "opened executor has group/other writable mode {actual_mode:#o}"
             ));
         }
-        if metadata.len() != expected_len {
+        if metadata.size() != expected_len {
             return Err(format!(
                 "opened executor has length {}, expected signed blob length {expected_len}",
-                metadata.len()
+                metadata.size()
             ));
         }
         executor_file_identity(&metadata)
@@ -1682,9 +1741,15 @@ fn verify_opened_executor_file(
         return Err("native executor Unix validation is unavailable on this platform".to_string());
     }
 
-    let (actual_hash, after_metadata) =
-        lillux::digest_open_regular_file_stable_exact(&mut file, expected_len)
-            .map_err(|error| format!("failed to hash opened executor: {error}"))?;
+    let observation = file
+        .regular_file_observation()
+        .map_err(|error| error.to_string())?;
+    if observation.size() != expected_len {
+        return Err("opened executor length changed before hashing".to_owned());
+    }
+    let actual_hash = file
+        .digest_regular_file_stable_exact(&observation)
+        .map_err(|error| format!("failed to hash opened executor: {error}"))?;
     if actual_hash != expected_hash {
         return Err(format!(
             "opened executor failed its content-address check for {executor_ref}"
@@ -1692,14 +1757,10 @@ fn verify_opened_executor_file(
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt as _;
-
-        let daemon_uid = unsafe { libc::geteuid() };
-        if !after_metadata.file_type().is_file()
-            || after_metadata.uid() != daemon_uid
-            || after_metadata.mode() & 0o7777 != expected_mode
-            || after_metadata.mode() & 0o022 != 0
-            || after_metadata.len() != expected_len
+        let after_metadata = file
+            .require_owned_regular()
+            .map_err(|error| error.to_string())?;
+        if after_metadata.mode() & 0o7777 != expected_mode || after_metadata.size() != expected_len
         {
             return Err("opened executor security metadata changed while hashing".to_string());
         }
@@ -1708,7 +1769,7 @@ fn verify_opened_executor_file(
             return Err("opened executor identity changed while hashing".to_string());
         }
         Ok(VerifiedOpenedExecutor {
-            handle: Arc::new(file),
+            handle: file,
             identity: after_identity,
         })
     }
@@ -1745,7 +1806,7 @@ fn inspect_materialized_executor(
     if let Err(error) = validate_executor_cache_ancestors(layout, &blob_dir, bare) {
         return MaterializedArtifactInspection::Invalid(error.to_string());
     }
-    let file = match blob_dir.open_regular(OsStr::new(bare), false) {
+    let file = match blob_dir.open_inherited_regular(OsStr::new(bare), false) {
         Ok(Some(file)) => file,
         Ok(None) => {
             return MaterializedArtifactInspection::Invalid(
@@ -1760,9 +1821,7 @@ fn inspect_materialized_executor(
     };
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt as _;
-
-        let metadata = match file.metadata() {
+        let metadata = match file.require_owned_regular() {
             Ok(metadata) => metadata,
             Err(error) => {
                 return MaterializedArtifactInspection::Invalid(format!(
@@ -1770,15 +1829,11 @@ fn inspect_materialized_executor(
                 ));
             }
         };
-        let daemon_uid = unsafe { libc::geteuid() };
         let actual_mode = metadata.mode() & 0o7777;
-        if !metadata.file_type().is_file()
-            || metadata.uid() != daemon_uid
-            || actual_mode & 0o022 != 0
-        {
+        if actual_mode & 0o022 != 0 {
             return MaterializedArtifactInspection::Invalid(format!(
                 "materialized executor descriptor is not a daemon-owned, non-group/other-writable regular file (uid={}, mode={actual_mode:#o})",
-                metadata.uid()
+                metadata.owner()
             ));
         }
     }
@@ -1906,10 +1961,8 @@ fn stage_managed_executor_blob(
     }
     #[cfg(unix)]
     let bytes = {
-        use std::os::unix::fs::FileExt as _;
-
         let descriptor = executor.verified_command.executable();
-        let before = descriptor.metadata().map_err(|error| {
+        let before = descriptor.file_identity().map_err(|error| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "inspect managed executor before CAS admission: {error}"
             ))
@@ -1931,34 +1984,19 @@ fn stage_managed_executor_blob(
                 "managed executor descriptor identity changed before CAS admission"
             )));
         }
-        if !native_executor_size_is_admissible(before.len()) {
+        if !native_executor_size_is_admissible(before.size()) {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "managed executor exceeds {MAX_NATIVE_EXECUTOR_BYTES} bytes"
             )));
         }
-        let len = usize::try_from(before.len()).map_err(|_| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed executor is too large to admit on this platform"
-            ))
-        })?;
-        let mut bytes = vec![0_u8; len];
-        let mut offset = 0_usize;
-        while offset < bytes.len() {
-            let read = descriptor
-                .read_at(&mut bytes[offset..], offset as u64)
-                .map_err(|error| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "read managed executor for CAS admission: {error}"
-                    ))
-                })?;
-            if read == 0 {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "managed executor ended before its verified size"
-                )));
-            }
-            offset += read;
-        }
-        let after = descriptor.metadata().map_err(|error| {
+        let (bytes, _) = descriptor
+            .read_regular_file_stable_bounded(MAX_NATIVE_EXECUTOR_BYTES)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "read managed executor for CAS admission: {error}"
+                ))
+            })?;
+        let after = descriptor.file_identity().map_err(|error| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "reinspect managed executor after CAS admission read: {error}"
             ))
@@ -2208,7 +2246,7 @@ fn publish_verified_executor_blob(
         })?;
     drop(staged_file);
     let staged_file = staging
-        .open_regular(OsStr::new(bare), false)
+        .open_inherited_regular(OsStr::new(bare), false)
         .map_err(|error| MaterializationError::MaterializationFailed {
             executor_ref: bare.to_string(),
             detail: format!("failed to reopen staged executor: {error}"),
@@ -3072,6 +3110,9 @@ async fn load_execution_control_snapshot_cached(
 pub struct NativeLaunchResult {
     pub thread: Value,
     pub result: Value,
+    /// Daemon-owned durable dispatch evidence. Present for an executed or
+    /// replayed awaited managed effect; ordinary managed launches remain None.
+    pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     /// Exact terminal project generation committed by the authoritative
     /// thread finalization. `None` when terminal policy publishes no project
     /// generation, including projectless and discard execution.
@@ -3423,6 +3464,9 @@ pub struct BuildAndLaunchParams<'a> {
     /// dispatch. Present for callback-dispatched child launches; absent for
     /// roots and same-braid continuations.
     pub parent_execution_context: Option<&'a crate::dispatch::ParentExecutionContext>,
+    /// Exact effect grant selected from the signed caller Graph capability.
+    /// Public/root callers cannot populate this authority.
+    pub effect_authority: Option<&'a ryeos_effect_contract::PreparedEffectDispatchAuthority>,
     /// Machine continuation: fold the chain and resume with NO new stimulus.
     /// `false` for fresh launches and operator follow-ups (which inject their
     /// `parameters` as the opening stimulus); `true` only for an autonomous
@@ -3799,7 +3843,7 @@ fn capture_managed_descriptor_document(
     Ok(document)
 }
 
-fn verify_admitted_signed_descriptor_document(
+pub(crate) fn verify_admitted_signed_descriptor_document(
     document: &str,
     expected_content_hash: &str,
     expected_signer: &str,
@@ -3846,12 +3890,13 @@ async fn prepare_managed_launch_authority(
     transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
 ) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
     let engine = params.provenance.request_engine();
-    let subject_resolution_authority = params.provenance.subject_resolution_authority();
-    let resolution_project_root = (!matches!(
-        subject_resolution_authority,
-        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
-    ))
-    .then_some(params.project_path);
+    let root_admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed launch is missing exact admitted resolution authority"
+        ))
+    })?;
+    let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
+    let resolution_project_root = root_admission.resolution_workspace();
     let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
     let bundle_roots: Vec<PathBuf> = engine_roots
         .authoritative_bundle_roots()
@@ -3961,11 +4006,6 @@ async fn prepare_managed_launch_authority(
     } else {
         None
     };
-    let root_admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "managed launch is missing exact admitted resolution authority"
-        ))
-    })?;
     let recovery_trust_store = admitted_capsule
         .is_some()
         .then(|| root_admission.current_policy_trust_store())
@@ -4033,123 +4073,130 @@ async fn prepare_managed_launch_authority(
         &params.resolved.resolved_item.kind,
     )?;
 
-    let (selected_runtime, verified_protocol, admitted_prepared_launch) = if let Some(capsule) =
-        admitted_capsule.as_ref()
-    {
-        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
-            runtime_ref,
-            runtime_content_hash,
-            runtime_signer_fingerprint,
-            protocol_ref,
-            protocol_content_hash,
-            protocol_signer_fingerprint,
-            ..
-        } = &capsule.artifact_identity
-        else {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed recovery found a non-managed admitted artifact identity"
-            )));
-        };
-        let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
-            prepared_runtime_launch,
-            runtime_descriptor_document,
-            protocol_descriptor_document,
-            executor_blob_hash: _,
-        } = &capsule.execution_closure
-        else {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed recovery found a non-managed admitted execution closure"
-            )));
-        };
-        for (label, signer) in [
-            ("runtime", runtime_signer_fingerprint),
-            ("protocol", protocol_signer_fingerprint),
-        ] {
-            if !engine.node_trust_store.is_trusted(signer) {
+    let (selected_runtime, verified_protocol, admitted_prepared_launch, current_managed_selection) =
+        if let Some(capsule) = admitted_capsule.as_ref() {
+            let ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref,
+                runtime_content_hash,
+                runtime_signer_fingerprint,
+                protocol_ref,
+                protocol_content_hash,
+                protocol_signer_fingerprint,
+                ..
+            } = &capsule.artifact_identity
+            else {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "admitted managed {label} signer is no longer trusted: {signer}"
+                    "managed recovery found a non-managed admitted artifact identity"
                 )));
+            };
+            let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch,
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                executor_blob_hash: _,
+            } = &capsule.execution_closure
+            else {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed recovery found a non-managed admitted execution closure"
+                )));
+            };
+            for (label, signer) in [
+                ("runtime", runtime_signer_fingerprint),
+                ("protocol", protocol_signer_fingerprint),
+            ] {
+                if !engine.node_trust_store.is_trusted(signer) {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "admitted managed {label} signer is no longer trusted: {signer}"
+                    )));
+                }
             }
-        }
-        let runtime_body = verify_admitted_signed_descriptor_document(
-            runtime_descriptor_document,
-            runtime_content_hash,
-            runtime_signer_fingerprint,
-            &engine.node_trust_store,
-        )?;
-        let runtime_yaml: ryeos_engine::runtime_registry::RuntimeYaml =
-            serde_yaml::from_str(&runtime_body).map_err(|error| {
+            let runtime_body = verify_admitted_signed_descriptor_document(
+                runtime_descriptor_document,
+                runtime_content_hash,
+                runtime_signer_fingerprint,
+                &engine.node_trust_store,
+            )?;
+            let runtime_yaml: ryeos_engine::runtime_registry::RuntimeYaml =
+                serde_yaml::from_str(&runtime_body).map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "decode admitted runtime descriptor: {error}"
+                    ))
+                })?;
+            let canonical_runtime_ref =
+                ryeos_engine::canonical_ref::CanonicalRef::parse(runtime_ref).map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "decode admitted runtime ref: {error}"
+                    ))
+                })?;
+            ryeos_engine::runtime_registry::validate_admitted_runtime_descriptor(
+                &canonical_runtime_ref,
+                &runtime_yaml,
+            )
+            .map_err(|error| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "decode admitted runtime descriptor: {error}"
+                    "validate admitted runtime descriptor: {error}"
                 ))
             })?;
-        let canonical_runtime_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(runtime_ref)
+            let selected_runtime = ryeos_engine::runtime_registry::VerifiedRuntime {
+                canonical_ref: canonical_runtime_ref,
+                raw_content_digest: runtime_content_hash.clone(),
+                signer_fingerprint: runtime_signer_fingerprint.clone(),
+                yaml: runtime_yaml,
+                trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+                bundle_root: PathBuf::new(),
+                descriptor_path: PathBuf::new(),
+            };
+            let protocol_body = verify_admitted_signed_descriptor_document(
+                protocol_descriptor_document,
+                protocol_content_hash,
+                protocol_signer_fingerprint,
+                &engine.node_trust_store,
+            )?;
+            let descriptor: ryeos_engine::protocols::ProtocolDescriptor =
+                serde_yaml::from_str(&protocol_body).map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "decode admitted protocol descriptor: {error}"
+                    ))
+                })?;
+            ryeos_engine::protocols::validate_admitted_protocol_descriptor(
+                protocol_ref,
+                &descriptor,
+            )
             .map_err(|error| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!("decode admitted runtime ref: {error}"))
-        })?;
-        ryeos_engine::runtime_registry::validate_admitted_runtime_descriptor(
-            &canonical_runtime_ref,
-            &runtime_yaml,
-        )
-        .map_err(|error| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "validate admitted runtime descriptor: {error}"
-            ))
-        })?;
-        let selected_runtime = ryeos_engine::runtime_registry::VerifiedRuntime {
-            canonical_ref: canonical_runtime_ref,
-            raw_content_digest: runtime_content_hash.clone(),
-            signer_fingerprint: runtime_signer_fingerprint.clone(),
-            yaml: runtime_yaml,
-            trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
-            bundle_root: PathBuf::new(),
-            descriptor_path: PathBuf::new(),
-        };
-        let protocol_body = verify_admitted_signed_descriptor_document(
-            protocol_descriptor_document,
-            protocol_content_hash,
-            protocol_signer_fingerprint,
-            &engine.node_trust_store,
-        )?;
-        let descriptor: ryeos_engine::protocols::ProtocolDescriptor =
-            serde_yaml::from_str(&protocol_body).map_err(|error| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "decode admitted protocol descriptor: {error}"
+                    "validate admitted protocol descriptor: {error}"
                 ))
             })?;
-        ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &descriptor)
-            .map_err(|error| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "validate admitted protocol descriptor: {error}"
-            ))
-        })?;
-        let verified_protocol = ryeos_engine::protocols::VerifiedProtocol {
-            canonical_ref: protocol_ref.clone(),
-            raw_content_digest: protocol_content_hash.clone(),
-            signer_fingerprint: protocol_signer_fingerprint.clone(),
-            descriptor,
-            trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
-            bundle_root: PathBuf::new(),
-            descriptor_path: PathBuf::new(),
-        };
-        crate::dispatch::validate_admitted_callback_runtime_protocol(
-            &verified_protocol,
-            &selected_runtime.canonical_ref,
+            let verified_protocol = ryeos_engine::protocols::VerifiedProtocol {
+                canonical_ref: protocol_ref.clone(),
+                raw_content_digest: protocol_content_hash.clone(),
+                signer_fingerprint: protocol_signer_fingerprint.clone(),
+                descriptor,
+                trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+                bundle_root: PathBuf::new(),
+                descriptor_path: PathBuf::new(),
+            };
+            crate::dispatch::validate_admitted_callback_runtime_protocol(
+                &verified_protocol,
+                &selected_runtime.canonical_ref,
+            )
+            .map_err(BuildAndLaunchError::from)?;
+            let prepared =
+                serde_json::from_value::<super::launch_preparation::PreparedRuntimeLaunch>(
+                    prepared_runtime_launch.clone(),
+                )
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "decode admitted prepared runtime launch: {error}"
+                    ))
+                })?;
+            (selected_runtime, verified_protocol, Some(prepared), None)
+        } else {
+            let selection = ryeos_app::thread_lifecycle::managed_runtime_identity::resolve_current_managed_runtime_selection(
+            engine,
+            params.runtime_ref,
+            &params.resolved.resolved_item.kind,
         )
-        .map_err(BuildAndLaunchError::from)?;
-        let prepared = serde_json::from_value::<super::launch_preparation::PreparedRuntimeLaunch>(
-            prepared_runtime_launch.clone(),
-        )
-        .map_err(|error| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "decode admitted prepared runtime launch: {error}"
-            ))
-        })?;
-        (selected_runtime, verified_protocol, Some(prepared))
-    } else {
-        let selected_runtime = engine
-            .runtimes
-            .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
             .map_err(|error| {
                 BuildAndLaunchError::from(DispatchError::LaunchPreparationFailed {
                     code: "runtime_launch_contract_unavailable".to_owned(),
@@ -4158,17 +4205,14 @@ async fn prepare_managed_launch_authority(
                     binding: None,
                     details: Box::new(BTreeMap::new()),
                 })
-            })?
-            .clone();
-        let verified_protocol = crate::dispatch::require_callback_runtime_protocol(
-            engine,
-            &selected_runtime,
-            "managed",
-        )
-        .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
-        .clone();
-        (selected_runtime, verified_protocol, None)
-    };
+            })?;
+            (
+                selection.runtime.clone(),
+                selection.protocol.clone(),
+                None,
+                Some(selection),
+            )
+        };
     let runtime_binary =
         crate::dispatch::strip_binary_ref_prefix(&selected_runtime.yaml.binary_ref)
             .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
@@ -4181,6 +4225,14 @@ async fn prepare_managed_launch_authority(
         )));
     }
     let executor_ref = format!("native:{runtime_binary}");
+    if let Some(selection) = current_managed_selection.as_ref()
+        && selection.executor_ref != executor_ref
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed executor ref derivation disagrees with verified runtime selection: launch={executor_ref}, selected={}",
+            selection.executor_ref
+        )));
+    }
     if selected_runtime.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
         || verified_protocol.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
     {
@@ -4209,6 +4261,7 @@ async fn prepare_managed_launch_authority(
         .map_err(BuildAndLaunchError::Internal)?;
     let materialization_isolation = Arc::clone(&params.state.isolation);
     let materialization_timings = params.launch_timings.clone();
+    let materialization_managed_selection = current_managed_selection.clone();
     let admitted_executor_identity = admitted_capsule
         .as_ref()
         .map(|capsule| match &capsule.artifact_identity {
@@ -4292,34 +4345,81 @@ async fn prepare_managed_launch_authority(
                 &admitted_manifest_hash,
                 &admitted_signer_fingerprint,
             )
-            .map(|materialized| (materialized, None))
+            .map(|materialized| (materialized, None, None))
         } else {
-            let attestation = verify_native_executor_chain_attestation_for_engine(
-                &materialization_engine,
-                &materialization_bundle_roots,
-                &materialization_executor_ref,
-                ryeos_engine::resolution::TrustClass::TrustedBundle,
-                materialization_timings.as_ref(),
-            )?;
-            let materialized = materialize_native_executor_for_engine(
-                &materialization_engine,
-                &materialization_bundle_roots,
-                &materialization_executor_ref,
-                &materialization_cache_root,
-                ryeos_engine::resolution::TrustClass::TrustedBundle,
-                materialization_timings.as_ref(),
-            )?;
-            if !attestation.matches_materialized(&materialized) {
-                return Err(MaterializationError::MaterializationFailed {
-                    executor_ref: materialization_executor_ref,
-                    detail: "materialized executor differs from its verified chain attestation"
+            let selection = materialization_managed_selection.as_ref().ok_or_else(|| {
+                MaterializationError::Internal(
+                    "fresh managed executor materialization has no current runtime selection"
                         .to_string(),
-                });
-            }
-            Ok((materialized, Some(attestation)))
+                )
+            })?;
+            materialization_engine.with_checked_bundle_generation(|_| {
+                let current_identity = ryeos_app::thread_lifecycle::managed_runtime_identity::resolve_current_managed_executor_identity(
+                    &materialization_engine,
+                    selection,
+                )
+                .map_err(|error| MaterializationError::ResolutionFailed {
+                    executor_ref: materialization_executor_ref.clone(),
+                    detail: error.to_string(),
+                })?;
+                let attestation = verify_native_executor_chain_attestation_for_engine(
+                    &materialization_engine,
+                    &materialization_bundle_roots,
+                    &materialization_executor_ref,
+                    ryeos_engine::resolution::TrustClass::TrustedBundle,
+                    materialization_timings.as_ref(),
+                )?;
+                let materialized = materialize_native_executor_for_engine(
+                    &materialization_engine,
+                    &materialization_bundle_roots,
+                    &materialization_executor_ref,
+                    &materialization_cache_root,
+                    ryeos_engine::resolution::TrustClass::TrustedBundle,
+                    materialization_timings.as_ref(),
+                )?;
+                if !attestation.matches_materialized(&materialized) {
+                    return Err(MaterializationError::MaterializationFailed {
+                        executor_ref: materialization_executor_ref.clone(),
+                        detail:
+                            "materialized executor differs from its verified chain attestation"
+                                .to_string(),
+                    });
+                }
+                if !current_identity.matches_materialized(
+                    &materialization_executor_ref,
+                    &materialized.content_hash,
+                    &materialized.bundle_manifest_hash,
+                    &materialized.bundle_signer_fingerprint,
+                ) {
+                    return Err(MaterializationError::MaterializationFailed {
+                        executor_ref: materialization_executor_ref.clone(),
+                        detail: "complete executor-chain identity differs from the verified runtime source-bundle identity".to_string(),
+                    });
+                }
+                Ok((materialized, Some(attestation), Some(current_identity)))
+            })
         }
     });
 
+    // Ownership of the recipe comes from the exact pre-augmentation binding,
+    // not from workspace retention. An independent followed child can retain
+    // inherited outputs without becoming their recipe author.
+    let requires_own_output_recipe =
+        if let Some(outputs) = params.provenance.project_authority().workspace_outputs() {
+            match admitted_prepared_launch.as_ref() {
+                Some(prepared) => prepared
+                    .binding_records
+                    .contains_key(&outputs.partition.recipe_binding),
+                None => super::launch_preparation::project_effective_ref_bindings(
+                    &selected_runtime.yaml.launch_contract.ref_bindings,
+                    &resolution.composed.composed,
+                    &params.resolved.ref_bindings,
+                )?
+                .contains_key(&outputs.partition.recipe_binding),
+            }
+        } else {
+            false
+        };
     let augmentation = async {
         // Augmentation is part of the authoritative resolution, not a mutation
         // of already-audited launch state. Its internal worker is an
@@ -4387,7 +4487,8 @@ async fn prepare_managed_launch_authority(
     let concurrent_prerequisites_succeeded =
         augmentation_result.is_ok() && materialization_result.is_ok();
     let augmentation_audits = augmentation_result?;
-    let (materialized_executor, executor_chain_attestation) = materialization_result?;
+    let (materialized_executor, executor_chain_attestation, current_managed_executor_identity) =
+        materialization_result?;
     debug_assert!(
         concurrent_prerequisites_succeeded,
         "runtime preparation must remain strictly after augmentation and executor materialization join"
@@ -4441,6 +4542,7 @@ async fn prepare_managed_launch_authority(
                 runtime: &selected_runtime,
                 primary: &resolution,
                 ref_bindings: &params.resolved.ref_bindings,
+                product_selections: &params.resolved.product_selections,
                 roots: &engine_roots,
                 parsers: &request_snapshot.parser_dispatcher,
                 trust_store: &request_snapshot.trust_store,
@@ -4470,6 +4572,13 @@ async fn prepare_managed_launch_authority(
         drop(runtime_preparation_timer);
         prepared?
     };
+    super::launch_preparation::validate_prepared_project_result_requirement(
+        &selected_runtime,
+        &prepared_launch,
+    )
+    .map_err(BuildAndLaunchError::from)?;
+    super::launch_preparation::require_prepared_project_result(&prepared_launch, params.provenance)
+        .map_err(BuildAndLaunchError::from)?;
     let current_trust_store = match (
         recovery_trust_store.as_ref(),
         effective_request_snapshot.as_deref(),
@@ -4489,6 +4598,15 @@ async fn prepare_managed_launch_authority(
         &prepared_launch,
     )
     .map_err(BuildAndLaunchError::Internal)?;
+    let evidence_publication = super::persistent_session::prepare_or_verify_evidence_attachments(
+        params.state,
+        &selected_runtime.yaml.launch_contract.evidence_attachments,
+        &params.resolved.plan_context.requested_by,
+        params.parameters,
+        &mut prepared_launch,
+        admitted_capsule.is_some(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     // A cross-site continuation inherits the source's portable outer program,
     // but persistent-session capsules bind node-local realization and must be
     // admitted again on the target. The transferred source capsule remains
@@ -4500,21 +4618,54 @@ async fn prepare_managed_launch_authority(
             engine,
             &params.resolved.plan_context.requested_by,
             &mut prepared_launch,
+            &engine_roots,
+            &subject_resolution_authority,
         )
         .map_err(BuildAndLaunchError::Internal)?;
     }
-    let pending_session_publications =
+    let mut pending_session_publications =
         super::persistent_session::admit_or_verify_prepared_sessions(
             params.state,
             engine,
             &mut prepared_launch,
+            &subject_resolution_authority,
             admitted_capsule.is_some() && !cross_site_continuation,
+            params.handler_context,
+            &engine_roots,
         )
         .map_err(|error| {
             super::persistent_session::classify_prepared_session_admission_error(&error)
                 .map(BuildAndLaunchError::from)
                 .unwrap_or_else(|| BuildAndLaunchError::Internal(error))
         })?;
+    pending_session_publications.include_evidence_publication(evidence_publication);
+    if let Some(outputs) = params.provenance.project_authority().workspace_outputs() {
+        super::workspace_outputs::admission::verify_prepared_partition(
+            &prepared_launch,
+            &outputs.partition,
+            requires_own_output_recipe,
+        )?;
+        super::workspace_outputs::admission::validate_current_bounds(
+            params.state,
+            &outputs.partition,
+        )?;
+        super::workspace_outputs::admission::validate_input_mounts(
+            engine,
+            &resolution,
+            &prepared_launch,
+            &outputs.partition,
+        )?;
+    } else if super::workspace_outputs::admission::requires_output_partition(&prepared_launch)? {
+        return Err(BuildAndLaunchError::CapabilityRejected {
+            reason: "prepared output recipe has no paired workspace authority".to_owned(),
+        });
+    }
+    super::prepared_content_identity::bind_prepared_content_identity(
+        &mut resolution,
+        &prepared_launch,
+        admitted_capsule.is_some(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     let effective_caps = if let Some(capsule) = admitted_capsule.as_ref() {
         // Capability authority is part of the admitted execution closure.
         // Recovery must not reopen the composed item or its runtime-authority
@@ -4555,6 +4706,24 @@ async fn prepare_managed_launch_authority(
         )?
     };
 
+    if params
+        .provenance
+        .project_authority()
+        .workspace_outputs()
+        .is_some()
+        && selected_runtime
+            .yaml
+            .required_caps
+            .iter()
+            .any(|cap| ryeos_runtime::cap_matches(cap, "ryeos.runtime.dedicated_session.start"))
+    {
+        return Err(BuildAndLaunchError::CapabilityRejected {
+            reason:
+                "session-bound candidate disposition does not admit workspace output partitions"
+                    .to_owned(),
+        });
+    }
+
     // Capture the complete hook policy after every declared augmentation and
     // capability derivation, then lock/validate/finalize the exact resolution
     // before any capsule, callback token, or runtime envelope can exist.
@@ -4586,6 +4755,28 @@ async fn prepare_managed_launch_authority(
         super::admitted_trust::validate_hook_plan_current_trust(engine, current_trust_store, &plan)
             .map_err(BuildAndLaunchError::Internal)?;
 
+        ryeos_app::operator_external_content::product_composition::admit_root_product_selections(
+            params.state,
+            &params.resolved.current_site_id,
+            engine,
+            &engine_roots,
+            params
+                .resolved
+                .root_admission
+                .as_ref()
+                .ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "recovered selection has no root admission"
+                    ))
+                })?
+                .resolution_subject_authority(),
+            &mut resolution,
+            params.resolved.requested_by.as_deref(),
+            params.handler_context,
+            &params.resolved.product_selections,
+            true,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
         let recovered_external =
             ryeos_app::external_content_admission::recover_external_realizations(
                 params.state,
@@ -4627,6 +4818,10 @@ async fn prepare_managed_launch_authority(
             });
         let finalization_proof = ryeos_engine::effective_program::prove_finalization_authority(
             &candidate,
+            engine
+                .kinds
+                .get(&params.resolved.resolved_item.kind)
+                .and_then(|schema| schema.external_content_contract()),
             &[],
             &engine_roots,
             finalization_project,
@@ -4663,6 +4858,7 @@ async fn prepare_managed_launch_authority(
             .map_err(BuildAndLaunchError::Internal)?;
         super::effective_program_projection::capture_and_finalize_fresh_effective_program(
             params.state,
+            &params.resolved.current_site_id,
             engine,
             &params.resolved.resolved_item.kind,
             resolution,
@@ -4672,24 +4868,82 @@ async fn prepare_managed_launch_authority(
             &request_snapshot.trust_store,
             Some(&materialization),
             inherited_external_realizations.as_ref(),
+            params.resolved.requested_by.as_deref(),
+            params.handler_context,
+            &params.resolved.product_selections,
         )
         .map_err(BuildAndLaunchError::from)?
     };
-    let admitted_artifact_identity =
-        ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
-            runtime_ref: selected_runtime.canonical_ref.to_string(),
-            runtime_content_hash: selected_runtime.raw_content_digest.clone(),
-            runtime_signer_fingerprint: selected_runtime.signer_fingerprint.clone(),
-            protocol_ref: verified_protocol.canonical_ref.clone(),
-            protocol_content_hash: verified_protocol.raw_content_digest.clone(),
-            protocol_signer_fingerprint: verified_protocol.signer_fingerprint.clone(),
-            executor_ref: executor_ref.clone(),
-            executor_content_hash: materialized_executor.content_hash.clone(),
-            executor_bundle_manifest_hash: materialized_executor.bundle_manifest_hash.clone(),
-            executor_bundle_signer_fingerprint: materialized_executor
-                .bundle_signer_fingerprint
-                .clone(),
-        };
+    if admitted_capsule.is_none() {
+        let (filesystem, network) =
+            super::execution_realization::project_launch_isolation_ceilings(
+                params.state,
+                engine,
+                &params.resolved.resolved_item.kind,
+                Some(effective_program.resolution()),
+                params
+                    .parent_execution_context
+                    .map(|parent| parent.parent_thread_id.as_str()),
+            )
+            .map_err(BuildAndLaunchError::Internal)?;
+        prepared_launch.filesystem_authority_ceiling = filesystem;
+        prepared_launch.network_authority_ceiling = network;
+    }
+    // The current managed protocol grants callback and thread-auth authority.
+    // A captured-filesystem child must select a callback-free direct protocol;
+    // silently passing those bearers would contradict its admitted ceiling.
+    if prepared_launch.filesystem_authority_ceiling
+        == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "captured execution cannot grant managed runtime callback or thread-auth authority"
+        )));
+    }
+    if prepared_launch.network_authority_ceiling
+        == ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated
+        && !params.state.isolation.is_enforced()
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed isolated network authority requires enforced isolation"
+        )));
+    }
+    let admitted_artifact_identity = match (
+        current_managed_selection.as_ref(),
+        current_managed_executor_identity.as_ref(),
+    ) {
+        (Some(selection), Some(executor_identity)) => {
+            ryeos_app::thread_lifecycle::managed_runtime_identity::managed_runtime_artifact_identity(
+                selection,
+                executor_identity,
+            )
+            .map_err(BuildAndLaunchError::Internal)?
+        }
+        (None, None) => {
+            // Recovery and transferred continuation reconstruct exclusively
+            // from their retained capsule. Current registries may narrow trust
+            // but must not substitute a new runtime, protocol, or executor
+            // identity.
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref: selected_runtime.canonical_ref.to_string(),
+                runtime_content_hash: selected_runtime.raw_content_digest.clone(),
+                runtime_signer_fingerprint: selected_runtime.signer_fingerprint.clone(),
+                protocol_ref: verified_protocol.canonical_ref.clone(),
+                protocol_content_hash: verified_protocol.raw_content_digest.clone(),
+                protocol_signer_fingerprint: verified_protocol.signer_fingerprint.clone(),
+                executor_ref: executor_ref.clone(),
+                executor_content_hash: materialized_executor.content_hash.clone(),
+                executor_bundle_manifest_hash: materialized_executor.bundle_manifest_hash.clone(),
+                executor_bundle_signer_fingerprint: materialized_executor
+                    .bundle_signer_fingerprint
+                    .clone(),
+            }
+        }
+        _ => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "fresh managed runtime and executor identities were not reconstructed as one pair"
+            )));
+        }
+    };
     admitted_artifact_identity
         .validate()
         .map_err(BuildAndLaunchError::Internal)?;
@@ -4944,6 +5198,7 @@ async fn prepare_managed_launch_authority(
                 kind: params.resolved.kind.clone(),
                 item_ref: params.resolved.item_ref.clone(),
                 ref_bindings: params.resolved.ref_bindings.clone(),
+                product_selections: params.resolved.product_selections.clone(),
                 launch_mode: params.resolved.launch_mode.clone(),
                 parameters: params.parameters.clone(),
                 project_context: params.resolved.plan_context.project_context.clone(),
@@ -4969,6 +5224,7 @@ async fn prepare_managed_launch_authority(
                 origin_site_id: params.resolved.origin_site_id.clone(),
                 requested_by: params.resolved.plan_context.requested_by.clone(),
                 execution_hints: params.resolved.plan_context.execution_hints.clone(),
+                scheduled_fire: params.resolved.plan_context.scheduled_fire.clone(),
                 effective_caps: effective_caps.clone(),
                 parent_delegation_caps: metadata_template
                     .and_then(|template| template.resume_context.as_ref())
@@ -5027,6 +5283,29 @@ struct FinalizeFailedOnDrop<'a> {
     /// the terminal `thread_failed` event carries the cause. `None` only on a
     /// panic/cancellation mid-launch, where no error value exists to record.
     error: Option<Value>,
+}
+
+/// Dispose the two launch owners in the only safe order for the observed
+/// process state. Before an owned wait settles, lifecycle cleanup must stop a
+/// possibly-live tree before generic failure finalization. Afterwards there is
+/// no process left to stop, so the failure owner must publish the actual
+/// capture/finalization cause before lifecycle cleanup closes the workspace.
+fn drop_managed_launch_guards<F, L>(
+    failure_guard: F,
+    lifecycle_owner: L,
+    failure_precedes_cleanup: bool,
+) {
+    if failure_precedes_cleanup {
+        drop(failure_guard);
+        drop(lifecycle_owner);
+    } else {
+        drop(lifecycle_owner);
+        drop(failure_guard);
+    }
+}
+
+fn failure_precedes_lifecycle_cleanup(launch_failed: bool, settled_owned_wait: bool) -> bool {
+    launch_failed && settled_owned_wait
 }
 
 fn current_launch_owner(state: &AppState, thread_id: &str) -> Result<String> {
@@ -5095,7 +5374,21 @@ pub async fn build_and_launch(
     let project_path = params.project_path.to_path_buf();
     let canonical_ref = params.resolved.item_ref.clone();
     let acting_principal = params.acting_principal.to_string();
-    let outcome = build_and_launch_inner(params).await;
+    let runtime_ref = params.runtime_ref.unwrap_or_default().to_owned();
+    let outcome = match condition_workspace_output_authority(&params).await {
+        Ok(Some((resolved, provenance))) => {
+            build_and_launch_inner(BuildAndLaunchParams {
+                resolved: &resolved,
+                provenance: &provenance,
+                ..params
+            })
+            .await
+        }
+        Ok(None) => build_and_launch_inner(params).await,
+        Err(error) => Err(BuildAndLaunchError::from(
+            DispatchError::pre_birth_admission_refused(error.into_dispatch_error(&runtime_ref)),
+        )),
+    };
     let emission = match &outcome {
         Ok(result) => {
             let text = |key: &str| {
@@ -5158,17 +5451,117 @@ fn admission_stage_for(
             (Stage::Authority, "capability_rejected".to_string())
         }
         BuildAndLaunchError::LaunchPreparation(inner) => {
-            let code = match inner.as_ref() {
-                DispatchError::LaunchPreparationFailed { code, .. } => code.clone(),
-                _ => "launch_preparation_failed".to_string(),
-            };
-            (Stage::Preparation, code)
+            (Stage::Preparation, inner.code().to_owned())
         }
         BuildAndLaunchError::LaunchCancelled { stage, .. } => {
             (Stage::Cancelled, format!("cancelled_before_{stage}"))
         }
         BuildAndLaunchError::Internal(_) => (Stage::Internal, "internal".to_string()),
     }
+}
+
+/// Prepare a fresh producer's output partition before any workspace/capsule or
+/// thread birth. The returned pair must replace both borrowed launch inputs;
+/// changing provenance alone would split it from the admitted root contract.
+async fn condition_workspace_output_authority(
+    params: &BuildAndLaunchParams<'_>,
+) -> Result<
+    Option<(
+        ResolvedExecutionRequest,
+        ryeos_app::execution_provenance::ExecutionProvenance,
+    )>,
+    BuildAndLaunchError,
+> {
+    if params
+        .provenance
+        .project_authority()
+        .workspace_outputs()
+        .is_some()
+        || params.previous_thread_id.is_some()
+    {
+        return Ok(None);
+    }
+    let admission = params
+        .resolved
+        .root_admission
+        .as_ref()
+        .context("workspace output preparation has no exact root admission")?;
+    let engine = params.provenance.request_engine();
+    let runtime_ref = params
+        .runtime_ref
+        .context("managed output preparation has no runtime")?;
+    let runtime_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(runtime_ref)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let runtime = engine
+        .runtimes
+        .lookup_by_ref(&runtime_ref)
+        .context("managed output preparation runtime is not registered")?;
+    let declarations = &runtime.yaml.launch_contract.ref_bindings;
+    let bindings = super::launch_preparation::project_effective_ref_bindings(
+        declarations,
+        &admission.resolution_output().composed.composed,
+        &params.resolved.ref_bindings,
+    )?;
+    if !bindings.keys().any(|name| {
+        declarations.get(name).is_some_and(|declaration| {
+            declaration.project_result_requirement
+                == ryeos_engine::runtime_registry::ProjectResultRequirement::RetainedGeneration
+        })
+    }) {
+        return Ok(None);
+    }
+    let context = crate::executor::ExecutionContext {
+        principal_fingerprint: params.acting_principal.to_owned(),
+        caller_scopes: match &params.resolved.plan_context.requested_by {
+            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+                principal.scopes.clone()
+            }
+            ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+                principal.delegated_scopes.clone()
+            }
+        },
+        engine: engine.clone(),
+        plan_ctx: params.resolved.plan_context.clone(),
+        requested_call: None,
+    };
+    let prepared = crate::dispatch::prepare_admitted_launch_contract(
+        &crate::dispatch::LaunchContractApplicability::ManagedEnvelope {
+            runtime: Box::new(runtime.clone()),
+        },
+        admission,
+        &params.resolved.ref_bindings,
+        &params.lifecycle_authority,
+        params.provenance,
+        &context,
+        params.state,
+    )
+    .await?
+    .context("managed output preparation returned no contract")?;
+    let Some(partition) = super::workspace_outputs::admission::derive_initial_partition(
+        params.state,
+        engine,
+        admission.resolution_output(),
+        &prepared,
+        params
+            .provenance
+            .project_authority()
+            .operational_snapshot_projection(),
+    )?
+    else {
+        return Ok(None);
+    };
+    super::launch_preparation::require_prepared_project_result(&prepared, params.provenance)?;
+    let provenance = params
+        .provenance
+        .clone()
+        .condition_root_workspace_outputs(partition)?;
+    let mut resolved = params.resolved.clone();
+    resolved.root_admission = Some(
+        admission
+            .clone()
+            .rebind_conditioned_workspace_outputs(&provenance)?,
+    );
+    Ok(Some((resolved, provenance)))
 }
 
 async fn build_and_launch_inner(
@@ -5186,6 +5579,7 @@ async fn build_and_launch_inner(
         timings.bind_thread_id(&thread_id);
         timings.set_launch_dimensions(&params.resolved.resolved_item.kind, "managed_runtime");
     }
+    let (birth, replay) = async {
     if params.pre_minted_thread_id.is_some() {
         params
             .state
@@ -5244,12 +5638,96 @@ async fn build_and_launch_inner(
         .take()
         .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
 
+    if let Some(effect_authority) = params.effect_authority {
+        let metadata = authority.launch_metadata.as_mut().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed effect launch lost its finalized metadata"
+            ))
+        })?;
+        match metadata.effect_authority.as_ref() {
+            Some(retained) if retained != effect_authority => {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed effect authority contradicts retained launch metadata"
+                )));
+            }
+            Some(_) => {}
+            None => metadata.effect_authority = Some(effect_authority.clone()),
+        }
+        metadata
+            .validate()
+            .map_err(BuildAndLaunchError::Internal)?;
+        let capsule = metadata
+            .admitted_launch_capsule()
+            .map_err(BuildAndLaunchError::Internal)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed effect launch produced no admitted capsule"
+                ))
+            })?;
+        match super::runner::prepare_managed_dispatch_effect(
+            params.state,
+            params.resolved,
+            &capsule,
+            effect_authority,
+        )
+        .map_err(BuildAndLaunchError::Internal)?
+        {
+            super::runner::PreparedManagedDispatchEffect::Execute { identity } => {
+                // Validate the complete identity now; terminal recovery
+                // rederives it from the retained capsule and sealed grant.
+                identity.validate().map_err(BuildAndLaunchError::Internal)?;
+            }
+            super::runner::PreparedManagedDispatchEffect::Replay { result, dispatch } => {
+                return Ok((
+                    None,
+                    Some(NativeLaunchResult {
+                        thread: Value::Null,
+                        result,
+                        dispatch: Some(dispatch),
+                        result_project_snapshot_hash: None,
+                    }),
+                ));
+            }
+        }
+    }
+
     let initial_events = launch_audit_records(
         params.resolved,
         authority.effective_program.resolution(),
         &authority.prepared_launch,
         &authority.augmentation_audits,
     )?;
+    if params.effect_authority.is_some() {
+        let intent = params
+            .state
+            .state_store
+            .get_runtime_action_intent_by_child(&thread_id)
+            .map_err(BuildAndLaunchError::Internal)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "awaited managed effect has no runtime action intent"
+                ))
+            })?;
+        if intent.mode != ryeos_app::runtime_db::RuntimeActionMode::AwaitedRoot {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed effect child is not owned by an awaited-root action intent"
+            )));
+        }
+        params
+            .state
+            .state_store
+            .seal_root_action_intent(
+                &intent.operation_id,
+                params.provenance.project_authority(),
+                authority.launch_metadata.as_ref().ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "awaited managed effect lost launch metadata before intent seal"
+                    ))
+                })?,
+                &initial_events,
+            )
+            .map_err(BuildAndLaunchError::Internal)?;
+    }
     // Reserve the pre-minted ID before publishing the row. The reservation is
     // moved through the whole launch and drops automatically if creation or
     // preparation fails.
@@ -5306,6 +5784,26 @@ async fn build_and_launch_inner(
             })?,
     };
     drop(row_publication_timer);
+    Ok::<_, BuildAndLaunchError>((Some((thread, authority, _launch_claim)), None))
+    }
+    .await
+    .map_err(|error| {
+        if params.provenance.project_authority().workspace_outputs().is_some() {
+            BuildAndLaunchError::from(DispatchError::pre_birth_admission_refused(
+                error.into_dispatch_error(params.runtime_ref.unwrap_or_default()),
+            ))
+        } else {
+            error
+        }
+    })?;
+    if let Some(replay) = replay {
+        return Ok(replay);
+    }
+    let (thread, mut authority, _launch_claim) = birth.ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed launch produced neither a birth nor replay outcome"
+        ))
+    })?;
     if let Some(timings) = params.launch_timings.as_ref() {
         timings.record_nested_from_milestone(
             "background_dispatch",
@@ -5411,11 +5909,7 @@ async fn run_claimed_thread_row(
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
                     crate::structured_error::dispatch_error_value(dispatch_error.as_ref())
                 }
-                other => json!({
-                    "code": "launch_preparation_failed",
-                    "message": format!("{other:#}"),
-                    "retryable": other.retryable_launch_interruption(),
-                }),
+                other => retained_launch_preparation_error(other),
             };
             if let Err(cleanup_error) = crate::dispatch::finalize_method_thread_if_needed(
                 params.state,
@@ -5479,6 +5973,11 @@ async fn run_claimed_thread_row_with_authority(
             "message": format!("{err:#}"),
         }));
     }
+    let failure_precedes_cleanup = failure_precedes_lifecycle_cleanup(
+        result.is_err(),
+        lifecycle_owner.has_settled_owned_wait(),
+    );
+    drop_managed_launch_guards(guard, lifecycle_owner, failure_precedes_cleanup);
     result
 }
 
@@ -5505,6 +6004,7 @@ async fn run_claimed_thread_row_inner(
         pre_minted_thread_id: _,
         previous_thread_id,
         parent_execution_context,
+        effect_authority: _,
         suppress_stimulus,
         capability_policy: _,
         checkpoint_resume_mode,
@@ -5531,6 +6031,9 @@ async fn run_claimed_thread_row_inner(
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
+    let retained_effect_authority = launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.effect_authority.clone());
     let thread_id = thread.thread_id.clone();
     if launch_audit == LaunchAuditDisposition::AppendForAttempt {
         if thread.runtime.process_identity.is_some() {
@@ -5539,8 +6042,56 @@ async fn run_claimed_thread_row_inner(
             )));
         }
     }
+    // Lineage and borrower admission precede all workspace input contact.
+    // Record operational lineage the instant we commit to launching a child, so a
+    // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
+    // execution context is a child — inline-dispatched and follow children both
+    // flow through here; a fresh root launch and a continuation successor carry no
+    // parent context and are (correctly) not linked. This is fail-closed: the
+    // store atomically inherits an already-durable parent stop onto the child.
+    if let Some(parent_ctx) = parent_execution_context {
+        let inherited_stop = state.state_store.record_child_link(
+            &parent_ctx.parent_thread_id,
+            &thread_id,
+            "dispatch",
+        )?;
+        if inherited_stop.is_some() {
+            super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)?;
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "parent {} was stop-requested before child launch",
+                parent_ctx.parent_thread_id
+            )));
+        }
+    }
+
+    // A local machine-continuation successor continues its predecessor's work
+    // under a fresh thread id and carries no parent execution context, so the
+    // block above does not link it. Link it to its immediate local predecessor
+    // for operational stop propagation. A continuation whose state was restored
+    // by an authority above this runtime has no predecessor runtime row on this
+    // node: its signed cross-site edge already supplies chain authority, and the
+    // current placement is addressed directly for local stop ownership.
+    if let Some(previous) = previous_thread_id
+        && checkpoint_resume_mode != CheckpointResumeMode::ExternallyRestoredContinuation
+    {
+        let inherited_stop =
+            state
+                .state_store
+                .record_child_link(previous, &thread_id, "continuation")?;
+        if inherited_stop.is_some() {
+            super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)?;
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "predecessor {previous} was stop-requested before continuation launch"
+            )));
+        }
+    }
     let owns_workspace = !provenance.is_borrowed_child()
         && provenance.project_authority().requires_project_foldback();
+    if !provenance.is_borrowed_child()
+        && let Some(lifeline) = provenance.workspace_lifeline()
+    {
+        lifecycle_owner.track_owned_workspace_lifeline(lifeline.clone())?;
+    }
     super::runner::bind_owned_workspace_after_thread_birth(
         state,
         provenance,
@@ -5553,6 +6104,7 @@ async fn run_claimed_thread_row_inner(
         path: process_project_path,
         lifeline: admitted_input_lifeline,
         isolation_project_authority,
+        isolation_immutable_project,
         isolation_live_access_authority: isolation_live_access,
         external: bound_external_realizations,
         source: bound_source_closure,
@@ -5598,55 +6150,12 @@ async fn run_claimed_thread_row_inner(
     drop(pending_external_realization);
     drop(pending_session_publications);
 
-    // Record operational lineage the instant we commit to launching a child, so a
-    // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
-    // execution context is a child — inline-dispatched and follow children both
-    // flow through here; a fresh root launch and a continuation successor carry no
-    // parent context and are (correctly) not linked. This is fail-closed: the
-    // store atomically inherits an already-durable parent stop onto the child.
-    if let Some(parent_ctx) = parent_execution_context {
-        let inherited_stop = state.state_store.record_child_link(
-            &parent_ctx.parent_thread_id,
-            &thread_id,
-            "dispatch",
-        )?;
-        if inherited_stop.is_some() {
-            super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)?;
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "parent {} was stop-requested before child launch",
-                parent_ctx.parent_thread_id
-            )));
-        }
-    }
-
-    // A local machine-continuation successor continues its predecessor's work
-    // under a fresh thread id and carries no parent execution context, so the
-    // block above does not link it. Link it to its immediate local predecessor
-    // for operational stop propagation. A continuation whose state was restored
-    // by an authority above this runtime has no predecessor runtime row on this
-    // node: its signed cross-site edge already supplies chain authority, and the
-    // current placement is addressed directly for local stop ownership.
-    if let Some(previous) = previous_thread_id
-        && checkpoint_resume_mode != CheckpointResumeMode::ExternallyRestoredContinuation
-    {
-        let inherited_stop =
-            state
-                .state_store
-                .record_child_link(previous, &thread_id, "continuation")?;
-        if inherited_stop.is_some() {
-            super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)?;
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "predecessor {previous} was stop-requested before continuation launch"
-            )));
-        }
-    }
-
-    let subject_resolution_authority = provenance.subject_resolution_authority();
-    let resolution_project_root = (!matches!(
-        subject_resolution_authority,
-        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
-    ))
-    .then_some(project_path);
+    let root_admission = resolved
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("managed launch has no exact root admission"))?;
+    let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
+    let resolution_project_root = root_admission.resolution_workspace();
     let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
     let effective_request_snapshot = match resolved
         .root_admission
@@ -5822,6 +6331,9 @@ async fn run_claimed_thread_row_inner(
         turns = hard_limits.turns,
         turns_source = %turns_source,
         turns_cap = ?limits_config.caps.turns,
+        aggregate_duration_seconds = hard_limits.aggregate.duration_seconds,
+        aggregate_worker_executions = hard_limits.aggregate.worker_executions,
+        aggregate_provider_contacts = hard_limits.aggregate.provider_contacts,
         runtime_limits = %serde_json::to_string(&hard_limits.runtime)
             .unwrap_or_else(|_| "{}".to_string()),
         runtime_limit_caps = %serde_json::to_string(&limits_config.caps.runtime)
@@ -6000,6 +6512,14 @@ async fn run_claimed_thread_row_inner(
             )));
         }
     }
+    if !hard_limits.aggregate.is_unlimited()
+        && (accounting_scope.is_none() || state.accounting.is_none())
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "aggregate execution limits require the accounting ledger and a sealed accounting \
+             scope; refusing to launch"
+        )));
+    }
 
     // 6a¾. Journaled account birth and the launch accounting gate. Only a
     // freshly minted scope may create accounts; a recovered or continued
@@ -6007,6 +6527,7 @@ async fn run_claimed_thread_row_inner(
     // on a missing account — allowance is never re-minted from limits).
     // The gate must be open before the runtime can spawn; reserve/issue
     // callbacks require it and terminal fencing closes it atomically.
+    let mut aggregate_deadline_at_ms = None;
     if let (Some(scope), Some(accounting)) = (accounting_scope.as_ref(), state.accounting.as_ref())
     {
         let account_limit = (!hard_limits.spend_usd.is_zero()).then_some(hard_limits.spend_usd);
@@ -6054,6 +6575,28 @@ async fn run_claimed_thread_row_inner(
                     ))
                 })?;
         }
+        let aggregate_budget = accounting
+            .ensure_execution_resource_budget(&scope.execution_budget_id, &hard_limits.aggregate)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "aggregate execution budget admission failed: {error:#}"
+                ))
+            })?;
+        if aggregate_budget
+            .deadline_at_ms
+            .is_some_and(|deadline| lillux::time::timestamp_millis() >= deadline)
+        {
+            return Err(BuildAndLaunchError::from(
+                DispatchError::LaunchPreparationFailed {
+                    code: "budget_exhausted".to_owned(),
+                    message: "aggregate execution duration is exhausted".to_owned(),
+                    classification: "policy".to_owned(),
+                    binding: None,
+                    details: Box::new(BTreeMap::new()),
+                },
+            ));
+        }
+        aggregate_deadline_at_ms = aggregate_budget.deadline_at_ms;
         accounting
             .activate_account(
                 &scope.execution_budget_id,
@@ -6264,6 +6807,7 @@ async fn run_claimed_thread_row_inner(
             parent_capabilities: None,
             depth: current_depth,
             suppress_stimulus,
+            scheduled_fire: params.resolved.plan_context.scheduled_fire.clone(),
         },
         EnvelopePolicy {
             effective_caps: effective_caps.clone(),
@@ -6324,6 +6868,8 @@ async fn run_claimed_thread_row_inner(
     // blocking process and pipe operations. Keep their owner on Tokio's
     // blocking pool so async workers remain free to service runtime UDS
     // callbacks.
+    let filesystem_authority_ceiling = prepared_launch.filesystem_authority_ceiling;
+    let network_authority_ceiling = prepared_launch.network_authority_ceiling;
     let isolation_verified_command = materialized_binary.verified_command;
     let materialized_binary_path = materialized_binary.path;
     let binary_path = materialized_binary_path
@@ -6478,6 +7024,9 @@ async fn run_claimed_thread_row_inner(
             binary: &binary_path,
             project_path: &project_owned,
             project_authority: isolation_project_authority,
+            immutable_project: isolation_immutable_project,
+            filesystem_authority_ceiling,
+            network_authority_ceiling,
             project_state_scope: project_state_scope.as_deref(),
             live_access: isolation_live_access,
             state_root: isolation_state_root.as_deref(),
@@ -6485,6 +7034,7 @@ async fn run_claimed_thread_row_inner(
             owns_workspace,
             envelope: &envelope,
             timeout_secs: duration,
+            aggregate_deadline_at_ms,
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             launch_owner: &launch_owner_owned,
@@ -6525,15 +7075,31 @@ async fn run_claimed_thread_row_inner(
         timings.emit("runtime_handoff_published");
     }
 
-    let spawned_runtime = spawn_handle
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn_runtime join error: {e}"))??;
-    let spawn_result = tokio::task::spawn_blocking(move || spawned_runtime.wait())
+    let spawned_runtime = match spawn_handle.await {
+        // The blocking owner performs any proved pre-contact/checked-abort
+        // borrower settlement while it still holds the request lifelines.
+        // Neither an arbitrary error nor a JoinError supplies that proof here.
+        Ok(result) => result?,
+        Err(error) => {
+            lifecycle_owner.revoke_tokens_after_unsettled_wait();
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "spawn_runtime join error: {error}"
+            )));
+        }
+    };
+    let wait_result = tokio::task::spawn_blocking(move || spawned_runtime.wait())
         .await
         .map_err(|e| anyhow::anyhow!("runtime wait join error: {e}"))?;
-    // The owned wait has completed and compare-cleared the exact attached
-    // identity. Revoke callback and thread-auth authority before result handling.
-    lifecycle_owner.disarm();
+    // Only the attached-wait settlement proof says SpawnedRuntime
+    // compare-cleared the exact reaped attachment and its workspace
+    // membership. Immediate spawn results and settlement errors retain the
+    // ordinary stop-first fallback.
+    if wait_result.settled_attached_wait {
+        lifecycle_owner.record_settled_owned_wait();
+    } else {
+        lifecycle_owner.revoke_tokens_after_unsettled_wait();
+    }
+    let spawn_result = wait_result.result;
 
     // Prune stale capabilities from other completed threads
     let pruned = state.callback_tokens.prune_expired();
@@ -6555,6 +7121,10 @@ async fn run_claimed_thread_row_inner(
                 let _ = state.state_store.reset_resume_attempts(&thread_id);
                 return Err(BuildAndLaunchError::Internal(err));
             }
+            let terminal_code = err
+                .downcast_ref::<DispatchError>()
+                .map(DispatchError::code)
+                .unwrap_or("pre_runtime_failure");
             // Pre-runtime failure (launch preparation, secret resolution, materialization,
             // builder): record the real cause into `error` — the ONLY field the
             // terminal `thread_failed` braid event persists — not `result`,
@@ -6565,10 +7135,10 @@ async fn run_claimed_thread_row_inner(
                 &ThreadFinalizeParams {
                     thread_id: thread_id.clone(),
                     status: "failed".to_string(),
-                    outcome_code: Some("pre_runtime_failure".to_string()),
+                    outcome_code: Some(terminal_code.to_string()),
                     result: None,
                     error: Some(json!({
-                        "code": "pre_runtime_failure",
+                        "code": terminal_code,
                         "message": format!("{err:#}"),
                     })),
                     metadata: None,
@@ -6607,6 +7177,11 @@ async fn run_claimed_thread_row_inner(
             if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                     "runtime requested recovery after a durable stop won"
+                )));
+            }
+            if !lifecycle_owner.has_settled_owned_wait() {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "runtime requested recovery without an exact settled attached wait"
                 )));
             }
             let launch_metadata = state
@@ -6662,19 +7237,63 @@ async fn run_claimed_thread_row_inner(
                         maximum = resume_policy.max_auto_resume_attempts,
                         "runtime requested exact same-thread recovery"
                     );
+                    // This accessor clones the canonical owner returned by the
+                    // atomic rotation; it performs no fresh serialization and
+                    // therefore cannot open a post-rotation fallible gap.
                     let next_owner = next_claim.canonical_owner()?;
-                    let current_thread =
-                        state.threads.get_thread(&thread_id)?.ok_or_else(|| {
-                            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                                "runtime recovery target disappeared"
-                            ))
-                        })?;
-                    let resumed = Box::pin(launch_claimed_native_resume(
+                    // Rotation transfers durable ownership, not cleanup of
+                    // the original live view. Install the successor guard
+                    // before disarming the predecessor or doing any fallible
+                    // reconstruction. Cancellation must never leave a gap.
+                    let mut next_lifecycle =
+                        super::process_attachment::LifecycleOwnerGuard::new(state, &thread_id);
+                    next_lifecycle.record_settled_owned_wait();
+                    // Declared after the lifecycle owner so cancellation also
+                    // drops the failure owner first under the transferred
+                    // settled-wait proof.
+                    let mut next_failure = FinalizeFailedOnDrop {
                         state,
-                        current_thread,
-                        &next_owner,
-                    ))
+                        thread_id: thread_id.clone(),
+                        launch_owner: next_owner.clone(),
+                        error: None,
+                    };
+                    let resumed = async {
+                        if let Some(workspace) = provenance.workspace_lifeline() {
+                            next_lifecycle.track_owned_workspace_lifeline(workspace)?;
+                        }
+                        lifecycle_owner.disarm();
+                        let current_thread =
+                            state.threads.get_thread(&thread_id)?.ok_or_else(|| {
+                                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                    "runtime recovery target disappeared"
+                                ))
+                            })?;
+                        Box::pin(launch_claimed_native_resume_inner(
+                            state,
+                            current_thread,
+                            &next_owner,
+                            Some(provenance.clone()),
+                            &mut next_lifecycle,
+                        ))
+                        .await
+                    }
                     .await;
+                    if let Err(error) = &resumed {
+                        next_failure.error = Some(json!({
+                            "code": "launch_failure",
+                            "message": format!("{error:#}"),
+                        }));
+                    }
+                    if resumed.is_ok() {
+                        next_lifecycle.disarm();
+                    }
+                    // Cleanup requires the exact successor claim to remain
+                    // active; do not release it before the cleanup owner.
+                    drop_managed_launch_guards(
+                        next_failure,
+                        next_lifecycle,
+                        failure_precedes_lifecycle_cleanup(resumed.is_err(), true),
+                    );
                     drop(next_claim);
                     return resumed;
                 }
@@ -6693,6 +7312,7 @@ async fn run_claimed_thread_row_inner(
         if let Some(workspace) = provenance.workspace_lifeline().as_ref() {
             workspace.disarm();
         }
+        lifecycle_owner.disarm();
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "managed runtime interrupted by daemon shutdown; row preserved for recovery"
         )));
@@ -6718,30 +7338,45 @@ async fn run_claimed_thread_row_inner(
         {
             terminal_status = ryeos_state::objects::ThreadStatus::Killed;
         }
-        let result_project_snapshot_hash = if owns_workspace {
+        let result_generation = if owns_workspace {
             super::prepare_stopped_managed_runtime_terminal_project_result(
                 state,
                 provenance,
                 &thread_id,
                 launch_owner,
             )
-            .map_err(BuildAndLaunchError::Internal)?
+            .map_err(|error| {
+                tracing::error!(
+                    thread_id = %thread_id,
+                    launch_owner,
+                    item_ref = %resolved.item_ref,
+                    error = %format!("{error:#}"),
+                    "failed to prepare stopped managed runtime terminal project result"
+                );
+                BuildAndLaunchError::Internal(
+                    error.context("prepare stopped managed runtime terminal project result"),
+                )
+            })?
         } else {
             None
         };
+        let result_project_snapshot_hash = result_generation
+            .as_ref()
+            .map(|generation| generation.snapshot_hash.as_str());
         // A retained worker-hosted candidate is a pre-terminal disposition
         // saga. Its worker and managed controller have stopped, but the RyeOS
-        // root remains running so validation and the owner's publish/discard
-        // decision can be testified on that same authoritative chain.
+        // root remains running until its admitted retained-for-review policy
+        // or the owner's publish/discard decision settles durably.
         if let Some(candidate_snapshot_hash) = result_project_snapshot_hash.as_deref()
             && let Some(session) = state.state_store.dedicated_session(&thread_id)?
             && session.state == "freezing"
         {
             let candidate_root_operation =
-                ryeos_app::hosted_operation::begin_hosted_root_operation(
+                ryeos_app::hosted_operation::begin_hosted_root_operation_async(
                     &state.state_store,
                     &thread_id,
                 )
+                .await
                 .map_err(BuildAndLaunchError::Internal)?;
             let terminal_publication = provenance
                 .project_authority()
@@ -6752,16 +7387,13 @@ async fn run_claimed_thread_row_inner(
                     ))
                 })?;
             let workspace_lifeline = provenance.workspace_lifeline();
-            if let Err(error) = super::runner::close_managed_runtime_workspace(
+            if let Err(error) = super::runner::close_terminal_workspace(
                 state,
                 workspace_lifeline.as_ref(),
                 &thread_id,
                 terminal_publication,
                 Some(candidate_snapshot_hash),
             ) {
-                if let Some(workspace) = workspace_lifeline.as_ref() {
-                    workspace.disarm();
-                }
                 return Err(BuildAndLaunchError::Internal(error.context(
                     "close managed hosted candidate workspace before binding",
                 )));
@@ -6783,9 +7415,20 @@ async fn run_claimed_thread_row_inner(
                     "managed hosted candidate lost its exact freezing-state CAS"
                 )));
             }
+            if session.candidate_disposition
+                == ryeos_app::runtime_db::DedicatedCandidateDisposition::RetainedForReview
+            {
+                state
+                    .state_store
+                    .settle_dedicated_candidate_retained_for_review(
+                        &thread_id,
+                        candidate_snapshot_hash,
+                    )
+                    .map_err(BuildAndLaunchError::Internal)?;
+            }
             ryeos_app::dedicated_session_service::notify_projection_change(&thread_id);
             drop(candidate_root_operation);
-            let terminal_session = loop {
+            let _terminal_session = loop {
                 let session = state
                     .state_store
                     .dedicated_session(&thread_id)?
@@ -6799,7 +7442,12 @@ async fn run_claimed_thread_row_inner(
                 }
                 if !matches!(
                     session.state.as_str(),
-                    "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding"
+                    "frozen"
+                        | "verifying"
+                        | "qualifying"
+                        | "publish_ready"
+                        | "publishing"
+                        | "discarding"
                 ) {
                     return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "managed hosted candidate entered invalid disposition state {}",
@@ -6831,7 +7479,23 @@ async fn run_claimed_thread_row_inner(
             };
             runtime_result = ryeos_runtime::envelope::dedicated_session_terminal_result(
                 thread_id.clone(),
-                serde_json::to_value(terminal_session)?,
+                ryeos_app::dedicated_session_service::canonical_terminal_session_projection(
+                    state, &thread_id,
+                )
+                .map_err(BuildAndLaunchError::Internal)?,
+            );
+        }
+        if let Some(session) = state.state_store.dedicated_session(&thread_id)?
+            && session.state == "terminal"
+            && session.candidate_disposition
+                == ryeos_app::runtime_db::DedicatedCandidateDisposition::RetainedForReview
+        {
+            runtime_result = ryeos_runtime::envelope::dedicated_session_terminal_result(
+                thread_id.clone(),
+                ryeos_app::dedicated_session_service::canonical_terminal_session_projection(
+                    state, &thread_id,
+                )
+                .map_err(BuildAndLaunchError::Internal)?,
             );
         }
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
@@ -6839,10 +7503,11 @@ async fn run_claimed_thread_row_inner(
         let mut hosted_root_terminalization =
             if state.state_store.dedicated_session(&thread_id)?.is_some() {
                 Some(
-                    ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+                    ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
                         &state.state_store,
                         &thread_id,
                     )
+                    .await
                     .map_err(BuildAndLaunchError::Internal)?,
                 )
             } else {
@@ -6858,7 +7523,7 @@ async fn run_claimed_thread_row_inner(
             &fallback.params,
             fallback.managed_envelope,
             launch_owner,
-            result_project_snapshot_hash.as_deref(),
+            result_generation.as_ref(),
         )?;
         if let Some(terminalization) = hosted_root_terminalization.as_mut() {
             terminalization.commit();
@@ -6933,30 +7598,38 @@ async fn run_claimed_thread_row_inner(
                 ))
             })?;
         let workspace_lifeline = provenance.workspace_lifeline();
-        if let Err(error) = super::runner::close_managed_runtime_workspace(
+        if let Err(error) = super::runner::close_terminal_workspace(
             state,
             workspace_lifeline.as_ref(),
             &thread_id,
             terminal_publication,
             result_project_snapshot_hash.as_deref(),
         ) {
-            if let Some(workspace) = workspace_lifeline.as_ref() {
-                workspace.disarm();
-            }
             return Err(BuildAndLaunchError::Internal(
                 error.context("close managed runtime workspace"),
             ));
         }
     }
 
+    if !owns_workspace && !provenance.is_borrowed_child() {
+        super::runner::close_aborted_owned_workspace(
+            state,
+            provenance.workspace_lifeline().as_ref(),
+            &thread_id,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+    }
+    lifecycle_owner.disarm();
+
     // The runtime returns terminal text in `result` (Option<String>) and any
     // non-fatal callback drift in `warnings`. Both must be visible to the
     // HTTP caller — dropping `result` would silently lose the assistant's
     // last message; dropping `warnings` would silently lose contract-drift
     // diagnostics surfaced via `record_callback_warning`.
-    Ok(NativeLaunchResult {
+    let mut launched = NativeLaunchResult {
         thread: serde_json::to_value(&thread_detail)?,
         result_project_snapshot_hash,
+        dispatch: None,
         result: json!({
             "success": runtime_result.success,
             "status": runtime_result.status,
@@ -6965,7 +7638,45 @@ async fn run_claimed_thread_row_inner(
             "cost": runtime_result.cost,
             "warnings": runtime_result.warnings,
         }),
-    })
+    };
+    // Only a successful hard terminal is eligible to publish an accepted
+    // product answer. Failed/cancelled/killed producers retain their ordinary
+    // terminal failure; the awaited-root owner reconstructs that failure and
+    // must not turn it into either an effect record or an acceptance error.
+    if let Some(effect_authority) = retained_effect_authority
+        && thread_detail.status == "completed"
+    {
+        let terminal_response = json!({
+            "thread": &launched.thread,
+            "result": &launched.result,
+        });
+        let recovered = super::runner::recover_terminal_dispatch_effect(
+            state,
+            &thread_id,
+            &resolved.item_ref,
+            &effect_authority,
+            &terminal_response,
+        )?;
+        launched.thread = recovered.get("thread").cloned().unwrap_or(Value::Null);
+        launched.result = recovered.get("result").cloned().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed effect terminal response has no result"
+            ))
+        })?;
+        launched.dispatch = Some(
+            serde_json::from_value(recovered.get("dispatch").cloned().ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed effect terminal response has no dispatch evidence"
+                ))
+            })?)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "decode managed effect dispatch evidence: {error}"
+                ))
+            })?,
+        );
+    }
+    Ok(launched)
 }
 
 /// Outcome of a successor launch attempt.
@@ -7388,6 +8099,7 @@ async fn prepare_follow_child_launch_inner(
         || admitted_request.plan_context.requested_by != operational_resume.requested_by
         || admitted_request.plan_context.project_context != operational_resume.project_context
         || admitted_request.plan_context.execution_hints != operational_resume.execution_hints
+        || admitted_request.plan_context.scheduled_fire != operational_resume.scheduled_fire
         || operational_resume.executor_ref.as_deref()
             != Some(admitted_request.executor_ref.as_str())
         || operational_resume.runtime_ref.as_deref() != Some(admitted_runtime_ref.as_str())
@@ -7431,6 +8143,7 @@ async fn prepare_follow_child_launch_inner(
             pre_minted_thread_id: None,
             previous_thread_id: None,
             parent_execution_context: Some(&parent_context),
+            effect_authority: launch_metadata.effect_authority.as_ref(),
             suppress_stimulus: false,
             capability_policy: CapabilityPolicy::FollowChildHybrid {
                 parent_effective_caps: resume.parent_delegation_caps.as_deref().ok_or_else(
@@ -7622,6 +8335,8 @@ async fn prepare_successor_launch(
             pre_minted_thread_id: None,
             previous_thread_id,
             parent_execution_context: None,
+            effect_authority: metadata_template
+                .and_then(|metadata| metadata.effect_authority.as_ref()),
             suppress_stimulus,
             capability_policy,
             checkpoint_resume_mode,
@@ -8413,6 +9128,7 @@ async fn launch_claimed_successor(
         pre_minted_thread_id: None,
         previous_thread_id: Some(&previous_thread_id),
         parent_execution_context: None,
+        effect_authority: launch_metadata.effect_authority.as_ref(),
         suppress_stimulus,
         capability_policy,
         checkpoint_resume_mode: match mode {
@@ -8500,11 +9216,16 @@ async fn finalize_recovered_hosted_candidate_disposition(
             "recovered hosted candidate workspace is neither closed nor frozen under the current claim"
         )));
     };
-    let candidate_snapshot_hash = workspace.frozen_snapshot_hash.as_deref().ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "recovered hosted candidate workspace has no frozen generation"
-        ))
-    })?;
+    let output_context = super::workspace_output_capture_context(state, thread_id, &workspace)?;
+    let storage_authority = super::pinned_state_authority(state)?;
+    let candidate_generation =
+        super::verified_frozen_generation(&storage_authority, &workspace, output_context.as_ref())?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "recovered hosted candidate workspace has no frozen generation"
+                ))
+            })?;
+    let candidate_snapshot_hash = candidate_generation.snapshot_hash.as_str();
     if !workspace_already_closed {
         let provenance = provenance.ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -8512,20 +9233,26 @@ async fn finalize_recovered_hosted_candidate_disposition(
             ))
         })?;
         let workspace_lifeline = provenance.workspace_lifeline();
-        if let Err(error) = super::runner::close_managed_runtime_workspace(
+        if let Err(error) = super::runner::close_terminal_workspace(
             state,
             workspace_lifeline.as_ref(),
             thread_id,
             terminal_publication,
             Some(candidate_snapshot_hash),
         ) {
-            if let Some(workspace) = workspace_lifeline.as_ref() {
-                workspace.disarm();
-            }
             return Err(BuildAndLaunchError::Internal(error.context(
                 "close recovered hosted candidate workspace before disposition",
             )));
         }
+    }
+    if candidate_session.candidate_disposition
+        == ryeos_app::runtime_db::DedicatedCandidateDisposition::RetainedForReview
+    {
+        state
+            .state_store
+            .settle_dedicated_candidate_retained_for_review(thread_id, candidate_snapshot_hash)
+            .map_err(BuildAndLaunchError::Internal)?;
+        ryeos_app::dedicated_session_service::notify_projection_change(thread_id);
     }
     let terminal_session = loop {
         let session = state
@@ -8546,7 +9273,7 @@ async fn finalize_recovered_hosted_candidate_disposition(
         }
         if !matches!(
             session.state.as_str(),
-            "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding"
+            "frozen" | "verifying" | "qualifying" | "publish_ready" | "publishing" | "discarding"
         ) {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "recovered hosted candidate entered invalid disposition state {}",
@@ -8576,33 +9303,44 @@ async fn finalize_recovered_hosted_candidate_disposition(
             }
         }
     };
-    let published_result = format!("published:{candidate_snapshot_hash}");
-    let has_owner_disposition = matches!(
+    let has_nonpublication_disposition = matches!(
         terminal_session.publication_result.as_deref(),
-        Some("discarded")
-    ) || terminal_session.publication_result.as_deref()
-        == Some(published_result.as_str());
-    if terminal_session.terminal_reason.as_deref() != Some("completed") || !has_owner_disposition {
+        Some("discarded" | "retained_for_review")
+    );
+    if terminal_session.terminal_reason.as_deref() != Some("completed") {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "recovered hosted candidate has no completed owner disposition"
+            "recovered hosted candidate has no completed terminal disposition"
         )));
+    }
+    if !has_nonpublication_disposition {
+        ryeos_app::dedicated_session_service::verify_terminal_candidate_publication(
+            state,
+            &terminal_session,
+            candidate_snapshot_hash,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
     }
     let runtime_result = ryeos_runtime::envelope::dedicated_session_terminal_result(
         thread_id.to_owned(),
-        serde_json::to_value(terminal_session)?,
+        ryeos_app::dedicated_session_service::canonical_terminal_session_projection(
+            state, thread_id,
+        )
+        .map_err(BuildAndLaunchError::Internal)?,
     );
     let terminal_status = runtime_terminal_status(runtime_result.status);
     let fallback = fallback_finalization(thread_id, &runtime_result, terminal_status);
-    let mut root_terminalization = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
-        &state.state_store,
-        thread_id,
-    )
-    .map_err(BuildAndLaunchError::Internal)?;
+    let mut root_terminalization =
+        ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
+            &state.state_store,
+            thread_id,
+        )
+        .await
+        .map_err(BuildAndLaunchError::Internal)?;
     let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
         &fallback.params,
         fallback.managed_envelope,
         launch_owner,
-        Some(candidate_snapshot_hash),
+        Some(&candidate_generation),
     )?;
     root_terminalization.commit();
     kick_launch_window_for_terminal(state, &finalized.chain_root_id);
@@ -8610,6 +9348,7 @@ async fn finalize_recovered_hosted_candidate_disposition(
     Ok(NativeLaunchResult {
         thread: serde_json::to_value(&finalized)?,
         result_project_snapshot_hash: Some(candidate_snapshot_hash.to_owned()),
+        dispatch: None,
         result: json!({
             "success": fallback.runtime_result.success,
             "status": fallback.runtime_result.status,
@@ -8621,10 +9360,241 @@ async fn finalize_recovered_hosted_candidate_disposition(
     })
 }
 
+fn load_candidate_integration_completion_fact(
+    state: &AppState,
+    thread: &ryeos_app::state_store::ThreadDetail,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    sealed: &ryeos_app::thread_lifecycle::SealedRootExecutionRequest,
+    authority: &ryeos_app::thread_lifecycle::CandidateEvaluationAuthority,
+) -> Result<
+    Option<ryeos_app::thread_lifecycle::CandidateIntegrationProcessCompletionFact>,
+    BuildAndLaunchError,
+> {
+    if !matches!(
+        &authority.purpose,
+        ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
+    ) {
+        return Ok(None);
+    }
+    if thread.thread_id != thread.chain_root_id {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "candidate integration recovery is not attached to its own root"
+        )));
+    }
+    let capsule_hash = thread
+        .admitted_launch_capsule_hash
+        .as_deref()
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "candidate integration recovery has no admitted capsule"
+            ))
+        })?;
+    let capsule = state
+        .state_store
+        .admitted_launch_capsule(&thread.thread_id)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "candidate integration admitted capsule disappeared"
+            ))
+        })?;
+    if capsule.content_hash()? != capsule_hash
+        || capsule.sealed_invocation != serde_json::to_value(sealed)?
+        || capsule.project_authority != resume.project_authority
+        || sealed.candidate_evaluation_authority() != Some(authority)
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "candidate integration capsule contradicts its recovery authority"
+        )));
+    }
+    let operation_id =
+        ryeos_app::thread_lifecycle::CandidateIntegrationProcessCompletionFact::operation_id(
+            authority,
+            &thread.thread_id,
+            capsule_hash,
+        )?;
+    let lookup = ryeos_app::authoritative_root_fact::lookup(
+        state,
+        &thread.thread_id,
+        ryeos_app::thread_lifecycle::CANDIDATE_INTEGRATION_PROCESS_COMPLETED_EVENT,
+        &operation_id,
+    )?;
+    if lookup.count > 1 {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "candidate integration completion fact is duplicated"
+        )));
+    }
+    let Some(payload) = lookup.payload else {
+        return if lookup.count == 0 {
+            Ok(None)
+        } else {
+            Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "candidate integration completion fact payload is unavailable"
+            )))
+        };
+    };
+    let fact: ryeos_app::thread_lifecycle::CandidateIntegrationProcessCompletionFact =
+        serde_json::from_value(payload).map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "decode candidate integration completion fact: {error}"
+            ))
+        })?;
+    fact.validate_for(authority, &thread.thread_id, capsule_hash)?;
+    Ok(Some(fact))
+}
+
+fn verify_recovered_candidate_integration_generation(
+    state: &AppState,
+    source_candidate_snapshot_hash: &str,
+    result_candidate_snapshot_hash: &str,
+) -> Result<(), BuildAndLaunchError> {
+    let authority = super::pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let source = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+        &cas,
+        source_candidate_snapshot_hash,
+    )?;
+    let result = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+        &cas,
+        result_candidate_snapshot_hash,
+    )?;
+    if source.snapshot().effective_policy_hash != result.snapshot().effective_policy_hash {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "candidate integration changed the admitted snapshot policy"
+        )));
+    }
+    if result_candidate_snapshot_hash != source_candidate_snapshot_hash
+        && !result
+            .snapshot()
+            .parent_hashes
+            .iter()
+            .any(|parent| parent == source_candidate_snapshot_hash)
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "candidate integration result is not a direct descendant of its sealed source"
+        )));
+    }
+    Ok(())
+}
+
+fn finalize_recovered_candidate_integration(
+    state: &AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    authority: &ryeos_app::thread_lifecycle::CandidateEvaluationAuthority,
+    fact: &ryeos_app::thread_lifecycle::CandidateIntegrationProcessCompletionFact,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let result_generation = super::prepare_stopped_managed_runtime_terminal_project_result(
+        state,
+        provenance,
+        thread_id,
+        launch_owner,
+    )?
+    .ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "completed candidate integration produced no retained generation"
+        ))
+    })?;
+    let result_snapshot_hash = result_generation.snapshot_hash.clone();
+    verify_recovered_candidate_integration_generation(
+        state,
+        &authority.candidate_snapshot_hash,
+        &result_snapshot_hash,
+    )?;
+    let completion = fact.canonical_completion(&result_snapshot_hash)?;
+    let mut terminalization = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+        &state.state_store,
+        thread_id,
+    )?;
+    let finalized = state.threads.finalize_from_completion_owned(
+        thread_id,
+        launch_owner,
+        &completion,
+        Some(&result_generation),
+    )?;
+    terminalization.commit();
+
+    let terminal_publication =
+        resume
+            .project_authority
+            .terminal_publication()
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "candidate integration recovery has no terminal publication authority"
+                ))
+            })?;
+    let workspace_lifeline = provenance.workspace_lifeline();
+    if let Err(error) = super::runner::close_terminal_workspace(
+        state,
+        workspace_lifeline.as_ref(),
+        thread_id,
+        terminal_publication,
+        Some(&result_snapshot_hash),
+    ) {
+        // Keep the reconstruction cleanup owner armed. A successful return
+        // would disarm it and discard the only original view lifeline while
+        // same-daemon reconciliation is correctly forbidden to recreate it.
+        return Err(BuildAndLaunchError::Internal(error.context(
+            "recovered candidate integration finalized but workspace closure is unresolved",
+        )));
+    }
+    kick_launch_window_for_terminal(state, &finalized.chain_root_id);
+    kick_follow_resume_if_ready(state, &finalized.chain_root_id);
+    Ok(NativeLaunchResult {
+        thread: serde_json::to_value(&finalized)?,
+        result_project_snapshot_hash: Some(result_snapshot_hash),
+        dispatch: None,
+        result: json!({
+            "success":true,
+            "status":"completed",
+            "result":completion.result,
+            "outputs":Value::Null,
+            "cost":Value::Null,
+            "warnings":[],
+        }),
+    })
+}
+
 async fn launch_claimed_native_resume(
     state: &AppState,
     thread: ryeos_app::state_store::ThreadDetail,
     launch_owner: &str,
+    live_provenance: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    // Reconstruction itself can create a new view on cold recovery, before
+    // the managed launch installs its ordinary lifecycle guard. Retain the
+    // original owner across that entire fallible interval as well.
+    let mut preparation_owner =
+        super::process_attachment::LifecycleOwnerGuard::new(state, &thread.thread_id);
+    if let Some(provenance) = live_provenance.as_ref()
+        && !provenance.is_borrowed_child()
+        && let Some(workspace) = provenance.workspace_lifeline()
+    {
+        preparation_owner.track_owned_workspace_lifeline(workspace)?;
+    }
+    let result = launch_claimed_native_resume_inner(
+        state,
+        thread,
+        launch_owner,
+        live_provenance,
+        &mut preparation_owner,
+    )
+    .await;
+    if result.is_ok() {
+        preparation_owner.disarm();
+    }
+    result
+}
+
+async fn launch_claimed_native_resume_inner(
+    state: &AppState,
+    thread: ryeos_app::state_store::ThreadDetail,
+    launch_owner: &str,
+    live_provenance: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
+    preparation_owner: &mut super::process_attachment::LifecycleOwnerGuard,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let thread_id = thread.thread_id.clone();
     let launch_metadata = state
@@ -8640,6 +9610,97 @@ async fn launch_claimed_native_resume(
         .ok_or_else(|| {
             anyhow::anyhow!("native resume: {thread_id} has no sealed admitted request")
         })?;
+    if let Some(provenance) = live_provenance.as_ref() {
+        super::runner::handoff_live_workspace_for_retry(
+            state,
+            provenance,
+            &thread_id,
+            launch_owner,
+        )?;
+    }
+
+    if let Some(authority) = sealed.candidate_evaluation_authority()
+        && matches!(
+            &authority.purpose,
+            ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
+        )
+    {
+        let fact =
+            load_candidate_integration_completion_fact(state, &thread, &resume, sealed, authority)?;
+        let workspace = state
+            .state_store
+            .execution_workspace_for_thread(&thread_id)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "candidate integration recovery workspace disappeared"
+                ))
+            })?;
+        if workspace.thread_id.as_deref() != Some(thread_id.as_str())
+            || workspace.base_snapshot != authority.candidate_snapshot_hash
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "candidate integration workspace contradicts its sealed source generation"
+            )));
+        }
+        match (workspace.state, fact.as_ref()) {
+            (ryeos_app::runtime_db::WorkspaceState::Ready, None) => {}
+            (ryeos_app::runtime_db::WorkspaceState::Active, None) => {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "candidate integration stopped after process contact without durable successful completion"
+                )));
+            }
+            (ryeos_app::runtime_db::WorkspaceState::Freezing, None) => {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "candidate integration entered its freeze journal without durable successful completion"
+                )));
+            }
+            (
+                ryeos_app::runtime_db::WorkspaceState::Ready
+                | ryeos_app::runtime_db::WorkspaceState::Active
+                | ryeos_app::runtime_db::WorkspaceState::Freezing,
+                Some(fact),
+            ) => {
+                let provenance = match live_provenance.clone() {
+                    Some(provenance) => Some(provenance),
+                    None => {
+                        crate::execution::runner::retained_workspace_provenance_for_native_resume(
+                            state,
+                            &thread_id,
+                            launch_owner,
+                            &resume,
+                            preparation_owner,
+                        )?
+                    }
+                }
+                .ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "completed candidate integration lost its retained workspace authority"
+                    ))
+                })?;
+                let (provenance, _) =
+                    crate::execution::runner::candidate_evaluation_provenance_from_resume_context(
+                        state,
+                        &resume,
+                        authority,
+                        Some(provenance),
+                    )?;
+                return finalize_recovered_candidate_integration(
+                    state,
+                    &thread_id,
+                    launch_owner,
+                    &resume,
+                    authority,
+                    fact,
+                    &provenance,
+                );
+            }
+            (state, _) => {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "candidate integration cannot recover from workspace state {state}"
+                )));
+            }
+        }
+    }
 
     let recovered_candidate_workspace_id = state
         .state_store
@@ -8647,7 +9708,13 @@ async fn launch_claimed_native_resume(
         .filter(|session| {
             matches!(
                 session.state.as_str(),
-                "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding" | "terminal"
+                "frozen"
+                    | "verifying"
+                    | "qualifying"
+                    | "publish_ready"
+                    | "publishing"
+                    | "discarding"
+                    | "terminal"
             ) && session.candidate_snapshot_hash.is_some()
         })
         .map(|session| session.workspace_id);
@@ -8673,13 +9740,26 @@ async fn launch_claimed_native_resume(
     // happens inside; working dir + runtime registry then follow the
     // provenance so the resumed run resolves against the pinned overlay
     // engine when the original spawn was pushed-head.
-    let retained_provenance =
-        crate::execution::runner::retained_workspace_provenance_for_native_resume(
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "workspace-reconstruction",
+        "managed native recovery stage"
+    );
+    let retained_provenance = match live_provenance {
+        Some(provenance) => Some(provenance),
+        None => crate::execution::runner::retained_workspace_provenance_for_native_resume(
             state,
             &thread_id,
             launch_owner,
             &resume,
-        )?;
+            preparation_owner,
+        )?,
+    };
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "workspace-reconstructed",
+        "managed native recovery stage"
+    );
     if recovered_candidate_workspace_id.is_some()
         && let Some(provenance) = retained_provenance.as_ref()
     {
@@ -8692,6 +9772,11 @@ async fn launch_claimed_native_resume(
         )
         .await;
     }
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "sealed-request-reconstruction",
+        "managed native recovery stage"
+    );
     let params = crate::execution::runner::execution_params_from_sealed_root_request(
         state,
         &thread_id,
@@ -8699,8 +9784,24 @@ async fn launch_claimed_native_resume(
         sealed,
         retained_provenance,
     )?;
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "sealed-request-reconstructed",
+        "managed native recovery stage"
+    );
     let project_path = params.provenance.effective_path().to_path_buf();
 
+    if !params.provenance.is_borrowed_child()
+        && let Some(workspace) = params.provenance.workspace_lifeline()
+    {
+        preparation_owner.track_owned_workspace_lifeline(workspace)?;
+    }
+
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "launch-preparation",
+        "managed native recovery stage"
+    );
     let result = run_claimed_thread_row(
         BuildAndLaunchParams {
             state,
@@ -8718,6 +9819,7 @@ async fn launch_claimed_native_resume(
             // SAME thread, not a successor — no chain braid.
             previous_thread_id: None,
             parent_execution_context: None,
+            effect_authority: launch_metadata.effect_authority.as_ref(),
             // Crash resume folds no new stimulus; it reloads its own checkpoint.
             suppress_stimulus: true,
             // Pin the captured authority verbatim (same as a machine relaunch).
@@ -8730,6 +9832,12 @@ async fn launch_claimed_native_resume(
         thread,
     )
     .await;
+    tracing::debug!(
+        thread_id = %thread_id,
+        recovery_stage = "launch-preparation-settled",
+        succeeded = result.is_ok(),
+        "managed native recovery stage"
+    );
     drop(params);
     result
 }
@@ -8959,6 +10067,7 @@ async fn launch_admitted_root_with_claim(
             pre_minted_thread_id: None,
             previous_thread_id: None,
             parent_execution_context: None,
+            effect_authority: metadata.effect_authority.as_ref(),
             suppress_stimulus: false,
             capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::None,
@@ -9036,7 +10145,7 @@ async fn launch_existing_native_resume_with_claim(
     // (flipping the awaiting waiter to `ready`) — so the parent must be kicked here
     // too, not left for the next restart.
     let child_chain_root_id = thread.chain_root_id.clone();
-    let result = launch_claimed_native_resume(&state, thread, &launch_owner).await;
+    let result = launch_claimed_native_resume(&state, thread, &launch_owner, None).await;
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
@@ -9196,6 +10305,7 @@ async fn launch_claimed_follow_child(
         // + 1 on the hot path; reconcile reconstructs the persisted parent
         // execution context below rather than silently granting root limits.
         parent_execution_context: Some(&parent_context),
+        effect_authority: metadata.effect_authority.as_ref(),
         launch_handoff,
     };
     match prepared_authority {
@@ -10260,6 +11370,121 @@ mod tests {
     use crate::execution::limits::{LimitCaps, LimitValues};
 
     #[test]
+    fn retained_launch_error_keeps_only_typed_bounded_stage_diagnostics() {
+        let secret = format!(
+            "sentinel-secret Authorization: Bearer token /private/path ENV_VALUE={} ",
+            "x".repeat(MAX_RETAINED_LAUNCH_ERROR_BYTES * 2)
+        );
+        let internal = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            secret.clone(),
+        ))
+        .context("unreviewed dynamic recovery detail")
+        .context(
+            crate::execution::persistent_session::SessionCapsuleVerificationStage::SourceClosure,
+        );
+        let error = BuildAndLaunchError::Internal(internal);
+        let retained = retained_launch_preparation_error(&error);
+        let encoded = lillux::canonical_json(&retained).unwrap();
+
+        assert_eq!(retained["code"], "launch_preparation_failed");
+        assert_eq!(retained["retryable"], true);
+        assert_eq!(
+            retained["stages"],
+            json!(["session-capsule/source-closure"])
+        );
+        assert!(encoded.len() <= MAX_RETAINED_LAUNCH_ERROR_BYTES);
+        assert!(!encoded.contains("sentinel-secret"));
+        assert!(!encoded.contains("Authorization"));
+        assert!(!encoded.contains("/private/path"));
+        assert!(!encoded.contains("ENV_VALUE"));
+        assert!(!encoded.contains("unreviewed dynamic recovery detail"));
+
+        let nonretryable = retained_launch_preparation_error(&BuildAndLaunchError::Internal(
+            anyhow::anyhow!("another sentinel secret"),
+        ));
+        assert_eq!(nonretryable["code"], "launch_preparation_failed");
+        assert_eq!(nonretryable["retryable"], false);
+        assert!(nonretryable.get("stages").is_none());
+        assert!(
+            !lillux::canonical_json(&nonretryable)
+                .unwrap()
+                .contains("another sentinel secret")
+        );
+    }
+
+    #[test]
+    fn post_wait_failure_is_persisted_before_lifecycle_cleanup() {
+        use std::sync::{Arc, Mutex};
+
+        struct DropRecord {
+            label: &'static str,
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl Drop for DropRecord {
+            fn drop(&mut self) {
+                self.events.lock().unwrap().push(self.label);
+            }
+        }
+
+        let observed_order = |launch_failed, settled_owned_wait| {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            drop_managed_launch_guards(
+                DropRecord {
+                    label: "failure",
+                    events: Arc::clone(&events),
+                },
+                DropRecord {
+                    label: "lifecycle",
+                    events: Arc::clone(&events),
+                },
+                failure_precedes_lifecycle_cleanup(launch_failed, settled_owned_wait),
+            );
+            Arc::try_unwrap(events).unwrap().into_inner().unwrap()
+        };
+
+        assert_eq!(observed_order(true, true), ["failure", "lifecycle"]);
+        assert_eq!(observed_order(true, false), ["lifecycle", "failure"]);
+        assert_eq!(observed_order(false, true), ["lifecycle", "failure"]);
+    }
+
+    #[test]
+    fn rotated_resume_cancellation_drops_failure_before_settled_cleanup() {
+        use std::sync::{Arc, Mutex};
+
+        struct DropRecord {
+            label: &'static str,
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl Drop for DropRecord {
+            fn drop(&mut self) {
+                self.events.lock().unwrap().push(self.label);
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        {
+            // This is the declaration order used only after the predecessor's
+            // exact attached wait has settled. Async cancellation drops locals
+            // in reverse order, preserving the real failure before cleanup.
+            let _lifecycle = DropRecord {
+                label: "lifecycle",
+                events: Arc::clone(&events),
+            };
+            let _failure = DropRecord {
+                label: "failure",
+                events: Arc::clone(&events),
+            };
+        }
+        assert_eq!(
+            Arc::try_unwrap(events).unwrap().into_inner().unwrap(),
+            ["failure", "lifecycle"]
+        );
+    }
+
+    #[test]
     fn machine_continuation_uses_its_durable_runtime_state_bootstrap() {
         let predecessor = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
             .with_continuation_source("T-source")
@@ -11255,7 +12480,6 @@ mod tests {
     #[test]
     fn materialized_descriptor_survives_path_substitution_without_inode_rebinding() {
         let _guard = materializer_test_guard();
-        use std::io::{Read as _, Seek as _};
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -11274,9 +12498,9 @@ mod tests {
         let held_inode = materialized
             .verified_command
             .executable()
-            .metadata()
+            .file_identity()
             .unwrap()
-            .ino();
+            .inode();
         let displaced = materialized.path.with_extension("displaced");
         std::fs::rename(&materialized.path, &displaced).unwrap();
         std::fs::write(&materialized.path, vec![0u8; fixture.bytes.len()]).unwrap();
@@ -11287,16 +12511,12 @@ mod tests {
             held_inode
         );
 
-        let mut exact = materialized
-            .verified_command
-            .executable()
-            .try_clone()
+        let exact = materialized.verified_command.executable();
+        let (bytes, _) = exact
+            .read_regular_file_stable_bounded(fixture.bytes.len() as u64)
             .unwrap();
-        exact.seek(std::io::SeekFrom::Start(0)).unwrap();
-        let mut bytes = Vec::new();
-        exact.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, fixture.bytes);
-        assert_eq!(exact.metadata().unwrap().ino(), held_inode);
+        assert_eq!(exact.file_identity().unwrap().inode(), held_inode);
     }
 
     #[test]
@@ -11592,6 +12812,7 @@ mod tests {
             spawns: 2,
             depth: 3,
             duration_seconds: 45,
+            aggregate: Default::default(),
             runtime: BTreeMap::from([
                 ("actions".to_string(), 4),
                 ("payload_bytes".to_string(), 8_192),
@@ -11615,6 +12836,7 @@ mod tests {
             spawns: 10,
             depth: 8,
             duration_seconds: 300,
+            aggregate: Default::default(),
             runtime: BTreeMap::from([
                 ("actions".to_string(), 12),
                 ("payload_bytes".to_string(), 65_536),

@@ -41,7 +41,7 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(&spec.requester_fingerprint))?;
+    ctx.require_owner(Some(spec.execution.principal_id()))?;
 
     let yaml_path = super::scheduler_register::canonical_schedule_source_path(
         &state.config.app_root,

@@ -162,7 +162,7 @@ jobs:
       # no write token or release authority, and runs on a disposable runner.
       - name: Qualify offline fresh-node activation, bank, restart, and replay
         run: |
-          scripts/release/qualify-local-inference-node.sh \
+          tests/e2e/local-inference-node/qualify.sh \
             --release-contract scripts/release/local-inference-qwen3-0.6b-v1.json \
             --bundle-source bundles \
             --ryeos-bin "$RUNNER_TEMP/local-inference-qualification-bin/ryeos" \
@@ -179,7 +179,7 @@ jobs:
 
       - name: Qualify online fresh-node activation, bank, restart, and replay
         run: |
-          scripts/release/qualify-local-inference-node.sh \
+          tests/e2e/local-inference-node/qualify.sh \
             --release-contract scripts/release/local-inference-qwen3-0.6b-v1.json \
             --bundle-source bundles \
             --ryeos-bin "$RUNNER_TEMP/local-inference-qualification-bin/ryeos" \

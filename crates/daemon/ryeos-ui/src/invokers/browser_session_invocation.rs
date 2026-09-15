@@ -72,6 +72,7 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
             verified: false,
             authorized_key_class: None,
             authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
             metadata: {
                 let mut m = BTreeMap::new();
                 if let Some(ref root) = session.project_root {

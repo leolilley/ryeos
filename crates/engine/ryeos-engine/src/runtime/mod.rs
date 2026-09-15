@@ -110,6 +110,12 @@ pub struct ChainIntermediate {
 pub struct TemplateContext {
     pub tool_path: PathBuf,
     pub project_path: Option<PathBuf>,
+    /// Schema-validated invocation parameters. A signed runtime descriptor
+    /// may select scalar values into one command argument or environment
+    /// value through rye-expr/1. Keep this as data in the existing template
+    /// context: adding a tool-specific argv builder or command multiplexer
+    /// would create a second execution-description path.
+    pub params: Value,
     pub params_json: String,
     pub interpreter: Option<String>,
     /// Handler-owned runtime context roots such as `tool_dir` and
@@ -122,6 +128,7 @@ impl TemplateContext {
         Self {
             tool_path,
             project_path: None,
+            params: Value::Null,
             params_json: String::new(),
             interpreter: None,
             extra: HashMap::new(),
@@ -172,6 +179,7 @@ fn compile_runtime_template(
         "tool_dir",
         "tool_parent",
         "project_path",
+        "params",
         "params_json",
         "interpreter",
         "runtime_dir",
@@ -201,6 +209,7 @@ fn render_compiled_runtime_template(
         "tool_path".to_owned(),
         Value::String(ctx.tool_path.to_string_lossy().into_owned()),
     );
+    roots.insert("params".to_owned(), ctx.params.clone());
     roots.insert(
         "params_json".to_owned(),
         Value::String(ctx.params_json.clone()),
@@ -558,6 +567,55 @@ pub fn compile_with_handlers(
     )>,
     sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
 ) -> Result<PlanSubprocessSpec, EngineError> {
+    compile_with_handlers_and_execution_root(
+        chain,
+        root_source_path,
+        chain_str,
+        ignored_keys,
+        registry,
+        params,
+        plan_env,
+        host_env,
+        project_root,
+        parsers,
+        kinds,
+        trust_store,
+        node_trust_store,
+        roots,
+        root_trust_class,
+        project_authority,
+        sealed_content,
+        project_root,
+    )
+}
+
+/// Separate process-path templating from authority to inspect project files.
+/// A logical execution root may populate argv/env/cwd, but it is never made
+/// available to interpreter discovery or source/config lookup handlers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_with_handlers_and_execution_root(
+    chain: &[ChainIntermediate],
+    root_source_path: &Path,
+    chain_str: &[String],
+    ignored_keys: &[String],
+    registry: &RuntimeHandlerRegistry,
+    params: &Value,
+    plan_env: &HashMap<String, String>,
+    host_env: &HostEnvBindings,
+    project_root: Option<&Path>,
+    parsers: &ParserDispatcher,
+    kinds: &KindRegistry,
+    trust_store: &TrustStore,
+    node_trust_store: &TrustStore,
+    roots: &ResolutionRoots,
+    root_trust_class: TrustClass,
+    project_authority: Option<(
+        &Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+    sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
+    execution_root: Option<&Path>,
+) -> Result<PlanSubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
         env: plan_env.clone(),
@@ -581,8 +639,9 @@ pub fn compile_with_handlers(
         root_trust_class,
         host_env,
     };
-    ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
+    ctx.template_ctx.project_path = execution_root.map(|p| p.to_path_buf());
 
+    ctx.template_ctx.params = params.clone();
     ctx.template_ctx.params_json = params.to_string();
 
     // Seed always-present template tokens computed from the chain
@@ -756,6 +815,7 @@ pub fn compile_with_handlers(
     // resolved configuration remains an explicit tool input; non-root timeout
     // and cancellation values do not become caller parameters.
     let invocation_params = subprocess_invocation_params(ctx.original_params, &ctx.params);
+    ctx.template_ctx.params = invocation_params.clone();
     ctx.template_ctx.params_json = invocation_params.to_string();
 
     let node_trust_ref = ctx.node_trust_store;
@@ -780,6 +840,14 @@ pub fn compile_with_handlers(
     // material instead of PATH. Unqualified refs stay wrapper-local;
     // qualified refs (`bin:<bundle>/<name>`) resolve from a registered bundle
     // while keeping runtime authority on the wrapper item.
+    //
+    // `realization:<id>/<member>` deliberately remains symbolic here. The
+    // engine has no CAS or target-local binding authority. Daemon admission
+    // resolves it from this execution's finalized external-realization set,
+    // retains the exact manifest/member coordinate, and isolation overlays the
+    // already-open member descriptor inside the complete realization tree. Do
+    // not solve this by adding a deferred child environment to a parent launch
+    // preparer: an ordinary child owns this admission itself.
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
         let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
             &cmd_expanded,
@@ -809,6 +877,12 @@ pub fn compile_with_handlers(
             }),
         )
     } else {
+        crate::external_content::parse_realization_command_ref(&cmd_expanded).map_err(|error| {
+            EngineError::InvalidRuntimeConfig {
+                path: "config.command".to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
         (cmd_expanded, None)
     };
 
@@ -823,7 +897,7 @@ pub fn compile_with_handlers(
         .stdin_data
         .as_deref()
         .map(|template| {
-            compile_stdin_template(template, &template_ctx, &invocation_params, project_root)
+            compile_stdin_template(template, &template_ctx, &invocation_params, execution_root)
         })
         .transpose()?;
 
@@ -846,7 +920,7 @@ pub fn compile_with_handlers(
         args,
         cwd: spec_overrides
             .cwd
-            .or_else(|| project_root.map(|p| p.to_path_buf())),
+            .or_else(|| execution_root.map(|p| p.to_path_buf())),
         env: expanded_env,
         env_sources: expanded_env_sources,
         stdin,
@@ -859,6 +933,84 @@ pub fn compile_with_handlers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn logical_execution_root_templates_do_not_grant_project_lookup_authority() {
+        struct AssertNoProjectLookup;
+        impl RuntimeHandler for AssertNoProjectLookup {
+            fn key(&self) -> &'static str {
+                "assert_no_project_lookup"
+            }
+            fn apply(&self, _: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
+                assert!(ctx.project_root.is_none());
+                assert!(ctx.project_authority.is_none());
+                assert!(ctx.roots.ordered.is_empty());
+                assert_eq!(
+                    ctx.template_ctx.project_path.as_deref(),
+                    Some(Path::new(
+                        ryeos_state::objects::ADMITTED_DIRECT_PROJECT_ROOT
+                    ))
+                );
+                Ok(())
+            }
+        }
+        let root = Path::new(ryeos_state::objects::ADMITTED_DIRECT_PROJECT_ROOT);
+        let source_path = Path::new("/bundle/.ai/tools/fixture.yaml");
+        let chain = [ChainIntermediate {
+            executor_id: "@subprocess".into(),
+            resolved_ref: "tool:fixture".into(),
+            kind: "tool".into(),
+            source_path: source_path.into(),
+            source_space: crate::contracts::ItemSpace::Bundle,
+            source_root: crate::contracts::ItemSourceRoot::Bundle {
+                name: "fixture".into(),
+            },
+            parsed: json!({
+                "assert_no_project_lookup": {},
+                "config": {"command":"/fixture/command", "args":["${project_path}"],
+                    "input_data":"${params_json}"},
+                "env_config":{"env":{"FIXTURE_ROOT":"${project_path}"}}
+            }),
+        }];
+        let mut registry = RuntimeHandlerRegistry::with_builtins();
+        registry.register(Arc::new(AssertNoProjectLookup));
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = KindRegistry::empty();
+        let trust = TrustStore::empty();
+        let roots = ResolutionRoots { ordered: vec![] };
+        let spec = compile_with_handlers_and_execution_root(
+            &chain,
+            source_path,
+            &["@subprocess".into()],
+            &[],
+            &registry,
+            &json!({"project_path":"ignored-caller-path"}),
+            &HashMap::new(),
+            &HostEnvBindings::default(),
+            None,
+            &parsers,
+            &kinds,
+            &trust,
+            &trust,
+            &roots,
+            TrustClass::TrustedBundle,
+            None,
+            None,
+            Some(root),
+        )
+        .unwrap();
+        assert_eq!(spec.args[0].literal_value(), root.to_str());
+        assert_eq!(spec.cwd.as_deref(), Some(root));
+        assert_eq!(
+            spec.env.get("FIXTURE_ROOT").map(String::as_str),
+            root.to_str()
+        );
+        let Some(crate::contracts::PlanStdin::RuntimeParameters { project_path, .. }) = spec.stdin
+        else {
+            panic!("expected typed parameter stdin");
+        };
+        assert_eq!(project_path.as_deref(), Some(root));
+    }
 
     #[test]
     fn env_value_expands_allowed_host_env_passthrough() {
@@ -950,6 +1102,34 @@ mod tests {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         let got = expand_env_value("${MY_HOST}-${tool_path}", &ctx, &host_env).unwrap();
         assert_eq!(got, "hello-/tool.yaml");
+    }
+
+    #[test]
+    fn validated_parameter_selects_one_runtime_argument_without_string_parsing() {
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params = json!({"package":"ryeos-app"});
+        let argument = RuntimeArgument::Template("${params.package}".to_owned());
+
+        assert_eq!(
+            render_runtime_argument(argument, &ctx)
+                .unwrap()
+                .literal_value(),
+            Some("ryeos-app")
+        );
+    }
+
+    #[test]
+    fn runtime_parameter_template_remains_one_argument() {
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params = json!({"package":"ryeos-app --workspace"});
+        let argument = RuntimeArgument::Template("${params.package}".to_owned());
+
+        assert_eq!(
+            render_runtime_argument(argument, &ctx)
+                .unwrap()
+                .literal_value(),
+            Some("ryeos-app --workspace")
+        );
     }
 
     #[test]

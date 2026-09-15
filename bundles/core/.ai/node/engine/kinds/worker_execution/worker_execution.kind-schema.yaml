@@ -1,5 +1,8 @@
-# ryeos:signed:2026-08-26T23:06:47Z:cf00cd4af697e358b66a20b7d545016e2e2481b4bf52e43d79f7428f22094cab:+r/TtqNbZTbypVy3QL2+qsR9XlfXBLySG0p8mIX06J84SeFk1GJ6A9Lc2rdGdoAoFa0xlXsjZTmT9law0zYpBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T03:28:04Z:0a1387738e52369514e4b098fb2c1d94b096b05903b86ade13a138356b2468e8:qzUD6/A4mA/EFTNLcV+fqetUdo/PgymAK4cvWsZkd4vXFm0cPqOEOmRO9wJ7+J9Om0vB32BL2Yn5AFrfq1zyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker_execution"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
 version: "1.0.0"
 location:
   directory: worker-executions

@@ -1,8 +1,7 @@
-<!-- ryeos:signed:2026-08-23T21:53:41Z:f3dada8709f91d9bab02d04b47671a448b3939d226b15941081ba33b57b60a7c:vVuqVvDhgVqcRO9hlW9SuSy6NsOAfiknqgiix04kZadHfz/Y51SRAMVZpK4zhzoBDmfCH66d8+5eg/EB0B2EBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/papers
 tags: [papers, research-program, index]
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Index and conventions for the RyeOS papers folder: the white paper thesis
   plus working notes for a four-paper research program on portable verified
@@ -12,8 +11,7 @@ description: >
 # RyeOS papers
 
 Working notes for a research program. One white paper and four papers, each
-defending exactly one claim, arranged so that every downstream claim is
-inherited from an upstream result rather than asserted fresh.
+defending exactly one claim, arranged so that downstream claims state their upstream assumptions and additional proof obligations.
 
 None of these files are drafts. They are reference material for later
 analysis, positioning, and writing — same register as the original white
@@ -21,15 +19,28 @@ paper notes.
 
 ## The program in one paragraph
 
-RyeOS changes what an execution is: an object (signed, content-addressed,
-durable) rather than an event (located, mortal, witnessed only by its
-machine). From that one substitution the rest is forced — portability forces
-proof, proof makes the executor fungible, fungible executors include
-authored-output executors (operators, models), and verification for that
-class is testimony, not recomputation. The papers walk that chain; the white
-paper carries the general systems thesis; the agent paper cashes the
-consequences; the forgetting paper keeps the program honest about
-permanence.
+RyeOS represents execution as signed, content-addressed, durable objects,
+separating work from its current executor. This motivates portable authority,
+recoverable histories and attributable judgment. These are connected design
+obligations, not automatic consequences of serializing a run. The papers
+develop that systems thesis, its implications for agents and measurement, and
+the retention and privacy obligations it creates.
+
+## Claim status and alignment
+
+The September 2026 alignment distinguishes architectural hypotheses from
+proved results and current release guarantees. Earlier impossibility claims
+about other systems, automatic recovery/federation, and unconditional
+permanence are withdrawn. Other systems can adopt similar contracts; the
+question is architectural fit and demonstrated behavior.
+
+Signatures establish attribution under key/trust assumptions, not external
+truth, complete history or legal identity. Governance complements enforcement.
+The newer [enduring-environment synthesis](../future/enduring-working-environment.md)
+and [adaptation evidence note](../future/governed-adaptation-and-memory-evidence.md)
+supply the product-facing boundaries. Changes here align the argument, not
+authorize their implementation. Edited papers are unsigned pending review and
+normal signing.
 
 ## Files
 

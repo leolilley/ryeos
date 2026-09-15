@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:09Z:1186a79d3e5855420b385294ca1cb259fa40d330abed8275d1b4d60608dcc874:guQgIqnLsXcuS+hGHJO+vtch4k+VxmyGVBh08UljVG0R6A1bYeU4HVvgn2nXiSwBe9icgN+GmMY91qtfKq2VBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T04:33:06Z:ea93ad685711eb868afba87e90fe41781f15bd5d7e9472ee5d0f0c6566479be3:giSHzyD7/xsGyGCLStBC7JQjma5Mrh94Jx1bMqXlodfT1QwgBDVd8QIT2P4vPSR34TKz8xOvHg37mFCp2eK0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - status
@@ -9,6 +9,7 @@ forms:
 project:
   resolution: optional
   bind_parameter: project
+  bind_no_project_parameter: no_project
   no_project_flag: true
 dispatch:
   kind: execute_ref

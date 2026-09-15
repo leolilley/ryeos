@@ -24,6 +24,7 @@ fn shell_write(marker: &Path) -> SubprocessRequest {
         timeout: 30.0,
         limits: None,
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     }
 }

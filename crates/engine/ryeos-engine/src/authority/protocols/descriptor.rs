@@ -52,6 +52,12 @@ pub struct ProtocolDescriptor {
     /// of stdio. Absence means this is an ordinary one-shot protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<PersistentSessionProtocol>,
+
+    /// Optional pure projector for execution-specific result/call evidence.
+    /// Its owning protocol ref and signed digest are selected from the exact
+    /// direct launch artifact identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_evidence: Option<ryeos_handler_protocol::ExecutionEvidenceProjectorDeclWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,11 +90,33 @@ pub enum PersistentSessionWorkspaceAuthority {
     RuntimeWorkspace,
 }
 
+impl PersistentSessionWorkspaceAuthority {
+    pub fn filesystem_ceiling(self) -> crate::isolation::IsolationFilesystemAuthorityCeiling {
+        match self {
+            Self::EphemeralScratch => {
+                crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+            }
+            Self::RuntimeWorkspace => {
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PersistentSessionNetworkAuthority {
     Isolated,
     NodePolicy,
+}
+
+impl PersistentSessionNetworkAuthority {
+    pub fn network_ceiling(self) -> crate::isolation::IsolationNetworkAuthorityCeiling {
+        match self {
+            Self::Isolated => crate::isolation::IsolationNetworkAuthorityCeiling::Isolated,
+            Self::NodePolicy => crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +292,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::Http,
             session: None,
+            execution_evidence: None,
         }
     }
 

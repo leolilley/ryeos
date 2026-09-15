@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-08T10:36:34Z:a47b177f63865edc3a061364ebf7bef6ec844b21ebc516b7f2957a1dbfa5d214:gb5sXeAfFP13vyt25slbEOm5/o6KEKkpc6jB0JLh/evk9ZYecleZARNxngf8iPPm4aF+1/c/atv/pDjS6ywaBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Independently qualified GNU CPython runtime selection
+external_content: []
+external_product_slots:
+  - id: runtime
+    relationship_ref: config:development/ryeos/gnu-python-products
+    relationship: runtime_to_qualified_runtime
+    kind: tree
+    mount_root: execution_runtime
+    mount: python-gnu

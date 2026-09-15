@@ -23,7 +23,9 @@
 mod common;
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use common::DaemonHarness;
 use common::fast_fixture::FastFixture;
 use lillux::crypto::SigningKey;
@@ -106,6 +108,382 @@ description: "synth runtime for runtime_e2e"
     Ok(())
 }
 
+/// Install a runtime that reaches the real same-daemon native-resume handoff.
+///
+/// The tiny native fixture blocks after held-process attachment/release,
+/// allowing the test to make one deliberate fixture-local corruption in the
+/// disposable runtime database. It then emits the ordinary typed recovery
+/// control envelope directly; no shell, interpreter fallback, or executor
+/// fault-injection hook participates in the test.
+fn install_rotated_recovery_runtime(
+    root: &Path,
+    marker: &Path,
+    release: &Path,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let marker = marker
+        .to_str()
+        .filter(|path| {
+            !path
+                .chars()
+                .any(|ch| matches!(ch, '\n' | '\r' | '"' | '\\'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("test marker path is not safe C string text"))?;
+    let release = release
+        .to_str()
+        .filter(|path| {
+            !path
+                .chars()
+                .any(|ch| matches!(ch, '\n' | '\r' | '"' | '\\'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("test release path is not safe C string text"))?;
+    let process_control_schema = ryeos_runtime::process_outcome::RUNTIME_PROCESS_CONTROL_SCHEMA;
+    let recovery_reason = serde_json::to_value(
+        ryeos_runtime::process_outcome::RuntimeRecoveryReason::RetainedProgressOutcomeUnknown,
+    )?;
+    let recovery_reason = recovery_reason
+        .as_str()
+        .filter(|value| {
+            !value
+                .chars()
+                .any(|ch| matches!(ch, '\n' | '\r' | '"' | '\\'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("typed recovery reason is not safe C string text"))?;
+    anyhow::ensure!(
+        !process_control_schema
+            .chars()
+            .any(|ch| matches!(ch, '\n' | '\r' | '"' | '\\')),
+        "typed process-control schema is not safe C string text"
+    );
+    let source = format!(
+        r#"#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+static int write_all(int fd, const char *bytes, size_t length) {{
+    while (length > 0) {{
+        ssize_t written = write(fd, bytes, length);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return -1;
+        bytes += written;
+        length -= (size_t)written;
+    }}
+    return 0;
+}}
+
+int main(void) {{
+    const char *thread_id = getenv("RYEOSD_THREAD_ID");
+    if (thread_id == NULL || thread_id[0] == '\0' || strlen(thread_id) > 128) return 70;
+    char marker_payload[256];
+    int marker_length = snprintf(
+        marker_payload,
+        sizeof(marker_payload),
+        "%s %ld %ld\n",
+        thread_id,
+        (long)getpid(),
+        (long)getpgrp()
+    );
+    if (marker_length <= 0 || (size_t)marker_length >= sizeof(marker_payload)) return 79;
+    int marker = open("{marker}", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (marker < 0) return 72;
+    if (write_all(marker, marker_payload, (size_t)marker_length) != 0 || fsync(marker) != 0 || close(marker) != 0) return 73;
+
+    struct stat release_stat;
+    struct timespec delay = {{.tv_sec = 0, .tv_nsec = 25000000L}};
+    unsigned int attempt;
+    for (attempt = 0; attempt < 400; ++attempt) {{
+        if (lstat("{release}", &release_stat) == 0) {{
+            if (!S_ISREG(release_stat.st_mode)) return 74;
+            break;
+        }}
+        if (errno != ENOENT) return 75;
+        while (nanosleep(&delay, &delay) != 0) {{
+            if (errno != EINTR) return 76;
+        }}
+        delay.tv_sec = 0;
+        delay.tv_nsec = 25000000L;
+    }}
+    if (attempt == 400) return 71;
+    if (printf("{{\"process_outcome\":\"recovery_required\",\"schema\":\"{process_control_schema}\",\"thread_id\":\"%s\",\"reason\":\"{recovery_reason}\"}}\n", thread_id) < 0) return 77;
+    return fflush(stdout) == 0 ? 0 : 78;
+}}
+"#
+    );
+    let build = tempfile::tempdir().context("create native recovery fixture build directory")?;
+    let source_path = build.path().join("rotated-recovery-runtime.c");
+    let binary_path = build.path().join("rotated-recovery-runtime");
+    std::fs::write(&source_path, source).context("write native recovery fixture source")?;
+    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let output = std::process::Command::new(&compiler)
+        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .with_context(|| format!("run native recovery fixture compiler {compiler:?}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "native recovery fixture compiler failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let binary = std::fs::read(&binary_path).context("read native recovery fixture binary")?;
+    anyhow::ensure!(
+        binary.starts_with(b"\x7fELF"),
+        "native recovery fixture compiler did not produce an ELF binary"
+    );
+    let binary_ref = common::fast_fixture::install_signed_bundle_binary(
+        root,
+        "e2e-rotated-recovery-runtime",
+        &binary,
+        signer,
+    )?;
+    let runtimes_dir = root.join(".ai/runtimes");
+    std::fs::create_dir_all(&runtimes_dir)?;
+    let body = format!(
+        r#"kind: runtime
+serves: e2e_recovery_kind
+default: true
+binary_ref: {binary_ref}
+abi_version: "v3"
+required_caps:
+  - runtime.execute
+native_resume:
+  checkpoint_interval_secs: 1
+  max_auto_resume_attempts: 1
+launch_contract:
+  primary_allowed_kinds: [e2e_recovery_kind]
+  primary_allowed_spaces: [bundle, project]
+  primary_allowed_trust: [trusted_bundle, trusted_project]
+  ref_bindings: {{}}
+  preparation:
+    kind: none
+  config_inputs: {{}}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {{}}
+  financial_authority:
+    kind: none
+  external_effect_authority:
+    kind: none
+description: "same-daemon rotated recovery fixture"
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(
+        runtimes_dir.join("e2e-rotated-recovery-runtime.yaml"),
+        signed,
+    )?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RotatedRecoveryMarker {
+    thread_id: String,
+    pid: i64,
+    pgid: i64,
+}
+
+fn parse_rotated_recovery_marker(raw: &str) -> anyhow::Result<RotatedRecoveryMarker> {
+    let mut fields = raw.split_whitespace();
+    let marker = RotatedRecoveryMarker {
+        thread_id: fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("native recovery marker omitted its thread ID"))?
+            .to_owned(),
+        pid: fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("native recovery marker omitted its PID"))?
+            .parse()
+            .context("parse native recovery marker PID")?,
+        pgid: fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("native recovery marker omitted its PGID"))?
+            .parse()
+            .context("parse native recovery marker PGID")?,
+    };
+    anyhow::ensure!(
+        fields.next().is_none() && !marker.thread_id.is_empty(),
+        "native recovery marker has an invalid field count"
+    );
+    anyhow::ensure!(
+        marker.pid > 0 && marker.pgid > 0,
+        "native recovery marker has invalid PID coordinates"
+    );
+    Ok(marker)
+}
+
+/// Read-only proof that the marker-writing process is the exact live process
+/// durably attached to this thread and owned by its current launch claim.
+/// Missing fields are transient while attachment commits; contradictory fields
+/// are hard test failures. This deliberately mirrors the typed runtime-store
+/// invariants without adding a production corruption or observation API.
+fn prove_rotated_recovery_process_attached(
+    state_path: &Path,
+    marker: &RotatedRecoveryMarker,
+) -> anyhow::Result<Option<usize>> {
+    let db_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let connection =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    let row = connection.query_row(
+        "SELECT runtime.pid, runtime.pgid, runtime.process_identity, runtime.launch_metadata, \
+                claim.claim_id, claim.claimed_by, epoch.last_epoch \
+           FROM thread_runtime AS runtime \
+           LEFT JOIN thread_launch_claim AS claim ON claim.thread_id=runtime.thread_id \
+           LEFT JOIN thread_launch_epoch AS epoch ON epoch.thread_id=runtime.thread_id \
+          WHERE runtime.thread_id=?1",
+        rusqlite::params![&marker.thread_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        },
+    );
+    let (pid, pgid, process_identity, launch_metadata, claim_id, claimed_by, launch_epoch) =
+        match row {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+    let (
+        Some(pid),
+        Some(pgid),
+        Some(process_identity),
+        Some(launch_metadata),
+        Some(claim_id),
+        Some(claimed_by),
+        Some(launch_epoch),
+    ) = (
+        pid,
+        pgid,
+        process_identity,
+        launch_metadata,
+        claim_id,
+        claimed_by,
+        launch_epoch,
+    )
+    else {
+        return Ok(None);
+    };
+
+    anyhow::ensure!(
+        pid == marker.pid && pgid == marker.pgid,
+        "marker PID/PGID {}/{} contradict durable attachment {pid}/{pgid}",
+        marker.pid,
+        marker.pgid
+    );
+    let identity: ryeos_app::process::ExecutionProcessIdentity =
+        serde_json::from_str(&process_identity)
+            .context("decode attached native recovery process identity")?;
+    ryeos_app::process::validate_execution_process_identity_shape(&identity)
+        .context("validate attached native recovery process identity")?;
+    anyhow::ensure!(
+        identity.target_pid == marker.pid && identity.group_leader_pid == marker.pgid,
+        "marker coordinates contradict the attached exact process identity"
+    );
+    anyhow::ensure!(
+        ryeos_app::process::execution_alive(&identity),
+        "marker-writing native process is not the exact live attached incarnation"
+    );
+
+    let owner: ryeos_app::runtime_db::LaunchOwner = serde_json::from_str(&claimed_by)
+        .context("decode attached native recovery launch owner")?;
+    let canonical_owner = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
+    anyhow::ensure!(
+        canonical_owner == claimed_by
+            && owner.thread_id == marker.thread_id
+            && owner.unpredictable_nonce == claim_id
+            && owner.monotonic_launch_epoch == u64::try_from(launch_epoch)?
+            && owner.monotonic_launch_epoch > 0
+            && !owner.daemon_generation_id.is_empty(),
+        "durable launch owner contradicts its exact native recovery claim"
+    );
+    let metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
+        serde_json::from_str(&launch_metadata)
+            .context("decode attached native recovery launch metadata")?;
+    metadata
+        .validate()
+        .context("validate attached native recovery launch metadata")?;
+    let sealed = metadata.sealed_root_request.as_ref();
+    anyhow::ensure!(
+        metadata.native_resume.is_some() && metadata.resume_context.is_some() && sealed.is_some(),
+        "attached native recovery process lacks its fully sealed resume metadata"
+    );
+    let source_bytes = sealed
+        .expect("sealed request presence was proved")
+        .admitted_program_subject()
+        .context("read exact admitted native recovery subject")?
+        .source_content
+        .into_bytes();
+    Ok(Some(source_bytes.len()))
+}
+
+/// Plant one conflicting recovery-only source materialization after the exact
+/// admitted process is attached but before it requests rotation. Runtime
+/// metadata and the authoritative CAS capsule remain valid and unchanged;
+/// reconstruction must reject this operational path rather than overwrite it.
+fn plant_conflicting_rotated_recovery_source(
+    app_root: &Path,
+    thread_id: &str,
+    admitted_source_bytes: usize,
+) -> anyhow::Result<()> {
+    let capsule_root = ryeos_app::launch_metadata::daemon_thread_state_dir(app_root, thread_id)
+        .join("launch-capsule");
+    let root = lillux::PinnedDirectory::open_or_create(&capsule_root)
+        .context("open recovery capsule materialization root")?;
+    root.set_mode(0o700)?;
+    root.ensure_path_binding()?;
+    anyhow::ensure!(
+        root.atomic_create_regular(
+            std::ffi::OsStr::new("subject.source"),
+            &vec![b'!'; admitted_source_bytes],
+            0o600,
+        )?
+        .is_some(),
+        "recovery capsule source was materialized before the deliberate conflict"
+    );
+    root.ensure_path_binding()?;
+    Ok(())
+}
+
 /// Install a minimal kind schema for `kind` at
 /// `<root>/.ai/node/engine/kinds/<kind>/` so the engine's
 /// RuntimeRegistry boot validation (ε.2) accepts a runtime that serves
@@ -132,6 +510,19 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
+  # Managed launch always captures a signed hook plan before minting callback
+  # authority. This synthetic kind has no authored hooks, but it still owns a
+  # finite event contract so the captured plan is an authenticated empty plan
+  # rather than an implicit hook-free exception.
+  hooks:
+    authored_path: [hooks]
+    plan_derived: effective_hook_plan
+    events:
+      fixture_terminal:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, status]
+        allowed_results: [discard]
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -276,6 +667,206 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
              (native:/manifest/bundle/binary), got: {err}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure() {
+    let control = tempfile::tempdir().expect("recovery fixture control directory");
+    let marker = control.path().join("attached-thread-id");
+    let release = control.path().join("release-runtime");
+    let planted_marker = marker.clone();
+    let planted_release = release.clone();
+    let plant = move |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        let bundle_root = state.join(".ai/bundles/runtime-e2e-rotated-recovery");
+        std::fs::create_dir_all(&bundle_root)?;
+        install_kind_schema(&bundle_root, "e2e_recovery_kind", &fixture.publisher)?;
+        let items = bundle_root.join(".ai/e2e_recovery_kind_items");
+        std::fs::create_dir_all(&items)?;
+        std::fs::write(
+            items.join("rotated-recovery.yaml"),
+            lillux::signature::sign_content("{}\n", &fixture.publisher, "#", None),
+        )?;
+        install_rotated_recovery_runtime(
+            &bundle_root,
+            &planted_marker,
+            &planted_release,
+            &fixture.publisher,
+        )?;
+        common::fast_fixture::register_fixture_bundle(
+            state,
+            "runtime-e2e-rotated-recovery",
+            &bundle_root,
+            fixture,
+        )
+    };
+    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with rotated-recovery runtime");
+
+    let execute = h.post_execute(
+        "e2e_recovery_kind:rotated-recovery",
+        ".",
+        serde_json::json!({}),
+    );
+    let corrupt = async {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let marker = loop {
+            if let Ok(raw) = std::fs::read_to_string(&marker)
+                && !raw.is_empty()
+            {
+                break parse_rotated_recovery_marker(&raw)?;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "fixture runtime never published its native process marker"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let admitted_source_bytes = loop {
+            if let Some(admitted_source_bytes) =
+                prove_rotated_recovery_process_attached(&h.state_path, &marker)?
+            {
+                break admitted_source_bytes;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "marker-writing process never acquired its exact durable process attachment and launch owner"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        plant_conflicting_rotated_recovery_source(
+            &h.state_path,
+            &marker.thread_id,
+            admitted_source_bytes,
+        )?;
+        anyhow::ensure!(
+            prove_rotated_recovery_process_attached(&h.state_path, &marker)?.is_some(),
+            "native recovery attachment changed while planting its reconstruction conflict"
+        );
+        std::fs::write(&release, b"release")?;
+        Ok::<String, anyhow::Error>(marker.thread_id)
+    };
+    let (response, thread_id) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(execute, corrupt)
+    })
+    .await
+    .expect("rotated recovery request timed out");
+    let (status, body) = response.expect("post rotated-recovery runtime");
+    let thread_id = match thread_id {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            let daemon_stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "plant conflicting recovery source: {error:#}; exact execute response={status} \
+                 {body:#}; daemon stderr before fixture teardown:\n{daemon_stderr}"
+            );
+        }
+    };
+
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        if let Ok(db) = ryeos_state::projection::ProjectionDb::open(&projection_path)
+            && let Ok(Some(result)) = ryeos_state::queries::get_thread_result(&db, &thread_id)
+        {
+            break result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rotated failure was not projected; response={status} {body:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(result.status, "failed", "response={status} {body:#}");
+    assert!(
+        result.outcome_code.is_none(),
+        "generic managed-launch finalization must retain its typed cause in error"
+    );
+    let error: serde_json::Value = serde_json::from_str(
+        result
+            .error
+            .as_deref()
+            .expect("rotated reconstruction failure retains structured error"),
+    )
+    .expect("projected failure error is JSON");
+    assert_eq!(error["code"].as_str(), Some("launch_failure"));
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("materialization has conflicting content")),
+        "wrong reconstruction failure: {error:#}; response={status} {body:#}"
+    );
+
+    // This fixture deliberately uses the projectless lane: it proves the real
+    // attached process was compare-cleared and that rotation did not invent or
+    // retain workspace membership. Physical cleanup of an existing pinned-COW
+    // view belongs to its separate workspace lifecycle integration fixtures.
+    let runtime_db_path = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let connection = rusqlite::Connection::open_with_flags(
+        runtime_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open runtime DB read-only");
+    let runtime: (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "SELECT resume_attempts, pid, pgid, process_identity, workspace_id, \
+                    workspace_view_identity, workspace_borrower_launch_owner \
+               FROM thread_runtime WHERE thread_id=?1",
+            rusqlite::params![thread_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .expect("read settled runtime row");
+    assert_eq!(runtime.0, 1, "recovery did not rotate exactly once");
+    assert!(
+        runtime.1.is_none() && runtime.2.is_none() && runtime.3.is_none(),
+        "settled recovery retained a process attachment"
+    );
+    assert!(
+        runtime.4.is_none() && runtime.5.is_none() && runtime.6.is_none(),
+        "projectless recovery retained workspace membership"
+    );
+    let claims: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM thread_launch_claim WHERE thread_id=?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )
+        .expect("count retained launch claims");
+    assert_eq!(claims, 0, "rotated launch claim leaked after settlement");
+    let workspaces: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM execution_workspace WHERE thread_id=?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )
+        .expect("count projectless workspaces");
+    assert_eq!(
+        workspaces, 0,
+        "workspace-less fixture unexpectedly acquired a workspace"
+    );
 }
 
 // ── 4. Multi-default conflict at startup → daemon refuses ──────────────

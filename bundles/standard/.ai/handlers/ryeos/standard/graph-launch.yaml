@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-08T01:19:44Z:4ae4508af121c545127a9462ebce14a4832ab8e3426d2bcc547b923967cc40b9:yVSedJbRGOg+9X7cJ+Y5rc6dDtarxn/dNuLgJMHudYWKCf0y6SqELY0UUoyuh959aKcCdgsXVSW8eND+LoaJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/standard
+name: graph-launch
+kind: handler
+serves: launch_preparer
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-launch-preparer
+abi_version: "v3"
+required_caps: []
+description: "Pure optional product-recipe admission for graphs"

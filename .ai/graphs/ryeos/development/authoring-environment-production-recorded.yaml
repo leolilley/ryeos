@@ -1,0 +1,84 @@
+# ryeos:signed:2026-09-08T14:41:32Z:3ed5269e748782f5ab8420bc4f20d55f87a68909e3b9ebaf60d687389aea9b75:ZWzydpH31F5EfYz8D0SZsx4ICNweraX/PVTnRyk8afxaQwTqBoxDP9nlXL1NEMxL7lwOuAYBl2N+DRhSyHyQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Reuse or run the exact retained authoring-environment producer
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.ryeos/development/authoring-environment-production
+      - ryeos.execute.config.development/ryeos/authoring-environment-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/assemble
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/verify
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    required: [assembly_inputs_selection, built_utilities_selection]
+    properties:
+      assembly_inputs_selection:
+        type: object
+        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        properties:
+          declaration_id: {type: string, enum: [assembly-inputs]}
+          witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+          qualification_hash: {type: "null"}
+          witness_source:
+            oneOf:
+              - type: object
+                required: [kind]
+                properties:
+                  kind: {const: local_capture}
+                additionalProperties: false
+              - type: object
+                required: [kind, acceptance_hash]
+                properties:
+                  kind: {const: received}
+                  acceptance_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+                additionalProperties: false
+        additionalProperties: false
+      built_utilities_selection:
+        type: object
+        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        properties:
+          declaration_id: {type: string, enum: [built-utilities]}
+          witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+          qualification_hash: {type: "null"}
+          witness_source:
+            oneOf:
+              - type: object
+                required: [kind]
+                properties:
+                  kind: {const: local_capture}
+                additionalProperties: false
+              - type: object
+                required: [kind, acceptance_hash]
+                properties:
+                  kind: {const: received}
+                  acceptance_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+                additionalProperties: false
+        additionalProperties: false
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:ryeos/development/authoring-environment-production
+        ref_bindings: {}
+        params: {}
+        product_selections:
+          - target: {kind: root}
+            selection: "${inputs.assembly_inputs_selection}"
+          - target: {kind: root}
+            selection: "${inputs.built_utilities_selection}"
+      assign:
+        accepted_products: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.accepted_products}"

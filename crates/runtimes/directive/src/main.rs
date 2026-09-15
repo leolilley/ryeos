@@ -42,25 +42,40 @@ fn compile_stimulus(
 
     let mut referenced_inputs = std::collections::BTreeSet::new();
     for reference in compiled.references().iter() {
-        if reference.root() == "inputs" && reference.is_dynamic() {
-            anyhow::bail!(
-                "directive user prompt cannot use a dynamic inputs[...] reference; \
-                 use an exact inputs.name or inputs[\"name\"] reference"
-            );
-        }
-        if reference.root() != "inputs" {
-            anyhow::bail!(
-                "directive user prompt expression root `{}` is not available; only `inputs` is allowed",
-                reference.root()
-            );
-        }
-        match reference.segments() {
-            [ryeos_runtime::ReferenceSegment::Key(key)] => {
-                referenced_inputs.insert(key.clone());
+        match reference.root() {
+            "inputs" => {
+                if reference.is_dynamic() {
+                    anyhow::bail!(
+                        "directive user prompt cannot use a dynamic inputs[...] reference; \
+                         use an exact inputs.name or inputs[\"name\"] reference"
+                    );
+                }
+                match reference.segments() {
+                    [ryeos_runtime::ReferenceSegment::Key(key)] => {
+                        referenced_inputs.insert(key.clone());
+                    }
+                    _ => anyhow::bail!(
+                        "directive user prompt references must name exactly one input with \
+                         inputs.name or inputs[\"name\"]"
+                    ),
+                }
+            }
+            "execution" => {
+                if reference.is_dynamic()
+                    || !matches!(
+                        reference.segments().first(),
+                        Some(ryeos_runtime::ReferenceSegment::Key(key)) if key == "schedule"
+                    )
+                {
+                    anyhow::bail!(
+                        "directive user prompt execution references must use the static \
+                         execution.schedule namespace"
+                    );
+                }
             }
             _ => anyhow::bail!(
-                "directive user prompt references must name exactly one input with \
-                 inputs.name or inputs[\"name\"]"
+                "directive user prompt expression root `{}` is not available; only `inputs` and `execution` are allowed",
+                reference.root()
             ),
         }
     }
@@ -74,19 +89,27 @@ fn compile_stimulus(
 /// Callers invoke this only on fresh launches and operator follow-ups. A
 /// suppressed machine continuation must not call it: its unused prompt is
 /// deliberately neither compiled nor rendered.
-fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<String> {
+fn render_stimulus(
+    prompt_template: &str,
+    inputs: &serde_json::Value,
+    scheduled_fire: Option<&ryeos_engine::contracts::ScheduledFireContext>,
+) -> Result<String> {
     let evaluation_limits = ryeos_runtime::EvaluationLimits::default();
-    render_stimulus_with_limits(prompt_template, inputs, &evaluation_limits)
+    render_stimulus_with_limits(prompt_template, inputs, scheduled_fire, &evaluation_limits)
 }
 
 fn render_stimulus_with_limits(
     prompt_template: &str,
     inputs: &serde_json::Value,
+    scheduled_fire: Option<&ryeos_engine::contracts::ScheduledFireContext>,
     evaluation_limits: &ryeos_runtime::EvaluationLimits,
 ) -> Result<String> {
     let (compiled, referenced_inputs) = compile_stimulus(prompt_template)?;
 
-    let context = ryeos_runtime::EvaluationContext::new().with_root("inputs", inputs);
+    let execution = ryeos_engine::scheduled_fire_context::execution_context_value(scheduled_fire);
+    let context = ryeos_runtime::EvaluationContext::new()
+        .with_root("inputs", inputs)
+        .with_root("execution", &execution);
     let mut session = ryeos_runtime::EvaluationSession::with_context(&context, evaluation_limits);
     let rendered_prompt = match session.render_template(&compiled)? {
         serde_json::Value::String(rendered) => rendered,
@@ -487,6 +510,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             let rendered_prompt = render_stimulus(
                 &bootstrap_output.config.user_prompt,
                 &envelope.request.inputs,
+                envelope.request.scheduled_fire.as_ref(),
             )?;
             callback.emit_stimulus(&rendered_prompt).await?;
             resume_state.messages.push(directive::ProviderMessage {
@@ -539,6 +563,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let rendered_prompt = render_stimulus(
             &bootstrap_output.config.user_prompt,
             &envelope.request.inputs,
+            envelope.request.scheduled_fire.as_ref(),
         )?;
         callback.emit_stimulus(&rendered_prompt).await?;
 
@@ -634,6 +659,7 @@ mod tests {
         let rendered = render_stimulus(
             "Question: ${inputs.question} / ${inputs[\"question\"]}",
             &json!({"question": "why?", "depth": 3}),
+            None,
         )
         .expect("render directive stimulus");
 
@@ -647,6 +673,7 @@ mod tests {
         let error = render_stimulus(
             "${inputs[inputs.selected]}",
             &json!({"selected": "question", "question": "why?"}),
+            None,
         )
         .expect_err("dynamic input reference must fail");
 
@@ -655,16 +682,24 @@ mod tests {
 
     #[test]
     fn rendered_stimulus_rejects_non_input_roots() {
-        let error = render_stimulus("${state.question}", &json!({"question": "why?"}))
+        let error = render_stimulus("${state.question}", &json!({"question": "why?"}), None)
             .expect_err("non-input root must fail");
 
-        assert!(error.to_string().contains("only `inputs` is allowed"));
+        assert!(
+            error
+                .to_string()
+                .contains("only `inputs` and `execution` are allowed")
+        );
     }
 
     #[test]
     fn rendered_stimulus_rejects_removed_input_interpolation() {
-        let error = render_stimulus("Question: {input:question}", &json!({"question": "why?"}))
-            .expect_err("removed input interpolation must fail");
+        let error = render_stimulus(
+            "Question: {input:question}",
+            &json!({"question": "why?"}),
+            None,
+        )
+        .expect_err("removed input interpolation must fail");
 
         assert!(error.to_string().contains("removed `{input:...}`"));
         assert!(error.to_string().contains("${inputs.name}"));
@@ -672,7 +707,7 @@ mod tests {
 
     #[test]
     fn removed_interpolation_text_inside_expression_string_is_data() {
-        let rendered = render_stimulus(r#"${"{input:question}"}"#, &json!({}))
+        let rendered = render_stimulus(r#"${"{input:question}"}"#, &json!({}), None)
             .expect("literal expression string");
 
         assert_eq!(rendered, "{input:question}");
@@ -685,7 +720,7 @@ mod tests {
             ..ryeos_runtime::EvaluationLimits::default()
         };
 
-        let error = render_stimulus_with_limits("ok", &json!({"x": "too long"}), &limits)
+        let error = render_stimulus_with_limits("ok", &json!({"x": "too long"}), None, &limits)
             .expect_err("oversized unused input must fail within the expression budget");
 
         assert!(error.to_string().contains("scalar is"));
@@ -694,9 +729,31 @@ mod tests {
 
     #[test]
     fn rendered_stimulus_requires_a_string_result() {
-        let error = render_stimulus("${inputs.count}", &json!({"count": 3}))
+        let error = render_stimulus("${inputs.count}", &json!({"count": 3}), None)
             .expect_err("whole prompt must produce a string");
 
         assert!(error.to_string().contains("non-string value"));
+    }
+
+    #[test]
+    fn rendered_stimulus_exposes_the_typed_scheduled_fire_context() {
+        let schedule = ryeos_engine::contracts::ScheduledFireContext::new(
+            "campaign.nightly".to_owned(),
+            "campaign.nightly@1700000000000".to_owned(),
+            1_700_000_000_000,
+            1_700_000_000_123,
+            "normal".to_owned(),
+            "a".repeat(64),
+        )
+        .unwrap();
+
+        let rendered = render_stimulus(
+            "Fire ${execution.schedule.fire_id}",
+            &json!({}),
+            Some(&schedule),
+        )
+        .expect("render scheduled execution context");
+
+        assert_eq!(rendered, "Fire campaign.nightly@1700000000000");
     }
 }

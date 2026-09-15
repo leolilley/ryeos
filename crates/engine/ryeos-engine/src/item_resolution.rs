@@ -804,6 +804,9 @@ mod tests {
             content: None,
             execution: Some(crate::kind_registry::ExecutionSchema {
                 effect_class_ceiling: None,
+                workspace_access: None,
+                network_authority_ceiling: None,
+                filesystem_authority_ceiling: None,
                 aliases: std::collections::HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,

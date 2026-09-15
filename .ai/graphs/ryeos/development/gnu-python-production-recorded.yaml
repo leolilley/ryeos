@@ -1,0 +1,59 @@
+# ryeos:signed:2026-09-08T14:41:33Z:c94f5404a53cf5d5c114d4fd785b00e77a07f7b65054e4b9c573ee404931a457:7Sw0JuQStxWRfxNGyWbx/mL3i4tX8ES2tUN7HRp6YM5+eYaGBcvpwk5AM/aBHRN+nu4xANl3EViTqsqJtEt3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Reuse or run the exact retained GNU CPython distribution producer
+effects: recorded
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.ryeos/development/gnu-python-production
+      - ryeos.execute.config.development/ryeos/gnu-python-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/produce-gnu-python
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    required: [production_support_selection]
+    properties:
+      production_support_selection:
+        type: object
+        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        properties:
+          declaration_id: {type: string, enum: [production-support]}
+          witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+          qualification_hash: {type: "null"}
+          witness_source:
+            oneOf:
+              - type: object
+                required: [kind]
+                properties:
+                  kind: {const: local_capture}
+                additionalProperties: false
+              - type: object
+                required: [kind, acceptance_hash]
+                properties:
+                  kind: {const: received}
+                  acceptance_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+                additionalProperties: false
+        additionalProperties: false
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:ryeos/development/gnu-python-production
+        ref_bindings: {}
+        params: {}
+        product_selections:
+          - target: {kind: root}
+            selection: "${inputs.production_support_selection}"
+      assign:
+        accepted_products: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.accepted_products}"

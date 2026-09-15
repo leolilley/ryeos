@@ -12,7 +12,7 @@ use super::types::{FireRecord, ScheduleSpecRecord};
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SchedulePlan {
     pub last_scheduled_at: Option<i64>,
-    pub last_fire_at: Option<i64>,
+    pub last_dispatched_at: Option<i64>,
     pub current_due_at: Option<i64>,
     pub current_due_within_grace: Option<bool>,
     pub misfire_horizon_exclusive: Option<i64>,
@@ -28,8 +28,8 @@ pub fn plan_schedule(
     now_ms: i64,
 ) -> SchedulePlan {
     let last_scheduled_at = last_fire.map(|f| f.scheduled_at);
-    let last_fire_at = last_fire.and_then(|f| f.fired_at);
-    plan_schedule_from_boundaries(spec, last_scheduled_at, last_fire_at, now_ms)
+    let last_dispatched_at = last_fire.and_then(|f| f.dispatched_at);
+    plan_schedule_from_boundaries(spec, last_scheduled_at, last_dispatched_at, now_ms)
 }
 
 /// Plan from the durable per-schedule cursor without loading a historical fire
@@ -46,13 +46,13 @@ pub fn plan_schedule_from_cursor(
 fn plan_schedule_from_boundaries(
     spec: &ScheduleSpecRecord,
     last_scheduled_at: Option<i64>,
-    last_fire_at: Option<i64>,
+    last_dispatched_at: Option<i64>,
     now_ms: i64,
 ) -> SchedulePlan {
     if !spec.enabled {
         return SchedulePlan {
             last_scheduled_at,
-            last_fire_at,
+            last_dispatched_at,
             current_due_at: None,
             current_due_within_grace: None,
             misfire_horizon_exclusive: None,
@@ -104,7 +104,7 @@ fn plan_schedule_from_boundaries(
 
     SchedulePlan {
         last_scheduled_at,
-        last_fire_at,
+        last_dispatched_at,
         current_due_at,
         current_due_within_grace,
         misfire_horizon_exclusive,
@@ -233,6 +233,19 @@ fn within_lateness_grace(spec: &ScheduleSpecRecord, scheduled_at: i64, now_ms: i
 mod tests {
     use super::*;
 
+    fn projectless_execution() -> crate::types::ScheduleExecution {
+        crate::types::ScheduleExecution {
+            authority: crate::types::ScheduleExecutionAuthority::Node {
+                principal_id: format!("fp:{}", "33".repeat(32)),
+                effective_origin_site_id: "site:test".to_string(),
+            },
+            capabilities: vec!["ryeos.execute.directive.test".to_string()],
+            policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
+        }
+    }
+
     fn make_spec(schedule_type: &str, expression: &str, registered_at: i64) -> ScheduleSpecRecord {
         ScheduleSpecRecord {
             schedule_id: "test".to_string(),
@@ -250,8 +263,7 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at,
-            requester_fingerprint: "fp:test".to_string(),
-            capabilities: vec!["ryeos.execute.*".to_string()],
+            execution: projectless_execution(),
         }
     }
 
@@ -262,12 +274,21 @@ mod tests {
             fire_id,
             schedule_id: "test".to_string(),
             scheduled_at,
-            fired_at: Some(scheduled_at + 1),
+            reserved_at: scheduled_at + 1,
+            dispatched_at: Some(scheduled_at + 1),
             completed_at: Some(scheduled_at + 1),
             status: "completed".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: Some("success".to_string()),
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: Some(
+                ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )
+                .unwrap(),
+            ),
+            admitted_capsule_hash: Some("44".repeat(32)),
         }
     }
 

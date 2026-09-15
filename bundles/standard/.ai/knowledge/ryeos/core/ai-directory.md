@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T21:49:18Z:a7633264ed70a527a434b7399ac99393b337b7aef4659c2688c708c315595f69:MY0N/POn2yxpNPQdnMNQ3rg2WWU6JRXEksQtDMeG5AgYQVnl0/vi0bCE0FNaQDj4BthaPhZqEO0oqfK2evDdCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T01:55:08Z:3ee2cc69aa87d2ec24eaeaadef2b2cd6860fe2e129946f534549ce22061c1231:5pTyP2vpv0mNGqKg8rblp6LnaZKl5/JcVrsWUHwtdYyNZ47kWOcdUoZR6Z9JH0wjlvHOJ1mP8Rrn6iRl/HPgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   The exact .ai/ directory layout — bundle structure and the daemon
   state directory, and how they relate.
@@ -45,7 +45,7 @@ machine, not the LLM workflow layer:
 │   ├── aliases/                         # core CLI aliases + remote/vault aliases
 │   ├── engine/kinds/                    # config, handler, parser, protocol,
 │   │                                     # runtime, service, node, tool,
-│   │                                     # streaming_tool, worker
+│   │                                     # worker, worker_execution
 │   ├── routes/                          # execute, health, public-key,
 │   │                                     # objects, vault, remote status, push-head
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
@@ -157,12 +157,11 @@ kind live relative to any `.ai/` root:
 | `protocol`      | `protocols/`   | No          | Wire protocol descriptors   |
 | `runtime`       | `runtimes/`    | Yes         | Runtime binary declarations |
 | `service`       | `services/`    | Yes         | In-process service endpoints |
-| `streaming_tool`| `tools/`       | Yes         | Same dir as tool, streaming protocol |
 | `tool`          | `tools/`       | Yes         | `.py`, `.yaml`, `.js`, `.ts` |
 | `worker`        | `workers/`     | Yes         | Persistent subprocess definition + adjacent source |
 
-Note: `tool` and `streaming_tool` share the `tools/` directory.
-Differentiation is by execution protocol, not directory.
+Tools select their output/callback contract explicitly with `execution_protocol`.
+The directory has one Tool authority, independent of the selected protocol.
 
 ## The `node/` Section Convention
 

@@ -13,7 +13,8 @@ fn live_dispatch_response(result: Value) -> Value {
             "source": "executed",
             "effect_class": "live",
             "action_digest": "ab".repeat(32),
-            "publication": "not_applicable"
+            "publication": "not_applicable",
+            "result_projection": {"kind": "dispatched_subject"}
         }
     })
 }
@@ -80,7 +81,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
             }
         }
     }
-    async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+    async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
     async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
@@ -309,10 +310,11 @@ config:
         visits: "${state.visits + 1}"
         assigned_step: "${run.step}"
         dispatch_source: "${dispatch.source}"
+        child_thread_id: "${dispatch.child_thread_id}"
       next:
         type: conditional
         branches:
-          - when: 'run.step == 0 && state.assigned_step == 0'
+          - when: 'run.step == 0 && state.assigned_step == 0 && dispatch.child_thread_id == inputs.expected_child_thread_id'
             to: done
           - to: wrong
     wrong:
@@ -324,11 +326,19 @@ config:
         return_step: "${run.step}"
         assigned_step: "${state.assigned_step}"
         dispatch_source: "${state.dispatch_source}"
+        child_thread_id: "${state.child_thread_id}"
 "#,
     );
-    let (walker, recorder) = make_recording_walker(graph, vec![json!({"ok": true})], None);
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![json!({"ok": true, "child_thread_id": "T-spoofed"})],
+        None,
+    );
     let result = walker
-        .execute(json!({}), Some("gr-run-step".to_string()))
+        .execute(
+            json!({"inputs": {"expected_child_thread_id": null}}),
+            Some("gr-run-step".to_string()),
+        )
         .await;
 
     assert!(result.success, "unexpected result: {result:?}");
@@ -339,6 +349,7 @@ config:
     assert_eq!(output["return_step"], 1);
     assert_eq!(output["assigned_step"], 0);
     assert_eq!(output["dispatch_source"], "executed");
+    assert_eq!(output["child_thread_id"], Value::Null);
 }
 
 #[tokio::test]
@@ -1000,6 +1011,29 @@ config:
         result.result.and_then(|v| v.as_str().map(String::from)),
         Some("g-42".to_string())
     );
+}
+
+#[tokio::test]
+async fn execution_thread_identity_comes_from_admitted_walker_not_inputs() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output: "${execution.thread_id}"
+"#,
+    );
+    let result = make_walker(graph, vec![]).execute(json!({
+        "thread_id": "spoofed-top-level",
+        "execution": {"thread_id": "spoofed-context"},
+        "inputs": {"thread_id": "spoofed-input", "execution": {"thread_id": "spoofed-nested"}}
+    }), None).await;
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.result, Some(json!("thread-test")));
 }
 
 #[tokio::test]
@@ -2065,7 +2099,9 @@ config:
       over: "${state.items}"
       as: "elem"
       action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem}"}}
-      assign: {last_value: "${result.value}"}
+      assign:
+        last_value: "${result.value}"
+        last_child_thread_id: "${dispatch.child_thread_id}"
       next:
         type: unconditional
         to: done
@@ -2073,7 +2109,13 @@ config:
       node_type: return
 "#;
     let graph = make_graph(yaml);
-    let w = make_walker(graph, vec![json!({"value": "a"}), json!({"value": "b"})]);
+    let w = make_walker(
+        graph,
+        vec![
+            json!({"value": "a", "child_thread_id": "T-spoof-a"}),
+            json!({"value": "b", "child_thread_id": "T-spoof-b"}),
+        ],
+    );
     let result = w
         .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
         .await;
@@ -2083,6 +2125,7 @@ config:
         Some("b"),
         "foreach assign must persist (last item wins)"
     );
+    assert_eq!(result.state["last_child_thread_id"], Value::Null);
 }
 
 #[tokio::test]
@@ -2742,7 +2785,18 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
             Ok(live_dispatch_response(json!({})))
         } else {
             let result = results.remove(0);
-            if result.get("__retryable_dispatch_error").is_some() {
+            if let Some(retained) = result.get("__retained_dispatch_then_unknown") {
+                assert!(self.retain_by_operation);
+                self.retained_dispatch_results.lock().unwrap().insert(
+                    operation_id.expect("retained dispatch has an occurrence"),
+                    retained.clone(),
+                );
+                Err(CallbackError::ActionFailed {
+                    code: ryeos_runtime::callback::RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE.to_string(),
+                    message: "terminal child retained but response unavailable".to_string(),
+                    retryable: false,
+                })
+            } else if result.get("__retryable_dispatch_error").is_some() {
                 Err(CallbackError::ActionFailed {
                     code: "service_unavailable".to_string(),
                     message: "simulated transient dispatch failure".to_string(),
@@ -2771,7 +2825,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
             }
         }
     }
-    async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+    async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
     async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
@@ -3126,9 +3180,16 @@ async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_re
         ("explicit", json!({"__unknown_dispatch_error":true})),
         ("transport", json!({"__transport_dispatch_error":true})),
     ] {
-        let (walker, recorder) = make_recording_walker(graph.clone(), vec![marker], None);
+        let checkpoint_dir = tempfile::tempdir().unwrap();
+        let checkpoint = CheckpointWriter::new(checkpoint_dir.path().to_path_buf());
+        let (walker, recorder) = make_recording_walker(
+            graph.clone(),
+            vec![marker.clone()],
+            Some(checkpoint_dir.path()),
+        );
+        let graph_run_id = format!("gr-unknown-{label}");
         let error = walker
-            .execute_recoverable(json!({}), Some(format!("gr-unknown-{label}")))
+            .execute_recoverable(json!({}), Some(graph_run_id.clone()))
             .await
             .unwrap_err();
         assert!(
@@ -3136,6 +3197,17 @@ async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_re
             "{label}: {error:#}"
         );
         assert_eq!(recorder.dispatch_count(), 1, "{label}");
+        assert_eq!(
+            recorder.recorded_dispatch_requests()[0]
+                .action
+                .operation_id
+                .as_deref(),
+            Some(
+                crate::dispatch::graph_action_operation_id(&graph_run_id, "flaky", 0, None, None,)
+                    .as_str()
+            ),
+            "{label}: the unknown occurrence must retain its checkpoint-derived identity"
+        );
         assert!(recorder.recorded_finalizations().is_empty(), "{label}");
         assert!(
             recorder.recorded_events().iter().all(|(_, event, _, _)| {
@@ -3146,7 +3218,133 @@ async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_re
             }),
             "{label}: an ambiguous occurrence must leave no committed step"
         );
+
+        // Load the actual still-uncommitted checkpoint and prove the
+        // recovered walker re-drives the same logical operation. A new
+        // operation id here would let the daemon reserve a second producer
+        // child after the first response was lost.
+        let stored = checkpoint
+            .load_latest()
+            .unwrap()
+            .expect("initial durable cursor");
+        let parsed = crate::resume::from_checkpoint_value(&stored, &graph).unwrap();
+        assert_eq!(parsed.current_node, "flaky");
+        assert_eq!(parsed.step_count, 0);
+        assert_eq!(parsed.graph_run_id, graph_run_id);
+        let resume = json!({"resume_state": serde_json::to_value(parsed).unwrap()});
+        let (recovered, recovered_recorder) =
+            make_recording_walker(graph.clone(), vec![marker.clone()], None);
+        let recovered_error = recovered
+            .execute_recoverable(resume, Some(graph_run_id.clone()))
+            .await
+            .unwrap_err();
+        assert!(
+            ryeos_runtime::process_outcome::recovery_required_in_chain(&recovered_error).is_some(),
+            "{label}: {recovered_error:#}"
+        );
+        assert_eq!(recovered_recorder.dispatch_count(), 1, "{label}");
+        assert_eq!(
+            recovered_recorder.recorded_dispatch_requests()[0]
+                .action
+                .operation_id,
+            recorder.recorded_dispatch_requests()[0].action.operation_id,
+            "{label}: exact checkpoint recovery changed the action operation id"
+        );
+        assert!(
+            recovered_recorder.recorded_finalizations().is_empty(),
+            "{label}"
+        );
     }
+}
+
+#[tokio::test]
+async fn initial_checkpoint_recovers_retained_first_child_without_second_execution() {
+    let graph = make_graph(RETRY_YAML);
+    let checkpoint_dir = tempfile::tempdir().unwrap();
+    let checkpoint = CheckpointWriter::new(checkpoint_dir.path().to_path_buf());
+    let recorder = Arc::new(RecordingMockClient::new_at_most_once(vec![
+        json!({"__retained_dispatch_then_unknown": subprocess_success()}),
+        json!({"must_not_execute": true}),
+    ]));
+    let walker = || {
+        Walker::new(
+            graph.clone(),
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            CallbackClient::from_inner(
+                recorder.clone(),
+                "thread-test",
+                "/tmp/test-project",
+                "tat-test",
+            ),
+            Some(CheckpointWriter::new(checkpoint_dir.path().to_path_buf())),
+        )
+    };
+    let error = walker()
+        .execute_recoverable(json!({}), Some("gr-initial-retained".into()))
+        .await
+        .unwrap_err();
+    assert!(ryeos_runtime::process_outcome::recovery_required_in_chain(&error).is_some());
+    let stored = checkpoint.load_latest().unwrap().unwrap();
+    let resume = crate::resume::from_checkpoint_value(&stored, &graph).unwrap();
+    assert_eq!(resume.step_count, 0);
+    let result = walker()
+        .execute_recoverable(
+            json!({"resume_state": serde_json::to_value(resume).unwrap()}),
+            Some("outer-recovery-id-is-not-authority".into()),
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "{result:?}");
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].action.operation_id,
+        requests[1].action.operation_id
+    );
+    assert_eq!(recorder.retained_dispatch_results.lock().unwrap().len(), 1);
+    assert_eq!(
+        recorder.dispatch_results.lock().unwrap().len(),
+        1,
+        "recovery must reuse the retained child, not consume a second execution"
+    );
+    assert_eq!(
+        recorder
+            .recorded_events()
+            .iter()
+            .filter(|(_, event, _, _)| event == "graph_started")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn rejected_initial_checkpoint_prevents_first_authored_child_contact() {
+    let graph = make_graph(RETRY_YAML);
+    let checkpoint_dir = tempfile::tempdir().unwrap();
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![subprocess_success()],
+        Some(checkpoint_dir.path()),
+    );
+    walker.fail_checkpoint_writes_after(0);
+    let result = walker
+        .execute(json!({}), Some("gr-initial-refused".into()))
+        .await;
+    assert_eq!(result.status, GraphRunStatus::Error);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("injected checkpoint persistence failure"))
+    );
+    assert_eq!(recorder.dispatch_count(), 0);
+    assert!(
+        CheckpointWriter::new(checkpoint_dir.path().to_path_buf())
+            .load_latest()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -3853,6 +4051,29 @@ config:
       node_type: return
 "#;
 
+const FOLLOW_WITH_PRODUCT_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action:
+        item_id: "directive:child"
+        ref_bindings: {}
+        product_selections:
+          - target: {kind: root}
+            selection:
+              declaration_id: authoring-tools
+              witness_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              witness_source: {kind: local_capture}
+              qualification_hash: null
+        params: {}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+
 const GRAPH_FOLLOW_YAML: &str = r#"
 version: "1.0.0"
 category: test
@@ -3915,6 +4136,24 @@ async fn follow_suspend_emits_events_and_no_receipt() {
     );
     assert_eq!(reqs[0].children.len(), 1);
     assert_eq!(reqs[0].children[0].item_ref, "directive:child");
+}
+
+#[tokio::test]
+async fn follow_seals_the_actions_exact_product_selections_into_the_child() {
+    let (walker, recorder) =
+        make_recording_walker(make_graph(FOLLOW_WITH_PRODUCT_YAML), vec![], None);
+    let result = walker
+        .execute(json!({}), Some("gr-follow-products".to_string()))
+        .await;
+    assert_eq!(result.status, GraphRunStatus::Continued);
+    let requests = recorder.recorded_follow_requests();
+    assert_eq!(requests.len(), 1);
+    let child = &requests[0].children[0];
+    assert_eq!(child.product_selections.len(), 1);
+    assert_eq!(
+        child.product_selections[0].selection.declaration_id,
+        "authoring-tools"
+    );
 }
 
 #[tokio::test]
@@ -4448,6 +4687,13 @@ config:
       action:
         item_id: "directive:${job.kind}"
         ref_bindings: {}
+        product_selections:
+          - target: {kind: root}
+            selection:
+              declaration_id: authoring-tools
+              witness_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              witness_source: {kind: local_capture}
+              qualification_hash: null
         params:
           value: "${job.value}"
           run: "${run.graph_run_id}"
@@ -4548,6 +4794,14 @@ async fn follow_fanout_spawns_one_ordered_rendered_cohort() {
     let children = &request.children;
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].item_ref, "directive:alpha");
+    assert_eq!(
+        children[0].product_selections[0].selection.declaration_id,
+        "authoring-tools"
+    );
+    assert_eq!(
+        children[1].product_selections,
+        children[0].product_selections
+    );
     assert_eq!(children[0].parameters["step"], 0);
     assert_eq!(children[1].parameters["step"], 0);
     assert_eq!(
@@ -5206,6 +5460,7 @@ config:
           payload:
             status: "${result.classification}"
             graph_run_id: "${run.graph_run_id}"
+            child_thread_id: "${dispatch.child_thread_id}"
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -5236,6 +5491,10 @@ config:
     assert_eq!(
         observations[0].observation.payload["graph_run_id"],
         "G-authored-project-observation"
+    );
+    assert_eq!(
+        observations[0].observation.payload["child_thread_id"],
+        Value::Null
     );
 }
 

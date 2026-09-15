@@ -1,0 +1,32 @@
+version: "1.0.0"
+category: test
+description: Retain the two exact output products from an ordinary awaited producer
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.test/dynamic-products
+      - ryeos.execute.config.test/dynamic-products
+      - ryeos.execute.tool.test/produce-dynamic
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:test/dynamic-products
+        ref_bindings: {}
+        params: {}
+      assign:
+        products: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.products}"

@@ -1,8 +1,7 @@
-<!-- ryeos:signed:2026-08-23T21:53:41Z:f851079ec3735301e2efe6513e0d7d8b6da6d90ac117f677dd6dbed24e22906b:bFVArVPN+BA+VgGzOrNY6apXZ1ziipeWzRlTAdlw0VDwP5EfBaO9FoMrrbo7GbR6ZvaSHTpPKTqg4/gdiu3PCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/papers
 tags: [papers, measurement, intelligence, observers, frames, research-note]
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Standalone research note beside the four-paper program: measurement of
   authored-output executors is testimony — a fold under a named observer
@@ -24,74 +23,36 @@ None of it may leak upstream: papers 1–4 remain self-contained.
 
 ## Thesis
 
-Short version:
+> Evaluation should identify its subject, procedure, evidence and scope.
+> A signed result is attributable; its quality and applicability still need
+> to be judged under the stated assumptions.
 
-> Recomputation verifies executors that have specs; testimony governs
-> executors that are their own spec — and *measurement* of such executors
-> is testimony too: a fold, under a named observer frame, over a signed
-> record. A benchmark is a frame that forgot to name itself.
-
-Expanded version:
-
-> Paper 2's specification gap does not stop at verification. An executor
-> with no external correctness predicate has no frame-free measure of its
-> quality either: every evaluation of an authored-output executor is some
-> observer's fold over its record, weighted by what that observer counts
-> as success. The dispute over what intelligence "really is" is a dispute
-> between unnamed frames. Make the frames explicit — signed,
-> content-addressed, diffable — and evaluation becomes lawful
-> frame-relative testimony: measurements carry warrants, disagreements
-> localize to frame deltas, and the only observer-independent content of
-> "intelligence" is whatever survives frame transformation. The substrate
-> hosts measurements without believing any of them: the court, not a
-> witness.
+Computational reproduction, testimony and task evaluation are complementary.
+A model output can have an exact external correctness predicate. Broader claims
+about an executor's competence depend on task selection, conditions and the
+coverage of retained evidence.
 
 ## The one claim
 
-Measurement of authored-output executors inherits the specification gap:
-with no external correctness predicate there is no frame-free measurement,
-only folds by observer frames over signed records. Reifying frames as data
-makes frame-relativity lawful — transformations explicit, provenance
-mandatory, invariance an empirical question — and reduces "intelligence"
-from a disputed essence to a conferred status whose objective content is
-exactly what survives admissible frame transformation. RyeOS is the
-constructive proof that this measurement discipline can be hosted without
-adding a primitive.
+Making measurement procedures explicit and content-addressed makes evaluation
+easier to inspect, reproduce where supported, and compare. RyeOS can connect
+these procedures to exact execution subjects without embedding a universal
+quality judgment in the substrate.
 
-## The fifth strain point (candidate)
+This is a proposed measurement discipline, not a proof that all benchmarks
+are undefined or that no other platform can host it. A procedure digest proves
+identity, not scientific validity.
 
-Step 3 of the core derivation says any *sufficiently trusted* interpreter
-can advance the object. Strain: sufficiently trusted by whom, at what —
-and measured how? Fungibility forces comparison (which officer; which
-model; what is this agent's work worth — paper 3's hiring question), and
-the moment the executors compared are authored-output, paper 2's own
-result forbids the canonical answer. No spec exists, so no canonical
-benchmark exists; a benchmark is a spec imposed after the fact and
-mistaken for a property of the executor. The resolution is the same move
-paper 2 made for verification, applied one level up. If this note is
-promoted, the strain moves to the map and this section becomes a
-reference.
+## The research question
 
-## The two gaps, transferred
+Executor replacement raises "suitable for which task, under what constraints?"
+Different evaluators can legitimately produce different conclusions. A named
+frame helps localise disagreement but does not eliminate sampling uncertainty,
+different evidence, implementation defects or conflicting interests.
 
-Paper 2 separates a shallow gap from a deep one; the same split governs
-measurement, and the argument collapses into an engineering complaint if
-they blur.
-
-**The contamination gap (shallow, contingent).** Benchmarks leak into
-training data, saturate, and are gamed. All real, all partially fixable —
-held-out sets, fresh tasks, adversarial rotation. If this were the whole
-problem, better benchmark hygiene would solve evaluation.
-
-**The frame gap (deep, essential).** Even a perfectly uncontaminated
-benchmark measures fit-to-frame, not a property of the executor. For
-interesting tasks the "right answer" is itself an authored judgment, so
-scoring is judgment about judgment; the choice of tasks, weights, and
-thresholds is an observer's conception of what counts, and no amount of
-engineering removes the observer from the measurement. The gap is not
-about test quality; it is the absence of a frame-free quantity to
-measure. What a leaderboard publishes is a fold with an unnamed frame and
-no provenance — and then everyone is surprised by Goodhart.
+Distinguish contamination and gaming from the choice of what to measure.
+Fresh held-out tasks can address some contamination. Explicit objectives make
+the evaluation scope inspectable. Neither establishes universal intelligence.
 
 ## Definitions owned here
 
@@ -105,11 +66,11 @@ no provenance — and then everyone is surprised by Goodhart.
   digest, procedure, subject scope, evidence class.
 - **frame transformation** — the explicit delta between two frames.
   Measurements under different frames compare lawfully only through it;
-  a disagreement that cannot be localized to a frame delta is not yet a
-  disagreement about the subject.
+  evidence and sampling differences must also be considered before attributing
+  a disagreement solely to the procedure.
 - **admissible observer** — a frame with standing in paper 3's sense,
-  applied second-order: legitimacy earned in the record of the frame's
-  own use and endorsement, never asserted. The degenerate frame
+  applied second-order: eligibility under an explicit local policy, informed
+  by its record and endorsements, not guaranteed by those endorsements. The degenerate frame
   ("intelligence is bananas owned") is not refuted; it is unendorsed, and
   its measurements carry that provenance.
 - **invariant candidate** — any property of subjects that every
@@ -139,40 +100,31 @@ frames fold records, not dispositions.
   quotient claiming distinct situations are the same situation. The
   substrate deliberately holds only the syntactic side (it is
   meaning-blind); the semantic quotient is authored, attributable work.
-- Intervention closes the record/disposition gap: under sealed execution
-  the record becomes re-derivable under controlled variation, so
-  competence can be measured as a function of a provably enforced
-  information bound — grants only narrow, so the bound is real, recorded,
-  and attributable.
+- Intervention can test beyond the originally retained record. Qualified
+  re-execution can strengthen controlled comparisons. A narrowed grant is not
+  by itself an information bound: pretraining, live context, artifacts, caches,
+  networking and enforcement must be included in the experiment.
 
 ## Intelligence as status
 
-The definition this context supports is not an essence definition, and
-that is the result, not a retreat — the same move paper 3 made for
-personhood. The corporation proves that civilization governs non-human
-persons without settling any metaphysics; the analogous instrument here
-is **creditworthiness**. No one believes creditworthiness is a substance
-inside the debtor. It is a fold — a named procedure over a signed record,
-computed by an interested observer, with multiple bureaus whose frames
-legitimately disagree — and it carries a whole economy without ever
-resolving what it "really is."
+One useful analogy is creditworthiness: an interested observer applies a
+procedure to evidence for a particular decision. Different procedures can
+disagree. This illustrates scoped evaluation; it does not settle intelligence
+as a philosophical or scientific concept, nor confer legal personhood.
 
-> Intelligence, on an accountable substrate, is a status, not a
-> substance: conferred by frames, earned in the record, always relative
-> to a named procedure, portable because the record is.
+> Report measured capability under a named procedure, with the subject and
+> evidence scope attached. Do not turn that report into an unqualified claim
+> about the executor.
 
-What this deflates, it also illuminates. IQ wars, leaderboard disputes,
-and "emergent capabilities" debates become legible as pre-relativistic
-muddles: fights over which frame is *the* frame, conducted with unnamed
-frames and unprovenanced folds. A capability "emerges" when someone's
-fold crosses someone's threshold — a sentence about two frames, not about
-the model. The substrate position does not win these fights; it dissolves
-them by making frame-relativity lawful. Relativity, not relativism.
+This framing is a research lens, not a dismissal of existing measurement work.
+Explicit frames can expose assumptions without making every disagreement
+merely terminological. Scientific validity and useful prediction remain
+empirical obligations.
 
-## Evidence in the implementation
+## Implementation hypotheses to qualify
 
-Present these as demonstrations of hosting capacity, not as the theory —
-each was built for reasons unrelated to measurement, which is the point:
+The following are historical mechanism mappings, not current acceptance results.
+Trace each against the current contract before citing it as evidence:
 
 - Attestation objects: issuer key, named policy, subject hash, claim,
   evidence — a signed judgment under a named procedure, with local policy
@@ -183,9 +135,9 @@ each was built for reasons unrelated to measurement, which is the point:
   produced them, as an enforcement mechanism rather than an aspiration.
 - The effect-class ladder with degradation under execution-identity
   change: sealed evidence degrades to recorded on a foreign identity —
-  never invalid, just less provable. Invariant content, frame-dependent
-  claim strength: a transformation law for evidence, and the model for
-  what one looks like.
+  where current contracts permit. A foreign identity may instead require
+  refusal; compatibility and authorisation cannot be inferred from a lower
+  evidence label.
 - The substrate's refusal of scalars wherever judgment matters: trust
   classes fold by minimum; capability coverage is a conservative partial
   order that fails closed on the unprovable; effect classes permit
@@ -215,11 +167,10 @@ admissible frame partially orders subjects by it; if it fails, the
 failure mode itself (which frames diverge, where) is the interesting
 datum.
 
-The experiment this substrate uniquely hosts: the **attenuation sweep**.
+A proposed experiment this substrate could support: the **attenuation sweep**.
 One executor, one task family, capability grants progressively narrowed —
-competence as a function of provably bounded information, the denominator
-of skill-acquisition-efficiency accounts made controllable rather than
-estimated. Sealed local execution upgrades the record from court record
+competence under measured access restrictions, with actual enforcement and
+residual information channels made explicit. Sealed local execution upgrades the record from court record
 to laboratory: not just what the actor did, but what it does under
 attributable intervention.
 
@@ -233,8 +184,8 @@ attributable intervention.
   statistics. Invariant-mining needs many frames over many keys' work —
   federation-scale evidence, correctly deferred.
 - Signed is not honest. Goodhart survives; the substrate makes gaming
-  attributable and visible on the record, which is a better starting
-  position than any current metric enjoys, and nothing more.
+  more inspectable when the relevant evidence is retained. Omitted attempts,
+  collusion and misleading procedures remain possible.
 - Design-history honesty, inherited from paper 2's guardrail: the
   substrate was carried into the measurement question deliberately, as a
   lens. The residual evidence is the unplanned fit — the mechanisms
@@ -275,10 +226,9 @@ any of them — anything that would is refuted by that fact.
   it is about the space of such frames and what survives movement
   between them.
 - **"You are refusing to define intelligence."** Cashed out, the refusal
-  is the result: the absence of a frame-free definition is a theorem of
-  the specification gap, not a failure of effort. What can be defined —
-  and is, above — is the measurement discipline and the invariant
-  program. The word never carries the argument.
+  is a scope choice, not a proved impossibility result. This note defines a
+  measurement discipline and an open invariant programme, not a universal
+  account of intelligence.
 
 ## Phrases worth preserving
 
@@ -299,7 +249,7 @@ any of them — anything that would is refuted by that fact.
   carry the argument. No consciousness claims, inherited from paper 2.
 - Adds no substrate primitives. The measurement layer is authored data —
   frames as signed items, folds as executions, verdicts as recorded
-  results. If a claim seems to need a new mechanism, the claim is wrong.
+  results. Map to existing owners first; demonstrated gaps need separate design.
 - Demonstrations precede promotion: this note joins the series only
   after the measurement fold and a frame-diff run land, by decision
   recorded in `series-map.md`.

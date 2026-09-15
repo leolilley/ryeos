@@ -47,6 +47,7 @@ fn dispatch_transport_is_unrecorded() {
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: Default::default(),
+        scheduled_fire: None,
         validate_only: true,
     };
     let canonical = CanonicalRef::parse("service:ui/invocations/dispatch").unwrap();

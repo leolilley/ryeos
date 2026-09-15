@@ -22,6 +22,7 @@ impl Walker {
         let FollowSuspendOutcome {
             item_id,
             ref_bindings,
+            product_selections,
             params,
         } = outcome;
         let item_ref = item_id;
@@ -111,6 +112,7 @@ impl Walker {
                 step as i64,
                 item_id,
                 ref_bindings,
+                product_selections,
                 params.clone(),
                 None,
                 completion,

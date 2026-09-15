@@ -5,7 +5,7 @@ name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.5.1"
+version: "1.6.0"
 ```
 
 # RyeOS Release Process
@@ -38,9 +38,14 @@ scaffolding, but AUR is not currently an active release channel.
 - One release uses one BuildKit Bake solve. Its internal, non-installable
   `release-artifacts` publication set compiles and signs the union required by
   the native archive and all release images exactly once. The archive,
-  standard, central-host, and hosted-workflow outputs derive from that shared
-  stage; each final image still copies only its exact deployable bundle set.
+  standalone workload-client realization, standard, central-host, and hosted-
+  workflow outputs derive from that shared stage; each final image still
+  copies only its exact deployable bundle set. The workload-client executable
+  is published as external content, never mined from an image filesystem.
   Do not reintroduce independent per-image release builds.
+- The release build date is the immutable tag commit time normalized to UTC;
+  it and `SOURCE_DATE_EPOCH` therefore describe one coordinate. Never inherit
+  the committer's local timezone or ask a build to infer either value from Git.
 - Do **not** check out `main` in `/home/leo/projects/ryeos-next` if `main` is
   already checked out in `/home/leo/projects/ryeos`.
 - Do **not** move a release tag that has already been pushed or consumed. Cut a
@@ -355,9 +360,12 @@ Two ambiguous states require operator intervention:
   signed immutable version.
 - If a GitHub release has a checksum but no archive, remove only the confirmed
   orphan checksum through release asset controls and rerun. The checksum cannot
-  establish which missing bytes should be restored. This differs from an
-  archive-only state, where the archive itself can be verified and its missing
-  checksum derived.
+  establish which missing bytes should be restored. For the officially signed
+  bundle archive only, an archive-first state can be recovered after its signed
+  contents pass cryptographic preflight. The workload-client archive is not
+  internally signed: an archive-only or checksum-only workload-client state is
+  ambiguous and requires explicit operator cleanup or a new release version;
+  its forgeable embedded build testimony cannot authorize reconstruction.
 
 ## 8. GHCR release channel
 
@@ -375,6 +383,8 @@ release outputs exist:
 GitHub release assets:
   ryeos-bundles-$new-x86_64.tar.gz
   ryeos-bundles-$new-x86_64.tar.gz.sha256
+  ryeos-workload-client-$new-x86_64-unknown-linux-gnu.tar.gz
+  ryeos-workload-client-$new-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 GHCR image tags:
   ghcr.io/leolilley/ryeos-standard:$new
@@ -382,10 +392,13 @@ GHCR image tags:
   ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
-The workflow asks BuildKit to construct the archive and three image candidates
-in one Bake invocation. Their common published stage performs one host Cargo
-build, one static-worker build closure, and one signed bundle publication. The
-four outputs then fan out without recompiling RyeOS. The workflow checks
+The workflow asks BuildKit to construct the bundle archive, standalone static
+workload-client realization, and three image candidates in one Bake invocation.
+Their common published stage performs one host Cargo build, one static-worker
+build closure, and one signed bundle publication. The five outputs then fan out
+without recompiling RyeOS. The workload-client archive carries canonical build
+testimony both as a sidecar and embedded in the executable; recovery verifies
+their exact equality against the tagged release coordinate. The workflow checks
 provenance and SBOM attestations, verifies keyless signatures, promotes the
 immutable version tags, and only then advances all `latest` tags. Runtime
 qualification is separate and non-gating. Verify the immutable tags, release

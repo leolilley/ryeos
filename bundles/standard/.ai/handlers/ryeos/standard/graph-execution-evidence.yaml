@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-08T05:52:47Z:b03e233042e07c406928f8d317ef1d96a7db918b46d6949ae77185cd8edc5ff7:Fftx8+42pLhGL2tGxIh+EH3fWfhndgtVoUn1L23PY3H1IgeN0zB+DWLkklxVn7hifk5+7dF1mP60L38AQQIZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/standard
+name: graph-execution-evidence
+kind: handler
+serves: execution_evidence_projector
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-execution-evidence
+abi_version: "v3"
+required_caps: []
+description: "Projects a bounded unary Graph terminal and event history into candidate execution evidence"

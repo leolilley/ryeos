@@ -1,0 +1,98 @@
+# ryeos:signed:2026-09-11T11:45:13Z:6bc9defdeef809d26ab5a839edae26f53d0096b4682b5efb3bdabb3b241f4435:557Xl+X7O9Tt5nDGJ+PY+icyajU5UDyaDhhAZqwncFlgRz3wYLU1JZDdqmbjwnwCWnBmKyXGkBu3U8IFqlr7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/development
+name: cargo-test
+version: "1.0.1"
+description: Bounded offline Cargo test for the selected RyeOS library packages
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: immutable_current_generation
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content: []
+external_product_slots:
+  - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_cargo_test
+    kind: tree
+    mount_root: execution_runtime
+    mount: platform
+  - id: vendor
+    relationship_ref: config:development/ryeos/cargo-vendor-products
+    relationship: cargo_vendor_to_test
+    kind: tree
+    mount_root: execution_runtime
+    mount: cargo-vendor
+env_config:
+  env:
+    PATH: ""
+  env_paths:
+    PATH:
+      prepend:
+        - /ryeos/realizations/platform/native/bin
+        - /ryeos/realizations/platform/rust/bin
+      append: []
+config:
+  command: realization:platform/rust/bin/cargo
+  # Cargo owns dependency resolution. The fixed directory source is the exact
+  # retained vendor manifest; no target can acquire a missing dependency.
+  args:
+    - --config
+    - 'source.crates-io.replace-with="ryeos-vendored"'
+    - --config
+    - 'source.ryeos-vendored.directory="/ryeos/realizations/cargo-vendor"'
+    - test
+    - --manifest-path
+    - Cargo.toml
+    - --locked
+    - --frozen
+    - --offline
+    - --jobs
+    - "2"
+    - --package
+    - "${params.package}"
+    - --lib
+    # The pinned native compiler owns the target; omitting --target also
+    # applies the admitted linker/sysroot flags to host build dependencies.
+    - --profile
+    - test
+    - "${params.test}"
+    - --
+    - --exact
+    - --nocapture
+    - --test-threads=1
+  timeout_secs: 300
+  env:
+    CARGO_HOME: /tmp/cargo
+    CARGO_TARGET_DIR: /tmp/target
+    RUSTC: /ryeos/realizations/platform/rust/bin/rustc
+    RUSTDOC: /ryeos/realizations/platform/rust/bin/rustdoc
+    LIBRARY_PATH: /ryeos/realizations/platform/lib
+    COMPILER_PATH: /ryeos/realizations/platform/native/bin
+    # The flat platform's libc.so is the verified DSO, not the publisher's
+    # absolute-path linker script. Preserve its nonshared link input explicitly;
+    # the archive already belongs to the exact platform manifest (no host libc).
+    RUSTFLAGS: >-
+      -C linker=/ryeos/realizations/platform/native/bin/gcc
+      -C link-arg=-B/ryeos/realizations/platform/native/bin/
+      -C link-arg=-B/ryeos/realizations/platform/lib/
+      -C link-arg=--sysroot=/ryeos/realizations/platform/sysroot
+      -C link-arg=-fno-use-linker-plugin
+      -C link-arg=-fuse-ld=lld
+      -C link-arg=-Wl,--dynamic-linker,/ryeos/realizations/platform/lib/ld-linux-x86-64.so.2
+      -C link-arg=-Wl,-rpath,/ryeos/realizations/platform/lib:/ryeos/realizations/platform/rust/lib:/ryeos/realizations/platform/rust/lib/rustlib/x86_64-unknown-linux-gnu/lib
+      -C link-arg=-Wl,-z,nodefaultlib
+      -C link-arg=/ryeos/realizations/platform/lib/libc_nonshared.a
+config_schema:
+  type: object
+  properties:
+    package:
+      type: string
+      enum: [lillux, ryeos-isolation-protocol]
+    test:
+      type: string
+      minLength: 1
+      maxLength: 256
+      pattern: '^[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*$'
+  required: [package, test]
+  additionalProperties: false

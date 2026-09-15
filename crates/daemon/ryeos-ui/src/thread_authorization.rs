@@ -117,6 +117,7 @@ mod tests {
         AuthoritativeThreadSubject {
             thread_id: "T-subject".to_string(),
             chain_root_id: "T-subject".to_string(),
+            item_ref: "tool:test/subject".to_string(),
             status: ThreadStatus::Running,
             requested_by: requested_by.map(str::to_string),
             project_authority,
@@ -147,6 +148,7 @@ mod tests {
             base_snapshot_hash: "a".repeat(64),
             snapshot_hash: "b".repeat(64),
             realization: PinnedProjectRealization::ReadOnly,
+            workspace_outputs: None,
             environment: EnvironmentAuthority::None,
             capability_ceiling: Vec::new(),
             child_policy: ChildProjectAuthorityPolicy::Inherit,

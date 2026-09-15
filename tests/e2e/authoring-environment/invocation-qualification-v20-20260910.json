@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "scope": "installed_two_node_loopback_negative_candidate_fixture",
+  "source_revision": "be91327f3bd5f0c17c38af97acee9deb2c083439",
+  "root": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+  "completion": {
+    "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+    "chain_root_id": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+    "command_kind": "route",
+    "command_sequence": 2,
+    "command_state": "completed",
+    "completion_fence": {
+      "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+      "command_sequence": 2,
+      "completion_operation_id": "ffd1f91d8b941a3cfe2dbd7ca7669abf4aa6ee1675fc5ec65d34a3c1da3a6b65",
+      "placement_thread_id": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+      "request_digest": "b3414fbf5940275d27424aef6fb00a06b816e594f7cc68463193f9fdff17165f",
+      "turn_id": "01a0866f-c2f9-71c2-b78d-da9752945a7a",
+      "worker_boot_epoch": 1
+    },
+    "idempotency_key": "invocation-v20-turn-start",
+    "operation": {
+      "completion_operation_id": "ffd1f91d8b941a3cfe2dbd7ca7669abf4aa6ee1675fc5ec65d34a3c1da3a6b65",
+      "completion_source": {
+        "batch_digest": "0fd7e9159c00bda8adba7d192d1b175e2512558231901bd05e14a0953d37156e",
+        "batch_operation_id": "cc17a75993645087797148ef9bbb6df234fe09d13b80628ba8167756ca4805f9",
+        "first_sequence": 13,
+        "kind": "pushed_observation_batch",
+        "through_sequence": 15
+      },
+      "id": "01a0866f-c2f9-71c2-b78d-da9752945a7a",
+      "kind": "turn",
+      "start_operation_id": "c1c9eb0d18f1e42f7b8f86c14ef9975188fffa7a16ad120fee3905bb5c1f942d",
+      "state": "completed"
+    },
+    "placement_thread_id": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+    "request_digest": "b3414fbf5940275d27424aef6fb00a06b816e594f7cc68463193f9fdff17165f",
+    "response_digest": "9276db701974a42a2fafd4cf5f782eef8c44a1f2bc4416034091284aa2566cc7",
+    "route_id": "turn.start",
+    "worker_boot_epoch": 1
+  },
+  "frozen_status": {
+    "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+    "bounded_outcome": null,
+    "candidate_disposition": "owner_decision",
+    "candidate_disposition_operation_id": null,
+    "candidate_disposition_root_id": null,
+    "candidate_evaluation": null,
+    "candidate_evaluation_hash": null,
+    "candidate_qualification": null,
+    "candidate_required": true,
+    "candidate_snapshot_hash": "0dfe3d18d6d4ccef7e8ad00d875f28f60da1cbbd125eaca6b207690f92c4b752",
+    "candidate_validation_hash": "811665c9a87e9a6ee1b3b20a70f41958fc196bda963aed05eaa566c33bc1dcbc",
+    "chain_root_id": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+    "completion_fence": {
+      "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+      "command_sequence": 2,
+      "completion_operation_id": "ffd1f91d8b941a3cfe2dbd7ca7669abf4aa6ee1675fc5ec65d34a3c1da3a6b65",
+      "placement_thread_id": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+      "request_digest": "b3414fbf5940275d27424aef6fb00a06b816e594f7cc68463193f9fdff17165f",
+      "turn_id": "01a0866f-c2f9-71c2-b78d-da9752945a7a",
+      "worker_boot_epoch": 1
+    },
+    "created_at_ms": 1788961807209,
+    "credential_generation": 2,
+    "credential_profile_id": "source-personal",
+    "current_turn_id": null,
+    "handoff": null,
+    "owner_principal": "fp:187fab6cdcea75febdf44cda0874fd8da7dd67b70bb8592f90f93506c2393786",
+    "placement_thread_id": "T-45f8dd82-40e1-98cb-7052-6f32f2e48e19",
+    "publication_result": "retained",
+    "remote_thread_id": "01a0866f-551c-7fa1-9b6c-e4b7fa012273",
+    "send_boundary": "settled",
+    "state": "frozen",
+    "terminal_reason": "completed",
+    "updated_at_ms": 1788961953842,
+    "worker_boot_epoch": 1,
+    "worker_instance_id": "T-35ea989b-7296-2465-d2c5-039f8846c321",
+    "workspace_id": "pre-1788961805308-5fd042b6"
+  },
+  "independent_evaluator": {
+    "result": {
+      "error": null,
+      "metadata": null,
+      "outcome_code": "exit:0",
+      "result": {
+        "accepted": false,
+        "base_snapshot_hash": "d9feab6a4309464ffcdf31c9e57b37b80e0a842b226fffcd98ab0f79e5be0902",
+        "candidate_snapshot_hash": "0dfe3d18d6d4ccef7e8ad00d875f28f60da1cbbd125eaca6b207690f92c4b752",
+        "evidence": {
+          "fixture": "formatted-value-two",
+          "sample_bytes_match": false
+        },
+        "schema_version": 1
+      }
+    },
+    "thread": {
+      "thread_id": "T-fc36c8c4-60cb-08ee-65ce-1896ec97692d",
+      "status": "completed",
+      "admitted_launch_capsule_hash": "daddd9018044427aaf38f61904b06a37529a46a5e4ec67537a1bec0e6f166010"
+    }
+  },
+  "evidence_limits": [
+    "The evaluator completed successfully but explicitly rejected the candidate: task acceptance is not process or model completion.",
+    "Qualification adoption/refusal must be re-exercised after the generic success classification fix is installed.",
+    "Candidate is retained, not published or discarded."
+  ]
+}

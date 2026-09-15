@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
 use anyhow::{Context, Result, anyhow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+// This is the existing async framing transport only. Native peer
+// authentication and every descriptor-derived authority must stay in Lillux
+// (`authenticated_unix_peer_from_stream` below); do not add `AsFd`, platform
+// branches or socket-control code to the daemon transport.
 use tokio::net::UnixStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -36,14 +37,11 @@ pub(super) async fn handle_connection(
         // Acquire the peer pidfd only for the one method that persists a
         // signalable process identity. Health/lifecycle traffic remains usable
         // on a host that cannot satisfy the runtime-attachment kernel contract.
-        #[cfg(target_os = "linux")]
         let peer = if request.method == "runtime.attach_process" {
             Some(authenticated_peer(&stream)?)
         } else {
             None
         };
-        #[cfg(not(target_os = "linux"))]
-        let peer: Option<super::AuthenticatedUnixPeer> = None;
 
         // INFO so the ndjson sink records span NEW/CLOSE per request — a
         // request that arrives and never closes is then attributable by
@@ -88,37 +86,8 @@ pub(super) async fn handle_connection(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn authenticated_peer(stream: &UnixStream) -> Result<super::AuthenticatedUnixPeer> {
-    let pid = stream
-        .peer_cred()
-        .context("read Unix peer credentials")?
-        .pid()
-        .map(i64::from)
-        .ok_or_else(|| anyhow!("Unix peer credentials did not include a PID"))?;
-
-    let mut raw_pidfd: libc::c_int = -1;
-    let mut value_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERPIDFD,
-            (&mut raw_pidfd as *mut libc::c_int).cast(),
-            &mut value_len,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("capture Unix peer pidfd with SO_PEERPIDFD");
-    }
-    if value_len as usize != std::mem::size_of::<libc::c_int>() || raw_pidfd < 0 {
-        anyhow::bail!("SO_PEERPIDFD returned an invalid descriptor");
-    }
-    // SAFETY: successful SO_PEERPIDFD installs a new descriptor in this
-    // process, and ownership transfers to the connection identity.
-    let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
-    Ok(super::AuthenticatedUnixPeer { pid, pidfd })
+    lillux::authenticated_unix_peer_from_stream(stream)
 }
 
 async fn read_frame(

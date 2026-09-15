@@ -1,0 +1,16 @@
+# ryeos:signed:2026-09-06T22:48:49Z:78dbfe07262d90d9f81cb9545e0db6ba6dce318ab02416733bab6fea947c3e0a:NJmbWG31LAV2+4pQAS5HeAzZlwC1y9KkaWK+Cd643EAWRPKCEqQFuxcb8J7daV2FodRg3rRF661SdVZJOK5zDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, import-binding]
+description: Stage an exact active binding's retained manifest for an independently authorized consumer
+defaults:
+  source: retained_binding
+forms:
+  - slots:
+      - field: binding_hash
+      - field: maximum_bytes
+help:
+  usage: ryeos external-content import-binding <binding-hash> <maximum-bytes>
+  examples:
+    - ryeos external-content import-binding <exact-active-binding-hash> 16777216
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/import

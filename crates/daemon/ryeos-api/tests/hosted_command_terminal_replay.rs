@@ -2,8 +2,10 @@ mod test_state;
 
 use ryeos_app::process::{ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION};
 use ryeos_app::runtime_db::{
-    NewCredentialProfile, NewDedicatedSession, WorkerProcessRecord, WorkerProcessState,
-    WorkspaceBinding, WorkspaceState,
+    DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession,
+    NewRuntimeWorkspaceOperation, RuntimeActionMode, RuntimeWorkspaceBinding,
+    RuntimeWorkspaceOperationPhase, WorkerProcessRecord, WorkerProcessState, WorkspaceBinding,
+    WorkspaceState,
 };
 use ryeos_app::state_store::{
     FinalizeThreadRecord, NewDedicatedSessionCommand, NewEventRecord, NewThreadRecord,
@@ -11,6 +13,16 @@ use ryeos_app::state_store::{
 use serde_json::{Value, json};
 
 fn store_structured_session_capsule(state: &ryeos_app::state::AppState) -> (String, String, Value) {
+    store_structured_session_capsule_with_schema(
+        state,
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION),
+    )
+}
+
+fn store_structured_session_capsule_with_schema(
+    state: &ryeos_app::state::AppState,
+    schema: Value,
+) -> (String, String, Value) {
     use ryeos_state::objects::{
         AdmittedDirectCommandClosure, AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity,
         AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
@@ -45,7 +57,7 @@ fn store_structured_session_capsule(state: &ryeos_app::state::AppState) -> (Stri
         wire: PersistentSessionWireContract {
             channel_env: "RYEOS_SESSION_FD".to_owned(),
             wire_protocol: "ryeos.structured-session".to_owned(),
-            wire_version: 1,
+            wire_version: 2,
             max_frame_bytes: 1024,
         },
         artifact_identity: AdmittedLaunchArtifactIdentity::DirectItemExecutor {
@@ -87,6 +99,7 @@ fn store_structured_session_capsule(state: &ryeos_app::state::AppState) -> (Stri
         },
         execution_realization_hash: "8".repeat(64),
         source_binding_hash: None,
+        retained_product_selections: None,
         structured_session_profile: Some(AdmittedStructuredSessionProfile {
             profile_hash: profile_hash.clone(),
             contract,
@@ -99,7 +112,13 @@ fn store_structured_session_capsule(state: &ryeos_app::state::AppState) -> (Stri
         runtime_ref: "runtime:fixture/session".to_owned(),
         executor_ref: "native:fixture".to_owned(),
     };
-    let value = capsule.to_value().unwrap();
+    let mut value = capsule.to_value().unwrap();
+    value["schema"] = schema;
+    if value["schema"] != json!(PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION) {
+        // Deliberately opaque nested shape: classifying history must not decode
+        // this predecessor as today's launch or protocol authority.
+        value["structured_session_profile"] = json!({"obsolete_shape":true});
+    }
     let hash = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap())
         .store_object(&value)
         .unwrap();
@@ -242,13 +261,80 @@ struct CompletedTurnFixture {
     request_digest: String,
 }
 
+struct PendingTurnFixture {
+    worker_instance_id: String,
+    command_payload: Value,
+    request_digest: String,
+    sequence: u64,
+    turn_id: String,
+    result: Value,
+}
+
 fn seed_completed_turn_fixture(
     state: &ryeos_app::state::AppState,
     root: &str,
 ) -> CompletedTurnFixture {
+    seed_completed_turn_fixture_with_progress(state, root, false)
+}
+
+fn seed_completed_turn_fixture_with_progress(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    early_progress: bool,
+) -> CompletedTurnFixture {
+    let pending = seed_pending_turn_fixture(state, root, early_progress);
+    let PendingTurnFixture {
+        worker_instance_id,
+        command_payload,
+        request_digest,
+        sequence,
+        turn_id,
+        result,
+    } = pending;
+    append_final_turn_batch(state, root, sequence, &request_digest, &result);
+    let response_digest = ryeos_state::objects::canonical_value_digest(&result).unwrap();
+    state.state_store.append_events(root, root, &[command_fact(
+        root, "hosted_command.settled", sequence, &request_digest, 1,
+        json!({"schema":1,"origin":"daemon_observed_io", "response_digest":response_digest,"succeeded":true}),
+    )]).unwrap();
+    state
+        .state_store
+        .settle_dedicated_command(root, sequence, 1, true, &result)
+        .unwrap();
+    project_turn_start(state, root, &turn_id);
+    complete_turn(state, root, &turn_id);
+    let observation =
+        ryeos_app::dedicated_session_service::command_observation(state, root, sequence).unwrap();
+    CompletedTurnFixture {
+        fence: serde_json::from_value(observation["completion_fence"].clone()).unwrap(),
+        worker_instance_id,
+        command_payload,
+        request_digest,
+    }
+}
+
+fn seed_pending_turn_fixture(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    early_progress: bool,
+) -> PendingTurnFixture {
+    seed_pending_turn_fixture_with_schema(
+        state,
+        root,
+        early_progress,
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION),
+    )
+}
+
+fn seed_pending_turn_fixture_with_schema(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    early_progress: bool,
+    schema: Value,
+) -> PendingTurnFixture {
     let owner = "fp:test-operator";
     let (capsule_hash, protocol_profile_hash, protocol_schema_hashes) =
-        store_structured_session_capsule(state);
+        store_structured_session_capsule_with_schema(state, schema);
     let launch_owner = format!("claim-{root}");
     let launch_claim = state
         .state_store
@@ -296,6 +382,8 @@ fn seed_completed_turn_fixture(
         .state_store
         .bind_execution_workspace(WorkspaceBinding {
             workspace_id: &workspace_id,
+            workspace_output_partition_identity: None,
+            base_output_capture_hash: None,
             thread_id: root,
             launch_owner: Some(&launch_claim.claimed_by),
             backend_id: Some("test-backend"),
@@ -305,6 +393,17 @@ fn seed_completed_turn_fixture(
         })
         .unwrap();
     let profile_id = format!("P-{root}");
+    state
+        .state_store
+        .bind_thread_workspace(
+            root,
+            &RuntimeWorkspaceBinding {
+                workspace_id: workspace_id.clone(),
+                view_identity: "test-mount".to_owned(),
+                borrower_launch_owner: launch_claim.owner.clone(),
+            },
+        )
+        .unwrap();
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
@@ -323,6 +422,7 @@ fn seed_completed_turn_fixture(
             admitted_capsule_hash: &capsule_hash,
             workspace_id: &workspace_id,
             candidate_required: false,
+            candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
             credential_profile_id: &profile_id,
             credential_generation: 1,
             credential_lock_owner: &worker_instance_id,
@@ -339,6 +439,7 @@ fn seed_completed_turn_fixture(
             lifecycle_generation: 1,
             process_identity: ExecutionProcessIdentity {
                 schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+                process_scope: None,
                 boot_id: format!("test-boot-{root}"),
                 target_pid: 101,
                 target_start_time_ticks: 10,
@@ -347,7 +448,7 @@ fn seed_completed_turn_fixture(
             },
             control_channel_identity: format!("fd:{root}"),
             state: WorkerProcessState::Attached,
-            daemon_generation_id: "daemon-test".to_owned(),
+            daemon_generation_id: ryeos_app::runtime_db::daemon_generation_id().to_owned(),
             placement_thread_id: root.to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: now,
@@ -357,6 +458,10 @@ fn seed_completed_turn_fixture(
     state
         .state_store
         .complete_worker_binding(&worker_instance_id, root, 1)
+        .unwrap();
+    state
+        .state_store
+        .bind_dedicated_remote_thread(root, &worker_instance_id, 1, "upstream-thread")
         .unwrap();
 
     let command_payload = json!({"route_id":"test.route","payload":{"value":1}});
@@ -387,14 +492,30 @@ fn seed_completed_turn_fixture(
         }],
         "value":"retained",
     });
-    let response_digest = ryeos_state::objects::canonical_value_digest(&result).unwrap();
+    let mut start = turn_start_fact(root, command.command_sequence, &request_digest, 1, &turn_id);
+    let progress = early_progress.then(|| {
+        let batch = json!({"events":[],"session_observations":result["session_observations"]});
+        let progress = command_fact(
+            root,
+            "hosted_worker_command_progress",
+            command.command_sequence,
+            &request_digest,
+            1,
+            json!({"schema":1,"origin":"daemon_observed_io",
+                "response_digest":ryeos_state::objects::canonical_value_digest(&batch).unwrap(),
+                "canonical_batch":batch}),
+        );
+        start.payload["source"]["kind"] = json!("command_progress");
+        start.payload["source"]["batch_operation_id"] = progress.payload["operation_id"].clone();
+        progress
+    });
     state
         .state_store
         .append_events(
             root,
             root,
             &[
-                command_fact(
+                Some(command_fact(
                     root,
                     "hosted_command.committed",
                     command.command_sequence,
@@ -411,52 +532,52 @@ fn seed_completed_turn_fixture(
                         "protocol_profile_hash":protocol_profile_hash,
                         "protocol_schema_hashes":protocol_schema_hashes,
                     }),
-                ),
-                command_fact(
-                    root,
-                    "hosted_worker_command_observation_batch",
-                    command.command_sequence,
-                    &request_digest,
-                    1,
-                    json!({
-                        "schema":1,
-                        "origin":"daemon_observed_io",
-                        "response_digest":response_digest,
-                        "canonical_batch":{
-                            "events":result["events"],
-                            "session_observations":result["session_observations"],
-                        },
-                    }),
-                ),
-                turn_start_fact(root, command.command_sequence, &request_digest, 1, &turn_id),
-                command_fact(
-                    root,
-                    "hosted_command.settled",
-                    command.command_sequence,
-                    &request_digest,
-                    1,
-                    json!({
-                        "schema":1,
-                        "origin":"daemon_observed_io",
-                        "response_digest":response_digest,
-                        "succeeded":true,
-                    }),
-                ),
-            ],
+                )),
+                progress,
+                Some(start),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
         )
         .unwrap();
     state
         .state_store
         .mark_dedicated_command_contacted(root, command.command_sequence, 1)
         .unwrap();
+    PendingTurnFixture {
+        worker_instance_id,
+        command_payload,
+        request_digest,
+        sequence: command.command_sequence,
+        turn_id,
+        result,
+    }
+}
+
+fn append_final_turn_batch(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    sequence: u64,
+    request_digest: &str,
+    result: &Value,
+) {
+    state.state_store.append_events(root, root, &[command_fact(
+        root, "hosted_worker_command_observation_batch", sequence, request_digest, 1,
+        json!({"schema":1,"origin":"daemon_observed_io",
+            "response_digest":ryeos_state::objects::canonical_value_digest(result).unwrap(),
+            "canonical_batch":{"events":result["events"],"session_observations":result["session_observations"]}}),
+    )]).unwrap();
+}
+
+fn project_turn_start(state: &ryeos_app::state::AppState, root: &str, turn_id: &str) {
     state
         .state_store
-        .settle_dedicated_command(root, command.command_sequence, 1, true, &result)
+        .observe_dedicated_session_state(root, 1, "idle", "turn_running", None, Some(turn_id))
         .unwrap();
-    state
-        .state_store
-        .observe_dedicated_session_state(root, 1, "idle", "turn_running", None, Some(&turn_id))
-        .unwrap();
+}
+
+fn complete_turn(state: &ryeos_app::state::AppState, root: &str, turn_id: &str) {
     let mut terminal_batch = json!({
         "first_sequence":1,
         "count":1,
@@ -473,18 +594,833 @@ fn seed_completed_turn_fixture(
         Value::String(ryeos_state::objects::canonical_value_digest(&terminal_batch).unwrap());
     ryeos_app::dedicated_session_service::ingest_observation_batch(state, root, 1, terminal_batch)
         .unwrap();
-    let observation = ryeos_app::dedicated_session_service::command_observation(
+}
+
+fn settle_pending_turn(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    pending: &PendingTurnFixture,
+) {
+    append_final_turn_batch(
         state,
         root,
-        command.command_sequence,
+        pending.sequence,
+        &pending.request_digest,
+        &pending.result,
+    );
+    let response_digest = ryeos_state::objects::canonical_value_digest(&pending.result).unwrap();
+    state
+        .state_store
+        .append_events(
+            root,
+            root,
+            &[command_fact(
+                root,
+                "hosted_command.settled",
+                pending.sequence,
+                &pending.request_digest,
+                1,
+                json!({"schema":1,"origin":"daemon_observed_io","response_digest":response_digest,"succeeded":true}),
+            )],
+        )
+        .unwrap();
+    state
+        .state_store
+        .settle_dedicated_command(root, pending.sequence, 1, true, &pending.result)
+        .unwrap();
+    project_turn_start(state, root, &pending.turn_id);
+}
+
+fn seed_workload_child(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    worker_instance_id: &str,
+    upstream_session_id: &str,
+    turn_id: &str,
+    call_id: &str,
+    child_thread_id: &str,
+    child_owner: &str,
+) {
+    seed_workspace_child(
+        state,
+        root,
+        worker_instance_id,
+        ryeos_runtime::workload_client::WorkloadInvocationSource::StructuredSession {
+            upstream_session_id: upstream_session_id.to_owned(),
+            operation_id: turn_id.to_owned(),
+            call_id: call_id.to_owned(),
+        },
+        child_thread_id,
+        child_thread_id,
+        child_owner,
+    );
+}
+
+fn seed_workspace_child(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    worker_instance_id: &str,
+    invocation: ryeos_runtime::workload_client::WorkloadInvocationSource,
+    child_thread_id: &str,
+    child_chain_root_id: &str,
+    child_owner: &str,
+) {
+    let session = state.state_store.dedicated_session(root).unwrap().unwrap();
+    let worker = state
+        .state_store
+        .worker_process(worker_instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(worker.placement_thread_id, root);
+    assert_eq!(worker.boot_epoch, 1);
+    assert_eq!(
+        worker.daemon_generation_id,
+        ryeos_app::runtime_db::daemon_generation_id()
+    );
+    assert_eq!(worker.session_capsule_hash, session.admitted_capsule_hash);
+    assert_eq!(worker.state, WorkerProcessState::Live);
+    assert_eq!(worker.cleanup_state, "owned");
+    let grant_digest = "d".repeat(64);
+    let operation_id = invocation.runtime_operation_id(&grant_digest).unwrap();
+    let project_authority_digest = "e".repeat(64);
+    state
+        .state_store
+        .reserve_runtime_action_intent_with_workspace(
+            &operation_id,
+            root,
+            RuntimeActionMode::Inline,
+            &"f".repeat(64),
+            child_thread_id,
+            None,
+            &NewRuntimeWorkspaceOperation {
+                workspace_id: &session.workspace_id,
+                access: ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+                worker_instance_id,
+                worker_boot_epoch: 1,
+                worker_boot_identity_hash: &worker.boot_identity_hash,
+                project_authority_digest: &project_authority_digest,
+                workload_client_grant_digest: &grant_digest,
+                invocation,
+            },
+        )
+        .unwrap();
+    state
+        .state_store
+        .transition_runtime_workspace_operation(
+            &operation_id,
+            &[RuntimeWorkspaceOperationPhase::Reserved],
+            RuntimeWorkspaceOperationPhase::Quiescing,
+        )
+        .unwrap();
+    state
+        .state_store
+        .bind_runtime_workspace_input_generation(
+            &operation_id,
+            &ryeos_state::objects::WorkspaceGenerationPair {
+                snapshot_hash: "a".repeat(64),
+                output_capture_hash: None,
+            },
+        )
+        .unwrap();
+    state
+        .state_store
+        .transition_runtime_workspace_operation(
+            &operation_id,
+            &[RuntimeWorkspaceOperationPhase::Quiesced],
+            RuntimeWorkspaceOperationPhase::ChildRunning,
+        )
+        .unwrap();
+    let mut child = root_thread(child_thread_id, child_owner);
+    child.chain_root_id = child_chain_root_id.to_owned();
+    if child_chain_root_id != child_thread_id {
+        child.upstream_thread_id = Some(root.to_owned());
+        child.captured_history_policy = None;
+    }
+    state.state_store.create_thread_for_test(&child).unwrap();
+    state
+        .state_store
+        .mark_thread_running(child_thread_id, None)
+        .unwrap();
+    state
+        .state_store
+        .finalize_thread(
+            child_thread_id,
+            &FinalizeThreadRecord {
+                status: "completed".to_owned(),
+                outcome_code: None,
+                result_json: Some(json!({"child_thread_id":child_thread_id,"ok":true})),
+                error_json: None,
+                artifacts: vec![],
+                final_cost: None,
+                managed_envelope: None,
+                result_project_snapshot_hash: None,
+                result_workspace_output_capture_hash: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        state
+            .state_store
+            .settle_runtime_workspace_operation(&operation_id)
+            .unwrap()
+    );
+}
+
+fn seed_nonworkload_child(state: &ryeos_app::state::AppState, root: &str, child_thread_id: &str) {
+    state
+        .state_store
+        .reserve_runtime_action_intent(
+            &ryeos_state::objects::canonical_value_digest(&json!({
+                "kind":"non-workload-fixture",
+                "child_thread_id":child_thread_id,
+            }))
+            .unwrap(),
+            root,
+            RuntimeActionMode::Inline,
+            &"4".repeat(64),
+            child_thread_id,
+            None,
+        )
+        .unwrap();
+    state
+        .state_store
+        .create_thread_for_test(&root_thread(child_thread_id, "fp:test-operator"))
+        .unwrap();
+    state
+        .state_store
+        .mark_thread_running(child_thread_id, None)
+        .unwrap();
+    state
+        .state_store
+        .finalize_thread(
+            child_thread_id,
+            &FinalizeThreadRecord {
+                status: "completed".to_owned(),
+                outcome_code: None,
+                result_json: Some(json!({"child_thread_id":child_thread_id,"ok":true})),
+                error_json: None,
+                artifacts: vec![],
+                final_cost: None,
+                managed_envelope: None,
+                result_project_snapshot_hash: None,
+                result_workspace_output_capture_hash: None,
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn command_observation_projects_only_children_of_its_exact_turn() {
+    let (tmp, state) = test_state::build_test_state();
+    let root = "T-exact-turn-children";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    settle_pending_turn(&state, root, &pending);
+    for (call_id, child) in [("call-one", "T-child-one"), ("call-two", "T-child-two")] {
+        seed_workload_child(
+            &state,
+            root,
+            &pending.worker_instance_id,
+            "upstream-thread",
+            &pending.turn_id,
+            call_id,
+            child,
+            "fp:test-operator",
+        );
+    }
+    seed_workspace_child(
+        &state,
+        root,
+        &pending.worker_instance_id,
+        ryeos_runtime::workload_client::WorkloadInvocationSource::Cli {
+            external_request_id: "cli-other".to_owned(),
+        },
+        "T-child-cli",
+        "T-child-cli",
+        "fp:test-operator",
+    );
+    seed_nonworkload_child(&state, root, "T-child-nonworkload");
+
+    // Model a retained callback from another upstream session using the
+    // production reservation path, then restore the current session
+    // coordinate. This is deliberately a projection-corruption fixture: the
+    // normal admission path would refuse such a callback while this turn is
+    // current, but observation must still exclude it if retained state ever
+    // contains it.
+    let projection = rusqlite::Connection::open(&state.config.db_path).unwrap();
+    projection
+        .execute(
+            "UPDATE dedicated_session SET remote_thread_id='other-upstream', current_turn_id='other-turn' WHERE placement_thread_id=?1",
+            [root],
+        )
+        .unwrap();
+    seed_workload_child(
+        &state,
+        root,
+        &pending.worker_instance_id,
+        "other-upstream",
+        "other-turn",
+        "call-other-session",
+        "T-child-other-session",
+        "fp:test-operator",
+    );
+    projection
+        .execute(
+            "UPDATE dedicated_session SET remote_thread_id='upstream-thread', current_turn_id=?2 WHERE placement_thread_id=?1",
+            rusqlite::params![root, pending.turn_id],
+        )
+        .unwrap();
+    drop(projection);
+
+    let running_session = state.state_store.dedicated_session(root).unwrap().unwrap();
+    let running_command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    let running_history = serde_json::to_value(
+        state
+            .state_store
+            .get_authoritative_root_thread_snapshot(root)
+            .unwrap(),
     )
     .unwrap();
-    CompletedTurnFixture {
-        fence: serde_json::from_value(observation["completion_fence"].clone()).unwrap(),
-        worker_instance_id,
-        command_payload,
-        request_digest,
+    let running =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap();
+    assert_eq!(running["operation"]["state"], "running");
+    assert!(running.get("completion_fence").is_none());
+    assert!(running.get("child_executions").is_none());
+    assert_eq!(
+        state.state_store.dedicated_session(root).unwrap().unwrap(),
+        running_session
+    );
+    assert_eq!(
+        state
+            .state_store
+            .dedicated_session_command(root, pending.sequence)
+            .unwrap()
+            .unwrap(),
+        running_command
+    );
+    assert_eq!(
+        serde_json::to_value(
+            state
+                .state_store
+                .get_authoritative_root_thread_snapshot(root)
+                .unwrap()
+        )
+        .unwrap(),
+        running_history
+    );
+    complete_turn(&state, root, &pending.turn_id);
+
+    let before_session = state.state_store.dedicated_session(root).unwrap().unwrap();
+    let before_command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    let before_history = serde_json::to_value(
+        state
+            .state_store
+            .get_authoritative_root_thread_snapshot(root)
+            .unwrap(),
+    )
+    .unwrap();
+    let before_intents = state.state_store.runtime_action_intents().unwrap().len();
+    let first =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap();
+    let children = first["child_executions"].as_array().unwrap();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["invocation"]["call_id"], "call-one");
+    assert_eq!(children[1]["invocation"]["call_id"], "call-two");
+    assert_eq!(
+        state.state_store.dedicated_session(root).unwrap().unwrap(),
+        before_session
+    );
+    assert_eq!(
+        state
+            .state_store
+            .dedicated_session_command(root, pending.sequence)
+            .unwrap()
+            .unwrap(),
+        before_command
+    );
+    assert_eq!(
+        serde_json::to_value(
+            state
+                .state_store
+                .get_authoritative_root_thread_snapshot(root)
+                .unwrap()
+        )
+        .unwrap(),
+        before_history
+    );
+    assert_eq!(
+        state.state_store.runtime_action_intents().unwrap().len(),
+        before_intents
+    );
+
+    state
+        .state_store
+        .observe_dedicated_session_state(root, 1, "idle", "turn_running", None, Some("later-turn"))
+        .unwrap();
+    seed_workload_child(
+        &state,
+        root,
+        &pending.worker_instance_id,
+        first["child_executions"][0]["invocation"]["upstream_session_id"]
+            .as_str()
+            .unwrap(),
+        "later-turn",
+        "later-call",
+        "T-child-later",
+        "fp:test-operator",
+    );
+    let replay =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap();
+    assert_eq!(replay["child_executions"], first["child_executions"]);
+    assert_eq!(
+        state.state_store.runtime_action_intents().unwrap().len(),
+        before_intents + 1
+    );
+
+    drop(state);
+    let reopened = test_state::reopen_test_state(&tmp);
+    let reconstructed = ryeos_app::dedicated_session_service::command_observation(
+        &reopened,
+        root,
+        pending.sequence,
+    )
+    .unwrap();
+    assert_eq!(reconstructed["child_executions"], first["child_executions"]);
+    assert_eq!(reconstructed["completion_fence"], first["completion_fence"]);
+}
+
+#[test]
+fn command_observation_refuses_a_child_with_contradictory_owner() {
+    let (_tmp, state) = test_state::build_test_state();
+    let root = "T-contradictory-child-owner";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    settle_pending_turn(&state, root, &pending);
+    let upstream = state
+        .state_store
+        .dedicated_session(root)
+        .unwrap()
+        .unwrap()
+        .remote_thread_id
+        .unwrap();
+    seed_workload_child(
+        &state,
+        root,
+        &pending.worker_instance_id,
+        &upstream,
+        &pending.turn_id,
+        "call-wrong-owner",
+        "T-child-wrong-owner",
+        "fp:other-owner",
+    );
+    complete_turn(&state, root, &pending.turn_id);
+    let error =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("contradicts its placement ownership"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn command_observation_refuses_a_child_with_contradictory_root() {
+    let (_tmp, state) = test_state::build_test_state();
+    let root = "T-contradictory-child-root";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    settle_pending_turn(&state, root, &pending);
+    seed_workspace_child(
+        &state,
+        root,
+        &pending.worker_instance_id,
+        ryeos_runtime::workload_client::WorkloadInvocationSource::StructuredSession {
+            upstream_session_id: "upstream-thread".to_owned(),
+            operation_id: pending.turn_id.clone(),
+            call_id: "call-wrong-root".to_owned(),
+        },
+        "T-child-wrong-root",
+        root,
+        "fp:test-operator",
+    );
+    complete_turn(&state, root, &pending.turn_id);
+    let error =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("has no authoritative snapshot"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn terminal_predecessor_command_history_is_preserved_without_replay() {
+    let (_tmp, state) = test_state::build_test_state();
+    let root = "T-terminal-predecessor";
+    let pending = seed_pending_turn_fixture_with_schema(
+        &state,
+        root,
+        false,
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 1),
+    );
+    // Neither a live placement nor an unproved cleanup is historical authority.
+    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    state
+        .state_store
+        .settle_worker_process(&pending.worker_instance_id, root, 1, "unproved", "fixture")
+        .unwrap();
+    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    state
+        .state_store
+        .settle_worker_process(&pending.worker_instance_id, root, 1, "reaped", "fixture")
+        .unwrap();
+    // Use the normal terminal transition, then restart fencing is deliberately
+    // not sufficient: this still-attached terminal must not take the opaque path.
+    state
+        .state_store
+        .terminalize_dedicated_session(root, &pending.worker_instance_id, 1, "fixture")
+        .unwrap();
+    finalize_fixture_thread(&state, root);
+    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+
+    // A separate placement exercises the exact installed failure: its prior
+    // worker was fenced and detached before the session/root became terminal.
+    let (_tmp, state) = test_state::build_test_state();
+    let pending = seed_pending_turn_fixture_with_schema(
+        &state,
+        root,
+        false,
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 1),
+    );
+    retire_fixture_session(&state, root, &pending);
+    let session_before =
+        serde_json::to_value(state.state_store.dedicated_session(root).unwrap()).unwrap();
+    let command_before = serde_json::to_value(
+        state
+            .state_store
+            .dedicated_session_command(root, pending.sequence)
+            .unwrap(),
+    )
+    .unwrap();
+    let history_before = serde_json::to_value(
+        state
+            .state_store
+            .get_authoritative_root_thread_snapshot(root)
+            .unwrap(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+        ryeos_app::dedicated_session_service::reconcile_observation_outboxes(&state).unwrap();
+        assert_eq!(
+            serde_json::to_value(state.state_store.dedicated_session(root).unwrap()).unwrap(),
+            session_before
+        );
+        assert_eq!(
+            serde_json::to_value(
+                state
+                    .state_store
+                    .dedicated_session_command(root, pending.sequence)
+                    .unwrap()
+            )
+            .unwrap(),
+            command_before
+        );
+        assert_eq!(
+            serde_json::to_value(
+                state
+                    .state_store
+                    .get_authoritative_root_thread_snapshot(root)
+                    .unwrap()
+            )
+            .unwrap(),
+            history_before
+        );
+        assert!(
+            ryeos_app::dedicated_session_service::command_observation(
+                &state,
+                root,
+                pending.sequence
+            )
+            .is_err()
+        );
     }
+    // Model an orphaned unproved boot not present in the detached slot. The
+    // existing indexed cleanup owner, not slot absence, must refuse retention.
+    let projection = rusqlite::Connection::open(&state.config.db_path).unwrap();
+    projection
+        .execute(
+            "UPDATE worker_process SET cleanup_state='unproved' WHERE worker_instance_id=?1",
+            [&pending.worker_instance_id],
+        )
+        .unwrap();
+    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    projection
+        .execute(
+            "UPDATE worker_process SET cleanup_state='reaped' WHERE worker_instance_id=?1",
+            [&pending.worker_instance_id],
+        )
+        .unwrap();
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+
+    // A stale/corrupt session row may not select another old capsule to evade
+    // exact immutable command association checks.
+    let original_capsule = state
+        .state_store
+        .dedicated_session(root)
+        .unwrap()
+        .unwrap()
+        .admitted_capsule_hash;
+    let (other_capsule, _, _) = store_structured_session_capsule_with_schema(
+        &state,
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 2),
+    );
+    projection
+        .execute(
+            "UPDATE dedicated_session SET admitted_capsule_hash=?1 WHERE placement_thread_id=?2",
+            [&other_capsule, root],
+        )
+        .unwrap();
+    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    projection
+        .execute(
+            "UPDATE dedicated_session SET admitted_capsule_hash=?1 WHERE placement_thread_id=?2",
+            [&original_capsule, root],
+        )
+        .unwrap();
+    drop(projection);
+
+    // The old row must not stop current unrelated commands from being repaired.
+    let current = seed_pending_turn_fixture(&state, "T-current-alongside-history", false);
+    append_final_turn_batch(
+        &state,
+        "T-current-alongside-history",
+        current.sequence,
+        &current.request_digest,
+        &current.result,
+    );
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+    assert_eq!(
+        state
+            .state_store
+            .dedicated_session_command("T-current-alongside-history", current.sequence)
+            .unwrap()
+            .unwrap()
+            .state,
+        "completed"
+    );
+}
+
+fn finalize_fixture_thread(state: &ryeos_app::state::AppState, root: &str) {
+    state
+        .state_store
+        .finalize_thread(
+            root,
+            &FinalizeThreadRecord {
+                status: "failed".to_owned(),
+                outcome_code: None,
+                result_json: None,
+                error_json: Some(json!({"fixture":"retired"})),
+                artifacts: vec![],
+                final_cost: None,
+                managed_envelope: None,
+                result_project_snapshot_hash: None,
+                result_workspace_output_capture_hash: None,
+            },
+        )
+        .unwrap();
+}
+
+fn retire_fixture_session(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    pending: &PendingTurnFixture,
+) {
+    state
+        .state_store
+        .fence_abandoned_worker_process(&pending.worker_instance_id, root, 1, "reaped")
+        .unwrap();
+    state
+        .state_store
+        .terminalize_unattached_dedicated_session(root, "fixture")
+        .unwrap();
+    finalize_fixture_thread(state, root);
+}
+
+#[tokio::test]
+async fn terminal_history_does_not_hide_malformed_or_future_session_capsules() {
+    for schema in [
+        Value::Null,
+        json!(0),
+        json!(-1),
+        json!("10"),
+        json!(1.5),
+        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION + 1),
+    ] {
+        let (_tmp, state) = test_state::build_test_state();
+        let root = "T-invalid-terminal-capsule";
+        let pending = seed_pending_turn_fixture_with_schema(&state, root, false, schema);
+        retire_fixture_session(&state, root, &pending);
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    }
+}
+
+#[tokio::test]
+async fn command_progress_recovery_preserves_the_exact_crash_frontier() {
+    for (label, projected, completed, final_batch) in [
+        ("before-projection", false, false, false),
+        ("before-ack", true, false, false),
+        ("before-settlement", true, false, true),
+        ("completion-before-settlement", true, true, true),
+    ] {
+        let (_tmp, state) = test_state::build_test_state();
+        let root = format!("T-progress-{label}");
+        let pending = seed_pending_turn_fixture(&state, &root, true);
+        if projected {
+            project_turn_start(&state, &root, &pending.turn_id);
+        }
+        if completed {
+            complete_turn(&state, &root, &pending.turn_id);
+        }
+        if final_batch {
+            append_final_turn_batch(
+                &state,
+                &root,
+                pending.sequence,
+                &pending.request_digest,
+                &pending.result,
+            );
+        }
+        for _ in 0..2 {
+            ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+            let command = state
+                .state_store
+                .dedicated_session_command(&root, pending.sequence)
+                .unwrap()
+                .unwrap();
+            let session = state.state_store.dedicated_session(&root).unwrap().unwrap();
+            assert_eq!(
+                command.state,
+                if final_batch {
+                    "completed"
+                } else {
+                    "outcome_unknown"
+                },
+                "{label}"
+            );
+            if completed {
+                assert_eq!(session.state, "idle", "{label}");
+                assert!(session.current_turn_id.is_none());
+                let observed = ryeos_app::dedicated_session_service::command_observation(
+                    &state,
+                    &root,
+                    pending.sequence,
+                )
+                .unwrap();
+                assert_eq!(observed["completion_fence"]["turn_id"], pending.turn_id);
+            } else {
+                assert_eq!(
+                    session.current_turn_id.as_deref(),
+                    Some(pending.turn_id.as_str()),
+                    "{label}"
+                );
+                assert_eq!(
+                    session.state,
+                    if final_batch {
+                        "turn_running"
+                    } else {
+                        "outcome_unknown"
+                    },
+                    "{label}"
+                );
+            }
+            if final_batch {
+                assert_eq!(
+                    command.result.as_ref().unwrap()["response_digest"],
+                    ryeos_state::objects::canonical_value_digest(&pending.result).unwrap()
+                );
+            }
+        }
+        let replay = state
+            .state_store
+            .replay_events(&root, Some(&root), None, 128, 1024 * 1024)
+            .unwrap();
+        let starts = replay
+            .events
+            .iter()
+            .filter(|event| event.event_type == "hosted_session.turn_started")
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 1, "{label}");
+        assert_eq!(starts[0].payload["source"]["kind"], "command_progress");
+    }
+}
+
+#[tokio::test]
+async fn command_progress_recovery_refuses_a_conflicting_final_start() {
+    let (_tmp, state) = test_state::build_test_state();
+    let root = "T-progress-conflicting-final";
+    let pending = seed_pending_turn_fixture(&state, root, true);
+    project_turn_start(&state, root, &pending.turn_id);
+    let mut bad_result = pending.result.clone();
+    bad_result["session_observations"][0]["turn_id"] = json!("different-turn");
+    append_final_turn_batch(
+        &state,
+        root,
+        pending.sequence,
+        &pending.request_digest,
+        &bad_result,
+    );
+    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    let command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(command.state, "dispatched");
+    let session = state.state_store.dedicated_session(root).unwrap().unwrap();
+    assert_eq!(
+        session.current_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn completed_command_retains_its_early_progress_start_authority() {
+    let (_tmp, state) = test_state::build_test_state();
+    let root = "T-progress-completed-fence";
+    let fixture = seed_completed_turn_fixture_with_progress(&state, root, true);
+    let observed = ryeos_app::dedicated_session_service::command_observation(
+        &state,
+        root,
+        fixture.fence.command_sequence,
+    )
+    .unwrap();
+    assert_eq!(observed["operation"]["state"], "completed");
+    assert_eq!(
+        observed["completion_fence"],
+        serde_json::to_value(&fixture.fence).unwrap()
+    );
+    let replay = state
+        .state_store
+        .replay_events(root, Some(root), None, 128, 1024 * 1024)
+        .unwrap();
+    let starts = replay
+        .events
+        .iter()
+        .filter(|event| event.event_type == "hosted_session.turn_started")
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].payload["source"]["kind"], "command_progress");
 }
 
 #[tokio::test]
@@ -492,6 +1428,10 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
     let (_tmp, state) = test_state::build_test_state();
     let root = "T-completed-fence";
     let fixture = seed_completed_turn_fixture(&state, root);
+
+    ryeos_app::dedicated_session_service::terminate_session(&state, root, "completed", None)
+        .await
+        .expect_err("mutable idle state cannot replace an exact completed-turn fence");
 
     let mut mutations = Vec::new();
     let mut changed = fixture.fence.clone();
@@ -626,7 +1566,12 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
     assert_eq!(
         state
             .state_store
-            .prepare_dedicated_session_recovery(recovered_root, 1, &recovered_worker)
+            .prepare_dedicated_session_recovery(
+                recovered_root,
+                1,
+                &recovered_worker,
+                &format!("W-{recovered_root}")
+            )
             .unwrap(),
         2
     );
@@ -641,6 +1586,7 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
             lifecycle_generation: 2,
             process_identity: ExecutionProcessIdentity {
                 schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+                process_scope: None,
                 boot_id: "test-boot-recovered-2".to_owned(),
                 target_pid: 102,
                 target_start_time_ticks: 20,
@@ -660,7 +1606,7 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
         .state_store
         .complete_worker_binding(&recovered_worker, recovered_root, 2)
         .unwrap();
-    let reattach_payload = json!({"upstream_session_id":"upstream-recovered"});
+    let reattach_payload = json!({"upstream_session_id":"upstream-thread"});
     let reattach = state
         .state_store
         .reserve_dedicated_session_command(NewDedicatedSessionCommand {
@@ -684,6 +1630,10 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
             2,
             &json!({"redacted":true}),
         )
+        .unwrap();
+    state
+        .state_store
+        .settle_dedicated_remote_recovery_status(recovered_root, 2, "upstream-thread", "safe_idle")
         .unwrap();
     assert_eq!(
         ryeos_app::dedicated_session_service::command_observation(
@@ -764,6 +1714,8 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
         .state_store
         .bind_execution_workspace(WorkspaceBinding {
             workspace_id: "W-terminal-hosted-replay",
+            workspace_output_partition_identity: None,
+            base_output_capture_hash: None,
             thread_id: root,
             launch_owner: Some(&launch_claim.claimed_by),
             backend_id: Some("test-backend"),
@@ -771,6 +1723,17 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
             pinned_root_identities: Some("{}"),
             mount_identity: Some("test-mount"),
         })
+        .unwrap();
+    state
+        .state_store
+        .bind_thread_workspace(
+            root,
+            &RuntimeWorkspaceBinding {
+                workspace_id: "W-terminal-hosted-replay".to_owned(),
+                view_identity: "test-mount".to_owned(),
+                borrower_launch_owner: launch_claim.owner.clone(),
+            },
+        )
         .unwrap();
     state
         .state_store
@@ -789,6 +1752,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
             admitted_capsule_hash: &capsule_hash,
             workspace_id: "W-terminal-hosted-replay",
             candidate_required: false,
+            candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
             credential_profile_id: "P-terminal-hosted-replay",
             credential_generation: 1,
             credential_lock_owner: "worker-terminal-hosted-replay",
@@ -805,6 +1769,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
             lifecycle_generation: 1,
             process_identity: ExecutionProcessIdentity {
                 schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+                process_scope: None,
                 boot_id: "test-boot".to_owned(),
                 target_pid: 101,
                 target_start_time_ticks: 10,
@@ -824,7 +1789,15 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
         .state_store
         .complete_worker_binding("worker-terminal-hosted-replay", root, 1)
         .unwrap();
-
+    state
+        .state_store
+        .bind_dedicated_remote_thread(
+            root,
+            "worker-terminal-hosted-replay",
+            1,
+            "upstream-terminal-hosted-replay",
+        )
+        .unwrap();
     let command_payload = json!({"route_id":"test.route","payload":{"value":1}});
     let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
         "command_kind":"route",
@@ -1329,6 +2302,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
                 final_cost: None,
                 managed_envelope: None,
                 result_project_snapshot_hash: None,
+                result_workspace_output_capture_hash: None,
             },
         )
         .unwrap();

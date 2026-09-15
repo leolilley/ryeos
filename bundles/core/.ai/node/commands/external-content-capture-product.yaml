@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-08T01:19:27Z:f93e38ae3a93b37235ae3b69bf5aff1bc08f12c5ac4d4bdab72f096926f31b82:YY9ZmHBriQUWjwPeDf5H7YQp73ZvOH4AEwXHNUatSV3ORia9jvbUJ9cw2ujKszUznPtMq6wdDdwy6wyyQjizBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, capture-product]
+description: Capture a named product from an exact retained producer
+defaults:
+  recipe_binding: product_recipe
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: thread_id
+      - field: product_name
+help:
+  usage: ryeos external-content capture-product <chain-root> <terminal-thread> <product-name>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/capture-product

@@ -231,6 +231,7 @@ async fn run_entry(
         current_site_id: site_id.clone(),
         origin_site_id,
         execution_hints: Default::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
@@ -276,6 +277,7 @@ async fn run_entry(
         validate_only: false,
         params,
         ref_bindings: decl.ref_bindings.clone(),
+        product_selections: Vec::new(),
         acting_principal: ctx.fingerprint.as_str(),
         project_path: source,
         provenance,

@@ -1,0 +1,1 @@
+{"additionalProperties":false,"properties":{"account":{"additionalProperties":false,"properties":{"email":{"const":"offline@example.test"},"type":{"const":"fixture"}},"required":["email","type"],"type":"object"}},"required":["account"],"type":"object"}

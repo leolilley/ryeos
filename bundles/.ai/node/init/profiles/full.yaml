@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-03T11:56:15Z:65d31589dd57efc9ba5aa4bba5e2e25cda64c42346e5737066374088e3b224eb:htP/z4KfKKBDPUPCMW90ygSNwYpRgDUelIuoIADaDqXZ3nbIRREKson8ZP1fT/J4AqxoWLyjTi8tSBNGDOJxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T12:59:28Z:7f8383fad733f11bb2b5738e1f23698df4aa3958c4b6fdbe81503edddfa7b4cd:7PxxqmJvQ5fsgs+g6MNWXyjUm413lwaO2czaxOUuLy6eGGWsb+g9/4hFN6Y/RMOkpvgu+Yy79akkHnEO2RqhAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -7,6 +7,7 @@ exact_bundles:
   - core
   - hosted-node
   - local-inference
+  - opencode
   - ryeos-ui
   - standard
   - web
@@ -88,6 +89,7 @@ policies:
       central-auth: []
       codex:
         - ryeos.register.command.root.codex
+      opencode: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
@@ -106,10 +108,11 @@ policies:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       web: []
   execution:
-    schema: 1
+    schema: 2
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
+    workload_client: null
   object_closure:
     schema: 1
     max_roots: 256
@@ -160,10 +163,18 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 1
+      version: 6
+      process_scopes:
+        mode: unconfigured
       mode: disabled
       backend: null
       filesystem:
+        proc_filesystem: empty
+        live_project:
+          mode: fixed_parents
+          limits:
+            max_entries: 2048
+            max_depth: 64
         readable:
           - "{node_public_identity}"
           - "{daemon_socket}"
@@ -175,6 +186,7 @@ policies:
           - "{checkpoint_dir}"
       network:
         mode: host
+        runtime_files: []
       environment:
         allow:
           - "*"
@@ -186,8 +198,19 @@ policies:
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
   ingest_ignore:
-    schema: 1
-    additional_patterns: []
+    schema: 2
+    patterns:
+      - "*.pyc"
+      - ".DS_Store"
+      - ".env"
+      - ".git/"
+      - ".hg/"
+      - ".svn/"
+      - ".venv/"
+      - "/.ai/config/remotes/"
+      - "__pycache__/"
+      - "node_modules/"
+      - "target/"
   external_content:
     schema: 1
     roots: {}

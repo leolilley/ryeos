@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "date": "2026-09-07",
+  "purpose": "Observed evidence index, not admission or publication authority",
+  "node_fingerprint": "0db14ae10fa3e060d175a9ebdd975f4041b0a3a271c99078436a4a4b0e533f60",
+  "source_revision": "53a1776ad plus uncommitted registry-production sources and Config",
+  "thread_id": "T-f0ad82c5-c19f-a956-6be8-f6933a898eda",
+  "capsule_hash": "48e1952e3ba5ee91e3efb828cf99a8d39b948be54d00534c2128c03abd6aa283",
+  "base_snapshot": "139198e642ea8e1a5d8d3a5524e726e2791ec5016be4292ddb34e9e6dfd07589",
+  "result_snapshot": "7f7c9e98dee4282d94bfbcd923dac71fc505a98f7070e16f8ad01ceccdebdde0",
+  "outcome_code": "exit:0",
+  "packages": 406,
+  "receipt_sha256": "3ce0f2d85bce2c5bd27f8c413c7b1de12d22fffe30eb32846ce5d7da589c78eb",
+  "bindings": {
+    "registry": "aaa4d683895cbee6ddfbce9a2642d97fa80253deaaa7e0fcd0993cc646cdd9fa",
+    "python": "cc4c28010e85a521b616c982964bb5c8a402ed6e3a2bd3b12dbb09eddd9c1b2d"
+  },
+  "observed_result_import": {
+    "manifest_hash": "9a5595bfa82a3a43f641ca1dbc6f0ef5b8de8c3bfd2c4270d46356679c60a158",
+    "request_digest": "2cc4977593786108a0a25ff7ef7f1b709d2a97309225b4e72edc2c44996bdac8",
+    "entry_count": 1109,
+    "total_bytes": 76041651
+  },
+  "independent_manifest_comparison": {
+    "source_manifest": "45835b5cf9928ead34e9b8bd0946b05090b8e6eaa652e0052e07fb8aa09d8ac1",
+    "result_manifest": "9a5595bfa82a3a43f641ca1dbc6f0ef5b8de8c3bfd2c4270d46356679c60a158",
+    "all_payload_entries_equal": true,
+    "compared_entries": 1108,
+    "compared_files": 771,
+    "compared_fields": ["path", "kind", "blob_hash", "mode", "size"],
+    "excluded_receipts": ["acquisition.json", "registry-inputs.json"]
+  },
+  "authority": {
+    "filesystem": "captured_execution",
+    "network": "isolated",
+    "include_operator_vault": false,
+    "project_head_advanced": false,
+    "worker_grants_changed": false,
+    "binding_published_by_tool": false
+  },
+  "gates": {
+    "installed_offline_assembly": true,
+    "independent_payload_equality": true,
+    "new_network_acquisition": false,
+    "new_cargo_vendor_run": false,
+    "worker_driven_development": false
+  }
+}

@@ -266,9 +266,12 @@ impl LaunchPreparerRunner {
                     ..lillux::SubprocessLimits::default()
                 }),
                 inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
                 supervised_status: None,
             },
             IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
                 project_path,
                 project_authority: IsolationProjectAuthority::ReadOnly,
                 filesystem_authority_ceiling:
@@ -285,7 +288,8 @@ impl LaunchPreparerRunner {
                 verified_code: &verified_code,
                 verified_command: Some(&verified_code[0]),
                 external_read_only_mounts: &[],
-                target_channel: None,
+                writable_runtime_view_mounts: &[],
+                target_channels: &[],
                 item_ref: &item_ref,
                 thread_id: "launch-preparer",
             },

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-08T05:52:27Z:b41fad57d6c30792b998335b22f8f8449033cdd319f099fb3a64f227e0ec99e7:PLFqdG0BppbSmkjJJZusX+9xFXgSxvzP6/FNT02Hx0O8kbrykOVcfFm1o1iu56KvV3PCMKwaWK823LQZcRRvBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: handler
+name: direct-execution-evidence
+category: ryeos/core
+serves: execution_evidence_projector
+abi_version: v3
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-direct-execution-evidence
+required_caps: []
+description: Projects one callback-free direct terminal result without child calls.

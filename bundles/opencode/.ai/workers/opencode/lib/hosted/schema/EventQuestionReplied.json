@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "question.replied"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "requestID": {
+          "type": "string",
+          "pattern": "^que"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionAnswer"
+          }
+        }
+      },
+      "required": [
+        "sessionID",
+        "requestID",
+        "answers"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "QuestionAnswer": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

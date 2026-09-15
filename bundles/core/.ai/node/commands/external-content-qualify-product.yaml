@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-08T13:46:46Z:d701b553581502ec196002228d527f90713ebed96d650eecec4bad318975e903:PJqBIjN5CTyO5JbatsqRNbse6XL07E8vvPjpL33uJsb/83ax9qQMukvQ+6m17NNdCrrmLzwiiQNzKyCYweaVCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, qualify-product]
+description: Qualify an exact product using its signed relationship and completed verifier
+forms:
+  - slots:
+      - field: witness_hash
+      - field: witness_source
+      - field: relationship_name
+      - field: verifier_chain_root_id
+      - field: verifier_thread_id
+help:
+  usage: ryeos external-content qualify-product <witness-hash> <witness-source-json> <relationship-name> <verifier-chain-root-id> <verifier-thread-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/qualify-product

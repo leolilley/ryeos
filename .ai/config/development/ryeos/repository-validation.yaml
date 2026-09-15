@@ -1,0 +1,211 @@
+# ryeos:signed:2026-09-07T08:40:52Z:6c286f89a3fb6a80e29e09452304af55ce7011f9daa27aec24d32eff77fb36ac:pPn80KPGB3rWaCOf8oL92b+bkQFLyWQ7Pg9R/XICRQ3QaZx7XBd2OBXnwq2dcnmxw6YiX2nZh6aKQZXt16FuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "repository-validation",
+  "version": "1.0.0",
+  "schema": "ryeos.development.repository-validation.v1",
+  "limits": {
+    "max_file_bytes": 16777216,
+    "max_files": 30000,
+    "max_total_bytes": 134217728,
+    "max_findings": 128,
+    "max_depth": 32
+  },
+  "dependency_layers": {
+    "workspace_manifest": "Cargo.toml",
+    "forbidden_edges": {
+      "lillux": [
+        "ryeos-state",
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui"
+      ],
+      "ryeos-state": [
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui"
+      ],
+      "ryeos-engine": [
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui"
+      ],
+      "ryeos-runtime": [
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui"
+      ],
+      "ryeos-app": [
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui"
+      ],
+      "ryeos-executor": [
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui"
+      ]
+    }
+  },
+  "text_checks": {
+    "naming": [
+      {
+        "roots": [
+          "deploy",
+          "bundles",
+          "crates",
+          "scripts",
+          ".ai",
+          "README.md"
+        ],
+        "exclude": [
+          "bundles/*/.ai/bin",
+          "bundles/*/.ai/objects",
+          "bundles/*/.ai/refs",
+          "bundles/*/.ai/state",
+          "bundles/*/.ai/cache",
+          "crates/clients/web/node_modules",
+          "crates/clients/web/pkg",
+          "crates/*/target",
+          ".ai/bin",
+          ".ai/objects",
+          ".ai/refs",
+          ".ai/state",
+          ".ai/cache",
+          ".ai/config/development/ryeos/repository-validation.yaml"
+        ],
+        "suffixes": [
+          ".rs",
+          ".py",
+          ".sh",
+          ".yaml",
+          ".yml",
+          ".md",
+          ".toml",
+          ".json"
+        ],
+        "patterns": [
+          "--init-if-missing",
+          "default_value = \"*\"",
+          "default: *",
+          "ryeos daemon rotate-key",
+          "write_authorized_key_toml_with_wildcard",
+          "next_port()",
+          "pick_free_port",
+          "--scopes \"bundle.",
+          "--scopes \"remote.",
+          "--scopes bundle.",
+          "--scopes remote."
+        ],
+        "regex": false,
+        "ignore_case": false
+      }
+    ],
+    "no-content-wrap": [
+      {
+        "roots": [
+          "bundles",
+          "crates/engine/ryeos-runtime/src",
+          "crates/runtimes/directive/src"
+        ],
+        "exclude": [
+          "bundles/*/.ai/bin",
+          "bundles/*/.ai/objects",
+          "bundles/*/.ai/refs",
+          "bundles/*/.ai/state",
+          "bundles/*/.ai/cache",
+          "crates/clients/web/node_modules",
+          "crates/clients/web/pkg",
+          "crates/*/target",
+          ".ai/bin",
+          ".ai/objects",
+          ".ai/refs",
+          ".ai/state",
+          ".ai/cache",
+          ".ai/config/development/ryeos/repository-validation.yaml"
+        ],
+        "suffixes": [
+          ".rs",
+          ".py",
+          ".sh",
+          ".yaml",
+          ".yml",
+          ".md",
+          ".toml",
+          ".json"
+        ],
+        "patterns": [
+          "content_wrap",
+          "first.?cut",
+          "v0\\.3\\.0-first",
+          "old fallback",
+          "BACKCOMPAT",
+          "compat shim"
+        ],
+        "regex": true,
+        "ignore_case": true
+      }
+    ],
+    "cli-presentation": [
+      {
+        "roots": [
+          "crates/bin/cli/src"
+        ],
+        "exclude": [
+          "crates/bin/cli/src/help.rs",
+          "crates/bin/cli/src/tty"
+        ],
+        "suffixes": [
+          ".rs"
+        ],
+        "patterns": [
+          "println!|eprintln!|writeln!|write!|print!"
+        ],
+        "regex": true,
+        "ignore_case": false
+      },
+      {
+        "roots": [
+          "crates/bin/cli/src/help.rs",
+          "crates/clients/terminal/src/main.rs"
+        ],
+        "exclude": [],
+        "suffixes": [
+          ".rs"
+        ],
+        "patterns": [
+          "println!|eprintln!|std::io::stdout|std::io::stderr"
+        ],
+        "regex": true,
+        "ignore_case": false
+      },
+      {
+        "roots": [
+          "crates/clients/web/src/bin/web.rs"
+        ],
+        "exclude": [],
+        "suffixes": [
+          ".rs"
+        ],
+        "patterns": [
+          "eprintln!|std::io::stderr"
+        ],
+        "regex": true,
+        "ignore_case": false
+      }
+    ]
+  }
+}

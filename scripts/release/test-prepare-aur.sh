@@ -43,7 +43,8 @@ mkdir -p "$bundle_root/.ai/node/init/profiles"
 while IFS= read -r node_init_profile; do
     {
         printf 'schema: 1\nexact_bundles:\n'
-        ryeos_bundle_set_names "$node_init_profile" | sort | sed 's/^/  - /'
+        ryeos_bundle_set_names "$(ryeos_node_init_profile_bundle_set "$node_init_profile")" \
+            | sort | sed 's/^/  - /'
         # AUR preparation validates archive structure; the official package
         # authoring step separately qualifies typed bodies with real RyeOS.
         printf '%s\n' 'policies:' '  fixture_policy:' '    schema: 1'

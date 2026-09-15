@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-11T02:28:03Z:3ebd600f2c9724d64ca868cd8f479abec87d360fcb73f4daeacde4e6dc88da66:vKwatG6QfIM2zkspRNa2t8q7VExLt+vgBOS7TeJhYwfzA2v13HgwSBYLh94H4n5YUE1fpZBwxBvwxn6Yl1ynCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T08:45:08Z:4bf3d35e513f216f7631858d3dd664156d71ac42e6cd392c62d24a0c0d924c12:J9pYs/rGwyDAgg6ODP1pU27kYqLUwpRVKjnoFqb7zQXH6ZwTGcNbF10G7JmTI9fEVEIrpmQ24KI9E7Zlir7qCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.0.0"
+version: "1.2.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -22,9 +22,35 @@ execution:
   # or interprets the tool document's `effects` field directly.
   effect_class_ceiling:
     path: [effects]
+  # Generic shared-workspace relationship for workload-delegated children.
+  # Absence on an item is deny-all for that surface. This is not inferred from
+  # durable effects: replay semantics cannot grant workspace mutation.
+  workspace_access:
+    path: [workspace_access]
+  # Generic per-execution network narrowing. Ordinary tools deliberately
+  # retain the node-policy ceiling when this optional composed field is absent;
+  # development build/test items author `isolated` explicitly.
+  network_authority_ceiling:
+    path: [network_authority]
+    default: node_policy
+  # Captured content is an irreversible ceiling over node/parent host mounts.
+  # The default for an ordinary tool is owned here, never by its dispatcher.
+  filesystem_authority_ceiling:
+    path: [filesystem_authority]
+    default: node_policy
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/tool_callback
+    # The item must select its complete subprocess wire from this closed
+    # kind-owned allowlist. This is the existing generic protocol-selection
+    # path: callback-free build/test tools use `opaque`, while tools that
+    # actually need daemon callbacks say so explicitly. Never infer callback
+    # authority from a tool name, executable, or caller.
+    protocol:
+      from_composed: [execution_protocol]
+      allowed:
+        - protocol:ryeos/core/tool_callback
+        - protocol:ryeos/core/opaque
+        - protocol:ryeos/core/tool_streaming
   thread_profile:
     name: tool_run
     root_executable: true
@@ -33,9 +59,25 @@ execution:
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
     "@method_dispatch": "tool:ryeos/core/method-dispatch/execute"
+  # An ordinary tool is a complete RyeOS execution and may therefore own its
+  # exact retained input/runtime content. This is the child-local environment
+  # boundary; managed parent launch preparers must not retain speculative
+  # environments for tools that may be dispatched later.
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: [project_files]
+    allowed_mount_roots: [project, execution_runtime]
+    max_declarations: 8
+    large_content:
+      max_total_bytes: 68719476736
 formats:
   - extensions: [".py"]
     parser: parser:ryeos/core/python/tool-header
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".sh"]
+    parser: parser:ryeos/core/shell/tool-header
     signature:
       prefix: "#"
       after_shebang: true
@@ -80,10 +122,37 @@ composed_value_contract:
     effects:
       type: single
       prim: string
+    workspace_access:
+      type: single
+      prim: string
+    # Closed mechanical launch ceiling projected by the signed kind schema.
+    # This never grants network access: `node_policy` preserves the parent/node
+    # ceiling, while `isolated` can only narrow it.
+    network_authority:
+      type: single
+      prim: string
+    filesystem_authority:
+      type: single
+      prim: string
+    # Explicit subprocess wire and bearer boundary. Absence is not a fallback:
+    # an attempted execution fails protocol selection.
+    execution_protocol:
+      type: single
+      prim: string
     source_scope:
       type: single
       prim: mapping
+    external_content:
+      type: single
+      prim: array
+    external_product_slots:
+      type: single
+      prim: array
 runtime:
+  # Tool invocation selectors remain ordinary schema-validated input. The
+  # shared runtime template may project one scalar `params` value into one
+  # argv/environment value; never add a tool/development-specific argv builder
+  # or command-multiplexer execution path here or in generic dispatch.
   handlers:
     - type: config
     - type: env_config
@@ -119,9 +188,22 @@ runtime:
     # (runtime block parser) so items may declare it without triggering
     # UnknownRuntimeBlock.
     - effects
+    # Consumed only through the kind-owned workspace-access projection above.
+    # Dispatch must not grow tool/provider-specific interpretations of it.
+    - workspace_access
+    # Consumed by the kind-owned network-authority projection above; it is not
+    # a runtime-handler block.
+    - network_authority
+    - filesystem_authority
+    # Mechanically selected through execution.terminator.protocol above.
+    - execution_protocol
     # Signed executor-chain policy for adjacent source admission. The daemon
     # consumes this before plan compilation; it is not a runtime handler.
     - source_scope
+    # Consumed by the kind-owned external-content admission contract above;
+    # it is not a runtime-handler block.
+    - external_content
+    - external_product_slots
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare

@@ -5,9 +5,7 @@
 //! cancellation, readiness, reuse, idle retirement, and process teardown.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Read;
-use std::os::fd::AsRawFd as _;
-use std::os::unix::net::UnixStream;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -190,7 +188,7 @@ impl PersistentSessionContractEligibility {
 
 pub struct StartedPersistentSession {
     pub running: ryeos_engine::dispatch::RunningExecution,
-    pub socket: UnixStream,
+    pub socket: lillux::InheritedDuplexChannel,
     /// Descriptor-backed workspace/content leases owned for exactly the
     /// process lifetime. Their concrete types remain outside pool semantics.
     pub lifelines: Vec<Box<dyn Send + Sync>>,
@@ -213,7 +211,10 @@ struct BudgetedSessionFrame {
 
 struct SessionProcess {
     wire: PersistentSessionWireContract,
-    writer: Mutex<UnixStream>,
+    /// The exact identity already validated by exclusive readiness, retained
+    /// so capture can compare the pool owner with its durable worker record.
+    expected_boot_identity: Option<String>,
+    writer: Mutex<lillux::InheritedDuplexChannel>,
     reader: Mutex<Option<SessionChannel>>,
     pending: Mutex<HashMap<String, SyncSender<std::result::Result<BudgetedSessionFrame, String>>>>,
     observation_sender: Mutex<Option<SyncSender<BudgetedSessionFrame>>>,
@@ -237,7 +238,7 @@ struct SessionProcess {
 const MAX_PENDING_SESSION_REQUESTS: usize = 32;
 
 struct SessionChannel {
-    socket: UnixStream,
+    socket: lillux::InheritedDuplexChannel,
     reader: FrameReader,
 }
 
@@ -315,11 +316,8 @@ impl SessionProcess {
         {
             bail!("persistent-session reader failed: {reason}");
         }
-        let mut writer = self
-            .writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        write_frame(&mut writer, wire, frame, deadline)
+        let mut writer = lock_writer_before_deadline(&self.writer, deadline)?;
+        write_frame(&mut *writer, wire, frame, deadline)
     }
 
     fn install_observation_sink(
@@ -1028,6 +1026,31 @@ impl PersistentSessionPool {
         C: Fn() -> bool,
         D: FnMut(Value) -> Result<()>,
     {
+        self.execute_exclusive_with_deadline(
+            session_id,
+            request_body,
+            cancelled,
+            |value| on_delta(value).map(|()| None),
+            None,
+        )
+    }
+
+    /// Apply an already-admitted absolute deadline to the ordinary request
+    /// I/O deadline, including time waiting for the shared writer.
+    /// A delta consumer may return an acknowledgement only after accepting
+    /// that exact request-correlated progress through its authority owner.
+    pub fn execute_exclusive_with_deadline<C, D>(
+        &self,
+        session_id: &str,
+        request_body: Value,
+        cancelled: C,
+        mut on_delta: D,
+        absolute_deadline: Option<Instant>,
+    ) -> Result<Value>
+    where
+        C: Fn() -> bool,
+        D: FnMut(Value) -> Result<Option<Value>>,
+    {
         self.ensure_admission_open()?;
         validate_exclusive_session_id(session_id)?;
         let (process, contract) = {
@@ -1044,7 +1067,7 @@ impl PersistentSessionPool {
             (Arc::clone(&entry.process), entry.contract.clone())
         };
         let deadline =
-            Instant::now() + Duration::from_millis(contract.lifecycle.request_timeout_ms);
+            exclusive_request_deadline(contract.lifecycle.request_timeout_ms, absolute_deadline);
         let result = execute_on_process(
             &process,
             &contract.wire,
@@ -1092,6 +1115,15 @@ impl PersistentSessionPool {
         session_id: &str,
         control_body: Value,
     ) -> Result<Value> {
+        self.execute_exclusive_control_with_deadline(session_id, control_body, None)
+    }
+
+    pub fn execute_exclusive_control_with_deadline(
+        &self,
+        session_id: &str,
+        control_body: Value,
+        absolute_deadline: Option<Instant>,
+    ) -> Result<Value> {
         self.ensure_admission_open()?;
         validate_exclusive_session_id(session_id)?;
         let (process, contract) = {
@@ -1108,7 +1140,7 @@ impl PersistentSessionPool {
             (Arc::clone(&entry.process), entry.contract.clone())
         };
         let deadline =
-            Instant::now() + Duration::from_millis(contract.lifecycle.request_timeout_ms);
+            exclusive_request_deadline(contract.lifecycle.request_timeout_ms, absolute_deadline);
         let result = execute_on_process(
             &process,
             &contract.wire,
@@ -1116,7 +1148,7 @@ impl PersistentSessionPool {
             control_body,
             &|| false,
             deadline,
-            &mut |_| Ok(()),
+            &mut |_| Ok(None),
         )
         .map_err(|error| attach_process_diagnostic(&process, error));
         if result.is_err() {
@@ -1163,6 +1195,53 @@ impl PersistentSessionPool {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(state.exclusive_failure_cleanup.remove(session_id))
+    }
+
+    /// Read the existing exclusive owner without consuming any cleanup proof.
+    /// `None` means pool absence only; callers still need durable no-contact or
+    /// exact process-death authority. Pending and uncertain owners always refuse.
+    pub fn exclusive_capture_boot_identity(&self, session_id: &str) -> Result<Option<String>> {
+        validate_exclusive_session_id(session_id)?;
+        let process = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| anyhow!("persistent-session pool poisoned"))?;
+            if state.cleanup_unproved.is_some()
+                || state.exclusive_reservations.contains_key(session_id)
+                || state.exclusive_failure_cleanup.contains_key(session_id)
+            {
+                bail!(
+                    "workspace capture is fenced by pending or unsettled exclusive worker contact"
+                );
+            }
+            let Some(entry) = state.exclusive.get(session_id) else {
+                return Ok(None);
+            };
+            Arc::clone(&entry.process)
+        };
+        // Retirement may hold the process slot during a blocking reap. Never
+        // hold the pool or another process mutex while waiting for that owner;
+        // contended cleanup is not a stable capture point.
+        let cleanup_unknown = process
+            .cleanup_unproved
+            .try_lock()
+            .map_err(|_| anyhow!("session cleanup owner is busy or poisoned"))?
+            .is_some();
+        let running_present = process
+            .running
+            .try_lock()
+            .map_err(|_| anyhow!("session process owner is busy or poisoned"))?
+            .is_some();
+        if process.closed.load(Ordering::Acquire) || cleanup_unknown || !running_present {
+            bail!("workspace capture is fenced by a draining or cleanup-unknown exclusive worker");
+        }
+        let identity = process
+            .expected_boot_identity
+            .as_ref()
+            .ok_or_else(|| anyhow!("exclusive capture owner has no verified boot identity"))?;
+        Ok(Some(identity.clone()))
     }
 
     pub fn retire_exclusive(&self, session_id: &str) -> Result<ExclusiveRetirementOutcome> {
@@ -1244,7 +1323,7 @@ impl PersistentSessionPool {
             request_body,
             &cancelled,
             deadline,
-            &mut on_delta,
+            &mut |value| on_delta(value).map(|()| None),
         );
         let result = result.map_err(|error| attach_process_diagnostic(&process, error));
         match result {
@@ -2568,6 +2647,7 @@ fn ready_process(
     };
     Ok(SessionProcess {
         wire: wire.clone(),
+        expected_boot_identity,
         writer: Mutex::new(writer),
         reader: Mutex::new(Some(SessionChannel { socket, reader })),
         pending: Mutex::new(HashMap::new()),
@@ -2642,7 +2722,7 @@ fn execute_on_process<C, D>(
 ) -> Result<Value>
 where
     C: Fn() -> bool,
-    D: FnMut(Value) -> Result<()>,
+    D: FnMut(Value) -> Result<Option<Value>>,
 {
     let request_id = format!(
         "{}-{}",
@@ -2705,7 +2785,21 @@ where
             } = budgeted;
             match frame.kind {
                 PersistentSessionFrameKind::Delta => {
-                    on_delta(frame.body.expect("delta body validated"))?;
+                    if let Some(acknowledgement) =
+                        on_delta(frame.body.expect("delta body validated"))?
+                    {
+                        process.write(
+                            wire,
+                            &PersistentSessionFrame {
+                                protocol: wire.wire_protocol.clone(),
+                                version: wire.wire_version,
+                                kind: PersistentSessionFrameKind::ObservationAck,
+                                request_id: Some(request_id.clone()),
+                                body: Some(acknowledgement),
+                            },
+                            deadline,
+                        )?;
+                    }
                 }
                 PersistentSessionFrameKind::Final => {
                     if cancel_sent {
@@ -2740,8 +2834,32 @@ fn require_frame_identity(
     Ok(())
 }
 
+fn exclusive_request_deadline(
+    request_timeout_ms: u64,
+    absolute_deadline: Option<Instant>,
+) -> Instant {
+    let signed_deadline = Instant::now() + Duration::from_millis(request_timeout_ms);
+    absolute_deadline.map_or(signed_deadline, |absolute| signed_deadline.min(absolute))
+}
+
+fn lock_writer_before_deadline(
+    writer: &Mutex<lillux::InheritedDuplexChannel>,
+    deadline: Instant,
+) -> Result<std::sync::MutexGuard<'_, lillux::InheritedDuplexChannel>> {
+    loop {
+        if Instant::now() >= deadline {
+            bail!("persistent-session frame deadline expired while waiting for its writer");
+        }
+        match writer.try_lock() {
+            Ok(writer) => return Ok(writer),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => sleep_until_io_retry(deadline),
+        }
+    }
+}
+
 fn write_frame(
-    stream: &mut UnixStream,
+    stream: &mut impl Write,
     wire: &PersistentSessionWireContract,
     frame: &PersistentSessionFrame,
     deadline: Instant,
@@ -2749,23 +2867,15 @@ fn write_frame(
     let encoded = encode_frame(wire, frame)?;
     let mut written = 0;
     while written < encoded.len() {
-        // Use the descriptor operation directly. This protocol is admitted as
-        // an inherited byte-stream FD; it does not require socket-specific
-        // send authority, which may be deliberately absent in a sandbox.
-        // RyeOS binaries retain Rust's default ignored-SIGPIPE disposition, so
-        // a closed peer remains an ordinary EPIPE error.
-        let sent = unsafe {
-            libc::write(
-                stream.as_raw_fd(),
-                encoded[written..].as_ptr().cast(),
-                encoded.len() - written,
-            )
-        };
-        let outcome = if sent < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(sent as usize)
-        };
+        // The writer lock or a previous partial write may consume the entire
+        // remaining budget. Never initiate another write syscall after expiry,
+        // even if the descriptor is immediately writable at that point.
+        if Instant::now() >= deadline {
+            bail!("persistent-session frame write exceeded its deadline");
+        }
+        // The typed Lillux endpoint owns the underlying descriptor operation;
+        // persistent-session protocol code only reads and writes bytes.
+        let outcome = stream.write(&encoded[written..]);
         match outcome {
             Ok(0) => bail!("persistent-session channel closed while writing a frame"),
             Ok(count) => written += count,
@@ -2928,9 +3038,11 @@ fn validate_frame_shape(
         PersistentSessionFrameKind::Cancel => {
             frame.request_id.as_ref().is_some_and(|id| !id.is_empty()) && frame.body.is_none()
         }
-        PersistentSessionFrameKind::ObservationBatch
-        | PersistentSessionFrameKind::ObservationAck => {
+        PersistentSessionFrameKind::ObservationBatch => {
             frame.request_id.is_none() && frame.body.is_some()
+        }
+        PersistentSessionFrameKind::ObservationAck => {
+            frame.request_id.as_ref().is_none_or(|id| !id.is_empty()) && frame.body.is_some()
         }
     };
     if !valid
@@ -3112,6 +3224,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn absolute_contact_deadline_caps_existing_signed_io_deadline() {
+        let expired = Instant::now() - Duration::from_millis(1);
+        assert_eq!(exclusive_request_deadline(60_000, Some(expired)), expired);
+        let distant = Instant::now() + Duration::from_secs(60);
+        assert!(exclusive_request_deadline(100, Some(distant)) < distant);
+        let before = Instant::now();
+        let interactive = exclusive_request_deadline(100, None);
+        let after = Instant::now();
+        assert!(interactive >= before + Duration::from_millis(100));
+        assert!(interactive <= after + Duration::from_millis(100));
+    }
+
+    #[test]
+    fn expired_contact_deadline_prevents_request_and_control_frame_writes() {
+        #[derive(Default)]
+        struct RecordingWriter {
+            writes: usize,
+        }
+
+        impl Write for RecordingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let wire = test_wire();
+        for kind in [
+            PersistentSessionFrameKind::Request,
+            PersistentSessionFrameKind::Control,
+        ] {
+            let mut writer = RecordingWriter::default();
+            let frame = PersistentSessionFrame {
+                protocol: wire.wire_protocol.clone(),
+                version: wire.wire_version,
+                kind,
+                request_id: Some("expired-request".into()),
+                body: Some(serde_json::json!({"kind":"fixture"})),
+            };
+            let error = write_frame(&mut writer, &wire, &frame, Instant::now()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("frame write exceeded its deadline")
+            );
+            assert_eq!(writer.writes, 0);
+        }
+    }
+
+    #[test]
+    fn writer_contention_cannot_outlive_the_contact_deadline() {
+        let (writer, _peer) = lillux::inherited_duplex_channel_pair().unwrap();
+        let writer = Mutex::new(writer);
+        let held = writer.lock().unwrap();
+        // A same-thread holder makes an unconditional lock deadlock. The
+        // bounded acquisition must return without needing that lock released.
+        assert!(
+            lock_writer_before_deadline(&writer, Instant::now() + Duration::from_millis(1),)
+                .is_err()
+        );
+        drop(held);
+        assert!(
+            lock_writer_before_deadline(&writer, Instant::now() + Duration::from_secs(1),).is_ok()
+        );
+    }
+
+    #[test]
     fn bounded_stream_error_retains_the_terminal_exception() {
         let error = format!("{}FINAL_EXCEPTION", "traceback frame\n".repeat(512));
         let bounded = bounded_stream_error(&error);
@@ -3135,7 +3318,6 @@ mod tests {
         observation_sink: Option<PersistentSessionObservationSink>,
     ) -> Result<StartedPersistentSession> {
         use std::collections::HashMap;
-        use std::os::fd::{AsRawFd as _, OwnedFd};
 
         use ryeos_engine::contracts::{
             EffectivePrincipal, EngineContext, ExecutionDecorations, ExecutionPlan, LaunchMode,
@@ -3147,14 +3329,21 @@ mod tests {
         std::fs::create_dir_all(&policy_dir)?;
         std::fs::write(
             policy_dir.join("isolation-policy.yaml"),
-            "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 1048576\n  stderr_bytes: 1048576\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            serde_yaml::to_string(
+                &ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring(),
+            )?,
         )?;
         let isolation = Arc::new(ryeos_engine::isolation::IsolationRuntime::load(
             app_root.path(),
         )?);
-        let (daemon_socket, worker_socket) = UnixStream::pair()?;
-        let worker_file = Arc::new(std::fs::File::from(OwnedFd::from(worker_socket)));
-        let worker_fd = worker_file.as_raw_fd();
+        let (daemon_channel, worker_channel) =
+            lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
+        let daemon_socket = daemon_channel;
+        let target_channel = ryeos_engine::isolation::IsolationTargetChannelAuthority::new(
+            worker_channel,
+            0,
+            "RYEOS_SESSION_FD",
+        )?;
         let script = r#"
 import json, os, struct
 fd = int(os.environ['RYEOS_SESSION_FD'])
@@ -3183,6 +3372,12 @@ while True:
     frame = receive()
     if frame['kind'] == 'request':
         send('delta', frame['request_id'], {'text':'fixture'})
+        if frame['body'].get('await_delta_ack'):
+            acknowledgement = receive()
+            if (acknowledgement['kind'] != 'observation_ack'
+                    or acknowledgement['request_id'] != frame['request_id']
+                    or acknowledgement['body'] != {'accepted':'fixture'}):
+                raise SystemExit(3)
         if frame['body'].get('emit_observation'):
             send('observation_batch', None, {
                 'first_sequence':1,
@@ -3213,7 +3408,7 @@ while True:
             verified_command: None,
             args: vec!["-S".into(), "-c".into(), script.into()],
             cwd: None,
-            env: HashMap::from([("RYEOS_SESSION_FD".to_owned(), worker_fd.to_string())]),
+            env: HashMap::new(),
             env_sources: HashMap::new(),
             stdin: None,
             timeout_secs: 30,
@@ -3233,6 +3428,10 @@ while True:
             entrypoint: PlanNodeId("spawn".to_owned()),
             capabilities: PlanCapabilities::default(),
             materialization_requirements: Vec::new(),
+            network_authority_ceiling:
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+            filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             cache_key: "fixture".to_owned(),
             thread_kind: Some("worker".to_owned()),
             executor_chain: Vec::new(),
@@ -3245,6 +3444,8 @@ while True:
             isolation,
             isolation_project_authority:
                 ryeos_engine::isolation::IsolationProjectAuthority::External,
+            isolation_immutable_project: None,
+            isolation_workspace_view: None,
             isolation_filesystem_authority_ceiling:
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             isolation_network_authority_ceiling:
@@ -3263,10 +3464,11 @@ while True:
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
             isolation_external_read_only_mounts: Vec::new(),
-            isolation_target_channel: None,
+            isolation_writable_runtime_view_mounts: Vec::new(),
+            isolation_target_channels: vec![target_channel],
             isolation_workspace: None,
             subprocess_limits: None,
-            inherited_fds: vec![Arc::clone(&worker_file)],
+            inherited_fds: Vec::new(),
             thread_id: "session:fixture".to_owned(),
             chain_root_id: "session:fixture".to_owned(),
             current_site_id: "site:fixture".to_owned(),
@@ -3289,7 +3491,7 @@ while True:
         Ok(StartedPersistentSession {
             running,
             socket: daemon_socket,
-            lifelines: vec![Box::new(app_root), Box::new(worker_file)],
+            lifelines: vec![Box::new(app_root)],
             expected_boot_identity: None,
             observation_sink,
         })
@@ -3417,6 +3619,30 @@ while True:
         pool.retire_exclusive(&session_id).unwrap();
         pool.reserve_exclusive(&session_id, &lifecycle, &wire)
             .unwrap();
+    }
+
+    #[test]
+    fn exclusive_capture_readiness_refuses_pending_and_preserves_cleanup_proof() {
+        let pool = PersistentSessionPool::new();
+        let id = "c".repeat(64);
+        assert!(pool.exclusive_capture_boot_identity(&id).unwrap().is_none());
+        let reservation = pool
+            .reserve_exclusive(&id, &test_lifecycle(), &test_wire())
+            .unwrap();
+        assert!(pool.exclusive_capture_boot_identity(&id).is_err());
+        drop(reservation);
+        {
+            let mut state = pool.inner.state.lock().unwrap();
+            state.exclusive_failure_cleanup.insert(id.clone(), "reaped");
+        }
+        assert!(pool.exclusive_capture_boot_identity(&id).is_err());
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state(&id).unwrap(),
+            Some("reaped")
+        );
+        pool.inner.state.lock().unwrap().cleanup_unproved =
+            Some("fixture unknown process".to_owned());
+        assert!(pool.exclusive_capture_boot_identity(&id).is_err());
     }
 
     #[test]
@@ -3754,6 +3980,54 @@ while True:
             ..admitted
         };
         assert!(validate_frame_shape(&excessive, None).is_err());
+    }
+
+    #[test]
+    fn command_progress_ack_retains_its_request_coordinate() {
+        let frame = PersistentSessionFrame {
+            protocol: "test.session".to_owned(),
+            version: 1,
+            kind: PersistentSessionFrameKind::ObservationAck,
+            request_id: Some("request-one".to_owned()),
+            body: Some(serde_json::json!({"command_progress_digest":"a".repeat(64)})),
+        };
+        assert!(validate_frame_shape(&frame, None).is_ok());
+        let mut empty = frame.clone();
+        empty.request_id = Some(String::new());
+        assert!(validate_frame_shape(&empty, None).is_err());
+        let mut absent = frame;
+        absent.body = None;
+        assert!(validate_frame_shape(&absent, None).is_err());
+    }
+
+    #[test]
+    fn command_progress_ack_is_sent_only_after_delta_acceptance() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 5_000;
+        lifecycle.request_timeout_ms = 5_000;
+        let wire = test_wire();
+        let session_id = "progress-ack-fixture";
+        pool.reserve_exclusive(session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let mut accepted = false;
+        let result = pool
+            .execute_exclusive_with_deadline(
+                session_id,
+                serde_json::json!({"await_delta_ack":true}),
+                || false,
+                |delta| {
+                    assert_eq!(delta, serde_json::json!({"text":"fixture"}));
+                    accepted = true;
+                    Ok(Some(serde_json::json!({"accepted":"fixture"})))
+                },
+                None,
+            )
+            .unwrap();
+        assert!(accepted);
+        assert_eq!(result, serde_json::json!({"echo":{"await_delta_ack":true}}));
     }
 
     #[test]

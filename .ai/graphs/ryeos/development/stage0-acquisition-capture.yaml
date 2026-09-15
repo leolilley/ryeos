@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-13T00:56:27Z:e7cc22e31043eaf179c2d1494f6a46ae22893e990ba9de2445039a7fb2af477f:GsFJ4G+gW5T11nUWFS8MiGzokzFqKddeHQFbdq/xUmf0uoBVD9ZXAaayMZhsbSOnJeAFIao4bm2rqKLA/MnNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Retain the exact pre-RyeOS Stage0 acquisition directory without relabelling it as compiler production
+effects: recorded
+product_recipe: config:development/ryeos/stage0-acquisition-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/stage0-acquisition-products
+config:
+  start: retained
+  max_steps: 1
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    retained:
+      node_type: return
+      output:
+        retained_input: stage0-acquisition
+        compiler_produced: false
+        consumer_bound: false

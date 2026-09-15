@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-18T22:04:51Z:3fd1d742976c65357abd69da3314a49d41182e3f8df600a4c571ced0dbb6a2a4:zYzlCa2p14n/gEuADJw130O63Ig66kYzr/TK5F31tsB9VVjhWznCLb9EpslBiqyPFggv1kJCkMPDJIJh9uiTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-08T08:44:51Z:c8846e091f680875c949564e8af881aee5436e40ece345c5b99297b06a712b9e:dXTZ9CPrRk4aATfm+AixdvvhYQqJlyU+0y2Ro+ukOPKy1HSTbJnA+Oy0lbLS/s1SvW7WyzKU61c9KS7oTztUBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
-version: "1.2.0"
+version: "1.3.0"
 description: Python tool subprocess runtime contract — interpreter, working directory, sys.path, environment, and how params/project_path arrive.
 ---
 
@@ -16,19 +16,44 @@ everything below is identical for both.
 
 ## Interpreter selection
 
-Resolved in this order (first match wins):
+The nearest explicit `env_config.interpreter` in the executor chain owns
+interpreter selection: the invoked Tool, then its wrappers, then the shared
+runtime. Later interpreter declarations do not replace it or resolve a host
+fallback. Other environment contributions retain their existing layering.
+
+Without a Tool/wrapper selection, the shared runtime uses `local_binary`,
+resolved in this order (first match wins):
 
 1. **Environment override** — if the `RYE_PYTHON` environment variable is
    set, its value is used verbatim as the interpreter.
 2. **PATH fallback** — bare `python3`, resolved to an absolute executable by
    the engine before admission.
 
-The resolved interpreter is also exported to the subprocess as `RYE_PYTHON`.
+That local runtime exports its resolved interpreter as `RYE_PYTHON`.
 The ordinary runtime never selects a live-project `.venv`: interpreter and
 site-package bytes that affect an exact execution must arrive through an
 admitted runtime or external realization. A project-authored runtime that
 selects a live-project interpreter is refused when execution requires a
 private admitted-input root.
+
+An exact runtime dependency can instead be selected on the Tool without copying
+the shared Python source loader:
+
+```yaml
+env_config:
+  interpreter:
+    type: realization_member
+    realization_id: python
+    relative_path: python/bin/python3.14
+```
+
+This stays a symbolic realization/member coordinate until daemon admission.
+The Tool must own the corresponding exact external-content declaration and
+current consumer binding. Selection neither grants access nor qualifies its
+loader, libraries, Python ABI, or native extensions. There is no host-path,
+environment-variable, or PATH fallback for this selector. It accepts one direct
+executable, not an executable plus shell arguments. Worker command exposure is
+a separate environment declaration even when it uses the same artifact.
 
 ## Working directory
 
@@ -40,14 +65,35 @@ possibly sparse and ephemeral view containing those admitted bytes. Relative
 file reads/writes are relative to that view; the path is not resolution or
 publication authority. Writes to an ephemeral workspace are discarded when
 the process ends and never fold back into the live project. Durable results
-must use the structured return value or a daemon-owned publication callback
+must use retained project authority, the structured return value, or a daemon-owned publication callback
 such as item authoring, vault, or bundle-event publication. RyeOS does not yet
 offer a generic opaque-byte artifact ingest callback.
 
+## Signing an owned source unit
+
+When the signed kind and executor declare `item_namespace` source ownership
+with `owner_signed_files` testimony, ordinary project signing also signs the
+selected auxiliary source files. Keep helpers in the kind-excluded `lib/`
+directory; they do not need runnable Tool headers or separate canonical refs.
+The same source selector, capture exclusions and size bounds apply to signing
+and admission.
+
+Include newly authored executor definitions and runnable sibling Tools in the
+same signing batch. RyeOS validates and signs those descriptors before resolving
+their source units, so argument order does not create a bootstrap dependency.
+An unselected runnable sibling must already have a valid signature from the
+same owner; signing one Tool does not bypass validation for another Tool.
+An unchanged second pass leaves bytes unchanged. Project signing uses conditional
+per-file publication, not an all-files transaction: a failed batch can contain
+completed individual writes and does not establish a complete valid source unit.
+
 ## Imports / `sys.path`
 
-The runtime invokes Python with `-I` (isolated mode), so `PYTHONPATH` and
-the user/site `site-packages` are **ignored**. The runtime then prepends,
+The runtime invokes Python with `-I -B -u`: isolated mode ignores `PYTHONPATH`
+and user site-packages; `-B` explicitly suppresses bytecode even though isolated
+mode ignores Python environment options. The selected interpreter's own installed
+site-packages are not disabled by `-I`; their bytes belong to its runtime closure.
+The runtime then prepends,
 in order:
 
 1. the tool's own directory,
@@ -81,10 +127,13 @@ importable — this isolation is intentional and is verified by tests.
 
 ## Environment
 
-The subprocess always receives at least:
+The shared runtime declares:
 
 - `PYTHONUNBUFFERED=1`
-- `RYE_PYTHON=<resolved interpreter>`
+- `PYTHONDONTWRITEBYTECODE=1` (the explicit `-B` is authoritative under `-I`)
+- `RYE_PYTHON=<resolved interpreter>` when its local interpreter selection owns
+  the invocation; realization selection does not export a symbolic selector as
+  an executable environment path.
 
 plus any vault/host bindings the dispatch layer attaches.
 

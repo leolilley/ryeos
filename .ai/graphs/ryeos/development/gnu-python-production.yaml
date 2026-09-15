@@ -1,0 +1,42 @@
+# ryeos:signed:2026-09-08T10:36:33Z:675514c12108164233a9031e13b047f992ab74c737a5cdeb4158d118d2a6b8f2:f0+Jy9aZF+X87TRnxeiwFsfRz3m9k8+2vFnyNNWZGrVvRsTvFeGZ7SOG9syZyLzEViu8Pxww+okwesGMDF+KCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Produce the exact relocatable GNU CPython distribution as retained products
+effects: recorded
+product_recipe: config:development/ryeos/gnu-python-products
+external_product_slots:
+  - id: production-support
+    relationship_ref: config:development/ryeos/authoring-prepared-input-products
+    relationship: prepared_inputs_to_gnu_python_production
+    kind: tree
+    mount_root: execution_runtime
+    mount: gnu-python-support
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/gnu-python-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/produce-gnu-python
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/authoring-environment-production/produce-gnu-python
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

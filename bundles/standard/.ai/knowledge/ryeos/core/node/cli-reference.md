@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-03T11:56:15Z:2eff75cf9344fc6f04aa3d127acca4b00a44ab126a331a67e6b77e995795ec27:TJbmSjxGcMh5Gb0SNCMbs+VOS7qA0oeoFnjj2emwi3Fm8yDRiQhuQ7J1gx4c3LwnKiQWsyc1mBrnv2VtAVVpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T09:38:49Z:5c47818dfc08f22f4748f6c502a21681343cf2ace9ac8c701d754f077ed7d52b:2b7b4DRvaEmjsTAwlgX/mG0dhv+IHv5g747sR0VANSQzUoDmVIyYrA+LjAgXNjvK82+e5PnXLzZeUj8w4u/qAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.5.1"
+version: "3.5.3"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -21,7 +21,34 @@ The `ryeos` CLI has two execution paths:
 Daemon-backed dispatch is preflighted with local lifecycle status unless
 `RYEOSD_URL` is set. Lifecycle verbs ignore `RYEOSD_URL`.
 
+Command metadata and bundle verification use registered definition admission:
+the same signed policy, adapter checks, trust and bundle-generation fencing,
+but no supervised process-scope acquisition. Direct executable dispatch
+re-admits execution under the retained generation guard; it does not fall back
+to definition admission if execution is refused. An `auto` command whose
+resolved service declares `availability: both` uses the live daemon when that
+node is running. Otherwise, its standalone service must prove stopped-node
+ownership and independently admit the service. Standalone services do not
+acquire the supervised worker controller's scope authority.
+
 ## Minimal lifecycle surface
+
+Signed command project bindings distinguish selection from service parameters:
+`no_project_flag` permits the CLI selector, `bind_parameter` projects a selected
+path, and `bind_no_project_parameter` explicitly projects a projectless selection
+as `true` into the named service argument. It does not emit an implicit `false`.
+`request_project_path` separately supplies execution-envelope context. Both live
+and offline binding use the same rules. Remote execute/status/list declare the
+boolean projection; doctor, fetch, verification, binding and UI commands do not
+acquire an undeclared service argument merely because they accept `--no-project`.
+
+For direct `execute <item-ref>`, argv `--project` / `--no-project` select the
+execution context separately from the item's structured parameters. JSON
+`project`, `no_project`, and `project_path` fields supplied through `--input`
+or the single-JSON-argument form remain item data; they neither select local
+project authority nor disappear during CLI binding. A remote operation may
+therefore carry its own project parameter while the outer call is projectless.
+Signed command aliases still use their declared selector-to-service mappings.
 
 ### `ryeos init`
 
@@ -46,14 +73,23 @@ ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER
 ### `ryeos start`
 
 ```bash
-ryeos start [--app-root <dir>]
+ryeos start [--app-root <dir>] [--bind <addr>] [--uds-path <path>]
 ```
 
 Starts the local daemon. Fails if not initialized, succeeds immediately
-if already running, and uses the lifecycle start flock. The readiness timeout
-is 15 minutes so verified projection recovery can finish. Interactive terminals
+if already running, and uses the lifecycle start flock. A node with no host
+association starts directly. A node explicitly configured with host supervision
+requests the installed service through Lillux; missing or unhealthy supervision
+is an error and never falls back to direct spawning. The readiness timeout is
+15 minutes so verified projection recovery can finish. Interactive terminals
 show the daemon's typed startup phases and counters in one redrawn boot line;
 redirected output remains plain and deterministic.
+
+Endpoint arguments are durable stopped-node configuration, not transient
+process overrides. A differing value is published under the same lifecycle and
+state locks as the launch request; a running or starting node must be stopped
+before its endpoints can change. Direct and supervised launches then consume
+the same persisted configuration.
 
 ### `ryeos stop`
 
@@ -68,6 +104,48 @@ Connects to a configured live UDS, captures the kernel-authenticated peer with
 waiting two more seconds. Neither mode signals a PID from `daemon.json` or an
 RPC response.
 
+For a configured supervised node, stop first publishes native down intent and
+then terminates the exact pinned daemon. The daemon disappearing is not worker
+scope-settlement evidence; normal restart recovery retains any remaining worker
+cleanup obligations.
+
+If the node's bootstrap configuration is malformed, stop cannot safely invent
+a direct-daemon endpoint. It may still publish Down through an exact protected
+host-service association; a direct node must have its bootstrap configuration
+repaired before authenticated shutdown can proceed.
+
+### `ryeos node host setup`
+
+```bash
+ryeos node host setup --confirm [--app-root <dir>] [--bind <addr>] [--uds-path <path>]
+```
+
+One-time administrator-maintenance setup for an existing initialized node that
+will host dedicated workers requiring an OS delegation. It records an exact
+account, app-root identity, node identity and installed daemon image in
+administrator-owned host configuration, then leaves the new service down.
+Optional endpoint arguments replace the stopped node's ordinary persisted
+bootstrap configuration before the privileged host association is created.
+Lillux chooses and provisions the supported native service-manager and scope
+delegation; these are not node-policy or project settings. Afterwards the
+ordinary `ryeos start`, `ryeos stop` and `ryeos node status` commands operate
+the configured service without granting any host authority to workers.
+The installed daemon starts with an empty environment and resolves the node's
+persisted bootstrap configuration only after entering the selected account.
+
+Setup intentionally leaves the native service inert across host boot. Running
+the node remains an explicit `ryeos start` decision, rather than an implicit
+host reboot side effect.
+
+Nodes without this explicit association remain supported direct nodes. If an
+association exists but its native service is absent, unhealthy or mismatched,
+lifecycle commands fail closed rather than start an un-supervised replacement.
+Package upgrades likewise require the association's pinned daemon executable
+to equal the package-owned daemon path before creating an upgrade journal or
+stopping the node. A service intentionally pinned to another prefix must be
+upgraded by that prefix's owning installation mechanism; the ordinary package
+installer never writes there or silently changes the association.
+
 ### `ryeos node status`
 
 ```bash
@@ -75,7 +153,10 @@ ryeos node status [--json] [--app-root <dir>]
 ```
 
 Read-only lifecycle status. Treats `daemon.json` as a hint and trusts
-only a `lifecycle.status` response reporting `status: "running"`.
+only a `lifecycle.status` response reporting `status: "running"`. If complete
+bootstrap configuration cannot be decoded, status may report retained terminal
+startup-failure testimony for the selected app root, but it does not infer a
+TCP or UDS endpoint from defaults or stale process metadata.
 
 ### `ryeos node doctor`
 

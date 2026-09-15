@@ -3,6 +3,7 @@ version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "read-identity-context-doc"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Read the raw signed source of the tv-tracker Identity context doc (resolve + verify + read the on-disk file). Read-only — no authoring authority. Returns fetch report incl. raw content + signature_status."
 
 config:

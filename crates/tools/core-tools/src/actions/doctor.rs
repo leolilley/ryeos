@@ -381,6 +381,7 @@ fn check_imports(
         current_site_id: "site:doctor".into(),
         origin_site_id: "site:doctor".into(),
         execution_hints: Default::default(),
+        scheduled_fire: None,
         validate_only: true,
     };
 
@@ -442,6 +443,8 @@ fn import_one(
         &[],
         isolation,
         IsolationLaunchContext {
+            immutable_project: None,
+            workspace_view: None,
             project_path,
             project_authority: IsolationProjectAuthority::ReadOnly,
             filesystem_authority_ceiling:
@@ -458,7 +461,8 @@ fn import_one(
             verified_code: &isolation_verified_code,
             verified_command: None,
             external_read_only_mounts: &[],
-            target_channel: None,
+            writable_runtime_view_mounts: &[],
+            target_channels: &[],
             item_ref,
             thread_id: "offline-doctor",
         },

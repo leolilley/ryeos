@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:08Z:60987f2c0b5228794c38c442a744d53874ad269004ea8b1367bfd8d0171676ed:nx1bzDRLkqJg43+wfIvBsMzWrfC9UNo/LO9JGehV/RZxcj6kHFqbjHJUu+ldr9w4ytT4W07eHp1b5L4Lg/DsAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:39Z:d661d342c81cfdc0057bdafd9dca2e04aae96c1a328cf5637a62df4ccc7a19ee:OIngQphYdLlWljU+3gfVd89NAGLfIdjkQUdMOzSxXFLvXLdY1ti8iuMeF3wJAQMS7tJiJusEB8rFEp/GUgCxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Fetch an HTTP(S) page and return markdown, text, or HTML"
 
 config:

@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-11T02:28:47Z:1a8f00b7543f8af5db78fbbd80f68ac0d8a4ae3bca3de52bac44b40dbdc4e0b3:ktiUIO6pjibQOLds/kBbnYP5/sOhKZQiPBR8o9A/DHrgMi+Gkkdfm9eFjPKfUjFlg+icFzn7rKxumkvQItU6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:38Z:23671c48c18e7eae6b0480e1e774aabcd57c3321b8043bdf07ff753bf3a8f2c9:433ol86A5r2XJfbJPpFUvZ41cwILuS8x9K9xk9zcrrg2njHXnmIiw0ugvKN3lp916QeZIbaRtsTeiFC88LG2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/knowledge"
 version: "1.0.0"
 description: "Recall a knowledge item composed into text within a token budget. Use this at runtime to load a specific knowledge doc on demand — e.g. a per-run model written by an upstream step whose ref is only known now."
 
 executor_id: "@method_dispatch"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 
 method_dispatch:
   method: compose

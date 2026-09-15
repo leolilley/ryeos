@@ -3,8 +3,10 @@
 
 First-class signed integration for hosting the pinned Codex App Server on a
 RyeOS node. Codex-specific structured-session semantics live in signed bundle
-data and the bundle-owned bridge; durable process, session, workspace,
-authorization, and publication authority remain in generic RyeOS substrate.
+data; the generic `ryeos-structured-session-bridge` is core-owned and shared
+with every structured-session workload, while durable process, session,
+workspace, authorization, and publication authority remain in generic RyeOS
+substrate.
 
 This bundle does not provide RyeOS local inference and does not place ChatGPT
 credentials in NodeVault or bundle content.
@@ -38,8 +40,7 @@ resets the mode-0400 compatibility config before every worker generation; the
 workload may rewrite that seed, but it is neither retained policy nor a
 same-UID integrity boundary. When a generic RyeOS isolation backend is enabled
 it also overlays that file read-only, but Codex activation does not require
-RyeOS's optional Bubblewrap isolation bundle or any other RyeOS isolation
-backend. OpenAI's pinned standalone package does require its own packaged
+RyeOS's node isolation backend. OpenAI's pinned standalone package does require its own packaged
 `codex-resources/bwrap` companion for restricted Linux command execution. The
 activation imports that exact workload-owned file beside Codex; it does not
 select RyeOS's isolation backend, install or discover a host `bwrap`, or
@@ -100,7 +101,7 @@ incumbent grant for that source key is being reclassified or rebound, use
 transition:
 
 ```sh
-HOSTED_SCOPES='ryeos.runtime.dedicated_session.start,ryeos.runtime.dedicated_session.command,ryeos.runtime.dedicated_session.terminate,ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/command-observation,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
+HOSTED_SCOPES='ryeos.runtime.dedicated_session.start,ryeos.runtime.dedicated_session.command,ryeos.runtime.dedicated_session.terminate,ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.worker_execution.codex/bounded-turn,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/list,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/command-observation,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/start-candidate-evaluation,ryeos.execute.service.worker-executions/qualify-candidate,ryeos.execute.service.worker-executions/start-candidate-integration,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
@@ -390,8 +391,9 @@ records live OpenAI inference using Codex-managed ChatGPT
 authentication; reported plan type is an observation, not proof of a
 subscription tier.
 
-The session item authors a finite RyeOS `spend_usd` execution allowance so
-that the accounting ledger can conserve one exact allowance across placement
-handoff. The Codex worker runtime has no provider financial authority and does
-not report ChatGPT-subscription charges. This ceiling is placement authority,
-not observed usage, a billing limit, or evidence about subscription spend.
+The Codex worker profiles do not author a `spend_usd` limit. Their runtime has
+no provider financial authority, and Codex does not expose authoritative
+ChatGPT-subscription charges to this contract, so a numeric allowance here
+would not be enforceable spend. Unattended roots can instead bound the exact
+resources RyeOS can prove before contact: whole-tree duration, logical worker
+executions, and bounded hosted-turn contacts.

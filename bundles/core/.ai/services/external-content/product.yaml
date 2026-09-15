@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-09T14:21:58Z:dc0a09f87d956f83afd0ce09212f5c9f186caec8285f06aea92e2e18515f18e0:ulfnrQjrseKl7II2jNRuQwVP3vb6CPBuNHf+bnxcz1kVbBjadK+YDFEx4VAz3SiFKn7ob1M0iMHyc1xepxoaAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.product
+required_caps: ["ryeos.execute.service.external-content/product"]
+schema:
+  chain_root_id: string
+  thread_id: string
+  recipe_binding: string
+  product_name: string
+description: Read the exact durable node-authenticated product capture without consulting live workspace or thread history; exact admitted operator owner only

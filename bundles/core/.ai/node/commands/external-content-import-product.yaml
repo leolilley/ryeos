@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-08T13:46:46Z:443d884fdf2315d6b5a76d4ea48e394d7ab07a8633df8c96c1e31b02d3d23e56:gl9mBUCvAFuTa63VQQ9k/InYouRS+NKGanbbXcuWPXWSXOtvgYbERhYPNBk2bFNpd8SLEqCg61xihX1O805yAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, import-product]
+description: Stage a published product for a separate ordinary consumer binding
+defaults:
+  source: retained_product
+forms:
+  - slots:
+      - field: witness_hash
+      - field: witness_source
+      - field: maximum_bytes
+help:
+  usage: ryeos external-content import-product <witness-hash> <witness-source-json> <maximum-bytes>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/import

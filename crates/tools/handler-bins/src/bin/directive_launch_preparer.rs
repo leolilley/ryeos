@@ -12,6 +12,8 @@ fn main() {
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)
-        | HandlerRequest::EffectiveValidate(_) => directive_launch::wrong_request(),
+        | HandlerRequest::EffectiveValidate(_)
+        | HandlerRequest::ExecutionEvidenceDescribe(_)
+        | HandlerRequest::ExecutionEvidenceProject(_) => directive_launch::wrong_request(),
     }));
 }

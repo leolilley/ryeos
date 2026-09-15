@@ -32,11 +32,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 fn core_kinds_dir() -> PathBuf {
@@ -78,15 +74,7 @@ fn core_bundle_owns_engine_kinds_only() {
 
     let kinds: Vec<&str> = registry.kinds().collect();
     for expected in [
-        "config",
-        "handler",
-        "parser",
-        "protocol",
-        "service",
-        "node",
-        "tool",
-        "streaming_tool",
-        "runtime",
+        "config", "handler", "parser", "protocol", "service", "node", "tool", "runtime",
     ] {
         assert!(
             registry.contains(expected),

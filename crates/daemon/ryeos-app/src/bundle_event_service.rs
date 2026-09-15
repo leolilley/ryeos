@@ -450,8 +450,8 @@ fn attribution_for_callback(cap: &CallbackCapability) -> ryeos_state::BundleEven
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lillux::time::{Duration, MonotonicDeadline};
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
 
     use crate::execution_provenance::ExecutionProvenance;
 
@@ -469,9 +469,11 @@ mod tests {
             invocation_id: "inv-test".into(),
             thread_id: "T-test".into(),
             launch_owner: None,
+            runtime_method_surface:
+                crate::callback_token::CallbackRuntimeMethodSurface::complete_runtime_protocol(),
             chain_root_id: "T-test".into(),
             project_path: PathBuf::from("/tmp/test"),
-            expires_at: Instant::now() + Duration::from_secs(60),
+            expires_at: MonotonicDeadline::after(Duration::from_secs(60)),
             effective_caps,
             provenance: ExecutionProvenance::root_live_fs(
                 PathBuf::from("/tmp/test"),
@@ -490,6 +492,7 @@ mod tests {
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,
+            workload_client_grant: None,
         }
     }
 

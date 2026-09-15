@@ -51,7 +51,7 @@ pub struct ResolvedBinary {
 #[derive(Debug)]
 pub struct CapturedExecutable {
     pub identity: ResolvedBinary,
-    pub handle: std::sync::Arc<std::fs::File>,
+    pub handle: lillux::InheritedDescriptorAuthority,
 }
 
 /// Signed identity of one bundle's complete native-executor authorization
@@ -1655,10 +1655,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn captured_executable_is_sealed_against_installed_path_mutation() {
-        use std::io::{Read as _, Seek as _};
-        use std::os::fd::AsRawFd as _;
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
@@ -1667,17 +1663,22 @@ mod tests {
                 .expect("signed executable should be captured");
 
         std::fs::write(&captured.identity.absolute_path, b"mutated-after-capture\n").unwrap();
-        let mut retained = captured.handle.try_clone().unwrap();
-        retained.rewind().unwrap();
-        let mut bytes = Vec::new();
-        retained.read_to_end(&mut bytes).unwrap();
+        let retained = &captured.handle;
+        let (bytes, _) = retained
+            .read_regular_file_stable_bounded(b"placeholder-binary\n".len() as u64)
+            .unwrap();
         assert_eq!(bytes, b"placeholder-binary\n");
 
-        let seals = unsafe { libc::fcntl(retained.as_raw_fd(), libc::F_GET_SEALS) };
+        let seals = unsafe {
+            libc::fcntl(
+                retained.inherited_descriptor().unwrap() as i32,
+                libc::F_GET_SEALS,
+            )
+        };
         let required =
             libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
         assert_eq!(seals & required, required);
-        assert_ne!(retained.metadata().unwrap().permissions().mode() & 0o111, 0);
+        assert_ne!(retained.file_identity().unwrap().mode() & 0o111, 0);
     }
 
     #[cfg(target_os = "linux")]

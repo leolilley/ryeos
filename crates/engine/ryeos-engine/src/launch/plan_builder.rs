@@ -23,9 +23,7 @@ use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::resolution::TrustClass;
-use crate::runtime::{
-    ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry, compile_with_handlers,
-};
+use crate::runtime::{ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry};
 use crate::trust::TrustStore;
 
 /// Maximum executor chain depth before we assume a cycle or misconfiguration.
@@ -911,6 +909,9 @@ pub struct BuildPlanInput<'a> {
     pub trust_store: &'a TrustStore,
     pub node_trust_store: &'a TrustStore,
     pub host_env: &'a HostEnvBindings,
+    /// Already admitted composed/parent filesystem ceiling. It is consumed
+    /// before runtime templates can read host bindings, not just at spawn.
+    pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     pub project_authority: Option<(
         &'a Path,
         &'a dyn crate::project_content::AuthoritativeProjectContent,
@@ -926,6 +927,59 @@ pub struct BuildPlanInput<'a> {
     fields(canonical_ref = %input.item.resolved.canonical_ref)
 )]
 pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineError> {
+    build_plan_with_execution_root(input, None)
+}
+
+/// Reconstruct a current Bundle program at its already-admitted logical
+/// execution root, without granting that root any source lookup authority.
+/// This does not create a project binding, materialization, or process.
+pub fn build_bundle_plan_with_logical_project_root(
+    input: BuildPlanInput<'_>,
+    logical_project_root: Option<&Path>,
+) -> Result<ExecutionPlan, EngineError> {
+    validate_logical_project_root_input(&input, logical_project_root)?;
+    build_plan_with_execution_root(input, Some(logical_project_root))
+}
+
+fn validate_logical_project_root_input(
+    input: &BuildPlanInput<'_>,
+    logical_project_root: Option<&Path>,
+) -> Result<(), EngineError> {
+    if logical_project_root.is_some_and(|root| {
+        root.as_os_str() != std::ffi::OsStr::new(ryeos_state::objects::ADMITTED_DIRECT_PROJECT_ROOT)
+    }) || input.item.resolved.source_space != crate::contracts::ItemSpace::Bundle
+        || !matches!(
+            input.item.resolved.source_root,
+            crate::contracts::ItemSourceRoot::Bundle { .. }
+        )
+        || input.item.trust_class != ContractTrustClass::Trusted
+        || input.item.resolved.materialized_project_root.is_some()
+        || input.ctx.project_context != crate::contracts::ProjectContext::None
+        || input.ctx.subject_resolution_authority
+            != crate::contracts::SubjectResolutionAuthority::Projectless
+        || input.item.resolved.subject_resolution_authority
+            != crate::contracts::SubjectResolutionAuthority::Projectless
+        || input.project_authority.is_some()
+        || input
+            .roots
+            .ordered
+            .iter()
+            .any(|root| root.space == crate::contracts::ItemSpace::Project)
+        || input.root_source.is_none()
+    {
+        return Err(EngineError::Internal(
+            "logical project-root compilation requires exact captured Bundle source and projectless lookup authority".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_plan_with_execution_root(
+    input: BuildPlanInput<'_>,
+    // Outer None preserves ordinary context-derived behavior; Some(None)
+    // explicitly retains an admitted projectless execution context.
+    logical_project_root: Option<Option<&Path>>,
+) -> Result<ExecutionPlan, EngineError> {
     let BuildPlanInput {
         item,
         root_source,
@@ -939,6 +993,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         trust_store,
         node_trust_store,
         host_env,
+        filesystem_authority_ceiling: admitted_filesystem_ceiling,
         project_authority,
         sealed_content,
     } = input;
@@ -1108,7 +1163,16 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     );
     plan_env.insert("RYEOS_ITEM_KIND".to_owned(), resolved.kind.clone());
     plan_env.insert("RYEOS_ITEM_REF".to_owned(), canonical_ref.clone());
-    if let Some(ref root) = resolved.materialized_project_root {
+    let execution_project_root =
+        logical_project_root.unwrap_or_else(|| match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
+            crate::contracts::ProjectContext::None
+            | crate::contracts::ProjectContext::SnapshotHash { .. }
+            | crate::contracts::ProjectContext::ProjectRef { .. } => {
+                resolved.materialized_project_root.as_deref()
+            }
+        });
+    if let Some(root) = execution_project_root {
         plan_env.insert(
             "RYEOS_PROJECT_ROOT".to_owned(),
             root.to_string_lossy().to_string(),
@@ -1118,6 +1182,11 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     plan_env.insert(
         "RYEOS_ORIGIN_SITE_ID".to_owned(),
         ctx.origin_site_id.clone(),
+    );
+    plan_env.insert(
+        "RYEOS_EXECUTION_CONTEXT".to_owned(),
+        crate::scheduled_fire_context::execution_context_value(ctx.scheduled_fire.as_ref())
+            .to_string(),
     );
 
     // Step 4: Compile intermediates into SubprocessSpec via the
@@ -1134,6 +1203,29 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
             .ok_or_else(|| EngineError::UnsupportedKind {
                 kind: resolved.kind.clone(),
             })?;
+    // The chain compiler owns the signed root carrier. Daemon admission
+    // subsequently freezes projections from its fully composed subject, but
+    // standalone/offline plan execution must also honor this root's declared
+    // restrictions instead of silently substituting node-policy authority.
+    let execution =
+        root_kind_schema
+            .execution
+            .as_ref()
+            .ok_or_else(|| EngineError::SchemaLoaderError {
+                reason: format!("kind `{}` has no execution schema", resolved.kind),
+            })?;
+    let root_value = &terminal.intermediates[0].parsed;
+    let filesystem_authority_ceiling = execution
+        .project_filesystem_authority_ceiling(root_value)?
+        .intersect(admitted_filesystem_ceiling);
+    let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
+    let no_host_environment = HostEnvBindings::default();
+    let host_env = match filesystem_authority_ceiling {
+        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+            &no_host_environment
+        }
+        crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy => host_env,
+    };
     let runtime_spec =
         root_kind_schema
             .runtime()
@@ -1149,7 +1241,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     // the complete meaning-blind implementation set those policies may name.
     let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
-    let spec = compile_with_handlers(
+    let spec = crate::runtime::compile_with_handlers_and_execution_root(
         &terminal.intermediates,
         &terminal.root_source_path,
         &terminal.chain,
@@ -1167,6 +1259,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         root_trust_class,
         project_authority,
         sealed_content,
+        logical_project_root.unwrap_or(project_root.as_deref()),
     )?;
 
     // Step 5: Build plan node
@@ -1210,6 +1303,8 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         entrypoint: entrypoint_id,
         capabilities,
         materialization_requirements: Vec::new(),
+        network_authority_ceiling,
+        filesystem_authority_ceiling,
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
@@ -1392,7 +1487,10 @@ mod tests {
         let parent = tempdir();
         let bundle_root = parent.join("runtime-bundle");
         fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
-        let backend = "  - id: linux\n    protocol: ryeos.isolation-adapter/v3\n    targets: [x86_64-unknown-linux-gnu]\n    adapter: adapter\n    artifacts: {launcher: launcher}\n    capabilities: [filesystem.private_root]\n";
+        let backend = format!(
+            "  - id: linux\n    protocol: {}\n    targets: [x86_64-unknown-linux-gnu]\n    adapter: adapter\n    artifacts: {{}}\n    capabilities: [filesystem.private_root]\n",
+            ryeos_isolation_protocol::ISOLATION_ADAPTER_PROTOCOL
+        );
         let body = format!(
             "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nisolation_backends:\n{backend}{backend}"
         );
@@ -1581,6 +1679,7 @@ metadata:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         }
     }
@@ -1645,6 +1744,114 @@ config:
     // ── Test: chain walks to terminal with executor_id null ─────────────
 
     #[test]
+    fn bundled_worker_filesystem_ceiling_survives_preparation_and_retention() {
+        use crate::isolation::IsolationFilesystemAuthorityCeiling::{
+            CapturedExecution, NodePolicy,
+        };
+
+        let project = tempfile::tempdir().unwrap();
+        let schemas = tempfile::tempdir().unwrap();
+        let ts = test_ts();
+        write_tool_schema(schemas.path());
+        // Exercise the actual signed kind's parser, composed contract and
+        // runtime allowlist, rather than a fixture-only projection declaration.
+        let worker_schema = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/engine/kinds/worker/worker.kind-schema.yaml"
+        ));
+        let worker_schema = worker_schema
+            .lines()
+            .filter(|line| !line.starts_with("# ryeos:signed:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let schema_dir = schemas.path().join("worker");
+        fs::create_dir(&schema_dir).unwrap();
+        fs::write(
+            schema_dir.join("worker.kind-schema.yaml"),
+            sign_yaml(&worker_schema),
+        )
+        .unwrap();
+        let kinds = KindRegistry::load_base(&[schemas.path().to_path_buf()], &ts).unwrap();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        write_terminal(project.path(), "ryeos/core/subprocess/execute");
+        let worker_dir = project.path().join(AI_DIR).join("workers/fixture");
+        fs::create_dir_all(&worker_dir).unwrap();
+        let worker_path = worker_dir.join("session.yaml");
+        let ctx = test_plan_context(Some(project.path().to_path_buf()));
+        let roots = ResolutionRoots::from_flat(Some(project.path().join(AI_DIR)), vec![]);
+
+        for (authored, expected) in [
+            (None, NodePolicy),
+            (Some("captured_execution"), CapturedExecution),
+        ] {
+            let mut worker = json!({
+                "category": "fixture",
+                "version": "1.0.0",
+                "executor_id": "@subprocess",
+                "execution_protocol": "protocol:ryeos/core/structured_session",
+                "supported_target": {"os": "linux", "arch": "x86_64"},
+                "source": {"root": "lib/session", "entry": "profile.json", "digest": "a".repeat(64)},
+                "external_content": [],
+                "config": {"command": "/bin/sh", "args": ["--version"]}
+            });
+            if let Some(authored) = authored {
+                worker["filesystem_authority"] = json!(authored);
+            }
+            let shape = kinds
+                .get("worker")
+                .unwrap()
+                .composed_value_contract
+                .validate_instance(&worker);
+            assert!(shape.errors.is_empty(), "{shape:?}");
+            fs::write(&worker_path, serde_yaml::to_string(&worker).unwrap()).unwrap();
+            let mut item = make_verified_item(
+                "worker:fixture/session",
+                "worker",
+                worker_path.clone(),
+                Some("@subprocess"),
+                Some(project.path().to_path_buf()),
+            );
+            item.resolved.source_format = ResolvedSourceFormat {
+                extension: ".yaml".to_owned(),
+                parser: "parser:ryeos/core/yaml/yaml".to_owned(),
+                signature: SignatureEnvelope {
+                    prefix: "#".to_owned(),
+                    suffix: None,
+                    after_shebang: false,
+                },
+            };
+            let plan = build_plan(BuildPlanInput {
+                item: &item,
+                root_source: None,
+                parameters: &json!({}),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+                node_trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
+                // runtime_workspace's protocol ceiling must not widen a
+                // narrower ceiling authored by the worker itself.
+                filesystem_authority_ceiling: NodePolicy,
+                project_authority: None,
+                sealed_content: None,
+            })
+            .unwrap();
+            assert_eq!(plan.filesystem_authority_ceiling, expected);
+            assert_eq!(
+                plan.filesystem_authority_ceiling.intersect(NodePolicy),
+                expected
+            );
+            let retained: ExecutionPlan =
+                serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+            assert_eq!(retained.filesystem_authority_ceiling, expected);
+        }
+    }
+
+    #[test]
     fn chain_walks_to_null_terminal() {
         let project_dir = tempdir();
         let kinds_dir = tempdir();
@@ -1666,7 +1873,18 @@ config:
             Some(project_dir.clone()),
         );
 
-        let ctx = test_plan_context(Some(project_dir.clone()));
+        let mut ctx = test_plan_context(Some(project_dir.clone()));
+        ctx.scheduled_fire = Some(
+            crate::contracts::ScheduledFireContext::new(
+                "campaign.nightly".to_owned(),
+                "campaign.nightly@1700000000000".to_owned(),
+                1_700_000_000_000,
+                1_700_000_000_123,
+                "normal".to_owned(),
+                "a".repeat(64),
+            )
+            .unwrap(),
+        );
         let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         let plan = build_plan(BuildPlanInput {
@@ -1682,6 +1900,8 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             project_authority: None,
             sealed_content: None,
         })
@@ -1693,6 +1913,23 @@ config:
             plan.executor_chain
                 .iter()
                 .any(|id| id.contains("subprocess"))
+        );
+        let PlanNode::DispatchSubprocess { spec, .. } = &plan.nodes[0] else {
+            panic!("tool plan entrypoint must be a subprocess");
+        };
+        let execution_context: serde_json::Value = serde_json::from_str(
+            spec.env
+                .get("RYEOS_EXECUTION_CONTEXT")
+                .expect("engine plan execution context"),
+        )
+        .unwrap();
+        assert_eq!(
+            execution_context["schedule"]["fire_id"],
+            "campaign.nightly@1700000000000"
+        );
+        assert_eq!(
+            spec.env_sources.get("RYEOS_EXECUTION_CONTEXT"),
+            Some(&crate::contracts::RuntimeEnvSource::EnginePlan)
         );
     }
 
@@ -1735,6 +1972,8 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             project_authority: None,
             sealed_content: None,
         })
@@ -1806,6 +2045,8 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             project_authority: None,
             sealed_content: None,
         })
@@ -1853,6 +2094,8 @@ config:
             trust_store: &TrustStore::empty(),
             node_trust_store: &TrustStore::empty(),
             host_env: &HostEnvBindings::default(),
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             project_authority: None,
             sealed_content: None,
         })
@@ -1883,6 +2126,68 @@ config:
 
     fn empty_kinds() -> KindRegistry {
         KindRegistry::empty()
+    }
+
+    #[test]
+    fn logical_project_root_input_refuses_source_authority_or_noncanonical_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = write_chain_tool(temp.path(), "fixture", Some("@subprocess"));
+        let mut item =
+            make_verified_item("tool:fixture", "tool", source, Some("@subprocess"), None);
+        item.resolved.source_space = ItemSpace::Bundle;
+        item.resolved.source_root = crate::contracts::ItemSourceRoot::Bundle {
+            name: "fixture".into(),
+        };
+        item.resolved.subject_resolution_authority =
+            crate::contracts::SubjectResolutionAuthority::Projectless;
+        let ctx = test_plan_context(None);
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = empty_kinds();
+        let trust = TrustStore::empty();
+        let host_env = HostEnvBindings::default();
+        let params = json!({});
+        let hints = ExecutionHints::default();
+        let check = |item: &VerifiedItem, ctx: &PlanContext, roots: &ResolutionRoots, logical| {
+            validate_logical_project_root_input(
+                &BuildPlanInput {
+                    item,
+                    ctx,
+                    roots,
+                    root_source: Some("captured bytes"),
+                    parameters: &params,
+                    hints: &hints,
+                    kinds: &kinds,
+                    parsers: &parsers,
+                    registry_fingerprint: "fixture",
+                    trust_store: &trust,
+                    node_trust_store: &trust,
+                    host_env: &host_env,
+                    filesystem_authority_ceiling:
+                        crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    project_authority: None,
+                    sealed_content: None,
+                },
+                logical,
+            )
+        };
+        let roots = empty_roots();
+        let logical = Path::new(ryeos_state::objects::ADMITTED_DIRECT_PROJECT_ROOT);
+        check(&item, &ctx, &roots, None).unwrap();
+        check(&item, &ctx, &roots, Some(logical)).unwrap();
+        for invalid in ["/tmp/project", "/", "relative", "/__ryeos_project/../other"] {
+            assert!(check(&item, &ctx, &roots, Some(Path::new(invalid))).is_err());
+        }
+        let slash = format!("{}/", logical.display());
+        assert!(check(&item, &ctx, &roots, Some(Path::new(&slash))).is_err());
+        let project_roots = ResolutionRoots::from_flat(Some(temp.path().join(AI_DIR)), vec![]);
+        assert!(check(&item, &ctx, &project_roots, Some(logical)).is_err());
+        let local_ctx = test_plan_context(Some(temp.path().to_path_buf()));
+        assert!(check(&item, &local_ctx, &roots, Some(logical)).is_err());
+        item.resolved.materialized_project_root = Some(temp.path().to_path_buf());
+        assert!(check(&item, &ctx, &roots, Some(logical)).is_err());
+        item.resolved.materialized_project_root = None;
+        item.resolved.source_space = ItemSpace::Project;
+        assert!(check(&item, &ctx, &roots, Some(logical)).is_err());
     }
 
     fn ignored() -> Vec<String> {
@@ -2394,6 +2699,8 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             project_authority: None,
             sealed_content: None,
         })
@@ -2538,6 +2845,7 @@ env_config:
     var: RYEOS_PYTHON
   env:
     PYTHONUNBUFFERED: "1"
+    QUALIFICATION_LABEL: "${BUILD_LABEL}"
 config:
   command: "${interpreter}"
   args:
@@ -2581,6 +2889,13 @@ category: ryeos/core/subprocess\n";
         let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         // 5. Build plan — this walks the full 3-hop chain
+        let host_env = HostEnvBindings {
+            allowed: std::collections::HashSet::from(["BUILD_LABEL".to_owned()]),
+            values: std::collections::HashMap::from([(
+                "BUILD_LABEL".to_owned(),
+                "host-only".to_owned(),
+            )]),
+        };
         let plan = build_plan(BuildPlanInput {
             item: &item,
             root_source: None,
@@ -2593,11 +2908,38 @@ category: ryeos/core/subprocess\n";
             registry_fingerprint: "fp:test",
             trust_store: &ts,
             node_trust_store: &ts,
-            host_env: &HostEnvBindings::default(),
+            host_env: &host_env,
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             project_authority: None,
             sealed_content: None,
         })
         .expect("build_plan should succeed for valid 3-hop chain");
+
+        // The raw root has no restrictive projection: this restriction was
+        // supplied by the composed subject or parent admission. It must take
+        // effect before handler templates consume the otherwise allowed host
+        // value, rather than only clearing inherited variables at spawn.
+        let error = build_plan(BuildPlanInput {
+            item: &item,
+            root_source: None,
+            parameters: &json!({"message": "hello"}),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &ts,
+            node_trust_store: &ts,
+            host_env: &host_env,
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            project_authority: None,
+            sealed_content: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("BUILD_LABEL"), "{error}");
 
         // 6. Verify the plan structure
         assert_eq!(plan.root_ref, "tool:my_tool");

@@ -61,6 +61,7 @@ struct ResolvedLaunch {
     parent_thread_id: Option<String>,
     depth: u32,
     hard_limits: Value,
+    scheduled_fire: Option<ryeos_engine::contracts::ScheduledFireContext>,
     callback: Option<EnvelopeCallback>,
     target_digest: Option<String>,
     invocation_id: Option<String>,
@@ -177,6 +178,7 @@ fn main() -> anyhow::Result<()> {
         "parent_thread_id": resolved.parent_thread_id,
         "depth": resolved.depth,
         "hard_limits": resolved.hard_limits,
+        "scheduled_fire": resolved.scheduled_fire,
     });
 
     // Inject the complete identity-bearing resume DTO. The walker parses this
@@ -296,6 +298,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         parent_thread_id: envelope.request.parent_thread_id.clone(),
         depth: envelope.request.depth,
         hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
+        scheduled_fire: envelope.request.scheduled_fire.clone(),
         callback: Some(envelope.callback),
         target_digest: Some(target_digest),
         invocation_id: Some(envelope.invocation_id.clone()),

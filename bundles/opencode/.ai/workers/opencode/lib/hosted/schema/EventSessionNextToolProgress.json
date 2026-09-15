@@ -1,0 +1,116 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.tool.progress"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "assistantMessageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "callID": {
+          "type": "string"
+        },
+        "structured": {
+          "type": "object"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LLMToolContent"
+          }
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "assistantMessageID",
+        "callID",
+        "structured",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "LLMToolContent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolTextContent"
+        },
+        {
+          "$ref": "#/$defs/ToolFileContent"
+        }
+      ]
+    },
+    "ToolTextContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "ToolFileContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "file"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "uri",
+        "mime"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

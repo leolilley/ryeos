@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-19T02:50:32Z:a0acd55e75d49de98f9676cce581dd3deb5cfba1bbbf10f290126051488ccb64:UGAwzcnFfXmQAgUKt9sJ4HRJLe+Z0a74LLACbOqQ1FPSnENOhP5q0Mk1DTTltCTZOQO8/pJutdAECJ61g2b1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T09:19:47Z:ed2e52467700ba47bcbc329cc9cbbbe4f413f97e835a3f83aeacba23eea64086:fgKIeyPKSpwfnmW8UtzeAKb1XPgc/mrraLEBj4VcCaGtCTe4fFAZYFWzeecCeRoy2HoyfPyZkCCmvVcgYS1UBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -10,7 +10,6 @@ provides_kinds:
 - protocol
 - runtime
 - service
-- streaming_tool
 - tool
 - worker
 - worker_execution
@@ -22,3 +21,30 @@ runtime_authority:
   - log
   - show
   - create
+isolation_backends:
+- id: linux-lillux
+  protocol: ryeos.isolation-adapter/v10
+  targets:
+  - x86_64-unknown-linux-gnu
+  - aarch64-unknown-linux-gnu
+  adapter: ryeos-lillux-isolation-adapter
+  artifacts: {}
+  capabilities:
+  - filesystem.private_root
+  - filesystem.fd_read_only
+  - filesystem.fd_writable
+  - filesystem.ordered_overlays
+  - filesystem.fixed_parent_views
+  - filesystem.project_workspace_cow
+  - filesystem.workspace_delta
+  - filesystem.private_tmp
+  - filesystem.pid_namespace_proc
+  - devices.minimal
+  - environment.exact
+  - network.host
+  - network.isolated
+  - process.isolated_pid_namespace
+  - process.target_pid_reporting
+  - lifecycle.shared_process_group
+  - process.nested_sandbox
+  - ipc.target_unix_stream

@@ -12,13 +12,23 @@ web_search = "disabled"
 allow_login_shell = false
 
 [shell_environment_policy]
-inherit = "core"
+# Start from the bridge's admitted environment, then keep only this finite
+# child-facing surface. `core` drops the broker endpoint before filters run.
+inherit = "all"
 ignore_default_excludes = false
 
 [shell_environment_policy.filters]
+"PATH" = "include"
+"LANG" = "include"
+"LC_ALL" = "include"
+"LC_CTYPE" = "include"
+"TERM" = "include"
+"TZ" = "include"
+"GIT_CONFIG_NOSYSTEM" = "include"
+"GIT_CONFIG_GLOBAL" = "include"
+"GIT_PAGER" = "include"
 "HOME" = "exclude"
 "CODEX_HOME" = "exclude"
-"RYEOS_*" = "exclude"
 "DBUS_*" = "exclude"
 "SSH_*" = "exclude"
 "*PROXY" = "exclude"
@@ -31,6 +41,13 @@ extends = ":workspace"
 ":minimal" = "read"
 ":tmpdir" = "deny"
 ":slash_tmp" = "deny"
+# Process resources are pinned read-only runtime inputs, never project files.
+"/ryeos/realizations/codex" = "read"
+"/ryeos/realizations/codex-code-mode-host" = "read"
+"/ryeos/realizations/codex-resources/bwrap" = "read"
+"/ryeos/realizations/codex-resources/zsh/bin/zsh" = "read"
+"/ryeos/realizations/codex-path/rg" = "read"
+"/ryeos/realizations/environment/command-tools" = "read"
 
 [permissions.ryeos-workspace-only.filesystem.":workspace_roots"]
 ".ai/cache/ryeos-runtime" = "read"
@@ -48,7 +65,9 @@ hooks = false
 multi_agent = false
 memories = false
 network_proxy = false
-code_mode_host = true
+# RyeOS presents admitted executions as direct dynamic tools. Advertising the
+# separate JavaScript host would make Codex request an unimplemented `exec`.
+code_mode_host = false
 
 [features.code_mode]
 enabled = false

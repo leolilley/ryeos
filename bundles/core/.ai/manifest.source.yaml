@@ -4,3 +4,30 @@ description: "Engine foundation: kind schemas, handlers, parsers, services, tool
 requires_kinds: []
 runtime_authority:
   project_snapshots: [status, log, show, create]
+isolation_backends:
+  - id: linux-lillux
+    protocol: ryeos.isolation-adapter/v10
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    adapter: ryeos-lillux-isolation-adapter
+    artifacts: {}
+    capabilities:
+      - filesystem.private_root
+      - filesystem.fd_read_only
+      - filesystem.fd_writable
+      - filesystem.ordered_overlays
+      - filesystem.fixed_parent_views
+      - filesystem.project_workspace_cow
+      - filesystem.workspace_delta
+      - filesystem.private_tmp
+      - filesystem.pid_namespace_proc
+      - devices.minimal
+      - environment.exact
+      - network.host
+      - network.isolated
+      - process.isolated_pid_namespace
+      - process.target_pid_reporting
+      - lifecycle.shared_process_group
+      - process.nested_sandbox
+      - ipc.target_unix_stream

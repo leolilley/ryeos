@@ -1,0 +1,45 @@
+version: "1.0.0"
+category: test
+description: Selected Graph subject reaches an ordinary probe through normalized realization inheritance
+external_content: []
+external_product_slots:
+  - id: auxiliary
+    relationship_ref: config:test/dynamic-products
+    relationship: auxiliary_to_graph_verifier
+    kind: file
+    mount_root: project
+    mount: qualification/auxiliary
+  - id: subject
+    relationship_ref: config:test/dynamic-products
+    relationship: subject_to_graph_verifier
+    kind: file
+    mount_root: project
+    mount: qualification/subject
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.test/probe-dynamic-products
+config:
+  start: probe
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    probe:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/probe-dynamic-products
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        qualification_result: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.qualification_result}"

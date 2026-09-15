@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-13T00:56:27Z:cf3a1851adb54453600d8ddb6da8f29151445b95e189e9e52968101f0d882f69:WyGCPeup3j9jCISHJVhzYUA60OJyX7rlCJmAjNdDWenPGnlR760MmF4KhAzCmXVCpasGJ1SoL0kphgzO+a6kBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Exact retained pre-RyeOS Stage0 acquisition input closure
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots: []
+  products:
+    - name: stage0_acquisition_inputs
+      source: {kind: retained_project}
+      path: stage0-acquisition
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 64
+        maximum_depth: 3
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  # Add the producer relationship only when the exact Stage1 archive/runtime
+  # closure is admitted. A product witness is not permission to launch a
+  # consumer, and a placeholder consumer would be competing authority.
+  relationships: []

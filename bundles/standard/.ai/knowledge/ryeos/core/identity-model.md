@@ -1,14 +1,37 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:30f245110bb9357bedb39d9cb943088087e72f0b6b7d1854c884414e97890c84:0Mfa9wH5GpqkCKSJJIQgAlZh366K0yJh8BATVPNuvWLiU3+E5Oh9IBM92Md9zXFD6Jc0ulTpedADZVGIJwieCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T02:15:34Z:9ff9c0aabc434de9850407a04b6b8f154bf806ed4fceaa8f3e45e32eae6db723:4Txon6+01vq/p8k4PWYMSMzPyyxjHpfmmYT83zS9eOZ9KMCmXvU3d9iJFFqWuOiBnPH2WZyCNw1biPpP1pftCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
-version: "2.0.0"
+version: "2.1.0"
 description: >
   The four identity layers in ryEOS: publisher trust, user key, node key,
   and vault key; what each signs and who owns each artifact.
 ---
 
 # Identity Model
+
+## Identity is separate from executable intent
+
+Keys identify signers. Grants define authority. Executions retain attributable
+work. A directive defines model-driven behaviour; neither that definition nor
+its prompted role creates a new cryptographic principal.
+
+A directive invocation is an admitted execution, not an enduring persona.
+The runtime acts through the authority admitted for that execution. A model
+need not hold a signing key, and a node-authored observation does not mean the
+model personally signed it.
+
+The earlier shorthand "an agent is a signing key with a body of work" expressed
+that accountability should outlive a process or model session. It is not the
+current identity schema: the roles below are distinct, and custody, delegation
+and key succession cannot be reduced to one persona equalling one key.
+
+Keep principal identity, exact content identity and execution identity separate.
+A valid signature is evidence of signing under key-custody assumptions, not
+proof of a human identity, semantic correctness or current permission to act.
+See [Mental model](mental-model.md) for the relationship to directives and work.
+
+## Identity and trust roles
 
 ryeOS has four distinct identity/trust layers:
 

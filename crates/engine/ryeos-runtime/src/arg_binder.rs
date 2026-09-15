@@ -371,7 +371,23 @@ fn normalize_field_value(
         },
         InvocationInputType::Array => match value {
             Value::Array(_) => Ok(value),
-            Value::String(s) => Ok(Value::Array(vec![Value::String(s)])),
+            Value::String(s) => {
+                // Array-valued command fields have two intentional CLI forms:
+                // a single typed JSON list, or repeated ordinary scalar flags.
+                // Decode the former here, at the shared schema boundary. Do
+                // not make individual commands (remote execution in
+                // particular) reinterpret their own JSON-shaped strings.
+                if s.trim_start().starts_with('[') {
+                    serde_json::from_str::<Value>(&s)
+                        .map_err(|_| format!("--{} must be a JSON array", flag_name(field)))
+                        .and_then(|decoded| match decoded {
+                            Value::Array(_) => Ok(decoded),
+                            _ => Err(format!("--{} must be a JSON array", flag_name(field))),
+                        })
+                } else {
+                    Ok(Value::Array(vec![Value::String(s)]))
+                }
+            }
             other => Err(format!(
                 "--{} must be an array, got {}",
                 flag_name(field),
@@ -700,6 +716,50 @@ mod tests {
 
         assert_eq!(result["parameters"]["smoke_only"], true);
         assert_eq!(result["parameters"]["limit"], 1);
+    }
+
+    #[test]
+    fn command_decodes_one_typed_json_array() {
+        let command = test_command(vec!["remote".into(), "run".into()], Vec::new());
+        let contract = InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({"product_selections": "array?"}),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &[
+                "--product-selections".into(),
+                r#"[{"target":{"kind":"root"},"selection":{"declaration_id":"runtime"}}]"#.into(),
+            ],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["product_selections"][0]["target"]["kind"], "root");
+        assert_eq!(
+            result["product_selections"][0]["selection"]["declaration_id"],
+            "runtime"
+        );
+    }
+
+    #[test]
+    fn command_rejects_malformed_typed_json_array() {
+        let command = test_command(vec!["remote".into(), "run".into()], Vec::new());
+        let contract = InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({"product_selections": "array?"}),
+        )
+        .unwrap()
+        .unwrap();
+        let error = bind_argv_with_command_and_contract(
+            &["--product-selections".into(), "[{".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("--product-selections must be a JSON array"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub struct ThreadRow {
     pub admitted_launch_capsule_hash: Option<String>,
     pub base_project_snapshot_hash: Option<String>,
     pub result_project_snapshot_hash: Option<String>,
+    pub result_workspace_output_capture_hash: Option<String>,
     pub captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     pub created_at: String,
     pub updated_at: String,
@@ -81,6 +82,8 @@ impl ThreadRow {
             admitted_launch_capsule_hash: row.get("admitted_launch_capsule_hash")?,
             base_project_snapshot_hash: row.get("base_project_snapshot_hash")?,
             result_project_snapshot_hash: row.get("result_project_snapshot_hash")?,
+            result_workspace_output_capture_hash: row
+                .get("result_workspace_output_capture_hash")?,
             captured_history_policy,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -412,7 +415,7 @@ const THREAD_COLUMNS: &str = r#"
     item_ref, executor_ref, launch_mode,
     current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
     project_authority_json, admitted_launch_capsule_hash,
-    base_project_snapshot_hash, result_project_snapshot_hash,
+    base_project_snapshot_hash, result_project_snapshot_hash, result_workspace_output_capture_hash,
     captured_history_policy_json, created_at, updated_at, started_at, finished_at
 "#;
 
@@ -1028,7 +1031,7 @@ pub fn execution_tree(
             t.current_site_id, t.origin_site_id, t.upstream_thread_id,
             t.requested_by, t.project_root, t.project_authority_json,
             t.admitted_launch_capsule_hash,
-            t.base_project_snapshot_hash, t.result_project_snapshot_hash,
+            t.base_project_snapshot_hash, t.result_project_snapshot_hash, t.result_workspace_output_capture_hash,
             t.captured_history_policy_json,
             t.created_at, t.updated_at, t.started_at, t.finished_at,
             walk.parent_thread_id AS tree_parent_thread_id,

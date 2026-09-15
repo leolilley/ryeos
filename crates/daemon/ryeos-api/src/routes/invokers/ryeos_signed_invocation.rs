@@ -53,6 +53,7 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             verified: true,
             authorized_key_class: Some(principal.principal_class),
             authenticated_origin_site_id: principal.authenticated_site_id,
+            authenticated_grant_authority: Some(principal.grant_authority),
             metadata: BTreeMap::new(),
         }))
     }

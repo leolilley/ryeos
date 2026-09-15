@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
+use lillux::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::net::UnixStream;
@@ -21,7 +21,7 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// follow suspension waits for durable cohort and successor handoff. Those
 /// calls remain bounded by admitted execution/cancellation policy rather than
 /// by this transport timer.
-pub const DEFAULT_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {

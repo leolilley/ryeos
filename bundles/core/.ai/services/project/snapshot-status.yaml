@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-06T06:51:53Z:eacc70d7f8ed8ecb69e33135bc23005a50a5d9ab9beb672f3999144c9321bb77:YSctJjyMZtaWsUWmgimZq0rei8VM6PDUFBQj4ptHOl1yF7hkxyfy6/pxmzOpbgluRB91vkLwFI8wSKiBcQ5qBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: project.snapshot-status
+availability: both
+record_thread: false
+state_access: read_only_existing
+required_caps: ["ryeos.execute.service.project/snapshot-status"]
+schema:
+  project_path: string
+  include_unchanged: boolean?
+  time_budget_ms: integer
+description: "Configured-local-operator worktree comparison against the principal's trusted snapshot HEAD. Uses the live node or fail-only existing-state standalone service when stopped; never repairs projections or creates snapshots. Project path must be absolute. The caller selects a scan budget in milliseconds; zero disables the scan deadline."

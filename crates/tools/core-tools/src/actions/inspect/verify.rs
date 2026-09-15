@@ -100,6 +100,7 @@ pub fn run_verify(params: VerifyParams, engine: &Engine) -> Result<VerifyRun> {
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
 

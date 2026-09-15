@@ -6,7 +6,26 @@ use ryeos_engine::runtime_registry::RuntimeLimitsDecl;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::launch_envelope::HardLimits;
+use super::launch_envelope::{AggregateExecutionLimits, HardLimits};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateLimitValues {
+    #[serde(default)]
+    pub duration_seconds: u64,
+    #[serde(default)]
+    pub worker_executions: u32,
+    #[serde(default)]
+    pub provider_contacts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateLimitCaps {
+    pub duration_seconds: Option<u64>,
+    pub worker_executions: Option<u32>,
+    pub provider_contacts: Option<u32>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +62,8 @@ pub struct LimitValues {
     pub depth: u32,
     #[serde(default = "default_duration")]
     pub duration_seconds: u64,
+    #[serde(default)]
+    pub aggregate: AggregateLimitValues,
     /// Runtime-declared dimensions remain flat in authored/config YAML for
     /// compatibility, but are captured generically and validated against the
     /// selected runtime's signed declaration before use.
@@ -59,6 +80,7 @@ impl Default for LimitValues {
             spawns: default_spawns(),
             depth: default_depth(),
             duration_seconds: default_duration(),
+            aggregate: AggregateLimitValues::default(),
             runtime: BTreeMap::new(),
         }
     }
@@ -81,6 +103,8 @@ pub struct LimitCaps {
     pub spawns: Option<u32>,
     pub depth: Option<u32>,
     pub duration_seconds: Option<u64>,
+    #[serde(default)]
+    pub aggregate: AggregateLimitCaps,
     #[serde(flatten)]
     pub runtime: BTreeMap<String, u64>,
 }
@@ -158,6 +182,20 @@ pub fn compute_effective_limits(
             requested.duration_seconds,
             caps.duration_seconds.unwrap_or(0),
         ),
+        aggregate: AggregateExecutionLimits {
+            duration_seconds: sentinel_clamp(
+                requested.aggregate.duration_seconds,
+                caps.aggregate.duration_seconds.unwrap_or(0),
+            ),
+            worker_executions: sentinel_clamp(
+                requested.aggregate.worker_executions,
+                caps.aggregate.worker_executions.unwrap_or(0),
+            ),
+            provider_contacts: sentinel_clamp(
+                requested.aggregate.provider_contacts,
+                caps.aggregate.provider_contacts.unwrap_or(0),
+            ),
+        },
         runtime: clamp_runtime_dimensions(
             &requested.runtime,
             &caps.runtime,
@@ -177,6 +215,9 @@ pub fn compute_effective_limits(
         hard.spawns = sentinel_clamp(hard.spawns, parent.spawns);
         hard.depth = sentinel_clamp(hard.depth, parent.depth);
         hard.duration_seconds = sentinel_clamp(hard.duration_seconds, parent.duration_seconds);
+        // One root owns the execution-tree ledger. A child neither resets nor
+        // narrows that shared authority with its own authored defaults.
+        hard.aggregate = parent.aggregate.clone();
         if hard.runtime_contract.is_some() && hard.runtime_contract == parent.runtime_contract {
             hard.runtime = clamp_runtime_dimensions(
                 &hard.runtime,
@@ -254,7 +295,20 @@ pub fn merge_header_limits(
         .as_object_mut()
         .expect("LimitValues always serializes to a JSON object");
     for (k, v) in overlay {
-        m.insert(k.clone(), v.clone());
+        if k == "aggregate" {
+            let aggregate = v
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("`limits.aggregate` must be an object"))?;
+            let target = m
+                .get_mut("aggregate")
+                .and_then(Value::as_object_mut)
+                .expect("LimitValues aggregate always serializes to an object");
+            for (name, value) in aggregate {
+                target.insert(name.clone(), value.clone());
+            }
+        } else {
+            m.insert(k.clone(), v.clone());
+        }
     }
     let result: LimitValues = serde_json::from_value(merged)?;
     result.validate("limits", declaration)?;

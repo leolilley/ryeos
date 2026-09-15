@@ -10,19 +10,17 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|full-sandbox|central-host|standard|hosted-node|hosted-workflow|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
 #   full            core + central-auth + standard + web + browser + ryeos-ui +
-#                   hosted-node + codex + local-inference (default)
-#   full-sandbox    full + the separately authored Linux isolation backend;
-#                   build its payload explicitly first
+#                   hosted-node + codex + opencode + local-inference (default)
 #   central-host    core + central-auth + standard + web + tv-tracker-authoring —
 #                   standard node plus the rye/web/search tool and app authoring
 #   standard        core + central-auth + standard — scheduler/graph/directive node
 #   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
-#   hosted-workflow core + central-auth + standard + hosted-node + codex — hosted
-#                   node that also runs scheduler/graph/directive and Codex workloads
+#   hosted-workflow core + central-auth + standard + hosted-node + codex + opencode — hosted
+#                   node that also runs scheduler/graph/directive and hosted workloads
 #   release-artifacts internal non-installable union used to compile and publish
 #                   the native archive and every release image in one build
 #
@@ -92,7 +90,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|full-sandbox|central-host|standard|hosted-node|hosted-workflow|release-artifacts) ;;
+  full|central-host|standard|hosted-node|hosted-workflow|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -228,8 +226,8 @@ BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
 CODEX="$ROOT/bundles/codex"
+OPENCODE="$ROOT/bundles/opencode"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
-SANDBOX_LINUX_BUBBLEWRAP="$ROOT/bundles/sandbox-linux-bubblewrap"
 TVTA="$ROOT/bundles/tv-tracker-authoring"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
 INIT_SEED="$SOURCE_ROOT_AI/node/init"
@@ -260,15 +258,20 @@ staged_payload_records_for_set() {
     core rye-parser-yaml-header-document ryeos-handler-bins release \
     core rye-parser-regex-kv ryeos-handler-bins release \
     core rye-composer-identity ryeos-handler-bins release \
+    core ryeos-direct-execution-evidence ryeos-handler-bins release \
     core ryeos-core-tools ryeos-core-tools release \
     core ryeos-session-exec ryeos-session-exec static \
     core ryeos-worker-execution-launch-preparer ryeos-structured-session static \
-    core ryeos-worker-execution-runtime ryeos-structured-session static
+    core ryeos-worker-execution-runtime ryeos-structured-session static \
+    core ryeos-structured-session-bridge ryeos-structured-session static \
+    core ryeos-lillux-isolation-adapter ryeos-lillux-isolation-adapter static
   case "$BUNDLE_SET" in
-    full|full-sandbox|central-host|standard|hosted-workflow|release-artifacts)
+    full|central-host|standard|hosted-workflow|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         standard ryeos-directive-runtime ryeos-directive-runtime release \
         standard ryeos-directive-launch-preparer ryeos-handler-bins release \
+        standard ryeos-graph-launch-preparer ryeos-handler-bins release \
+        standard ryeos-graph-execution-evidence ryeos-handler-bins release \
         standard ryeos-graph-runtime ryeos-graph-runtime release \
         standard ryeos-knowledge-runtime ryeos-knowledge-runtime release \
         standard rye-composer-extends-chain ryeos-handler-bins release \
@@ -276,22 +279,16 @@ staged_payload_records_for_set() {
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox|central-host|release-artifacts)
+    full|central-host|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' web ryeos-web-tools ryeos-web-tools release
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox|release-artifacts)
+    full|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         ryeos-ui ryeos-tui ryeos-client-terminal release \
         ryeos-ui web ryeos-client-web release \
         browser ryeos-browser-tools ryeos-browser-tools release
-      ;;
-  esac
-  case "$BUNDLE_SET" in
-    full|full-sandbox|hosted-workflow|release-artifacts)
-      printf '%s\t%s\t%s\t%s\n' \
-        codex ryeos-structured-session-bridge ryeos-structured-session static
       ;;
   esac
 }
@@ -372,18 +369,11 @@ prepare_bundle_trees() {
     rm -rf "$bundle_dir/.ai/refs"
     rm -f  "$bundle_dir/PUBLISHER_TRUST.toml"
   done
-  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-artifacts" ]]; then
     rm -rf "$LOCAL_INFERENCE/.ai/bin"
     rm -rf "$LOCAL_INFERENCE/.ai/objects"
     rm -rf "$LOCAL_INFERENCE/.ai/refs"
     rm -f  "$LOCAL_INFERENCE/PUBLISHER_TRUST.toml"
-  fi
-  if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
-    # Its separately authored binaries were preflighted and remain in place;
-    # only its closed bundle graph is regenerated.
-    rm -rf "$SANDBOX_LINUX_BUBBLEWRAP/.ai/objects"
-    rm -rf "$SANDBOX_LINUX_BUBBLEWRAP/.ai/refs"
-    rm -f  "$SANDBOX_LINUX_BUBBLEWRAP/PUBLISHER_TRUST.toml"
   fi
   for bundle_dir in "${BUNDLE_DIRS[@]}"; do
     mkdir -p "$bundle_dir/.ai/bin/$TRIPLE"
@@ -394,25 +384,29 @@ prepare_bundle_trees() {
 
 # Cargo package list per bundle set (the default when --crates is not given).
 case "$BUNDLE_SET" in
-  full|full-sandbox|release-artifacts)
+  full|release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
-          ryeos-client-terminal ryeos-client-web ryeos-structured-session)
+          ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
+          ryeos-lillux-isolation-adapter)
     ;;
   standard)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-lillux-isolation-adapter)
     ;;
   hosted-workflow)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-lillux-isolation-adapter)
     ;;
   hosted-node)
-    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session)
+    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
+          ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
 esac
 
@@ -427,10 +421,12 @@ fi
 host_pkgs=()
 build_static_session_exec=0
 build_static_structured_session=0
+build_static_lillux_isolation_adapter=0
 for p in "${pkgs[@]}"; do
   case "$p" in
     ryeos-session-exec) build_static_session_exec=1 ;;
     ryeos-structured-session) build_static_structured_session=1 ;;
+    ryeos-lillux-isolation-adapter) build_static_lillux_isolation_adapter=1 ;;
     *) host_pkgs+=("$p") ;;
   esac
 done
@@ -463,6 +459,7 @@ ryeos_term_begin PUBLISH "building $BUILD_PROFILE binaries${JOBS:+ (jobs=$JOBS)}
 if (( ${#host_pkgs[@]} > 0 )); then
   ryeos_term_update "building selected release binaries" "${host_pkgs[*]}"
   ryeos_term_suspend
+  ryeos_term_info "host release build: node, CLI, runtimes, tools, and clients"
   "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
   ryeos_term_resume "selected release build complete"
 else
@@ -476,16 +473,24 @@ fi
 static_build_labels=()
 (( build_static_session_exec == 1 )) && static_build_labels+=(ryeos-session-exec)
 (( build_static_structured_session == 1 )) && static_build_labels+=(ryeos-structured-session)
+(( build_static_lillux_isolation_adapter == 1 )) && static_build_labels+=(ryeos-lillux-isolation-adapter)
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
   if (( build_static_session_exec == 1 )); then
+    ryeos_term_info "static worker build: ryeos-session-exec (separate self-contained binary)"
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
       "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-session-exec
   fi
   if (( build_static_structured_session == 1 )); then
+    ryeos_term_info "static worker build: ryeos-structured-session (separate self-contained binary)"
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
       "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-structured-session
+  fi
+  if (( build_static_lillux_isolation_adapter == 1 )); then
+    ryeos_term_info "static isolation build: ryeos-lillux-isolation-adapter (self-contained adapter)"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-lillux-isolation-adapter
   fi
   ryeos_term_resume "selected static worker build complete"
 else
@@ -500,20 +505,9 @@ materialize_staged_payloads
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-session-exec"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-launch-preparer"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-runtime"
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-structured-session-bridge"
-fi
-if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
-  test -x "$SANDBOX_LINUX_BUBBLEWRAP/.ai/bin/$TRIPLE/bwrap" || {
-    ryeos_term_fail "full-sandbox requires an explicitly built sandbox-linux-bubblewrap payload"
-    ryeos_term_info "run ./bundles/sandbox-linux-bubblewrap/build-payload.sh before populate"
-    exit 2
-  }
-  test -x "$SANDBOX_LINUX_BUBBLEWRAP/.ai/bin/$TRIPLE/ryeos-bubblewrap-adapter" || {
-    ryeos_term_fail "full-sandbox requires an explicitly built sandbox-linux-bubblewrap adapter"
-    ryeos_term_info "run ./bundles/sandbox-linux-bubblewrap/build-payload.sh before populate"
-    exit 2
-  }
+require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  require_static_payload "$PAYLOAD_STAGE/core/ryeos-structured-session-bridge"
 fi
 prepare_bundle_trees
 
@@ -557,7 +551,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$R
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing standard bundle" "signed manifests"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
@@ -566,7 +560,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing web bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
@@ -583,7 +577,7 @@ if [[ "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing browser bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
@@ -596,14 +590,14 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing hosted-node bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$HOSTED_NODE" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing codex bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \
@@ -611,14 +605,15 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
-  ryeos_term_update "publishing sandbox-linux-bubblewrap bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$SANDBOX_LINUX_BUBBLEWRAP" \
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  ryeos_term_update "publishing opencode bundle" "signed manifests"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$OPENCODE" \
     --registry-root "$CORE" \
+    --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing local-inference bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$LOCAL_INFERENCE" \
     --registry-root "$CORE" \

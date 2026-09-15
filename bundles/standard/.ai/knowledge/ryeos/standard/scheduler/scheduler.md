@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:40Z:79d622c08de678f9500cc7b4d07ecdb42a557b4560d16924ba5d63931cf06742:Ke438Jv2hf1fGcGpSGUhdFn3BHaA+o8tVqcaKtbNISKJc9sM1y9EaHEW1bPW5gzjTU42vLggkq/IUeIhaUKRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-05T01:24:37Z:484a45898c683e6387517ecb7c6f455e0c4395e14770f53b79c95c6d59482811:p3oBFii2vUWqF8iKlGzBN+e8pS2mOKP5e68xPoY18++1cCtKGGvFTwYOC5oAGkgnt5SDFmEvG9kZiOjPBa9bDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -53,7 +53,10 @@ Register a schedule by providing:
 - **Overlap policy** — `allow`, `skip`, or `cancel_previous`
 - **Lateness grace** — a positive number of seconds
 - **Enabled state** — an explicit boolean
-- **Project root** — optional project context for execution
+- **Capabilities** — a sorted, unique, non-empty subset of the caller's grant
+- **Execution policy** — the ordinary explicit project, environment, target,
+  lifecycle, and response policy
+- **Project root** — absent for projectless work and required for project-backed work
 
 Complete registration object:
 
@@ -70,10 +73,54 @@ overlap_policy: skip
 lateness_grace_secs: 60
 enabled: true
 project_root: /path/to/project
+capabilities:
+  - ryeos.execute.graph.reports/hourly
+execution_policy:
+  schema_version: 2
+  ownership: daemon_owned
+  recovery: restart_recoverable
+  response: accepted
+  target:
+    kind: here
+  environment:
+    kind: project_overlay
+    include_operator_vault: true
+    name_policy:
+      kind: declared_required
+  project:
+    kind: live_direct
+    access: read_write
+    child_policy:
+      kind: inherit
 ```
 
-All fields in this example except `project_root` are required. Policies are
-authored behavior: the daemon does not infer them or substitute defaults.
+All fields are required except that `project_root` is omitted for an explicitly
+projectless policy. Policies are authored behavior: the daemon does not infer
+them or substitute defaults.
+
+`live_direct` and `pinned` are separate supported lanes. Use `live_direct` when
+each fire is intentionally meant to see the then-current live tree. Use
+`pinned` with `source.kind: current_head` or an explicit snapshot hash when one
+immutable project authority must survive admission and restart recovery.
+Scheduled execution rejects `capture_live`, because capture is an interactive
+admission operation rather than a recurring policy.
+
+`live_direct` is never snapshotted implicitly: every fire, including recovery
+of an interrupted fire, resolves the live filesystem again. A pinned fire does
+the opposite. Its first admitted attempt binds the immutable generation and
+every recovery rematerializes only that stored authority; it never falls back
+to the live tree.
+
+Each fire carries one daemon-authored, immutable execution context. Graph and
+directive expressions read it as `execution.schedule`; direct subprocess tools
+receive the same canonical JSON projection in the protected
+`RYEOS_EXECUTION_CONTEXT` environment variable. Its `schedule` field is `null`
+for ordinary nonscheduled execution. The context is separate from item
+parameters and includes the schedule ID, fire ID, scheduled time, first durable
+dispatch time, trigger reason, and exact schedule-spec hash. Recovery of the
+same fire preserves these values. A recurring external observation should bind
+`fire_id` into that observation's signed action input: the context is available
+authority, not an implicit cache partition for every unrelated child effect.
 
 The daemon evaluates the schedule and fires executions at the
 specified times. Each fire creates a new thread.
@@ -81,10 +128,10 @@ specified times. Each fire creates a new thread.
 ## Fire History
 
 `ryeos scheduler show-fires <id>` returns the execution history:
-- Fire timestamps
+- Scheduled, reserved, dispatched, and completed timestamps
 - Thread IDs for each execution
 - Result status (completed, failed, cancelled)
-- Duration and token usage
+- The schedule-spec hash, bound project authority, and admitted capsule hash
 
 ## Pause and Resume
 

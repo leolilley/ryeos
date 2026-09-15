@@ -1,13 +1,12 @@
 //! Streaming tool demonstrator binary.
 //!
-//! Reads `parameters_json` on stdin (ignored), then writes 7
+//! Reads plan-owned opaque stdin (ignored), then writes 7
 //! length-prefixed JSON frames to stdout: 5 stdout chunks, 1 stderr
 //! chunk, and a terminal exit frame. This exercises the
 //! `tool_streaming` protocol end-to-end including the Stderr kind.
 
 use std::io::{Read, Write};
 
-use base64::Engine;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -43,16 +42,16 @@ fn emit_frame(chunk: &StreamingChunk) {
 }
 
 fn main() {
-    // Drain stdin (tool_streaming sends parameters_json).
-    let mut stdin = String::new();
-    std::io::stdin().read_to_string(&mut stdin).unwrap();
+    // Drain the ordinary signed executor plan's input, without interpreting it.
+    let mut stdin = Vec::new();
+    std::io::stdin().read_to_end(&mut stdin).unwrap();
 
     // 5 stdout chunks.
     for i in 0..5u64 {
         emit_frame(&StreamingChunk {
             seq: i,
             kind: StreamingChunkKind::Stdout,
-            data: Some(base64::engine::general_purpose::STANDARD.encode(format!("chunk {i}\n"))),
+            data: Some(format!("chunk {i}\n")),
             exit_code: None,
             terminal: false,
         });
@@ -63,7 +62,7 @@ fn main() {
     emit_frame(&StreamingChunk {
         seq: 5,
         kind: StreamingChunkKind::Stderr,
-        data: Some(base64::engine::general_purpose::STANDARD.encode("done\n")),
+        data: Some("done\n".into()),
         exit_code: None,
         terminal: false,
     });

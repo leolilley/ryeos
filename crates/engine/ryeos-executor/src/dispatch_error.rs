@@ -359,6 +359,12 @@ pub enum DispatchError {
         "runtime action '{operation_id}' completed but its exact result is unavailable under digest-only retention"
     )]
     RuntimeActionResultUnavailable { operation_id: String },
+    /// A launch failed before the first authoritative thread root could be
+    /// admitted. The inner error remains the public failure; this wrapper only
+    /// prevents an API fallback from manufacturing a diagnostic root under the
+    /// provisional, pre-conditioning authority.
+    #[error("{0}")]
+    PreBirthAdmissionRefused(#[source] Box<DispatchError>),
     /// One exact error result shared by all requests waiting on the same
     /// in-flight cache fill. The wrapper delegates every public error
     /// classification to the leader's immutable result.
@@ -380,12 +386,46 @@ pub fn required_secret_remediation(env_var: &str) -> String {
 }
 
 impl DispatchError {
+    /// Mark a failure as occurring before authoritative root admission.
+    ///
+    /// The wrapper is deliberately classification-transparent: callers still
+    /// observe the inner status, code, message, retryability, and structured
+    /// fields. Only `permits_prebirth_diagnostic_root` changes.
+    pub fn pre_birth_admission_refused(error: Self) -> Self {
+        match error {
+            Self::PreBirthAdmissionRefused(_) => error,
+            _ => Self::PreBirthAdmissionRefused(Box::new(error)),
+        }
+    }
+
+    /// Whether a failure may be persisted by creating a diagnostic root when
+    /// dispatch has not created any authoritative thread row.
+    pub fn permits_prebirth_diagnostic_root(&self) -> bool {
+        match self {
+            Self::PreBirthAdmissionRefused(_) => false,
+            Self::Shared(error) => error.permits_prebirth_diagnostic_root(),
+            _ => true,
+        }
+    }
+
+    /// The typed failure that supplies public status and structured fields.
+    /// Transparent coordination wrappers must never change the wire contract.
+    pub(crate) fn public_error(&self) -> &Self {
+        match self {
+            Self::PreBirthAdmissionRefused(error) => error.public_error(),
+            Self::Shared(error) => error.public_error(),
+            _ => self,
+        }
+    }
+
     /// Map the typed variant to the HTTP status `/execute` returns.
     /// The execute response mode calls this once per error path; status
     /// is determined by variant, never by matching the message string.
     pub fn http_status(&self) -> StatusCode {
-        if let Self::Shared(error) = self {
-            return error.http_status();
+        match self {
+            Self::Shared(error) => return error.http_status(),
+            Self::PreBirthAdmissionRefused(error) => return error.http_status(),
+            _ => {}
         }
         match self {
             Self::InvalidRef(..)
@@ -459,14 +499,18 @@ impl DispatchError {
             | Self::RuntimeActionOutcomeUnknown { .. }
             | Self::Internal(_)
             | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Shared(_) => unreachable!("shared errors return before classification"),
+            Self::Shared(_) | Self::PreBirthAdmissionRefused(_) => {
+                unreachable!("transparent error wrappers return before classification")
+            }
         }
     }
 
     /// Stable machine-readable error code for structured error surfaces.
     pub fn code(&self) -> &str {
-        if let Self::Shared(error) = self {
-            return error.code();
+        match self {
+            Self::Shared(error) => return error.code(),
+            Self::PreBirthAdmissionRefused(error) => return error.code(),
+            _ => {}
         }
         match self {
             Self::InvalidRef(..) => "invalid_ref",
@@ -521,7 +565,9 @@ impl DispatchError {
             Self::RuntimeActionOutcomeUnknown { .. } => "runtime_action_outcome_unknown",
             Self::RuntimeActionResultUnavailable { .. } => "runtime_action_result_unavailable",
             Self::Internal(_) => "internal",
-            Self::Shared(_) => unreachable!("shared errors return before classification"),
+            Self::Shared(_) | Self::PreBirthAdmissionRefused(_) => {
+                unreachable!("transparent error wrappers return before classification")
+            }
         }
     }
 
@@ -529,8 +575,10 @@ impl DispatchError {
     /// configuration change. This is an explicit allowlist: unknown and newly
     /// added failures remain non-retryable until their safety is established.
     pub fn retryable(&self) -> bool {
-        if let Self::Shared(error) = self {
-            return error.retryable();
+        match self {
+            Self::Shared(error) => return error.retryable(),
+            Self::PreBirthAdmissionRefused(error) => return error.retryable(),
+            _ => {}
         }
         match self {
             Self::ServiceUnavailable { .. } => true,
@@ -648,6 +696,44 @@ mod tests {
         assert_eq!(error.code(), "runtime_action_result_unavailable");
         assert!(!error.retryable());
         assert!(error.to_string().contains(&"2".repeat(64)));
+    }
+
+    #[test]
+    fn prebirth_refusal_preserves_public_classification_but_forbids_fallback_root() {
+        let mut details = BTreeMap::new();
+        details.insert(
+            "service".to_string(),
+            LaunchDiagnosticScalarWire::String("temporarily unavailable".to_string()),
+        );
+        let inner = DispatchError::LaunchPreparationFailed {
+            code: "output_partition_unavailable".to_string(),
+            message: "partition authority could not be prepared".to_string(),
+            classification: "unavailable".to_string(),
+            binding: Some("build".to_string()),
+            details: Box::new(details),
+        };
+        let original_message = inner.to_string();
+        let error = DispatchError::pre_birth_admission_refused(inner);
+
+        assert_eq!(error.code(), "output_partition_unavailable");
+        assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.retryable());
+        assert_eq!(error.to_string(), original_message);
+        assert!(!error.permits_prebirth_diagnostic_root());
+        assert!(matches!(
+            error.public_error(),
+            DispatchError::LaunchPreparationFailed {
+                binding: Some(binding),
+                details,
+                ..
+            } if binding == "build" && details.contains_key("service")
+        ));
+    }
+
+    #[test]
+    fn ordinary_dispatch_failure_still_permits_diagnostic_fallback_root() {
+        let error = DispatchError::Conflict("ordinary admitted failure".to_string());
+        assert!(error.permits_prebirth_diagnostic_root());
     }
 
     #[test]

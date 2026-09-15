@@ -483,6 +483,7 @@ mod tests {
                 spawns: 5,
                 depth: 3,
                 duration_seconds: 60,
+                aggregate: Default::default(),
                 runtime: runtime_limits(&[
                     (TOOL_CALLS_LIMIT, 4),
                     (PROVIDER_REQUEST_BODY_BYTES_LIMIT, 4096),

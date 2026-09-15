@@ -1,0 +1,16 @@
+# ryeos:signed:2026-09-05T00:45:09Z:92202d7fe586f9f09ff5b12dd7e6dbd8fa2ea4d047e3ed432783d58f515df972:e8spkpuUNYukFjvjZRfLncY3crO+bkCpGLmsQl7EZ1C5Em/CXlL82S6qWqJ8113ARbuuZUiZybfdZvzIib1ECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [remote, worker, pull-result]
+description: "Pull one terminal hosted-worker candidate from a configured remote and apply it to the exact clean-base project"
+forms:
+  - slots:
+      - field: remote
+      - field: chain_root_id
+  - slots:
+      - field: chain_root_id
+project:
+  resolution: required
+  bind_parameter: project
+dispatch:
+  kind: execute_ref
+  execute: service:remote/pull-worker-result
+  availability: daemon

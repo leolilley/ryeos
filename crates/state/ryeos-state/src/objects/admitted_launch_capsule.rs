@@ -3,8 +3,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionProjectAuthority,
-    ExecutionRecoveryAuthority, validate_trimmed_control_free,
+    EXTERNAL_REALIZATIONS_DERIVED_KEY, ExecutionLaunchDriver, ExecutionLifecycleAuthority,
+    ExecutionProjectAuthority, ExecutionRecoveryAuthority, ExternalContentKind,
+    ExternalContentMode, ExternalContentRealizationSet, validate_trimmed_control_free,
 };
 
 // v17 seals the flat exact node-history policy provenance carried by the v12
@@ -14,14 +15,35 @@ use super::{
 // v19 requires the generic, target-bound environment-contribution projection
 // in every prepared managed-runtime launch. Predecessor capsules cannot be
 // interpreted as current portable launch authority.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 19;
+// v20 distinguishes a standalone content-addressed command from an executable
+// member overlaid into its complete admitted realization tree. Predecessor
+// direct capsules cannot claim that sibling-relative runtime layout.
+// v21 requires every serialized execution plan to carry the kind-projected
+// per-execution network ceiling. Predecessor plans cannot be reinterpreted as
+// having inherited node-policy networking.
+// v22 requires the filesystem ceiling beside networking in direct plans.
+// Both include admitted parent restrictions before becoming launch authority.
+// v23 combines those execution ceilings/mount roots with the daemon-authored
+// scheduled-fire coordinate (invocation-only) and independent candidate
+// purpose/dual-generation authority (executable-program identity).
+// v24 replaces path-mask claims with explicit fixed-parent live confinement
+// and admitted-execution-namespace symlink semantics; no predecessor aliases.
+// v25 retains independently enforced receiving-kind content contracts in the
+// prepared launch, alongside the intersected source/runtime content policy.
+// v24 is already allocated to the coordinating fixed-parent confinement cut.
+// v27 admits the complete typed root/dependency product-selection list.
+// v28 retains exact product receipt proofs separately from semantic program identity.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 28;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
+pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 
 const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "captured_history_policy",
+    "candidate_evaluation",
     "current_site_id",
     "effective_definition_digest",
     "execution_hints",
+    "scheduled_fire",
     "executor_ref",
     "executor_route",
     "handler_context",
@@ -35,6 +57,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "project_authority",
     "project_binding_subject_authority",
     "project_context",
+    "product_selections",
     "ref_bindings",
     "resolved_ref_bindings",
     "requested_by",
@@ -67,6 +90,7 @@ const INVOCATION_ONLY_FIELDS: &[&str] = &[
     "project_binding_subject_authority",
     "project_context",
     "requested_by",
+    "scheduled_fire",
     "resolution_subject_authority",
     "resolved_history_policy",
     "target_site_id",
@@ -185,7 +209,7 @@ fn retained_resolution_projection(value: &serde_json::Value) -> anyhow::Result<s
         edge.remove("to_source_path")
             .ok_or_else(|| anyhow::anyhow!("sealed resolution edge has no to_source_path"))?;
     }
-    Ok(retained)
+    crate::external_content::products::composition::project_resolution_product_selections_for_identity(&retained)
 }
 
 fn admitted_subject_projection(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -310,6 +334,19 @@ pub fn project_sealed_root_exact_program(
             .ok_or_else(|| anyhow::anyhow!("sealed invocation has no resolution_output"))?,
     )?;
     object.insert("resolution_output".to_string(), resolution);
+    let selectors: crate::external_content::products::composition::ProductSelectionInputs =
+        serde_json::from_value(
+            object
+                .get("product_selections")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("sealed invocation has no product selections"))?,
+        )?;
+    object.insert(
+        "product_selections".to_owned(),
+        crate::external_content::products::composition::product_selection_inputs_semantic_identity(
+            &selectors,
+        )?,
+    );
     Ok(program)
 }
 
@@ -373,6 +410,17 @@ pub enum AdmittedDirectCommandClosure {
         /// Exact absolute path at which isolation presents the retained bytes
         /// to the process image. This is behavior-bearing for interpreters and
         /// binaries whose loader resolves adjacent libraries from `$ORIGIN`.
+        execution_path: std::path::PathBuf,
+    },
+    RealizationMember {
+        executable_blob_hash: String,
+        realization_id: String,
+        realization_manifest_hash: String,
+        realization_mount_root: super::ExternalContentMountRoot,
+        realization_mount: String,
+        relative_path: String,
+        /// Exact project-root-relative target at which isolation overlays the
+        /// executable descriptor inside the complete read-only realization.
         execution_path: std::path::PathBuf,
     },
     NodePolicy,
@@ -446,6 +494,52 @@ impl AdmittedExecutionClosure {
                     if &expected != execution_path {
                         anyhow::bail!(
                             "admitted direct execution path does not match its content-addressed namespace"
+                        );
+                    }
+                }
+                if let AdmittedDirectCommandClosure::RealizationMember {
+                    executable_blob_hash,
+                    realization_id,
+                    realization_manifest_hash,
+                    realization_mount_root,
+                    realization_mount,
+                    relative_path,
+                    execution_path,
+                } = command
+                {
+                    super::thread_snapshot::validate_canonical_hash(
+                        "admitted realization command blob hash",
+                        executable_blob_hash,
+                    )?;
+                    super::thread_snapshot::validate_canonical_hash(
+                        "admitted realization command manifest hash",
+                        realization_manifest_hash,
+                    )?;
+                    if realization_id.is_empty()
+                        || realization_id.len() > 64
+                        || !realization_id.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'_' | b'-')
+                        })
+                    {
+                        anyhow::bail!("admitted realization command id is not canonical");
+                    }
+                    super::validate_canonical_project_relative_path(realization_mount)?;
+                    super::validate_canonical_project_relative_path(relative_path)?;
+                    validate_absolute_normalized_path(
+                        "admitted realization command execution path",
+                        execution_path,
+                    )?;
+                    let expected = realization_mount_root
+                        .destination(
+                            Some(std::path::Path::new(ADMITTED_DIRECT_PROJECT_ROOT)),
+                            realization_mount,
+                        )?
+                        .join(relative_path);
+                    if execution_path != &expected {
+                        anyhow::bail!(
+                            "admitted realization command path contradicts its mount/member coordinate"
                         );
                     }
                 }
@@ -936,6 +1030,80 @@ impl AdmittedLaunchAuthority {
         ))
     }
 
+    /// Reusable product-build authority, distinct from exact recovery authority.
+    /// Budget identifiers name this attempt's reservation owners; they do not
+    /// change an already successful build's answer. Keep the financial site,
+    /// ledger generation and presence of a narrower directive scope, together
+    /// with every program, material, project and permission field. Limits stay
+    /// sealed in the execution closure. This never authorizes a reservation or
+    /// substitutes for `digest()` during recovery or payment settlement.
+    pub fn product_build_replay_digest(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct AccountingAuthority<'a> {
+            budget_authority_site_id: &'a str,
+            ledger_epoch: u64,
+            directive_budget_scope_present: bool,
+        }
+        #[derive(Serialize)]
+        struct ReplayAuthority<'a> {
+            schema: &'static str,
+            exact_program_hash: &'a str,
+            project_authority: &'a ExecutionProjectAuthority,
+            lifecycle_authority: &'a ExecutionLifecycleAuthority,
+            launch_driver: &'a ExecutionLaunchDriver,
+            artifact_identity: &'a AdmittedLaunchArtifactIdentity,
+            execution_closure: &'a AdmittedExecutionClosure,
+            accounting_authority: Option<AccountingAuthority<'a>>,
+            effective_caps: &'a [String],
+            parent_delegation_caps: &'a Option<Vec<String>>,
+            runtime_ref: &'a str,
+            executor_ref: &'a str,
+        }
+        // Exhaustive destructuring makes new authority fields a compile-time
+        // review requirement rather than silently omitting them from reuse.
+        let Self {
+            exact_program_hash,
+            project_authority,
+            lifecycle_authority,
+            launch_driver,
+            artifact_identity,
+            execution_closure,
+            accounting_scope,
+            effective_caps,
+            parent_delegation_caps,
+            runtime_ref,
+            executor_ref,
+        } = self;
+        let accounting_authority = accounting_scope.as_ref().map(|scope| {
+            let AdmittedAccountingScope {
+                budget_authority_site_id,
+                ledger_epoch,
+                execution_budget_id: _,
+                directive_budget_id,
+            } = scope;
+            AccountingAuthority {
+                budget_authority_site_id,
+                ledger_epoch: *ledger_epoch,
+                directive_budget_scope_present: directive_budget_id.is_some(),
+            }
+        });
+        super::canonical_value_digest(&serde_json::to_value(ReplayAuthority {
+            schema: "ryeos.product_build_replay_authority.v1",
+            exact_program_hash,
+            project_authority,
+            lifecycle_authority,
+            launch_driver,
+            artifact_identity,
+            execution_closure,
+            accounting_authority,
+            effective_caps,
+            parent_delegation_caps,
+            runtime_ref,
+            executor_ref,
+        })?)
+    }
+
     pub fn execution_closure_digest(&self) -> anyhow::Result<String> {
         self.validate()?;
         Ok(lillux::sha256_hex(
@@ -1389,6 +1557,7 @@ impl AdmittedLaunchCapsule {
                 AdmittedExecutionClosure::DirectItemExecutor {
                     execution_plan,
                     protocol_descriptor_document,
+                    command,
                     ..
                 },
             ) => {
@@ -1410,6 +1579,46 @@ impl AdmittedLaunchCapsule {
                     lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
                 if &observed_plan_hash != execution_plan_hash {
                     anyhow::bail!("admitted direct execution plan contradicts artifact identity");
+                }
+                if let AdmittedDirectCommandClosure::RealizationMember {
+                    realization_id,
+                    realization_manifest_hash,
+                    realization_mount_root,
+                    realization_mount,
+                    ..
+                } = command
+                {
+                    let realization_value = self
+                        .exact_program
+                        .get("resolution_output")
+                        .and_then(|value| value.get("composed"))
+                        .and_then(|value| value.get("derived"))
+                        .and_then(|value| value.get(EXTERNAL_REALIZATIONS_DERIVED_KEY))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "realization-member command has no exact external-realization set"
+                            )
+                        })?;
+                    let realizations =
+                        ExternalContentRealizationSet::from_value(realization_value)?;
+                    let Some(realization) = realizations
+                        .iter()
+                        .find(|entry| entry.id == *realization_id)
+                    else {
+                        anyhow::bail!(
+                            "realization-member command is absent from its exact program"
+                        );
+                    };
+                    if realization.kind != ExternalContentKind::Tree
+                        || realization.mode != ExternalContentMode::Pinned
+                        || realization.manifest_hash != *realization_manifest_hash
+                        || realization.mount_root != *realization_mount_root
+                        || realization.mount != *realization_mount
+                    {
+                        anyhow::bail!(
+                            "realization-member command contradicts its exact program realization"
+                        );
+                    }
                 }
                 if !resolved_ref_bindings.is_empty() {
                     anyhow::bail!(
@@ -1462,6 +1671,7 @@ impl AdmittedLaunchCapsule {
                     DirectExecutableIdentity::BundleExecutor { .. }
                         | DirectExecutableIdentity::CapturedContent { .. },
                     AdmittedDirectCommandClosure::ContentAddressed { .. }
+                        | AdmittedDirectCommandClosure::RealizationMember { .. }
                 )
             );
             if !consistent {
@@ -1473,6 +1683,10 @@ impl AdmittedLaunchCapsule {
                 AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
                     execution_path: _,
+                }
+                | AdmittedDirectCommandClosure::RealizationMember {
+                    executable_blob_hash,
+                    ..
                 },
             ) = (executable_identity, command)
                 && content_hash != executable_blob_hash
@@ -1782,7 +1996,7 @@ mod tests {
             "source_content_digest": source_digest,
             "raw_content_digest": source_digest,
         });
-        let sealed_invocation = serde_json::json!({
+        let mut sealed_invocation = serde_json::json!({
             "schema_version": 13,
             "kind": "fixture",
             "item_ref": item_ref,
@@ -1851,11 +2065,17 @@ mod tests {
             "project_binding_subject_authority": {"kind":"projectless"},
             "resolution_subject_authority": {"kind":"projectless"},
             "execution_hints": {},
+            "scheduled_fire": null,
             "validate_only": false,
             "resolved_history_policy": {"retention":"durable"},
             "resolved_result_policy": {"retention":"full"},
             "captured_history_policy": {"retention":"durable"},
+            "candidate_evaluation": null,
         });
+        sealed_invocation
+            .as_object_mut()
+            .unwrap()
+            .insert("product_selections".to_owned(), serde_json::json!([]));
         let exact_program = project_sealed_root_exact_program(&sealed_invocation).unwrap();
         let exact_program_hash =
             lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
@@ -2024,6 +2244,15 @@ mod tests {
         relocated["validate_only"] = serde_json::json!(true);
         relocated["resolved_history_policy"] = serde_json::json!({"retention":"short"});
         relocated["captured_history_policy"] = serde_json::json!({"retention":"short"});
+        relocated["scheduled_fire"] = serde_json::json!({
+            "schema_version": 1,
+            "schedule_id": "nightly.solve",
+            "fire_id": "nightly.solve@1700000000000",
+            "scheduled_at_ms": 1700000000000_i64,
+            "first_dispatch_at_ms": 1700000000100_i64,
+            "trigger_reason": "normal",
+            "schedule_spec_hash": "a".repeat(64),
+        });
 
         assert_eq!(
             project_sealed_root_exact_program(&relocated).unwrap(),
@@ -2047,6 +2276,66 @@ mod tests {
         );
         assert!(
             project_sealed_root_exact_program(&invocation)
+                .unwrap_err()
+                .to_string()
+                .contains("must contain exactly")
+        );
+    }
+
+    #[test]
+    fn product_receipt_changes_sealed_authority_without_changing_exact_program() {
+        use crate::external_content::products::composition::*;
+        use crate::external_content::products::transfer::ProductWitnessSource;
+        let evidence = crate::external_content::products::qualification::tests::dynamic_evidence();
+        let selections = evidence.verifier_root_selections.unwrap();
+        let (id, selection) = selections.iter().next().unwrap();
+        let raw = ProductSelectionInput {
+            target: ProductSelectionTarget::Root {},
+            selection: ProductSelection {
+                declaration_id: id.clone(),
+                witness_hash: selection.witness_hash.clone(),
+                witness_source: ProductWitnessSource::LocalCapture {},
+                qualification_hash: None,
+            },
+        };
+        let (mut local, _, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        local["product_selections"] = serde_json::to_value(vec![raw]).unwrap();
+        local["resolution_output"]["composed"]["derived"]
+            [EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY] = serde_json::to_value(&selections).unwrap();
+        let expected = project_sealed_root_exact_program(&local).unwrap();
+        let mut received = local.clone();
+        let source = serde_json::json!({"kind":"received", "acceptance_hash":"a".repeat(64)});
+        received["product_selections"][0]["selection"]["witness_source"] = source.clone();
+        received["resolution_output"]["composed"]["derived"]
+            [EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY][id]["witness_source"] = source;
+        assert_ne!(
+            crate::objects::canonical_value_digest(&local).unwrap(),
+            crate::objects::canonical_value_digest(&received).unwrap()
+        );
+        assert_eq!(
+            expected,
+            project_sealed_root_exact_program(&received).unwrap()
+        );
+        received["product_selections"][0]["selection"]["witness_source"]["acceptance_hash"] =
+            serde_json::json!("bad");
+        assert!(project_sealed_root_exact_program(&received).is_err());
+    }
+
+    #[test]
+    fn exact_program_projection_requires_current_product_selection_field() {
+        let (invocation, _, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        assert!(invocation.get("product_selections").is_some());
+        project_sealed_root_exact_program(&invocation).unwrap();
+
+        let mut missing = invocation;
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("product_selections");
+        assert!(
+            project_sealed_root_exact_program(&missing)
                 .unwrap_err()
                 .to_string()
                 .contains("must contain exactly")
@@ -2148,6 +2437,62 @@ mod tests {
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn product_replay_excludes_attempt_budget_ids_but_keeps_recovery_and_authority_exact() {
+        let mut authority = managed_capsule(serde_json::json!({})).launch_authority();
+        authority.accounting_scope = Some(AdmittedAccountingScope {
+            budget_authority_site_id: "site:test".into(),
+            ledger_epoch: 7,
+            execution_budget_id: "budget:first".into(),
+            directive_budget_id: Some("directive:first".into()),
+        });
+        let exact = authority.digest().unwrap();
+        let reusable = authority.product_build_replay_digest().unwrap();
+        let mut next = authority.clone();
+        let scope = next.accounting_scope.as_mut().unwrap();
+        scope.execution_budget_id = "budget:second".into();
+        scope.directive_budget_id = Some("directive:second".into());
+        assert_ne!(exact, next.digest().unwrap());
+        assert_eq!(reusable, next.product_build_replay_digest().unwrap());
+        for change in 0..8 {
+            let mut changed = authority.clone();
+            match change {
+                0 => changed.accounting_scope.as_mut().unwrap().ledger_epoch += 1,
+                1 => {
+                    changed
+                        .accounting_scope
+                        .as_mut()
+                        .unwrap()
+                        .budget_authority_site_id = "site:other".into()
+                }
+                2 => {
+                    changed
+                        .accounting_scope
+                        .as_mut()
+                        .unwrap()
+                        .directive_budget_id = None
+                }
+                3 => changed.accounting_scope = None,
+                4 => changed.effective_caps.push("ryeos.test.additional".into()),
+                5 => changed.parent_delegation_caps = Some(vec!["ryeos.test.delegate".into()]),
+                6 => changed.exact_program_hash = "f".repeat(64),
+                7 => changed.runtime_ref = "runtime:test/other".into(),
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                reusable,
+                changed.product_build_replay_digest().unwrap(),
+                "authority change {change}"
+            );
+        }
+        next.accounting_scope
+            .as_mut()
+            .unwrap()
+            .execution_budget_id
+            .clear();
+        assert!(next.product_build_replay_digest().is_err());
     }
 
     #[test]

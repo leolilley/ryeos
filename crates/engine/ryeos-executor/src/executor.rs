@@ -876,6 +876,7 @@ pub async fn execute_service_verified(
                     state.node_history_policy()?,
                     thread_profile,
                     std::collections::BTreeMap::new(),
+                    Vec::new(),
                     recording.usage_subject.cloned(),
                     recording.usage_subject_asserted_by.map(str::to_owned),
                 )?)
@@ -889,6 +890,7 @@ pub async fn execute_service_verified(
         let recorded_admission = ryeos_app::thread_lifecycle::RecordedServiceAdmission::new(
             root_admission,
             endpoint.clone(),
+            &params,
         )?;
         // Registration precedes publication, while launch metadata and the
         // created→running transition commit atomically with root birth.
@@ -931,7 +933,8 @@ pub async fn execute_service_verified(
                     &task_scopes,
                     &task_current_site_id,
                     &task_origin_site_id,
-                )?;
+                )?
+                .with_recorded_service_root_id(task_invocation_id.clone())?;
                 let handler = task_state
                     .services
                     .get(&task_endpoint)

@@ -121,6 +121,33 @@ impl StartupSnapshot {
         }
     }
 
+    pub fn failed_before_control(
+        started_at: impl Into<String>,
+        failed_at: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        let started_at = started_at.into();
+        let failed_at = failed_at.into();
+        Self {
+            sequence: 1,
+            phase: StartupPhase::Failed,
+            phase_started_at: started_at.clone(),
+            updated_at: failed_at.clone(),
+            started_at,
+            ready_at: None,
+            failed_at: Some(failed_at),
+            elapsed_ms: 0,
+            chains_total: None,
+            chains_done: None,
+            threads_restored: None,
+            events_projected: None,
+            pending_head_changes: None,
+            recovery_threads: None,
+            message: None,
+            error: Some(error.into()),
+        }
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
         if self.started_at.trim().is_empty()
             || self.phase_started_at.trim().is_empty()

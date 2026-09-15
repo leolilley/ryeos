@@ -28,6 +28,20 @@ pub use result_outcome::{
 };
 pub use types::{FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledDispatchReceipt {
+    pub thread_id: String,
+    pub admitted_capsule_hash: String,
+}
+
+/// A selected authority and its temporary CAS reachability. Pinned selection
+/// keeps the ordinary staged-root publication alive until the fire journal and
+/// projection durably take ownership; no CAS guard crosses the async handoff.
+pub struct ScheduledProjectBinding {
+    pub authority: ryeos_state::objects::ExecutionProjectAuthority,
+    pub pending_publication: Option<ryeos_state::PendingCasPublication>,
+}
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -66,6 +80,13 @@ pub trait SchedulerContext: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Return the authoritative admitted capsule hash for an existing root.
+    /// Recovery uses this to close the crash window after thread birth but
+    /// before the scheduler recorded its dispatch handoff.
+    fn get_admitted_capsule_hash(&self, _thread_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Submit a cancel command for a thread.
     fn submit_cancel(&self, thread_id: &str) -> Result<()>;
 
@@ -78,7 +99,18 @@ pub trait SchedulerContext: Send + Sync + 'static {
         async { true }
     }
 
-    /// Dispatch a scheduled item for execution.
+    /// Revalidate retained delegation and bind this fire to one immutable
+    /// project authority before any root is born. Any selected immutable
+    /// generations must remain rooted by the returned pending publication
+    /// until the scheduler has persisted the fire's authority binding.
+    fn bind_scheduled_project_authority(
+        &self,
+        spec: &ScheduleSpecRecord,
+        fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
+        thread_id: &str,
+    ) -> impl std::future::Future<Output = Result<ScheduledProjectBinding>> + Send;
+
+    /// Dispatch a scheduled item from an already-durable project binding.
     ///
     /// The daemon constructs the `DispatchRequest` and `ExecutionContext`,
     /// then calls `dispatch::dispatch()`. The scheduler doesn't know about
@@ -86,11 +118,10 @@ pub trait SchedulerContext: Send + Sync + 'static {
     fn dispatch_scheduled_item(
         &self,
         spec: &ScheduleSpecRecord,
-        fire_id: &str,
+        fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
         thread_id: &str,
-        scheduled_at: i64,
-        trigger_reason: &str,
-    ) -> impl std::future::Future<Output = Result<()>> + Send;
+        project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> impl std::future::Future<Output = Result<ScheduledDispatchReceipt>> + Send;
 }
 
 // Blanket impl: Arc<T> where T: SchedulerContext delegates to T.
@@ -121,6 +152,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
         (**self).get_thread_result_outcome(thread_id)
     }
 
+    fn get_admitted_capsule_hash(&self, thread_id: &str) -> Result<Option<String>> {
+        (**self).get_admitted_capsule_hash(thread_id)
+    }
+
     fn submit_cancel(&self, thread_id: &str) -> Result<()> {
         (**self).submit_cancel(thread_id)
     }
@@ -132,13 +167,23 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
     async fn dispatch_scheduled_item(
         &self,
         spec: &ScheduleSpecRecord,
-        fire_id: &str,
+        fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
         thread_id: &str,
-        scheduled_at: i64,
-        trigger_reason: &str,
-    ) -> Result<()> {
+        project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<ScheduledDispatchReceipt> {
         (**self)
-            .dispatch_scheduled_item(spec, fire_id, thread_id, scheduled_at, trigger_reason)
+            .dispatch_scheduled_item(spec, fire, thread_id, project_authority)
+            .await
+    }
+
+    async fn bind_scheduled_project_authority(
+        &self,
+        spec: &ScheduleSpecRecord,
+        fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
+        thread_id: &str,
+    ) -> Result<ScheduledProjectBinding> {
+        (**self)
+            .bind_scheduled_project_authority(spec, fire, thread_id)
             .await
     }
 }

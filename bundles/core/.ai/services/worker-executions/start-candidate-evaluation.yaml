@@ -1,0 +1,8 @@
+# ryeos:signed:2026-09-05T01:24:23Z:2cc9cc65385c34664f8a3d16241731893db337f10ac434b0270b11f2eae3fb1d:tBrnTHbKMeF/wcSDyD/xWrRtWIPZZJvawzOlOzGbHTw6uqIMsgQJghY1KN5Yor+uKULBnkU3nrH72BQqWtNzAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: worker-executions
+name: start-candidate-evaluation
+kind: service
+endpoint: worker-executions.start-candidate-evaluation
+required_caps: ["ryeos.execute.service.worker-executions/start-candidate-evaluation"]
+schema: {chain_root_id: string, candidate_snapshot_hash: string, candidate_validation_hash: string, evaluator_item_ref: string, evaluator_parameters: object?, evaluator_ref_bindings: object?, integration: object?, launch_id: string}
+description: Launch an evaluator resolved from the exact immutable base against one exact retained candidate view without publication authority.

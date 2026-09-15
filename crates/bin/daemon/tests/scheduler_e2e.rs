@@ -21,7 +21,34 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 /// Convenience: POST /execute and unwrap.
-async fn exec(h: &DaemonHarness, item_ref: &str, params: Value) -> (reqwest::StatusCode, Value) {
+async fn exec(
+    h: &DaemonHarness,
+    item_ref: &str,
+    mut params: Value,
+) -> (reqwest::StatusCode, Value) {
+    // Registration tests exercise scheduler behavior rather than repeating the
+    // mandatory execution-authority envelope in every fixture. Keep that
+    // envelope explicit here: fires are daemon-owned, restart-recoverable,
+    // projectless test executions with a deliberately narrow capability.
+    if item_ref == "service:scheduler/register" {
+        let object = params
+            .as_object_mut()
+            .expect("scheduler registration params must be an object");
+        object
+            .entry("capabilities")
+            .or_insert_with(|| json!(["ryeos.execute.directive.test/*"]));
+        object.entry("execution_policy").or_insert_with(|| {
+            json!({
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "accepted",
+                "target": {"kind": "here"},
+                "environment": {"kind": "none"},
+                "project": {"kind": "projectless"}
+            })
+        });
+    }
     h.post_execute(item_ref, ".", params)
         .await
         .expect("post /execute")

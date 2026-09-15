@@ -1,12 +1,11 @@
-<!-- ryeos:signed:2026-07-23T10:04:37Z:6964cfb91b845545f4e58f48cada771d156d7c1350cc43ae3e41706473d315d6:E2ukYs9aEyxYVoS6SoOUWw1QA0fN7Gz2Jp3FX24WO38ozkSF1MN3XNwl686su6ISgMvzdnuQw7n4e1541t4NCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, ontology, execution, durability, process-model]
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Working notes for paper 1, "Execution Is an Object": the process
-  abstraction conflates a computation with its interpreter; separating them
-  turns durability, resume, replay, and migration into corollaries.
+  separation of work from its interpreter gives durability, resume, replay
+  and migration a shared identity model with explicit proof obligations.
 ---
 
 # Paper 1 — Execution Is an Object
@@ -25,56 +24,46 @@ Short version:
 
 Expanded version:
 
-> For fifty years the process has been the primitive of computing, and the
-> process conflates two things: the computation and its interpreter. An
-> execution under the process model is an event — located on one machine,
-> mortal, witnessed only by that machine, surviving as at most an exit code
-> and side effects. RyeOS separates computation from interpreter: the run is
-> a signed, content-addressed, durable object, and the process is a
-> disposable projection of it. Once separated, durability, resume, replay,
-> migration, and cancellation stop being subsystems and become corollaries.
+> RyeOS separates logical work from its current interpreter by retaining its
+> admitted capability, authority and history as an object graph. This gives
+> restart, inspection and transfer a shared identity model. Each operation still
+> needs an explicit implementation and qualification contract.
 
 ## The one claim
 
-The process abstraction conflates computation with interpreter; separating
-them (run = record, process = frontier interpreter) dissolves an entire
-category of infrastructure into corollaries of the ontology.
+Treating execution history and admitted authority as primary data gives
+continuity a common foundation instead of tying work solely to process state.
+The claim is about architectural coherence, not unique invention or automatic
+recovery of arbitrary processes.
 
 ## Argument skeleton
 
-1. **The conflation.** Under the process model, the identity, authority,
-   and existence of a computation are all properties of its interpreter:
-   PID, uid, address space, machine. Kill the interpreter and the
-   computation ceases to exist — not because the work is logically gone,
-   but because the substrate had nowhere else to keep it.
-2. **The separation.** Represent the run as a durable object (event log,
-   snapshots, lineage, continuation chain) with its own identity. The
-   process becomes a projection: process : execution :: SQLite projection
-   : CAS. RyeOS already states this tiering for state; the radical move is
-   applying it one level up, to the process itself.
-3. **The corollaries.** Resume after process death, replay of history,
-   continuation across a segment cut, and cross-node migration are all the
-   same operation — reading the execution back in from its own record.
-   Systems on the process model build each of these as a separate
-   subsystem; systems on the object model get them as theorems.
-4. **The time inversion.** The process model treats present state as truth
-   and history as optional decoration (logs). The object model inverts the
-   arrow: the past is the truth, the present is a cache. "Now" is the
-   growing edge of the record. This matches how courts, science, and
-   accounting already work — authority derives from the record, not from
-   the current state of anyone's RAM.
+1. **Separate work and executor.** A process can end while a logical task
+   remains unfinished. The retained execution names what was admitted and
+   which results or uncertainties were recorded.
+2. **Retain sufficient state.** Runtime checkpoints, content closures and
+   durable history support only the continuation operations their contracts
+   define. A process may hold unrecorded state that cannot be reconstructed.
+3. **Resume under authority.** Recovery must re-establish permissions,
+   compatibility and exclusive writer ownership. It must not repeat an
+   uncertain external effect merely because its response was lost.
+4. **Keep projections subordinate.** UI and database projections should derive
+   their authority from retained records. Their rebuilding depends on the
+   actual retained closure, schema and storage durability guarantees.
 
 ## Definitions owned by this paper
 
-- **record / projection** — the durable object is truth; process, database,
-  and client views are rebuildable projections of it.
+- **record / projection** — retained records govern derived views; rebuilding
+  and continuation depend on sufficient state and supported contracts.
 - **frontier** — the not-yet-executed edge of the record, where the run
-  touches the world. Nondeterminism exists only here; completed steps are
-  consumed as data and never re-crossed.
+  touches the world. Retained outcomes are fixed data; fresh execution can
+  introduce new nondeterminism. Completed steps are reusable under the declared
+  replay contract; uncertain effects require reconciliation.
 
-## Evidence in the implementation
+## Demonstrations to qualify
 
-Present these as demonstrations, not aspirations:
+These are implementation-oriented examples, not fresh qualification results.
+Record the tested revision, route and failure cuts before claiming acceptance:
 
 - The thread event log as the execution: tail, replay, chain, children,
   cancel all act on the same object (`ryeos thread ...`, `ryeos events
@@ -86,20 +75,17 @@ Present these as demonstrations, not aspirations:
 - Reconciliation re-spawning resumable work under the same thread identity
   after a daemon restart — the process died, the execution did not.
 - Completed child results spliced into a successor's resume state instead
-  of re-dispatched — completed steps are data, never re-crossed.
+  of re-dispatched, where the follow contract permits retained-result reuse.
 - CAS-first writes with rebuildable SQLite projection — the tiering this
   paper generalizes.
 
 ## Objections and current answers
 
-- **"This is just event sourcing / durable execution (Temporal)."** Three
-  differences. (a) Those systems record the execution; here the record *is*
-  the execution — the ontological claim, not an implementation pattern.
-  (b) The object is self-certifying (signed, content-addressed), so it
-  survives leaving its trust domain — see paper 2 and the white paper's
-  necessity argument. (c) The executor is out of the definition, so the
-  model generalizes to interpreters Temporal cannot host (see paper 2's
-  executor class).
+- **"This is event sourcing / durable execution."** There is real overlap.
+  The proposed distinction is the integrated identity of executable content,
+  authority and consequences across trust boundaries. It requires concrete
+  comparison and demonstrations, not an ontological assertion that competitors
+  cannot host a class of work.
 - **"Side effects escape the record."** True, and out of scope here: the
   world is not content-addressed. The frontier is exactly where proof meets
   world; what the record can attest there is the subject of paper 2
@@ -115,9 +101,9 @@ Present these as demonstrations, not aspirations:
 - The verb becomes a noun.
 - An execution is something that exists, not something that happens.
 - "Now" is the growing edge of the record.
-- Death of the process is a cache eviction, not an ending.
-- Systems on the process model build subsystems; systems on the object
-  model prove theorems.
+- Process death need not end work whose continuation state was retained.
+- Shared execution identity makes recovery contracts composable; it does not
+  replace them.
 
 ## Guardrails
 

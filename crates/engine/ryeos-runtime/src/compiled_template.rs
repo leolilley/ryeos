@@ -544,6 +544,10 @@ mod tests {
         let source = json!({
             "item_id": "tool:${inputs.tool}",
             "ref_bindings": {"policy": "knowledge:${inputs.policy}"},
+            "product_selections": [{
+                "target": {"kind": "root"},
+                "selection": {"declaration_id": "subject", "witness_hash": "${inputs.witness}", "qualification_hash": null}
+            }],
             "params": {"value": "${inputs.value}"},
             "call": {"method": "${inputs.method}", "args": {"q": "${inputs.query}"}},
             "facets": {"lane": "${inputs.lane}"},
@@ -557,6 +561,7 @@ mod tests {
             "inputs": {
                 "tool": "echo",
                 "policy": "test/policy",
+                "witness": "a".repeat(64),
                 "value": 7,
                 "method": "query",
                 "query": "hello",
@@ -571,6 +576,11 @@ mod tests {
 
         assert_eq!(rendered["item_id"], "tool:echo");
         assert_eq!(rendered["ref_bindings"]["policy"], "knowledge:test/policy");
+        assert_eq!(
+            rendered["product_selections"][0]["selection"]["witness_hash"],
+            "a".repeat(64)
+        );
+        assert!(rendered["product_selections"][0]["selection"]["qualification_hash"].is_null());
         assert_eq!(rendered["params"]["value"], 7);
         assert_eq!(rendered["call"]["method"], "query");
         assert_eq!(rendered["facets"]["lane"], "a");

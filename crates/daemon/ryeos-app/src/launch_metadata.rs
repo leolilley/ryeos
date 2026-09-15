@@ -73,10 +73,48 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // absence is durable and may never be normalized into verified callback
 // authority during recovery.
 // v22 carries the flat captured node-policy provenance contract. v23 binds
-// remote adoption to the exact target-node operator grant generation.
+// remote adoption to the exact target-node operator grant generation. v24
+// carries admitted-launch capsule v20, which distinguishes standalone command
+// bytes from an executable member overlaid into its complete realization.
+// v25 carries admitted-launch capsule v21 and its required kind-projected
+// per-execution network ceiling.
+// v26 carries required filesystem/network ceilings in direct and managed
+// plans, intersected before admission, and explicit realization mount roots
+// in admitted capsule v22. Predecessor authority is never reinterpreted.
 // Predecessor authority remains opaque history rather than being interpreted
 // as current launch authority.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 23;
+// v27 combines that source-local authority with sealed scheduled fires and
+// independent candidate evaluation/integration in capsule 23/request 16.
+// v28 carries explicit fixed-parent live confinement and namespace-scoped
+// symlink semantics in capsule v24. Older live authority stays opaque history.
+// v29 combines the current adapter protocol's explicit node-owned proc
+// surface with capsule 25/request 18 and retained content-target ceilings.
+// Classify prior launch evidence before decoding its nested authority.
+// v30 carries the strict isolation-adapter v7 provenance enum. Classify old
+// envelopes before decoding nested protocol authority; never alias v6 to v7.
+// v31 binds sealed node-network input digests in isolation provenance. Retain
+// predecessor launch records as opaque history, never decode with empty inputs.
+// v32 combines qualified process-scope guarantees and strict adapter v8
+// nested-sandbox provenance in the same unlanded containment cut.
+// Earlier launch classes are opaque history, never assumed scope-capable.
+// v33 retains explicit workload invocation bindings and v2 grant/wire authority.
+// An old mandatory-client declaration is not an implicit CLI binding.
+// The parallel environment-product branch allocated its own v31-v34 shapes:
+// v31 requires the exact invocation product selector map in ResumeContext.
+// Classify old envelopes before decoding nested protocol authority; never
+// synthesize an empty selector map for predecessor persisted launches.
+// v32 retains the daemon-selected durable-effect authority for an awaited
+// managed root so terminal recovery never reconstructs a grant from caller
+// input or the current wrapper definition.
+// v33 requires typed root/dependency selection lists and complete selected
+// verifier testimony. Earlier selector objects are not launch authority.
+// v34 retains source-bearing product selections; receipts are not semantic identity.
+// v35 combines source-bearing product selections and exact invocation/scope
+// authority. Both separately checkpointed branch shapes remain opaque history.
+// v36 requires site-qualified stable identity for pinned project generations.
+// Predecessor `local:<path>` pins remain opaque history and cannot authorize
+// candidate return or cross-site continuation under the current contract.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 36;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -254,6 +292,12 @@ pub struct RuntimeLaunchMetadata {
     /// exactly; it is never reconstructed from configured limits.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+
+    /// Exact durable-effect grant selected from the signed caller program for
+    /// an independently awaited managed root. This is daemon-derived launch
+    /// authority, never a producer parameter or producer stdout field.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +341,7 @@ impl Default for RuntimeLaunchMetadata {
             follow_launch_window: None,
             isolation: None,
             accounting_scope: None,
+            effect_authority: None,
         }
     }
 }
@@ -381,7 +426,8 @@ impl OriginalPushedHeadRef {
             ExecutionProvenance::Projectless { .. }
             | ExecutionProvenance::RootLiveProject { .. }
             | ExecutionProvenance::ChildLiveProject { .. }
-            | ExecutionProvenance::ChildPinnedGeneration { .. } => None,
+            | ExecutionProvenance::ChildPinnedGeneration { .. }
+            | ExecutionProvenance::ChildImmutableWorkspaceInput { .. } => None,
         }
     }
 }
@@ -407,6 +453,10 @@ pub struct ResumeContext {
     /// Complete canonical secondary execution identity. Required on disk;
     /// absence is a schema error, never an empty-map fallback.
     pub ref_bindings: BTreeMap<String, String>,
+    /// Exact invocation product selectors. Required even when empty so restart
+    /// and continuation checks cannot erase a selected witness implicitly.
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     pub launch_mode: String,
     pub parameters: serde_json::Value,
     /// Full engine `ProjectContext` from the original `PlanContext`.
@@ -460,6 +510,11 @@ pub struct ResumeContext {
     /// `ExecutionHints` from the original `PlanContext`. Carried
     /// verbatim so executor-specific flags survive resume.
     pub execution_hints: ExecutionHints,
+    /// Immutable daemon-authored scheduler coordinate. Required as an
+    /// explicit nullable field so persisted resume authority cannot silently
+    /// lose whether this chain belongs to a scheduled fire.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub scheduled_fire: Option<ryeos_engine::contracts::ScheduledFireContext>,
     /// Composed CHILD `effective_caps` captured at original spawn time. The
     /// reconciler re-mints a callback token for the resumed subprocess and
     /// the daemon enforces caps on every callback dispatch — this set is
@@ -521,23 +576,36 @@ impl ResumeContext {
     pub(crate) fn validate_continuation_transition_from(
         &self,
         source: &Self,
-        source_result_snapshot_hash: Option<&str>,
+        source_result_generation: Option<&ryeos_state::objects::WorkspaceGenerationPair>,
         transition_kind: ContinuationAuthorityTransitionKind,
     ) -> anyhow::Result<()> {
-        let transition = match source_result_snapshot_hash {
-            Some(result_snapshot_hash) => {
+        if let Some(generation) = source_result_generation {
+            generation.validate()?;
+        }
+        let transition = match source_result_generation {
+            Some(generation) => {
                 ryeos_state::objects::OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
-                    result_snapshot_hash,
+                    result_snapshot_hash: &generation.snapshot_hash,
                 }
             }
             None => ryeos_state::objects::OperationalProjectAuthorityTransition::InheritContinuation,
         };
         let mut expected = source.clone();
-        expected.project_authority = source
-            .project_authority
-            .transition_operational_generation(transition)?;
-        if let Some(result_hash) = source_result_snapshot_hash {
-            expected.original_snapshot_hash = Some(result_hash.to_string());
+        expected.project_authority = match source_result_generation
+            .and_then(|generation| generation.output_capture_hash.as_deref())
+        {
+            Some(capture_hash) => source
+                .project_authority
+                .transition_operational_generation_with_workspace_capture(
+                    transition,
+                    capture_hash,
+                )?,
+            None => source
+                .project_authority
+                .transition_operational_generation(transition)?,
+        };
+        if let Some(generation) = source_result_generation {
+            expected.original_snapshot_hash = Some(generation.snapshot_hash.clone());
             expected.original_pushed_head_ref = None;
         }
         if transition_kind == ContinuationAuthorityTransitionKind::OperatorFollowUp {
@@ -561,6 +629,22 @@ impl ResumeContext {
     pub fn authoritative_project_identity(
         &self,
     ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
+        ryeos_state::external_content::products::composition::validate_product_selection_inputs(
+            &self.product_selections,
+        )?;
+        // Remote-origin provenance survives local recovery. Locality is checked
+        // against the serving node by product admission, never by comparing the
+        // origin with the current placement or rewriting either identity here.
+        if !self.product_selections.is_empty() && self.scheduled_fire.is_some() {
+            anyhow::bail!(
+                "product selectors are retained only for unscheduled roots in the first composition lane"
+            );
+        }
+        if let Some(scheduled_fire) = &self.scheduled_fire {
+            scheduled_fire
+                .validate()
+                .context("validate resumed scheduled fire context")?;
+        }
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
         if let Some(identity) = &self.stable_project_identity {
@@ -829,6 +913,11 @@ impl RuntimeLaunchMetadata {
                 &self.accounting_scope,
                 &attempt.accounting_scope,
             )?,
+            effect_authority: exact(
+                "durable effect authority",
+                &self.effect_authority,
+                &attempt.effect_authority,
+            )?,
         };
         merged.validate()?;
         Ok(merged)
@@ -870,6 +959,7 @@ impl RuntimeLaunchMetadata {
                 || self.follow_parent_context.is_some()
                 || self.follow_launch_window.is_some()
                 || self.isolation.is_some()
+                || self.effect_authority.is_some()
             {
                 anyhow::bail!(
                     "in-process handler launch metadata contains subprocess-only authority"
@@ -882,6 +972,16 @@ impl RuntimeLaunchMetadata {
         }
         if let Some(resume) = &self.resume_context {
             resume.authoritative_project_identity()?;
+        }
+        if let Some(effect_authority) = &self.effect_authority {
+            effect_authority.validate()?;
+            if self.launch_driver
+                != Some(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
+                || self.resume_context.is_none()
+                || self.sealed_root_request.is_none()
+            {
+                anyhow::bail!("durable effect authority requires a sealed managed runtime launch");
+            }
         }
         if self.resume_context.is_some() && self.launch_driver.is_none() {
             anyhow::bail!("recoverable launch metadata has no admitted launch driver");
@@ -1006,11 +1106,12 @@ impl RuntimeLaunchMetadata {
             follow_launch_window: None,
             isolation: None,
             accounting_scope: None,
+            effect_authority: None,
         }
     }
 
     /// True when this carries no spawn-time metadata — i.e. a wire caller (a UDS
-    /// `runtime.attach_process` self-attach, which sends only thread/pid) let the
+    /// `runtime.attach_process` self-attach, which sends only thread identity) let the
     /// fields default. `attach_process` uses this to avoid clobbering metadata
     /// already seeded on the row at spawn (resume context).
     pub fn is_empty(&self) -> bool {
@@ -1032,6 +1133,7 @@ impl RuntimeLaunchMetadata {
             && self.follow_launch_window.is_none()
             && self.isolation.is_none()
             && self.accounting_scope.is_none()
+            && self.effect_authority.is_none()
     }
 
     /// Build the immutable CAS launch closure at admission. The runtime ledger
@@ -1265,6 +1367,7 @@ impl RuntimeLaunchMetadata {
             // retains the execution budget authority it was admitted under
             // (no allowance reset).
             accounting_scope: self.accounting_scope.clone(),
+            effect_authority: self.effect_authority.clone(),
         }
     }
 
@@ -1300,6 +1403,7 @@ impl RuntimeLaunchMetadata {
             // exact "hard cap resets at every continuation" failure the
             // ledger exists to prevent (plan constraint 6, §10.3).
             accounting_scope: self.accounting_scope.clone(),
+            effect_authority: self.effect_authority.clone(),
             ..Self::default()
         }
     }
@@ -1471,7 +1575,7 @@ mod tests {
                     path.clone(),
                     format!("local:{}", path.display()),
                     ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                    ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                    ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
                     ryeos_state::objects::EnvironmentAuthority::None,
                     Vec::new(),
                 )
@@ -1501,6 +1605,7 @@ mod tests {
             kind: "tool_run".to_string(),
             item_ref: "tool:test/run".to_string(),
             ref_bindings: BTreeMap::new(),
+            product_selections: Vec::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({}),
             project_context,
@@ -1515,11 +1620,115 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             requested_by: local_principal(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             effective_caps: Vec::new(),
             parent_delegation_caps: None,
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }
+    }
+
+    fn remote_origin_product_resume_context() -> ResumeContext {
+        let mut context = resume_context(ProjectContext::SnapshotHash {
+            hash: "a".repeat(64),
+        });
+        context.current_site_id = "site:target".to_owned();
+        context.origin_site_id = "site:source".to_owned();
+        // EffectivePrincipal::Local represents the admitted configured operator,
+        // not proof that its authenticated origin is this execution site.
+        context.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: format!("fp:{}", "b".repeat(64)),
+            scopes: vec!["ryeos.execute.tool.test/run".to_owned()],
+        });
+        context.product_selections = serde_json::from_value(serde_json::json!([{
+            "target": {"kind": "root"},
+            "selection": {
+                "declaration_id": "runtime",
+                "witness_hash": "c".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "qualification_hash": null
+            }
+        }]))
+        .unwrap();
+        context
+    }
+
+    #[test]
+    fn target_local_product_resume_preserves_distinct_origin_and_exact_selectors() {
+        // This exercises retained launch-authority validation, not fresh grant
+        // authentication or witness admission. Those remain their own owners.
+        let context = remote_origin_product_resume_context();
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some("a".repeat(64)))
+        );
+        let metadata = RuntimeLaunchMetadata::default().with_resume_context(context.clone());
+        let retained: RuntimeLaunchMetadata =
+            serde_json::from_value(serde_json::to_value(metadata).unwrap()).unwrap();
+        let restored = retained.resume_context.unwrap();
+        assert_eq!(restored, context);
+        assert_eq!(restored.current_site_id, "site:target");
+        assert_eq!(restored.origin_site_id, "site:source");
+        restored.authoritative_project_identity().unwrap();
+        restored
+            .validate_continuation_transition_from(
+                &context,
+                None,
+                ContinuationAuthorityTransitionKind::Inherit,
+            )
+            .unwrap();
+        for field in ["origin", "target", "owner", "witness"] {
+            let mut changed = restored.clone();
+            match field {
+                "origin" => changed.origin_site_id = "site:another-source".to_owned(),
+                "target" => changed.current_site_id = "site:another-target".to_owned(),
+                "owner" => changed.requested_by = local_principal(),
+                "witness" => changed.product_selections[0].selection.witness_hash = "d".repeat(64),
+                _ => unreachable!(),
+            }
+            assert!(
+                changed
+                    .validate_continuation_transition_from(
+                        &context,
+                        None,
+                        ContinuationAuthorityTransitionKind::Inherit,
+                    )
+                    .is_err(),
+                "retained product continuation changed {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_origin_does_not_relax_scheduled_product_or_selector_validation() {
+        let context = remote_origin_product_resume_context();
+        let mut scheduled = context.clone();
+        scheduled.scheduled_fire = Some(
+            ryeos_engine::contracts::ScheduledFireContext::new(
+                "nightly.solve".to_owned(),
+                "nightly.solve@1700000000000".to_owned(),
+                1_700_000_000_000,
+                1_700_000_000_100,
+                "normal".to_owned(),
+                "a".repeat(64),
+            )
+            .unwrap(),
+        );
+        assert!(
+            scheduled
+                .authoritative_project_identity()
+                .unwrap_err()
+                .to_string()
+                .contains("scheduled")
+        );
+        let mut malformed = context.clone();
+        malformed.product_selections[0].selection.witness_hash = "not-a-hash".to_owned();
+        assert!(malformed.authoritative_project_identity().is_err());
+        let mut duplicate = context;
+        duplicate
+            .product_selections
+            .push(duplicate.product_selections[0].clone());
+        assert!(duplicate.authoritative_project_identity().is_err());
     }
 
     #[test]
@@ -1539,6 +1748,126 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    fn output_resume_context() -> ResumeContext {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, ExecutionProjectAuthority, PinnedProjectRealization,
+            PinnedTerminalPublication, WORKSPACE_OUTPUT_PARTITION_SCHEMA, WorkspaceOutputPartition,
+            WorkspaceOutputRoot,
+        };
+        let mut context = resume_context(ProjectContext::SnapshotHash {
+            hash: "a".repeat(64),
+        });
+        let bounds = ryeos_state::external_content::products::ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 1024,
+            maximum_total_bytes: 4096,
+        };
+        let mut partition = WorkspaceOutputPartition {
+            schema: WORKSPACE_OUTPUT_PARTITION_SCHEMA.to_owned(),
+            recipe_binding: "product_recipe".to_owned(),
+            recipe_ref: "config:test/products".to_owned(),
+            recipe_raw_content_digest: "1".repeat(64),
+            declarations_hash: "2".repeat(64),
+            project_snapshot_policy_hash: "3".repeat(64),
+            roots: vec![WorkspaceOutputRoot {
+                name: "runtime".to_owned(),
+                path: "products/runtime".to_owned(),
+                storage: ryeos_state::external_content::products::ProductStorage::Content,
+                declared_bounds: bounds.clone(),
+                effective_bounds: bounds,
+            }],
+            products: Vec::new(),
+            partition_identity: String::new(),
+            capture_policy_digest: "4".repeat(64),
+        };
+        partition.partition_identity = partition.derived_partition_identity().unwrap();
+        context.project_authority = ExecutionProjectAuthority::pinned(
+            format!("snapshot:{}", "a".repeat(64)),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainResult,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+        .condition_initial_workspace_outputs(partition)
+        .unwrap();
+        context
+    }
+
+    #[test]
+    fn continuation_transition_preserves_the_exact_output_generation_pair() {
+        use ryeos_state::objects::{
+            OperationalProjectAuthorityTransition, WorkspaceGenerationPair,
+        };
+        let source = output_resume_context();
+        let generation = WorkspaceGenerationPair {
+            snapshot_hash: "b".repeat(64),
+            output_capture_hash: Some("c".repeat(64)),
+        };
+        let mut successor = source.clone();
+        successor.project_authority = source
+            .project_authority
+            .transition_operational_generation_with_workspace_capture(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &generation.snapshot_hash,
+                },
+                generation.output_capture_hash.as_deref().unwrap(),
+            )
+            .unwrap();
+        successor.original_snapshot_hash = Some(generation.snapshot_hash.clone());
+        successor
+            .validate_continuation_transition_from(
+                &source,
+                Some(&generation),
+                ContinuationAuthorityTransitionKind::Inherit,
+            )
+            .unwrap();
+        let mut source_only = generation.clone();
+        source_only.output_capture_hash = None;
+        assert!(
+            successor
+                .validate_continuation_transition_from(
+                    &source,
+                    Some(&source_only),
+                    ContinuationAuthorityTransitionKind::Inherit,
+                )
+                .is_err()
+        );
+        let mut wrong_capture = generation.clone();
+        wrong_capture.output_capture_hash = Some("d".repeat(64));
+        assert!(
+            successor
+                .validate_continuation_transition_from(
+                    &source,
+                    Some(&wrong_capture),
+                    ContinuationAuthorityTransitionKind::Inherit,
+                )
+                .is_err()
+        );
+        assert!(
+            successor
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::Inherit,
+                )
+                .is_err()
+        );
+        // An already admitted operational input can be inherited unchanged;
+        // it is not relabelled as a new terminal capture for this segment.
+        successor
+            .validate_continuation_transition_from(
+                &successor,
+                None,
+                ContinuationAuthorityTransitionKind::Inherit,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1626,6 +1955,7 @@ mod tests {
             follow_launch_window: None,
             isolation: None,
             accounting_scope: None,
+            effect_authority: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
@@ -1877,10 +2207,12 @@ mod tests {
             kind: "tool_run".to_string(),
             item_ref: "ns/foo".to_string(),
             ref_bindings: BTreeMap::new(),
+            product_selections: Vec::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                workspace_outputs: None,
                 stable_project_identity: "site:a:/tmp/proj".to_string(),
                 display_path: Some(PathBuf::from("/tmp/proj")),
                 base_snapshot_hash: "abc123".to_string(),
@@ -1909,6 +2241,17 @@ mod tests {
             origin_site_id: "site:a".to_string(),
             requested_by: local_principal(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: Some(
+                ryeos_engine::contracts::ScheduledFireContext::new(
+                    "nightly.solve".to_owned(),
+                    "nightly.solve@1700000000000".to_owned(),
+                    1_700_000_000_000,
+                    1_700_000_000_100,
+                    "normal".to_owned(),
+                    "a".repeat(64),
+                )
+                .unwrap(),
+            ),
             effective_caps: vec!["ryeos.execute.tool.test".to_string()],
             parent_delegation_caps: None,
             executor_ref: Some("native:test-runtime".to_string()),
@@ -1921,10 +2264,31 @@ mod tests {
             serde_json::to_value(&m).unwrap(),
             serde_json::to_value(&back).unwrap()
         );
+        let mut missing_scheduled_fire = serde_json::to_value(&m).unwrap();
+        missing_scheduled_fire["resume_context"]
+            .as_object_mut()
+            .unwrap()
+            .remove("scheduled_fire");
+        assert!(serde_json::from_value::<RuntimeLaunchMetadata>(missing_scheduled_fire).is_err());
+        let mut missing_product_selections = serde_json::to_value(&m).unwrap();
+        missing_product_selections["resume_context"]
+            .as_object_mut()
+            .unwrap()
+            .remove("product_selections");
+        assert!(
+            serde_json::from_value::<RuntimeLaunchMetadata>(missing_product_selections).is_err()
+        );
         let back_ctx = back.resume_context.expect("resume_context");
         assert_eq!(back_ctx.kind, "tool_run");
         assert_eq!(back_ctx.item_ref, "ns/foo");
         assert_eq!(back_ctx.original_snapshot_hash.as_deref(), Some("abc123"));
+        assert_eq!(
+            back_ctx
+                .scheduled_fire
+                .as_ref()
+                .map(|fire| fire.fire_id.as_str()),
+            Some("nightly.solve@1700000000000")
+        );
         assert_eq!(
             back_ctx.original_pushed_head_ref,
             Some(OriginalPushedHeadRef {

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-07T07:41:15Z:0e366ff3dc0e798ebca6f32d5b5d8f230e30bdce36137f547467a0d0af0b99d7:hRTvbdattnYhhwtU/Rk73yG71NfT8L/mkt9r7Td659ggyfV7e7GqrKcAUAxUJn7YU4ESl3ar7Pxh04cvA/s/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: registry-production
+version: "1.0.0"
+schema: ryeos.development.registry-production.v1
+# Source selections belong here, not caller parameters or the node policy.
+# The Tool declaration pins the actual input realization independently.
+lock_file: Cargo.lock
+output: products/registry-inputs

@@ -1,0 +1,248 @@
+# ryeos:signed:2026-09-08T15:46:44Z:a85ba705fbfd7b877b123592f8da4e676d737bb125fb563db989ba14dfbb6553:mfIEvHKYfOXsfVGfXk+8dQzmaNnvhgUG1SYsqmES29zOqG72Ne+e97cFffbetQ/s9cBVYD0EqFXPyL8drnZjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification
+name: gnu-python
+version: "1.0.0"
+description: Execute and qualify the exact selected GNU CPython runtime
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content: []
+external_product_slots:
+  - id: subject
+    relationship_ref: config:development/ryeos/gnu-python-products
+    relationship: runtime_to_qualification_verifier
+    kind: tree
+    mount_root: execution_runtime
+    mount: python-gnu
+env_config:
+  interpreter:
+    type: realization_member
+    realization_id: subject
+    relative_path: python/bin/python3.14
+config:
+  command: "${interpreter}"
+  args:
+    - -I
+    - -S
+    - -B
+    - -X
+    - utf8
+    - -c
+    - literal: |
+        import _ctypes, ctypes, hashlib, json, os, re, stat, sys, sysconfig, zlib
+
+        root = "/ryeos/realizations/python-gnu"
+        runtime = root + "/python"
+        sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
+        keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
+        if not isinstance(sealed, list) or len(sealed) != 1:
+            raise SystemExit("qualification requires exactly one sealed subject")
+        subject = sealed[0]
+        if not isinstance(subject, dict) or set(subject) != keys:
+            raise SystemExit("sealed subject has an incomplete identity")
+        if (subject["id"] != "subject" or subject["kind"] != "tree" or
+                subject["mode"] != "pinned" or subject["mount_root"] != "execution_runtime" or
+                subject["mount"] != "python-gnu"):
+            raise SystemExit("sealed subject is not the admitted GNU runtime")
+        if (not isinstance(subject["manifest_hash"], str) or
+                re.fullmatch(r"[0-9a-f]{64}", subject["manifest_hash"]) is None or
+                type(subject["entry_count"]) is not int or not 1 <= subject["entry_count"] <= 10000 or
+                type(subject["total_bytes"]) is not int or not 1 <= subject["total_bytes"] <= 268435456):
+            raise SystemExit("sealed subject exceeds the finite runtime contract")
+
+        def read_regular(path, limit, expected_bytes=None, expected_sha256=None):
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
+                    raise SystemExit("qualification evidence member is not regular")
+                chunks = []
+                total = 0
+                while True:
+                    chunk = os.read(descriptor, min(65536, limit + 1 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > limit:
+                        raise SystemExit("qualification evidence member exceeds its bound")
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            identity = (before.st_dev, before.st_ino, before.st_mode, before.st_size,
+                        before.st_mtime_ns, before.st_ctime_ns)
+            if identity != (after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                            after.st_mtime_ns, after.st_ctime_ns):
+                raise SystemExit("qualification evidence member changed during inspection")
+            data = b"".join(chunks)
+            if expected_bytes is not None and len(data) != expected_bytes:
+                raise SystemExit("qualification evidence member size differs")
+            digest = hashlib.sha256(data).hexdigest()
+            if expected_sha256 is not None and digest != expected_sha256:
+                raise SystemExit("qualification evidence member digest differs")
+            return data, digest
+
+        _, gcc_notice_sha256 = read_regular(
+            root + "/notices/gnu-runtime/notices/gcc-COPYRIGHT", 69004, 69004,
+            "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79")
+
+        def mapped_provider_paths(maps_text, names):
+            mapped = {name: set() for name in names}
+            for line in maps_text.splitlines():
+                fields = line.split(maxsplit=5)
+                if len(fields) != 6:
+                    continue
+                path = fields[5]
+                if path.endswith(" (deleted)"):
+                    path = path[:-10]
+                    deleted = True
+                else:
+                    deleted = False
+                name = path.rsplit("/", 1)[-1]
+                if name in mapped:
+                    if deleted:
+                        raise SystemExit("GNU Python startup provider mapping was deleted")
+                    mapped[name].add(path)
+            return mapped
+
+        def probe_versioned_symbols(provider_paths, symbol_contracts, ctypes_module, os_module):
+            no_load = getattr(os_module, "RTLD_NOLOAD", None)
+            if type(no_load) is not int:
+                raise SystemExit("runtime cannot prove an already-loaded provider")
+            process = ctypes_module.CDLL(None)
+            dlvsym = process.dlvsym
+            dlvsym.argtypes = [ctypes_module.c_void_p, ctypes_module.c_char_p,
+                               ctypes_module.c_char_p]
+            dlvsym.restype = ctypes_module.c_void_p
+            handles = []
+            observed = []
+            for provider, probes in symbol_contracts.items():
+                exact_handle = ctypes_module.CDLL(
+                    provider_paths[provider],
+                    mode=no_load | os_module.RTLD_NOW | os_module.RTLD_LOCAL)
+                lookup_handle = ctypes_module.CDLL(
+                    provider,
+                    mode=no_load | os_module.RTLD_NOW | os_module.RTLD_LOCAL)
+                handles.extend((exact_handle, lookup_handle))
+                if exact_handle._handle != lookup_handle._handle:
+                    raise SystemExit(
+                        "GNU Python SONAME lookup selects a different startup provider")
+                for symbol, version in probes:
+                    if not dlvsym(exact_handle._handle, symbol.encode("ascii"), version.encode("ascii")):
+                        raise SystemExit("GNU Python startup provider lacks a required versioned symbol")
+                    observed.append({"provider": provider, "symbol": symbol, "version": version})
+            return observed
+
+        maps_bytes, _ = read_regular("/proc/self/maps", 2097152)
+        try:
+            maps_text = maps_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SystemExit("process mappings are not UTF-8") from error
+        expected_mappings = {
+            "libgcc_s.so.1": {runtime + "/lib/libgcc_s.so.1"},
+            "libpthread.so.0": {runtime + "/lib/libpthread.so.0"},
+        }
+        mapped = mapped_provider_paths(maps_text, tuple(expected_mappings))
+        if mapped != expected_mappings:
+            raise SystemExit("GNU Python did not map its exact admitted startup providers")
+        if "LD_LIBRARY_PATH" in os.environ or "LD_PRELOAD" in os.environ:
+            raise SystemExit("GNU Python startup provider probe has ambient loader overrides")
+        provider_paths = {name: next(iter(paths)) for name, paths in expected_mappings.items()}
+        provider_sha256 = {
+            name: read_regular(path, 2097152)[1]
+            for name, path in provider_paths.items()
+        }
+        symbol_probes = probe_versioned_symbols(provider_paths, {
+            "libgcc_s.so.1": [
+                ("_Unwind_RaiseException", "GCC_3.0"),
+                ("_Unwind_Backtrace", "GCC_3.3"),
+                ("_Unwind_GetIPInfo", "GCC_4.2.0"),
+            ],
+            "libpthread.so.0": [
+                ("pthread_key_create", "GLIBC_2.2.5"),
+                ("pthread_key_delete", "GLIBC_2.2.5"),
+                ("pthread_setspecific", "GLIBC_2.2.5"),
+            ],
+        }, ctypes, os)
+        executable = runtime + "/bin/python3.14"
+        metadata_path = root + "/notices/python-build-standalone/PYTHON.json"
+        metadata_info = os.lstat(metadata_path)
+        if (not stat.S_ISREG(metadata_info.st_mode) or metadata_info.st_size != 128346):
+            raise SystemExit("GNU Python retained metadata identity differs")
+        with open(metadata_path, "rb") as stream:
+            metadata_bytes = stream.read(128347)
+        if (len(metadata_bytes) != 128346 or
+                hashlib.sha256(metadata_bytes).hexdigest() !=
+                "e4596127ee78428301bfc9beac06547a14ab7ead983c4c390d5256ecde061fa9"):
+            raise SystemExit("GNU Python retained metadata digest differs")
+        metadata = json.loads(metadata_bytes)
+        extensions = metadata.get("build_info", {}).get("extensions", {})
+        zlib_build = extensions.get("zlib")
+        ctypes_build = extensions.get("_ctypes")
+        if (not isinstance(zlib_build, list) or len(zlib_build) != 1 or
+                zlib_build[0].get("init_fn") != "PyInit_zlib" or
+                zlib_build[0].get("links") !=
+                [{"name": "z", "path_static": "build/lib/libz.a"}] or
+                "shared_lib" in zlib_build[0] or
+                not isinstance(ctypes_build, list) or len(ctypes_build) != 1 or
+                ctypes_build[0].get("init_fn") != "PyInit__ctypes" or
+                ctypes_build[0].get("links") != [
+                    {"name": "dl", "system": True},
+                    {"name": "ffi", "path_static": "build/lib/libffi.a"},
+                ] or "shared_lib" in ctypes_build[0]):
+            raise SystemExit("GNU Python built-in extension topology differs")
+        ctypes_source = runtime + "/lib/python3.14/ctypes/__init__.py"
+        if (sys.version_info[:3] != (3, 14, 7) or
+                sys.implementation.cache_tag != "cpython-314" or
+                sysconfig.get_config_var("SOABI") != "cpython-314-x86_64-linux-gnu" or
+                sys.executable != executable or sys.prefix != runtime or sys.base_prefix != runtime or
+                zlib.__spec__.origin != "built-in" or getattr(zlib, "__file__", None) is not None or
+                "zlib" not in sys.builtin_module_names or
+                _ctypes.__spec__.origin != "built-in" or
+                getattr(_ctypes, "__file__", None) is not None or
+                "_ctypes" not in sys.builtin_module_names or
+                ctypes.__file__ != ctypes_source or
+                zlib.ZLIB_RUNTIME_VERSION != "1.3.2"):
+            raise SystemExit("GNU Python identity or zlib runtime differs from policy")
+        payload = b"ryeos-gnu-python-zlib-probe-v1\0" * 64
+        compressed = zlib.compress(payload, level=9)
+        if zlib.decompress(compressed) != payload:
+            raise SystemExit("GNU Python zlib round trip failed")
+        libc = ctypes.CDLL("libc.so.6")
+        libc.gnu_get_libc_version.restype = ctypes.c_char_p
+        libc_version = libc.gnu_get_libc_version().decode("ascii")
+        if libc_version != "2.41":
+            raise SystemExit("GNU Python loaded an unexpected glibc")
+        thread_id = os.environ.get("RYE_THREAD_ID")
+        if not thread_id:
+            raise SystemExit("qualification has no admitted thread identity")
+        result = {
+            "schema": "ryeos.product_qualification_result.v1",
+            "subject_manifest_hash": subject["manifest_hash"],
+            "claims": ["gnu_python_extension_startup_providers_v1", "gnu_python_zlib_1_3_2"],
+            "probe_evidence": {
+                "schema": "ryeos.gnu_python_runtime_probe.v2",
+                "python_version": "3.14.7",
+                "soabi": "cpython-314-x86_64-linux-gnu",
+                "zlib_build_version": zlib.ZLIB_VERSION,
+                "zlib_runtime_version": zlib.ZLIB_RUNTIME_VERSION,
+                "glibc_version": libc_version,
+                "executable": executable,
+                "ctypes_source": ctypes_source,
+                "extension_topology": {"_ctypes": "built-in", "zlib": "built-in"},
+                "metadata_sha256": "e4596127ee78428301bfc9beac06547a14ab7ead983c4c390d5256ecde061fa9",
+                "startup_provider_sha256": provider_sha256,
+                "startup_provider_symbol_probes": symbol_probes,
+                "gcc_notice_sha256": gcc_notice_sha256,
+                "round_trip_bytes": len(payload),
+                "network_contacted": False,
+            },
+        }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

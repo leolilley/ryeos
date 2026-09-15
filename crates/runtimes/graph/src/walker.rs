@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anyhow::Context as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -61,10 +62,10 @@ use transitions::resolve_next_on_error;
 /// the signed graph definition and expression language, and no alternate
 /// checkpoint version is accepted.
 ///
-/// v4: executable identity is the effective-definition digest assembled from
-/// the complete admitted program; root-only definition identity does not
-/// decode.
-pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 4;
+/// v5: dispatch receipts carry the required daemon-authoritative result
+/// projection, so retained-effect answers cannot be reinterpreted as the
+/// dispatched kind's ordinary return contract.
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 5;
 pub(crate) const EXPRESSION_LANGUAGE: &str = "rye-expr/1";
 
 /// Follow-resume field keys for the checkpoint / resume-state payload. Shared by
@@ -495,6 +496,7 @@ impl Walker {
         // walker helpers; it is not injected into action params.
 
         let exec_ctx = context::execution_context_from_envelope(
+            self.thread_id.clone(),
             params
                 .get("parent_thread_id")
                 .and_then(|v| v.as_str())
@@ -508,6 +510,13 @@ impl Walker {
                 .get("hard_limits")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
+            params
+                .get("scheduled_fire")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("decode scheduled fire execution context")?,
         );
         let execution_context = exec_ctx.as_context_value();
 
@@ -729,6 +738,31 @@ impl Walker {
                     CommitResult::Terminate(result) => *result,
                 },
             );
+        }
+
+        // A fresh run needs an identity-bearing cursor before its first
+        // authored node can contact a child. An unknown first response exits
+        // before commit_step; recovery must re-drive this exact run/step and
+        // its daemon-retained occurrence, never invent a cold-start fallback.
+        // GraphStarted and its hooks remain ordered before this checkpoint:
+        // it retains their checked accounting but does not claim to protect
+        // a crash inside those earlier hooks.
+        if !resumed {
+            if let CommitResult::Terminate(result) = self
+                .write_checkpoint_or_error(
+                    &graph_run_id,
+                    &current,
+                    step,
+                    &state,
+                    &suppressed_errors,
+                    &mut guard,
+                    retry_attempt,
+                    &inputs,
+                )
+                .await
+            {
+                return Ok(*result);
+            }
         }
 
         // ── F3 main loop: run_node_body → commit_step ───────────

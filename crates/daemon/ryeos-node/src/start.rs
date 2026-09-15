@@ -1,5 +1,7 @@
+use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -17,134 +19,225 @@ pub struct StartReport {
     pub already_running: bool,
 }
 
+/// Optional bootstrap endpoint selection attached to one start operation.
+/// A differing value is durably published while the node is stopped before
+/// either direct or supervised launch; it is never a transient child argument.
+#[derive(Debug, Clone, Default)]
+pub struct StartEndpointConfiguration {
+    pub bind: Option<SocketAddr>,
+    pub uds_path: Option<PathBuf>,
+}
+
 pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartReport> {
-    start_with_progress(env, timeout, None).await
+    start_with_endpoint_configuration(env, timeout, StartEndpointConfiguration::default(), None)
+        .await
 }
 
 pub async fn start_with_progress(
     env: &LocalLifecycleEnv,
     timeout: Duration,
+    observer: Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<StartReport> {
+    start_with_endpoint_configuration(
+        env,
+        timeout,
+        StartEndpointConfiguration::default(),
+        observer,
+    )
+    .await
+}
+
+pub async fn start_with_endpoint_configuration(
+    env: &LocalLifecycleEnv,
+    timeout: Duration,
+    endpoints: StartEndpointConfiguration,
     mut observer: Option<&mut dyn LifecycleProgressObserver>,
 ) -> Result<StartReport> {
-    let config = env.config();
+    let app_root = env.config().app_root.clone();
+    crate::init_check::require_initialized(&app_root)?;
     let deadline = Instant::now() + timeout;
-
-    let initial = crate::status::status(env).await?;
-    observe(&mut observer, &initial);
-    match initial {
-        LifecycleStatus::NotInitialized { .. } => {
-            bail!("RyeOS is not initialized. Run: ryeos init")
-        }
-        status @ LifecycleStatus::Running { .. } => {
-            return Ok(StartReport {
-                status,
-                already_running: true,
-            });
-        }
-        LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => {}
-        LifecycleStatus::Unresponsive { diagnostics, .. } => {
-            // A live but unusable control socket is still ownership evidence;
-            // starting a second daemon could double-run against the same state.
-            bail!(
-                "a daemon control socket is live but unusable ({}); refusing to start a \
-                 replacement — inspect or stop the existing daemon first",
-                diagnostics.message
-            )
-        }
-        LifecycleStatus::Starting { .. } => {
-            // Join the live lifecycle stream instead of treating an already
-            // booting daemon as an error. This is what makes concurrent
-            // `ryeos start` and install wrappers show the same rebuild/replay
-            // progress without ever spawning a second daemon.
-            if let Some(status) = wait_for_existing_start(env, deadline, &mut observer).await? {
-                return Ok(StartReport {
-                    status,
-                    already_running: true,
-                });
-            }
-        }
-        LifecycleStatus::Failed { metadata, startup } => {
-            bail!(
-                "daemon startup failed{} during {}: {}",
-                metadata
-                    .pid
-                    .map(|pid| format!(" (pid {pid})"))
-                    .unwrap_or_default(),
-                startup.phase.as_str(),
-                startup
-                    .error
-                    .as_deref()
-                    .unwrap_or("unknown startup failure"),
-            )
-        }
-    }
-
-    let _start_lock = loop {
-        let lock_attempt = env.try_acquire_start_lock();
-        match lock_attempt {
-            Ok(lock) => break lock,
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                // Another `ryeos start` is in flight; let it converge.
+    let mut start_lock = Some(loop {
+        match env.try_acquire_start_lock()? {
+            Some(lock) => break lock,
+            None => {
+                // Never return success merely because another operation's
+                // daemon is live: supervised Up intent still needs this gate.
                 let status = crate::status::status(env).await?;
                 observe(&mut observer, &status);
-                if is_ready(&status) {
-                    return Ok(StartReport {
-                        status,
-                        already_running: true,
-                    });
-                }
-                if let Some(message) = startup_failure_message(&status) {
-                    bail!("{message}");
-                }
                 if Instant::now() >= deadline {
-                    bail!("timed out waiting for concurrent RyeOS daemon start");
+                    bail!("timed out waiting for the active node lifecycle operation");
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            Err(err) => return Err(err).context("acquire lifecycle start lock"),
         }
-    };
+    });
 
-    let ryeosd = resolve_ryeosd();
-    let (stderr_log_path, stderr_log_start, stderr_log) = open_startup_stderr_log(env)?;
-    let mut child = Command::new(&ryeosd)
-        .arg("--app-root")
-        .arg(&config.app_root)
-        .arg("--bind")
-        .arg(config.bind.to_string())
-        .arg("--uds-path")
-        .arg(&config.uds_path)
-        // The lifecycle controller has already resolved explicit start
-        // overrides against the stopped node's stored config. Preserve that
-        // same decision in the child; otherwise ryeosd reparses the stored
-        // file without the override authority and rejects the spawn.
-        .arg("--force")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_log))
-        .spawn()
-        .with_context(|| format!("spawn {}", ryeosd.display()))?;
+    // Configuration may have changed while this caller waited for the
+    // lifecycle lock. Reload it only after winning that lock; this snapshot is
+    // the sole basis for endpoint comparison, status and launch.
+    let locked_env =
+        LocalLifecycleEnv::from_config(crate::NodeConfig::load_local(Some(app_root.clone()))?);
+    // The caller's exact root selected both initialization and the lifecycle
+    // lease. A bootstrap document must never redirect this operation to a
+    // different root after that lease was acquired.
+    if locked_env.config().app_root != app_root {
+        bail!(
+            "node bootstrap configuration redirected lifecycle start from {} to {}",
+            app_root.display(),
+            locked_env.config().app_root.display()
+        );
+    }
+    start_lock
+        .as_ref()
+        .expect("lifecycle lock is retained until ownership is visible")
+        .ensure_protects_app_root(&locked_env.config().app_root)?;
+    let env = &locked_env;
+    let original_config = env.config();
+
+    // Resolve launch ownership only after acquiring the same lifecycle lock
+    // retained by host association publication. Otherwise a start that first
+    // observed no association could wait behind setup and then incorrectly
+    // launch directly after setup completed. Discovery/control errors remain
+    // terminal and never become permission to fall back to direct spawning.
+    let service = crate::supervision::InstalledService::discover(original_config)?;
+    if let Some(service) = &service {
+        service.check_start_allowed()?;
+    }
+
+    let mut initial = crate::status::status(env).await?;
+    observe(&mut observer, &initial);
+    let changes_endpoint = endpoints
+        .bind
+        .is_some_and(|bind| bind != original_config.bind)
+        || endpoints
+            .uds_path
+            .as_ref()
+            .is_some_and(|path| path != &original_config.uds_path);
+    let configured_env = if changes_endpoint {
+        if !matches!(
+            initial,
+            LifecycleStatus::Stopped { .. } | LifecycleStatus::Failed { .. }
+        ) {
+            bail!("stop the node before changing its configured endpoints");
+        }
+        if let Some(service) = &service {
+            // Failed supervised starts may still have Up intent or a process
+            // in its bounded diagnostics grace. Establish Down before waiting
+            // for the exact state authority used to publish the replacement.
+            service.request_down()?;
+        }
+        let config = crate::supervision::configure_host_endpoints_while_locked(
+            &app_root,
+            endpoints.bind,
+            endpoints.uds_path,
+            start_lock
+                .as_ref()
+                .expect("endpoint configuration precedes lifecycle-lock release"),
+        )?;
+        let configured = LocalLifecycleEnv::from_config(config);
+        initial = crate::status::status(&configured).await?;
+        observe(&mut observer, &initial);
+        Some(configured)
+    } else {
+        None
+    };
+    let env = configured_env.as_ref().unwrap_or(env);
+    let config = env.config();
+    // Retained failure is diagnostic history, not authority to prevent an
+    // explicit retry. Only a different failure observed after Up belongs to
+    // this start operation.
+    let initial_failure = startup_failure_key(&initial);
+    let initial_host_failure = match &service {
+        Some(service) => read_host_launch_failure_or_inhibit(service)?,
+        None => None,
+    };
+    if matches!(
+        initial,
+        LifecycleStatus::NotInitialized { .. } | LifecycleStatus::Unresponsive { .. }
+    ) {
+        bail!("node is uninitialized or its live control socket is unusable; refusing launch");
+    }
+    // Establish intent under the lifecycle gate even for an already-running
+    // daemon. A readiness observation must not bypass a concurrent stop's Down.
+    if let Some(service) = &service {
+        service.request_up()?;
+    }
+    let already_running = matches!(
+        initial,
+        LifecycleStatus::Running { .. } | LifecycleStatus::Starting { .. }
+    );
+    if is_ready(&initial) {
+        return Ok(StartReport {
+            status: initial,
+            already_running: true,
+        });
+    }
+    release_launch_lock_after_ownership(&mut start_lock, &initial);
+
+    // The same readiness loop serves native supervisors. Do not invent a
+    // per-manager ready protocol or interpret successful `up` as node readiness.
+    let mut direct = if service.is_some() || already_running {
+        None
+    } else {
+        let ryeosd = resolve_ryeosd();
+        let (stderr_log_path, stderr_log_start, stderr_log) = open_startup_stderr_log(env)?;
+        let child = Command::new(&ryeosd)
+            .arg("--app-root")
+            .arg(&config.app_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr_log))
+            .spawn()
+            .with_context(|| format!("spawn {}", ryeosd.display()))?;
+        Some((child, stderr_log_path, stderr_log_start))
+    };
 
     // Projection recovery can take minutes, but the lifecycle socket remains
     // live throughout. Publish each structured phase/counter snapshot to the
     // caller-owned observer.
     loop {
         let status = crate::status::status(env).await?;
+        release_launch_lock_after_ownership(&mut start_lock, &status);
         observe(&mut observer, &status);
         if is_ready(&status) {
             return Ok(StartReport {
                 status,
-                already_running: false,
+                already_running,
             });
         }
-        if let Some(message) = startup_failure_message(&status) {
+        if let Some(message) = startup_failure_message(&status)
+            && startup_failure_key(&status) != initial_failure
+        {
+            if let Some(service) = &service {
+                service
+                    .request_down()
+                    .context("inhibit supervisor after terminal startup failure")?;
+            }
+            if let Some((_, stderr_log_path, _)) = &direct {
+                bail!(
+                    "{message}\nstartup stderr log: {}",
+                    stderr_log_path.display()
+                );
+            }
+            bail!("{message}");
+        }
+        if let Some(service) = &service
+            && let Some(failure) = read_host_launch_failure_or_inhibit(service)?
+            && Some(&failure) != initial_host_failure.as_ref()
+        {
+            service
+                .request_down()
+                .context("inhibit supervisor after host-service launch failure")?;
             bail!(
-                "{message}\nstartup stderr log: {}",
-                stderr_log_path.display()
+                "host-service launch failed (pid {}) before node lifecycle control: {}",
+                failure.pid,
+                failure.error
             );
         }
 
-        if let Some(exit) = child.try_wait().context("poll spawned ryeosd")? {
+        if let Some((child, stderr_log_path, stderr_log_start)) = &mut direct
+            && let Some(exit) = child.try_wait().context("poll spawned ryeosd")?
+        {
             // One last re-probe: a concurrent starter may have won and
             // our child may have exited because the lock was held by a
             // sibling that became Running.
@@ -158,7 +251,7 @@ pub async fn start_with_progress(
             // Child is gone and no live daemon is visible. Surface the
             // failure immediately rather than wedging concurrent
             // starters behind the start lock until the deadline.
-            let stderr = read_startup_stderr_since(&stderr_log_path, stderr_log_start);
+            let stderr = read_startup_stderr_since(stderr_log_path, *stderr_log_start);
             if stderr.trim().is_empty() {
                 bail!(
                     "ryeosd exited before lifecycle readiness: {exit}\nstartup stderr log: {}",
@@ -186,41 +279,36 @@ pub async fn start_with_progress(
     }
 }
 
-/// Wait for a daemon which was already in Starting when this command began.
-/// `None` means it disappeared cleanly before readiness, so the caller may
-/// continue through the normal start-lock/spawn path.
-async fn wait_for_existing_start(
-    env: &LocalLifecycleEnv,
-    deadline: Instant,
-    observer: &mut Option<&mut dyn LifecycleProgressObserver>,
-) -> Result<Option<LifecycleStatus>> {
-    loop {
-        let status = crate::status::status(env).await?;
-        observe(observer, &status);
-        match &status {
-            LifecycleStatus::Running { .. } => return Ok(Some(status)),
-            LifecycleStatus::Failed { .. } => {
+fn read_host_launch_failure_or_inhibit(
+    service: &crate::supervision::InstalledService,
+) -> Result<Option<crate::supervision::HostLaunchFailure>> {
+    match service.launch_failure() {
+        Ok(failure) => Ok(failure),
+        Err(error) => {
+            if let Err(inhibit) = service.request_down() {
                 bail!(
-                    "{}",
-                    startup_failure_message(&status)
-                        .unwrap_or_else(|| "ryeosd startup failed".to_string())
-                )
+                    "host launch testimony is invalid: {error:#}; supervisor inhibition also failed: {inhibit:#}"
+                );
             }
-            LifecycleStatus::Starting { .. } => {}
-            LifecycleStatus::Unresponsive { .. } => {
-                // The process is still authoritative for this app root. Keep
-                // waiting; never turn a busy or incompatible control plane
-                // into a duplicate spawn.
-            }
-            LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => return Ok(None),
-            LifecycleStatus::NotInitialized { .. } => {
-                bail!("RyeOS became uninitialized while waiting for startup")
-            }
+            Err(error).context("host launch testimony is invalid; supervisor was inhibited")
         }
-        if Instant::now() >= deadline {
-            bail!("timed out waiting for existing RyeOS daemon lifecycle readiness");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Keep concurrent starters excluded only until process ownership is visible.
+/// Once Starting is authoritative, another starter joins it; retaining the lock
+/// through slow recovery would prevent stop --force from cancelling that boot.
+fn release_launch_lock_after_ownership(
+    lock: &mut Option<LifecycleStartLock>,
+    status: &LifecycleStatus,
+) {
+    if matches!(
+        status,
+        LifecycleStatus::Starting { .. }
+            | LifecycleStatus::Running { .. }
+            | LifecycleStatus::Unresponsive { .. }
+    ) {
+        drop(lock.take());
     }
 }
 
@@ -245,6 +333,17 @@ fn startup_failure_message(status: &LifecycleStatus) -> Option<String> {
             .error
             .as_deref()
             .unwrap_or("unknown startup failure"),
+    ))
+}
+
+fn startup_failure_key(status: &LifecycleStatus) -> Option<(Option<u32>, String, String)> {
+    let LifecycleStatus::Failed { metadata, startup } = status else {
+        return None;
+    };
+    Some((
+        metadata.pid,
+        startup.started_at.clone(),
+        startup.updated_at.clone(),
     ))
 }
 
@@ -290,14 +389,13 @@ fn read_startup_stderr_since(path: &Path, offset: u64) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// RAII guard for the lifecycle start lock.
-///
-/// Backed by an OS-level `flock(LOCK_EX | LOCK_NB)`. The lock is
-/// released by closing the file descriptor, so an abrupt process exit
-/// (crash, SIGKILL) cannot wedge subsequent starts the way a sentinel
-/// file would.
+/// RAII guard for the lifecycle operation lock. Lillux owns the pinned native
+/// descriptor and platform locking mechanics; RyeOS observes only acquisition
+/// or ordinary contention. Abrupt process exit releases the lease, so a crash
+/// cannot wedge a subsequent lifecycle operation through a sentinel file.
 pub struct LifecycleStartLock {
-    _file: File,
+    state_directory: lillux::PinnedDirectory,
+    _guard: lillux::PinnedDirectoryLock,
 }
 
 impl std::fmt::Debug for LifecycleStartLock {
@@ -307,45 +405,40 @@ impl std::fmt::Debug for LifecycleStartLock {
 }
 
 impl LifecycleStartLock {
-    pub fn try_acquire(app_root: &Path) -> io::Result<Self> {
-        let dir = app_root.join(ryeos_engine::AI_DIR).join("state");
-        fs::create_dir_all(&dir)?;
-        let path = dir.join("lifecycle-start.lock");
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
-        flock_exclusive_nb(&file)?;
-        // Record holder PID for diagnostics; ignore errors.
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            let _ = file.set_len(0);
-            let _ = writeln!(&file, "{}", std::process::id());
-        }
-        Ok(Self { _file: file })
+    pub fn try_acquire(app_root: &Path) -> Result<Option<Self>> {
+        let daemon_state = lillux::PinnedDirectory::open(app_root)?
+            .context("open lifecycle app root")?
+            .open_or_create_child(OsStr::new(ryeos_engine::AI_DIR), 0o700)?
+            .open_or_create_child(OsStr::new("state"), 0o700)?
+            .open_or_create_child(OsStr::new(ryeos_engine::roots::DAEMON_STATE_DIR), 0o700)?;
+        let root = daemon_state
+            .open_or_create_child(OsStr::new(ryeos_engine::roots::DAEMON_LIFECYCLE_DIR), 0o700)?;
+        let Some(guard) = root.try_lock_exclusive()? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            state_directory: root,
+            _guard: guard,
+        }))
     }
-}
 
-#[cfg(unix)]
-fn flock_exclusive_nb(file: &File) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let fd = file.as_raw_fd();
-    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if result == -1 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, err));
+    pub(crate) fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        self.state_directory.ensure_path_binding()?;
+        let expected =
+            ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).daemon_lifecycle();
+        if self.state_directory.path() != expected {
+            bail!("lifecycle lock belongs to another app root");
         }
-        return Err(err);
+        Ok(())
     }
-    Ok(())
-}
 
-#[cfg(not(unix))]
-fn flock_exclusive_nb(_file: &File) -> io::Result<()> {
-    Ok(())
+    /// During administrator host association, transfer the already-pinned
+    /// lifecycle-operation directory to the selected ordinary controller.
+    /// The host association itself remains administrator-owned; this is only
+    /// the per-node lock ordinary `start` and `stop` must later acquire.
+    pub(crate) fn grant_controller(&self, account: &lillux::ControllerAccount) -> Result<()> {
+        account.grant_private_directory(&self.state_directory)
+    }
 }
 
 fn resolve_ryeosd() -> PathBuf {
@@ -365,13 +458,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_observation_releases_launch_gate_before_ready_so_stop_can_enter() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lock = Some(
+            LifecycleStartLock::try_acquire(root.path())
+                .unwrap()
+                .expect("initial lifecycle lock is available"),
+        );
+        release_launch_lock_after_ownership(
+            &mut lock,
+            &LifecycleStatus::Stopped {
+                app_root: root.path().to_owned(),
+            },
+        );
+        assert!(
+            LifecycleStartLock::try_acquire(root.path())
+                .unwrap()
+                .is_none(),
+            "pre-marker launch must remain serialized"
+        );
+        let retained_failure = LifecycleStatus::Failed {
+            metadata: crate::DaemonMetadata {
+                pid: Some(41),
+                bind: None,
+                uds_path: None,
+                started_at: None,
+                version: None,
+                revision: None,
+                build_date: None,
+                app_root: root.path().to_owned(),
+            },
+            startup: crate::StartupSnapshot::failed_before_control(
+                "2026-09-10T00:00:00Z",
+                "2026-09-10T00:00:01Z",
+                "old failure",
+            ),
+        };
+        release_launch_lock_after_ownership(&mut lock, &retained_failure);
+        assert!(
+            LifecycleStartLock::try_acquire(root.path())
+                .unwrap()
+                .is_none(),
+            "retained failure must not release a new start operation's gate"
+        );
+        let starting = LifecycleStatus::Starting {
+            metadata: crate::DaemonMetadata {
+                pid: Some(42),
+                bind: None,
+                uds_path: None,
+                started_at: None,
+                version: None,
+                revision: None,
+                build_date: None,
+                app_root: root.path().to_owned(),
+            },
+            startup: crate::StartupSnapshot::bootstrapping("2026-09-10T00:00:00Z"),
+            control_available: true,
+        };
+        assert!(!is_ready(&starting));
+        release_launch_lock_after_ownership(&mut lock, &starting);
+        let _stop_lock = LifecycleStartLock::try_acquire(root.path())
+            .unwrap()
+            .expect("stop must not wait for startup readiness");
+        assert!(lock.is_none());
+    }
+
+    #[test]
     fn start_lock_is_exclusive_and_self_releasing() {
         let tmp = tempfile::tempdir().unwrap();
-        let first = LifecycleStartLock::try_acquire(tmp.path()).unwrap();
-        let err = LifecycleStartLock::try_acquire(tmp.path()).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        let first = LifecycleStartLock::try_acquire(tmp.path())
+            .unwrap()
+            .expect("first lifecycle lock is available");
+        assert!(
+            LifecycleStartLock::try_acquire(tmp.path())
+                .unwrap()
+                .is_none()
+        );
         drop(first);
         // Re-acquisition succeeds once dropped.
-        let _again = LifecycleStartLock::try_acquire(tmp.path()).unwrap();
+        let _again = LifecycleStartLock::try_acquire(tmp.path())
+            .unwrap()
+            .expect("released lifecycle lock is available");
+    }
+
+    #[test]
+    fn live_runtime_state_lock_does_not_block_lifecycle_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(
+            &ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf()).state(),
+        )
+        .unwrap();
+        let _runtime_lock = state.lock_exclusive().unwrap();
+        let _lifecycle = LifecycleStartLock::try_acquire(root.path())
+            .unwrap()
+            .expect("live runtime authority must not own the lifecycle-operation lock");
     }
 }

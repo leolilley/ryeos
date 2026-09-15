@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use lillux::local_ipc::AuthenticatedUnixPeer;
 
 use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -43,6 +42,7 @@ mod routing;
 #[cfg(feature = "crash-qualification-test-support")]
 mod runtime_phase_cut;
 mod transport;
+mod workload_client;
 
 #[cfg(test)]
 pub(crate) use routing::dispatch;
@@ -222,26 +222,6 @@ fn ready_lifecycle_response(state: &AppState) -> ryeos_node::LifecycleResponse {
     response
 }
 
-/// Kernel-authenticated identity of the process that opened this Unix stream.
-/// The pidfd, not the reusable numeric PID, remains authoritative for the
-/// connection lifetime.
-pub(crate) struct AuthenticatedUnixPeer {
-    pid: i64,
-    #[cfg(target_os = "linux")]
-    pidfd: OwnedFd,
-}
-
-impl AuthenticatedUnixPeer {
-    fn pid(&self) -> i64 {
-        self.pid
-    }
-
-    #[cfg(target_os = "linux")]
-    fn pidfd(&self) -> BorrowedFd<'_> {
-        self.pidfd.as_fd()
-    }
-}
-
 const MAX_UDS_CONNECTIONS: usize = 32;
 const MAX_UDS_IN_FLIGHT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
@@ -294,7 +274,18 @@ pub(crate) async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
-        None
+        let token = params
+            .get("callback_token")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("missing callback_token on {method}"))?;
+        // The handler repeats the stronger operation-specific validation. Keep
+        // the exact callback capability here as well so shared execution-tree
+        // deadline admission cannot be bypassed by the two-proof action path.
+        Some(
+            state
+                .callback_tokens
+                .validate_token_and_thread(token, thread_id)?,
+        )
     } else if matches!(
         method,
         "runtime.poll_input"
@@ -381,6 +372,11 @@ pub(crate) async fn dispatch_runtime_method(
             .assert_launch_owner(&cap.thread_id, owner)?;
     }
 
+    if let Some(cap) = callback_cap.as_ref() {
+        cap.runtime_method_surface.authorize(method)?;
+    }
+    enforce_aggregate_work_deadline(method, state, callback_cap.as_ref())?;
+
     enforce_runtime_callback_admission(method, params, state)?;
 
     // Strip transport-level fields before typed deserialization so
@@ -389,8 +385,13 @@ pub(crate) async fn dispatch_runtime_method(
     let clean_params = strip_transport_fields(params);
 
     match method {
-        "runtime.dispatch_action" => {
-            ryeos_executor::execution::runtime_dispatch::handle(params, state).await
+        ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD => {
+            // Launch preparation retains a large future. Keep it out of the
+            // inline dispatcher used by every callback, including small reads.
+            Box::pin(ryeos_executor::execution::runtime_dispatch::handle(
+                params, state,
+            ))
+            .await
         }
         "runtime.spawn_follow_child" => {
             Box::pin(ryeos_executor::execution::spawn_follow_child::handle(
@@ -461,6 +462,12 @@ pub(crate) async fn dispatch_runtime_method(
                 .ok_or_else(|| anyhow!("dedicated-session command requires callback authority"))?;
             dedicated_sessions::command(&clean_params, state, cap).await
         }
+        "runtime.dedicated_session_command_observation" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("dedicated-session command observation requires callback authority")
+            })?;
+            dedicated_sessions::command_observation(&clean_params, state, cap)
+        }
         "runtime.terminate_dedicated_session" => {
             let cap = callback_cap.as_ref().ok_or_else(|| {
                 anyhow!("dedicated-session termination requires callback authority")
@@ -490,7 +497,8 @@ pub(crate) async fn dispatch_runtime_method(
         }
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => {
-            let (result, prepared) = handle_request_continuation(&clean_params, state).await?;
+            let (result, prepared) =
+                Box::pin(handle_request_continuation(&clean_params, state)).await?;
             spawn_machine_continuation_launch(state, &result, prepared);
             Ok(result)
         }
@@ -595,6 +603,85 @@ pub(crate) async fn dispatch_runtime_method(
     }
 }
 
+fn enforce_aggregate_work_deadline(
+    method: &str,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<()> {
+    enforce_aggregate_work_deadline_at_ms(method, state, cap, lillux::time::timestamp_millis())
+}
+
+fn enforce_aggregate_work_deadline_at_ms(
+    method: &str,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    now_ms: i64,
+) -> Result<()> {
+    // Gate every callback that can begin/advance child work, provider work, or
+    // durable workload publication. Reads and lifecycle/accounting settlement
+    // remain available after expiry so the daemon can fail and clean up the
+    // already-admitted tree without stranding authority.
+    if !matches!(
+        method,
+        "runtime.dispatch_action"
+            | "runtime.spawn_follow_child"
+            | "runtime.append_event"
+            | "runtime.append_events"
+            | "runtime.bundle_events_append"
+            | "runtime.bundle_events_materialize_attachment"
+            | "runtime.vault_put"
+            | "runtime.author_item"
+            | "runtime.project_snapshot"
+            | "runtime.request_continuation"
+            | "runtime.publish_artifact"
+            | "runtime.publish_state_anchor"
+            | "runtime.publish_project_observation"
+            | "runtime.submit_command"
+            | "runtime.claim_commands"
+            | "runtime.poll_input"
+            | "runtime.provider_attempt_prepare"
+            | "runtime.provider_attempt_mark_issued"
+            | "runtime.provider_attempt_local_stream_start"
+            | "runtime.provider_attempt_local_stream_next"
+    ) {
+        return Ok(());
+    }
+    enforce_aggregate_deadline(state, cap, now_ms)
+}
+
+fn enforce_aggregate_deadline(
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    now_ms: i64,
+) -> Result<()> {
+    let Some(scope) = cap.and_then(|cap| cap.accounting_scope.as_ref()) else {
+        return Ok(());
+    };
+    let accounting = state
+        .accounting
+        .as_ref()
+        .ok_or_else(|| anyhow!("sealed accounting scope has no live accounting ledger"))?;
+    let budget = accounting
+        .execution_resource_budget_snapshot(&scope.execution_budget_id)?
+        .ok_or_else(|| anyhow!("sealed execution scope has no aggregate budget authority"))?;
+    if budget
+        .deadline_at_ms
+        .is_some_and(|deadline| now_ms >= deadline)
+    {
+        return Err(
+            ryeos_executor::dispatch_error::DispatchError::LaunchPreparationFailed {
+                code: "budget_exhausted".to_owned(),
+                message: "aggregate execution duration elapsed".to_owned(),
+                classification: "policy".to_owned(),
+                binding: None,
+                details: Box::new(std::collections::BTreeMap::new()),
+            }
+            .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Fence callback mutations once a durable stop (or daemon shutdown) has
 /// closed authoring. Cooperative cancellation retains only the narrow surface
 /// needed to settle already-issued commands and finalize.
@@ -631,7 +718,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
         method,
         "runtime.append_event"
             | "runtime.append_events"
-            | "runtime.dispatch_action"
+            | ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD
             | "runtime.spawn_follow_child"
             | "runtime.request_continuation"
             | "runtime.author_item"
@@ -685,6 +772,7 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.provider_attempt_local_stream_next"
             | "runtime.dedicated_session_status"
             | "runtime.wait_dedicated_session"
+            | "runtime.dedicated_session_command_observation"
     )
 }
 
@@ -695,7 +783,7 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
 fn is_thread_auth_method(method: &str) -> bool {
     matches!(
         method,
-        "runtime.dispatch_action" | "runtime.spawn_follow_child"
+        ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD | "runtime.spawn_follow_child"
     )
 }
 
@@ -756,7 +844,6 @@ fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<s
 #[serde(deny_unknown_fields)]
 struct RuntimeAttachProcessParams {
     thread_id: String,
-    pid: i64,
 }
 
 async fn handle_attach_process(
@@ -767,29 +854,19 @@ async fn handle_attach_process(
 ) -> Result<serde_json::Value> {
     let wire: RuntimeAttachProcessParams =
         serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
-    let peer = verify_attaching_peer_pid(wire.pid, peer)?;
-    // The runtime reports its own PID, which must match the accepted stream's
-    // kernel credential above. Derive and pin both the target and group leader
-    // daemon-side; never trust a runtime-supplied PGID or identity. The durable
-    // boot/start-time tuple is required for every later signal.
-    let process_identity = {
-        #[cfg(target_os = "linux")]
-        {
-            ryeos_app::process::capture_execution_process_identity_from_pidfd(
-                wire.pid,
-                None,
-                peer.pidfd(),
-            )
-            .context("capture runtime process identity from Unix peer pidfd")?
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            anyhow::bail!("runtime.attach_process requires Linux SO_PEERPIDFD support");
-        }
-    };
+    let peer = require_attaching_peer(peer)?;
+    // Peer PID is in the daemon's namespace; runtime-local PID 1 is not the
+    // host PID. The exact callback launch owner and existing immutable process
+    // attachment remain authoritative. Do not add a namespace translation,
+    // claimed PID, or runtime/kind-specific exception here.
+    let process_identity = ryeos_app::process::execution_process_identity_from_lillux(
+        peer.exact_process_identity(None)
+            .context("capture runtime process identity from authenticated Unix peer")?,
+        None,
+    )?;
     let params = ThreadAttachProcessParams {
         thread_id: wire.thread_id,
-        pid: wire.pid,
+        pid: peer.pid(),
         pgid: process_identity.pgid(),
         process_identity: Some(process_identity),
         metadata: None,
@@ -841,20 +918,10 @@ async fn handle_attach_process(
     serde_json::to_value(attached).context("failed to encode runtime.attach_process result")
 }
 
-fn verify_attaching_peer_pid(
-    reported_pid: i64,
-    peer: Option<&AuthenticatedUnixPeer>,
-) -> Result<&AuthenticatedUnixPeer> {
-    let peer = peer.ok_or_else(|| {
+fn require_attaching_peer(peer: Option<&AuthenticatedUnixPeer>) -> Result<&AuthenticatedUnixPeer> {
+    peer.ok_or_else(|| {
         anyhow!("runtime.attach_process requires a kernel-authenticated Unix peer pidfd")
-    })?;
-    let peer_pid = peer.pid();
-    if reported_pid != peer_pid {
-        anyhow::bail!(
-            "runtime.attach_process PID mismatch: reported {reported_pid}, Unix peer {peer_pid}"
-        );
-    }
-    Ok(peer)
+    })
 }
 
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
@@ -1023,16 +1090,30 @@ async fn handle_finalize(
             capability,
             &completion.status,
         )
-        .await?;
-    let result_project_snapshot_hash = pending_project_result
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                thread_id = %params.thread_id,
+                launch_owner,
+                item_ref = capability.item_ref.as_deref().unwrap_or(""),
+                effective_definition_digest = capability
+                    .effective_definition_digest
+                    .as_deref()
+                    .unwrap_or(""),
+                error = %format!("{error:#}"),
+                "failed to prepare managed runtime terminal project result"
+            );
+            error.context("prepare managed runtime terminal project result")
+        })?;
+    let result_generation = pending_project_result
         .as_ref()
-        .map(|pending| pending.snapshot_hash().to_string());
+        .map(|pending| pending.generation());
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,
         &completion,
         Some(managed_envelope),
-        result_project_snapshot_hash.as_deref(),
+        result_generation,
     )?;
     if let Some(pending) = pending_project_result {
         pending
@@ -1687,30 +1768,19 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn runtime_attach_requires_matching_unix_peer_pid() {
-        fn peer(pid: i64) -> AuthenticatedUnixPeer {
-            AuthenticatedUnixPeer {
-                pid,
-                #[cfg(target_os = "linux")]
-                pidfd: std::fs::File::open("/dev/null").unwrap().into(),
-            }
+    fn runtime_attach_has_no_caller_selected_process_identity() {
+        let request: RuntimeAttachProcessParams =
+            serde_json::from_value(json!({"thread_id":"T-runtime"})).unwrap();
+        assert_eq!(request.thread_id, "T-runtime");
+        for injected in [
+            json!({"thread_id":"T-runtime","pid":1}),
+            json!({"thread_id":"T-runtime","pgid":42}),
+            json!({"thread_id":"T-runtime","process_identity":{}}),
+        ] {
+            assert!(serde_json::from_value::<RuntimeAttachProcessParams>(injected).is_err());
         }
-
-        let matching = peer(42);
-        verify_attaching_peer_pid(42, Some(&matching)).unwrap();
-
-        let missing = verify_attaching_peer_pid(42, None)
-            .err()
-            .expect("missing authenticated Unix peer should be rejected");
+        let missing = require_attaching_peer(None).unwrap_err();
         assert!(format!("{missing:#}").contains("kernel-authenticated Unix peer pidfd"));
-
-        let other = peer(43);
-        let mismatched = verify_attaching_peer_pid(42, Some(&other))
-            .err()
-            .expect("mismatched authenticated Unix peer should be rejected");
-        let message = format!("{mismatched:#}");
-        assert!(message.contains("reported 42"), "got: {message}");
-        assert!(message.contains("Unix peer 43"), "got: {message}");
     }
 
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
@@ -1729,7 +1799,7 @@ mod tests {
                 access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
                 authorized_write_namespaces: vec!["project".to_string()],
                 confinement:
-                    ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                    ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
             },
             environment: ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
                 project_authority_id: authority_id,
@@ -1992,7 +2062,12 @@ mod tests {
             scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
             scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
             scheduler_reload_tx: None,
-            ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+            ignore_matcher: Arc::new(
+                ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
+                    patterns: Vec::new(),
+                })
+                .unwrap(),
+            ),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(
@@ -2988,6 +3063,7 @@ mod tests {
                 kind: "graph_run".into(),
                 item_ref: sealed.item_ref().to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
+                product_selections: Vec::new(),
                 launch_mode: "detached".into(),
                 parameters: json!({}),
                 project_context,
@@ -3012,6 +3088,7 @@ mod tests {
                     scopes: vec![],
                 }),
                 execution_hints: Default::default(),
+                scheduled_fire: None,
                 effective_caps: vec![],
                 parent_delegation_caps: None,
                 executor_ref: Some(sealed.executor_ref().to_string()),
@@ -3081,6 +3158,7 @@ mod tests {
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(
             item_ref,
             &std::collections::BTreeMap::new(),
+            &Vec::new(),
             &json!(null),
             None,
         )
@@ -3124,6 +3202,7 @@ mod tests {
                 kind: "graph_run".to_string(),
                 item_ref: sealed.item_ref().to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
+                product_selections: Vec::new(),
                 launch_mode: "detached".to_string(),
                 parameters: json!({}),
                 project_context: ProjectContext::None,
@@ -3142,6 +3221,7 @@ mod tests {
                     scopes: Vec::new(),
                 }),
                 execution_hints: Default::default(),
+                scheduled_fire: None,
                 effective_caps: Vec::new(),
                 parent_delegation_caps: Some(Vec::new()),
                 executor_ref: Some(sealed.executor_ref().to_string()),
@@ -3349,6 +3429,7 @@ mod tests {
                 pgid: 424242,
                 process_identity: Some(ryeos_app::process::ExecutionProcessIdentity {
                     schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    process_scope: None,
                     boot_id: "test-boot".to_string(),
                     target_pid: 424242,
                     target_start_time_ticks: 10,
@@ -3516,6 +3597,7 @@ mod tests {
                     final_cost: None,
                     managed_envelope: None,
                     result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
                 },
             )
             .unwrap();
@@ -5296,6 +5378,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_callback_method_surface_is_enforced_before_runtime_routing() {
+        let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-method-surface");
+        let cbt = generate_test_callback(
+            &state,
+            "T-method-surface",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["*".to_string()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        assert!(
+            state
+                .callback_tokens
+                .restrict_runtime_methods(
+                    &cbt.token,
+                    ryeos_app::callback_token::CallbackRuntimeMethodSurface::exact(vec![
+                        ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD.to_owned(),
+                    ])
+                    .unwrap(),
+                )
+                .unwrap()
+        );
+
+        let response = dispatch(
+            rpc(
+                "runtime.vault_get",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-method-surface",
+                }),
+            ),
+            &state,
+        )
+        .await;
+        let error = rpc_err(&response);
+        assert!(
+            error
+                .message
+                .contains("does not authorize runtime method `runtime.vault_get`")
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_workload_callback_inherits_deadline_without_widening_settlement_authority() {
+        let (tmp, mut state) = setup_app_state();
+        let thread_id = "T-workload-budget";
+        create_running_test_thread(&state, thread_id);
+        let ledger = Arc::new(
+            ryeos_app::accounting_db::AccountingDb::open_default(
+                &tmp.path().join("workload-budget"),
+            )
+            .unwrap(),
+        );
+        let execution_budget_id = "execution-workload-budget";
+        ledger
+            .create_execution_account_prepared(execution_budget_id, thread_id, None)
+            .unwrap();
+        let budget = ledger
+            .ensure_execution_resource_budget(
+                execution_budget_id,
+                &ryeos_engine::launch_envelope_types::AggregateExecutionLimits {
+                    duration_seconds: 60,
+                    worker_executions: 1,
+                    provider_contacts: 1,
+                },
+            )
+            .unwrap();
+        let deadline_at_ms = budget.deadline_at_ms.unwrap();
+        state.accounting = Some(Arc::clone(&ledger));
+        let root = generate_test_callback(
+            &state,
+            thread_id,
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["*".to_owned()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        let (budget_authority_site_id, ledger_epoch) = ledger.site_identity();
+        assert!(state.callback_tokens.set_accounting_scope(
+            &root.token,
+            ryeos_state::objects::AdmittedAccountingScope {
+                budget_authority_site_id,
+                ledger_epoch,
+                execution_budget_id: execution_budget_id.to_owned(),
+                directive_budget_id: None,
+            },
+        ));
+        let root = state
+            .callback_tokens
+            .validate_token_only(&root.token)
+            .unwrap();
+        let workload = generate_test_callback(
+            &state,
+            thread_id,
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.fixture".to_owned()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        assert!(
+            state
+                .callback_tokens
+                .set_accounting_scope(&workload.token, root.accounting_scope.clone().unwrap(),)
+        );
+        assert!(
+            state
+                .callback_tokens
+                .restrict_runtime_methods(
+                    &workload.token,
+                    ryeos_app::callback_token::CallbackRuntimeMethodSurface::exact(vec![
+                        ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD.to_owned(),
+                    ])
+                    .unwrap(),
+                )
+                .unwrap()
+        );
+        let workload = state
+            .callback_tokens
+            .validate_token_only(&workload.token)
+            .unwrap();
+        assert_eq!(workload.accounting_scope, root.accounting_scope);
+        enforce_aggregate_work_deadline_at_ms(
+            ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD,
+            &state,
+            Some(&workload),
+            deadline_at_ms - 1,
+        )
+        .unwrap();
+        let error = enforce_aggregate_work_deadline_at_ms(
+            ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD,
+            &state,
+            Some(&workload),
+            deadline_at_ms,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+            Some(ryeos_executor::dispatch_error::DispatchError::LaunchPreparationFailed {
+                code, ..
+            }) if code == "budget_exhausted"
+        ));
+        for method in [
+            "runtime.finalize_thread",
+            "runtime.complete_command",
+            "runtime.provider_attempt_settle",
+            "runtime.provider_attempt_release_unissued",
+            "runtime.provider_attempt_local_stream_control",
+            "runtime.get_thread",
+        ] {
+            enforce_aggregate_work_deadline_at_ms(method, &state, Some(&root), deadline_at_ms)
+                .unwrap();
+            assert!(workload.runtime_method_surface.authorize(method).is_err());
+        }
+        assert_eq!(
+            ledger
+                .execution_resource_budget_snapshot(execution_budget_id)
+                .unwrap(),
+            Some(budget),
+        );
+
+        // The internal entry point requires no kernel peer for dispatch, but
+        // cannot bypass a missing inherited ledger to reach child decoding.
+        let tat = state
+            .thread_auth
+            .mint(
+                thread_id,
+                "user:test".to_owned(),
+                workload.effective_caps.clone(),
+                None,
+                state.threads.site_id(),
+                state.threads.site_id(),
+                std::time::Duration::from_secs(300),
+            )
+            .unwrap();
+        state.accounting = None;
+        let error = dispatch_runtime_method(
+            ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD,
+            &json!({
+                "callback_token": workload.token,
+                "thread_id": thread_id,
+                "thread_auth_token": tat.token,
+                "action": {},
+            }),
+            &state,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("no live accounting ledger"));
+    }
+
+    #[tokio::test]
     async fn dispatch_action_with_correct_token_uses_server_side_principal() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-tat-ok");
@@ -5497,6 +5775,109 @@ mod tests {
                 "wildcard caps must pass UDS cap enforcement; downstream errors are fine: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_dispatch_future_has_bounded_inline_size() {
+        let (_tmp, state) = setup_app_state();
+        let params = json!({});
+        let dispatch = dispatch_runtime_method(
+            "runtime.dedicated_session_command_observation",
+            &params,
+            &state,
+            None,
+        );
+        let inline_bytes = std::mem::size_of_val(&dispatch);
+        assert!(
+            inline_bytes <= 64 * 1024,
+            "runtime dispatcher retains {inline_bytes} inline bytes for every method"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_session_command_observation_requires_exact_root_and_command_cap() {
+        let (_tmp, state) = setup_app_state();
+        for thread_id in ["T-observation", "T-other", "T-no-command-cap"] {
+            create_running_test_thread(&state, thread_id);
+        }
+        let allowed = generate_test_callback(
+            &state,
+            "T-observation",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.runtime.dedicated_session.command".to_string()],
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+
+        let same_root = dispatch(
+            rpc(
+                "runtime.dedicated_session_command_observation",
+                json!({
+                    "callback_token":allowed.token.clone(),
+                    "thread_id":"T-observation",
+                    "command_sequence":1,
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&same_root)
+                .message
+                .contains("dedicated session is not admitted"),
+            "the exact authorized root must reach the durable projection lookup: {:?}",
+            same_root.error
+        );
+
+        let other_root = dispatch(
+            rpc(
+                "runtime.dedicated_session_command_observation",
+                json!({
+                    "callback_token":allowed.token,
+                    "thread_id":"T-other",
+                    "command_sequence":1,
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&other_root)
+                .message
+                .contains("does not match thread_id"),
+            "a callback token must not inspect another root: {:?}",
+            other_root.error
+        );
+
+        let denied = generate_test_callback(
+            &state,
+            "T-no-command-cap",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/p"),
+            "0".repeat(64),
+        );
+        let no_cap = dispatch(
+            rpc(
+                "runtime.dedicated_session_command_observation",
+                json!({
+                    "callback_token":denied.token,
+                    "thread_id":"T-no-command-cap",
+                    "command_sequence":1,
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&no_cap)
+                .message
+                .contains("ryeos.runtime.dedicated_session.command"),
+            "command observation must require admitted command authority: {:?}",
+            no_cap.error
+        );
     }
 
     // ── facets (via runtime.* token-gated) ─────────────────────────

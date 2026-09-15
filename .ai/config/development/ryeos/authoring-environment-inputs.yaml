@@ -1,0 +1,935 @@
+# ryeos:signed:2026-09-08T10:36:33Z:3a4bc5951073b05bafa38eb3ba3a88f11987bd12c4c0cffd510cba441e89aa70:SEI0xVzIOwZdi/KxS3MtAybFx1ObpDgoLJTSjjcxb9Wa0z3ierWePEbBpdw4nt25XJ+4JGfnoijOAj0XhpoQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "built_utility_files": {
+    "environment/bin/awk": "bin/awk",
+    "environment/bin/basename": "bin/basename",
+    "environment/bin/cat": "bin/cat",
+    "environment/bin/chmod": "bin/chmod",
+    "environment/bin/cmp": "bin/cmp",
+    "environment/bin/cp": "bin/cp",
+    "environment/bin/cut": "bin/cut",
+    "environment/bin/date": "bin/date",
+    "environment/bin/diff": "bin/diff",
+    "environment/bin/dirname": "bin/dirname",
+    "environment/bin/env": "bin/env",
+    "environment/bin/find": "bin/find",
+    "environment/bin/git": "bin/git",
+    "environment/bin/grep": "bin/grep",
+    "environment/bin/head": "bin/head",
+    "environment/bin/ln": "bin/ln",
+    "environment/bin/ls": "bin/ls",
+    "environment/bin/mkdir": "bin/mkdir",
+    "environment/bin/mktemp": "bin/mktemp",
+    "environment/bin/mv": "bin/mv",
+    "environment/bin/patch": "bin/patch",
+    "environment/bin/printf": "bin/printf",
+    "environment/bin/pwd": "bin/pwd",
+    "environment/bin/readlink": "bin/readlink",
+    "environment/bin/realpath": "bin/realpath",
+    "environment/bin/rm": "bin/rm",
+    "environment/bin/rmdir": "bin/rmdir",
+    "environment/bin/sed": "bin/sed",
+    "environment/bin/sha256sum": "bin/sha256sum",
+    "environment/bin/sleep": "bin/sleep",
+    "environment/bin/sort": "bin/sort",
+    "environment/bin/stat": "bin/stat",
+    "environment/bin/tail": "bin/tail",
+    "environment/bin/tee": "bin/tee",
+    "environment/bin/test": "bin/test",
+    "environment/bin/timeout": "bin/timeout",
+    "environment/bin/touch": "bin/touch",
+    "environment/bin/tr": "bin/tr",
+    "environment/bin/uniq": "bin/uniq",
+    "environment/bin/wc": "bin/wc",
+    "environment/bin/xargs": "bin/xargs"
+  },
+  "category": "development/ryeos",
+  "files": {
+    "corresponding-sources/glibc_2.41-12+deb13u3.debian.tar.xz": "sources/glibc_2.41-12+deb13u3.debian.tar.xz",
+    "corresponding-sources/glibc_2.41-12+deb13u3.dsc": "sources/glibc_2.41-12+deb13u3.dsc",
+    "corresponding-sources/glibc_2.41.orig.tar.xz": "sources/glibc_2.41.orig.tar.xz",
+    "corresponding-sources/ncurses_6.5+20250216-2.debian.tar.xz": "sources/ncurses_6.5+20250216-2.debian.tar.xz",
+    "corresponding-sources/ncurses_6.5+20250216-2.dsc": "sources/ncurses_6.5+20250216-2.dsc",
+    "corresponding-sources/ncurses_6.5+20250216.orig.tar.gz": "sources/ncurses_6.5+20250216.orig.tar.gz",
+    "corresponding-sources/ncurses_6.5+20250216.orig.tar.gz.asc": "sources/ncurses_6.5+20250216.orig.tar.gz.asc",
+    "corresponding-sources/pcre2-source.tar.gz": "sources/pcre2-source.tar.gz",
+    "corresponding-sources/ripgrep-source.tar.gz": "sources/ripgrep-source.tar.gz",
+    "corresponding-sources/ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz": "sources/ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz",
+    "corresponding-sources/zsh-exec-wrapper.patch": "sources/zsh-exec-wrapper.patch",
+    "corresponding-sources/zsh-source.tar.gz": "sources/zsh-source.tar.gz",
+    "environment/bin/rg": "utilities/bin/rg",
+    "environment/bin/zsh": "utilities/bin/zsh",
+    "environment/lib/ld-linux-x86-64.so.2": "elf/lib/ld-linux-x86-64.so.2",
+    "environment/lib/libc.so.6": "elf/lib/libc.so.6",
+    "environment/lib/libdl.so.2": "elf/lib/libdl.so.2",
+    "environment/lib/libm.so.6": "elf/lib/libm.so.6",
+    "environment/lib/libpthread.so.0": "elf/lib/libpthread.so.0",
+    "environment/lib/librt.so.1": "elf/lib/librt.so.1",
+    "environment/lib/libtinfo.so.6": "elf/lib/libtinfo.so.6",
+    "environment/lib/libutil.so.1": "elf/lib/libutil.so.1",
+    "environment/licenses/GPL-2": "notices/GPL-2",
+    "environment/licenses/GPL-3": "notices/GPL-3",
+    "environment/licenses/LGPL-2.1": "notices/LGPL-2.1",
+    "environment/licenses/OpenAI-LICENSE": "notices/OpenAI-LICENSE",
+    "environment/licenses/OpenAI-NOTICE": "notices/OpenAI-NOTICE",
+    "environment/licenses/binutils-COPYRIGHT": "notices/binutils-COPYRIGHT",
+    "environment/licenses/coreutils/AUTHORS": "utilities/licenses/coreutils/AUTHORS",
+    "environment/licenses/coreutils/COPYING": "utilities/licenses/coreutils/COPYING",
+    "environment/licenses/diffutils/AUTHORS": "utilities/licenses/diffutils/AUTHORS",
+    "environment/licenses/diffutils/COPYING": "utilities/licenses/diffutils/COPYING",
+    "environment/licenses/findutils/AUTHORS": "utilities/licenses/findutils/AUTHORS",
+    "environment/licenses/findutils/COPYING": "utilities/licenses/findutils/COPYING",
+    "environment/licenses/gawk/AUTHORS": "utilities/licenses/gawk/AUTHORS",
+    "environment/licenses/gawk/COPYING": "utilities/licenses/gawk/COPYING",
+    "environment/licenses/gawk/missing_d/COPYING.LIB": "utilities/licenses/gawk/missing_d/COPYING.LIB",
+    "environment/licenses/gcc-COPYRIGHT": "notices/gcc-COPYRIGHT",
+    "environment/licenses/git/COPYING": "utilities/licenses/git/COPYING",
+    "environment/licenses/git/compat/regex/regex.c": "utilities/licenses/git/compat/regex/regex.c",
+    "environment/licenses/git/reftable/LICENSE": "utilities/licenses/git/reftable/LICENSE",
+    "environment/licenses/git/sha1dc/LICENSE.txt": "utilities/licenses/git/sha1dc/LICENSE.txt",
+    "environment/licenses/glibc-COPYRIGHT": "notices/glibc-COPYRIGHT",
+    "environment/licenses/grep/AUTHORS": "utilities/licenses/grep/AUTHORS",
+    "environment/licenses/grep/COPYING": "utilities/licenses/grep/COPYING",
+    "environment/licenses/ncurses-COPYRIGHT": "notices/ncurses-COPYRIGHT",
+    "environment/licenses/patch/AUTHORS": "utilities/licenses/patch/AUTHORS",
+    "environment/licenses/patch/COPYING": "utilities/licenses/patch/COPYING",
+    "environment/licenses/patchelf-COPYRIGHT": "notices/patchelf-COPYRIGHT",
+    "environment/licenses/pcre2-COPYING": "notices/pcre2-COPYING",
+    "environment/licenses/pcre2-LICENCE.md": "notices/pcre2-LICENCE.md",
+    "environment/licenses/ripgrep-COPYING": "notices/ripgrep-COPYING",
+    "environment/licenses/ripgrep-LICENSE-MIT": "notices/ripgrep-LICENSE-MIT",
+    "environment/licenses/ripgrep-UNLICENSE": "notices/ripgrep-UNLICENSE",
+    "environment/licenses/sed/AUTHORS": "utilities/licenses/sed/AUTHORS",
+    "environment/licenses/sed/COPYING": "utilities/licenses/sed/COPYING",
+    "environment/licenses/zig/LICENSE": "utilities/licenses/zig/LICENSE",
+    "environment/licenses/zig/lib/libc/musl/COPYRIGHT": "utilities/licenses/zig/lib/libc/musl/COPYRIGHT",
+    "environment/licenses/zlib-COPYRIGHT": "notices/zlib-COPYRIGHT",
+    "environment/licenses/zlib/LICENSE": "utilities/licenses/zlib/LICENSE",
+    "environment/licenses/zsh-LICENCE": "notices/zsh-LICENCE",
+    "environment/licenses/zstd-COPYRIGHT": "notices/zstd-COPYRIGHT"
+  },
+  "inputs": {
+    "elf/bin/patchelf": {
+      "bytes": 264464,
+      "mode": 493,
+      "sha256": "db7d1d1be4a257c75a5bae14e68c2bc825a3be3d2bc13a405436bc56272cfc37"
+    },
+    "elf/bin/readelf": {
+      "bytes": 777864,
+      "mode": 493,
+      "sha256": "4a387d80a70e6e97ef940a666fab59d5c38e7cf19ff907192fa983cb8505a7de"
+    },
+    "elf/lib/ld-linux-x86-64.so.2": {
+      "bytes": 225672,
+      "mode": 493,
+      "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+    },
+    "elf/lib/libc.so.6": {
+      "bytes": 1995216,
+      "mode": 420,
+      "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+    },
+    "elf/lib/libdl.so.2": {
+      "bytes": 14408,
+      "mode": 420,
+      "sha256": "295fa521a03cd2faa99974f378c9e23dd622021ec7d32bcad4f8ea61aec8a872"
+    },
+    "elf/lib/libctf-nobfd.so.0": {
+      "bytes": 215992,
+      "mode": 420,
+      "sha256": "69e10bcecd3c354805887f5d848c5dc8e15f36fc6e36b91de62063c12db3bf7b"
+    },
+    "elf/lib/libgcc_s.so.1": {
+      "bytes": 182856,
+      "mode": 420,
+      "sha256": "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af"
+    },
+    "elf/lib/libm.so.6": {
+      "bytes": 977112,
+      "mode": 420,
+      "sha256": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3"
+    },
+    "elf/lib/libpthread.so.0": {
+      "bytes": 14408,
+      "mode": 420,
+      "sha256": "85e21f7dba0394411d00959176fd18b470e575b0b05f1f4f41e5636802ce0500"
+    },
+    "elf/lib/librt.so.1": {
+      "bytes": 14552,
+      "mode": 420,
+      "sha256": "7b7b84d1aedda0e0b2bdfc68844362782132180b8f02be1300e21e77572e514b"
+    },
+    "elf/lib/libsframe.so.1": {
+      "bytes": 30976,
+      "mode": 420,
+      "sha256": "adb0b9a33909e7264ad724e138eb97995832e535b22b192c1a898c349c918a9f"
+    },
+    "elf/lib/libstdc++.so.6": {
+      "bytes": 2497768,
+      "mode": 420,
+      "sha256": "972bb2a18b71140dab0240f8a1f68ab3fb1d56bcd4c4f824a91b70888faf5a00"
+    },
+    "elf/lib/libtinfo.so.6": {
+      "bytes": 220464,
+      "mode": 420,
+      "sha256": "4013e7651ac68f547d8333517def25b2366c97eec7de7f06e105dbf3444ffebf"
+    },
+    "elf/lib/libutil.so.1": {
+      "bytes": 14408,
+      "mode": 420,
+      "sha256": "e3981d10efd152a53f083e38f5f9ddde7a049c85d0ab388a5eec91b52fc98a11"
+    },
+    "elf/lib/libz.so.1": {
+      "bytes": 125376,
+      "mode": 420,
+      "sha256": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e"
+    },
+    "elf/lib/libzstd.so.1": {
+      "bytes": 825336,
+      "mode": 420,
+      "sha256": "27f07c9a49c2c956bcfb64cd4712976586a66facbf15fc7f09bc37413b5f2b21"
+    },
+    "notices/GPL-2": {
+      "bytes": 17984,
+      "mode": 420,
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
+    },
+    "notices/GPL-3": {
+      "bytes": 35149,
+      "mode": 420,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "notices/LGPL-2.1": {
+      "bytes": 26419,
+      "mode": 420,
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+    },
+    "notices/OpenAI-LICENSE": {
+      "bytes": 10926,
+      "mode": 420,
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+    },
+    "notices/OpenAI-NOTICE": {
+      "bytes": 242,
+      "mode": 420,
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+    },
+    "notices/binutils-COPYRIGHT": {
+      "bytes": 1795,
+      "mode": 420,
+      "sha256": "20a9818b14f941467bcc0f459a1b1951e3bfecc1cc259e5004f8b9a80d7dc804"
+    },
+    "notices/gcc-COPYRIGHT": {
+      "bytes": 69004,
+      "mode": 420,
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+    },
+    "notices/glibc-COPYRIGHT": {
+      "bytes": 51200,
+      "mode": 420,
+      "sha256": "f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d"
+    },
+    "notices/ncurses-COPYRIGHT": {
+      "bytes": 4670,
+      "mode": 420,
+      "sha256": "f838d6048fbc59356b7e56c207a7cb32dc6bf4adea95514a002596bde8f6e1e7"
+    },
+    "notices/patchelf-COPYRIGHT": {
+      "bytes": 2073,
+      "mode": 420,
+      "sha256": "00979eb2f76d2d409fd78177da82c565a055e044cfb437ac3e14577f68eae7d5"
+    },
+    "notices/pcre2-COPYING": {
+      "bytes": 97,
+      "mode": 420,
+      "sha256": "99272c55f3dcfa07a8a7e15a5c1a33096e4727de74241d65fa049fccfdd59507"
+    },
+    "notices/pcre2-LICENCE.md": {
+      "bytes": 3867,
+      "mode": 420,
+      "sha256": "9cf7ac6976099a1d856826d3ef1b093bd6b84489dc6100628ac79e740cf9885a"
+    },
+    "notices/ripgrep-COPYING": {
+      "bytes": 126,
+      "mode": 420,
+      "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    "notices/ripgrep-LICENSE-MIT": {
+      "bytes": 1081,
+      "mode": 420,
+      "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    "notices/ripgrep-UNLICENSE": {
+      "bytes": 1211,
+      "mode": 420,
+      "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    },
+    "notices/zlib-COPYRIGHT": {
+      "bytes": 2927,
+      "mode": 420,
+      "sha256": "9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6"
+    },
+    "notices/zsh-LICENCE": {
+      "bytes": 1963,
+      "mode": 420,
+      "sha256": "d06fdf3ef9b1ec69d6b9e170b0a9516fbad3523261ff1668bde3bfea6e0ef5f5"
+    },
+    "notices/zstd-COPYRIGHT": {
+      "bytes": 5332,
+      "mode": 420,
+      "sha256": "5cec9fef4d3fa7e0371fbef4ec3fc416e0105dc2a9922117f84e825cb11f50f8"
+    },
+    "sources/glibc_2.41-12+deb13u3.debian.tar.xz": {
+      "bytes": 494644,
+      "mode": 420,
+      "sha256": "de7d715bf7e559b78baebac4115122641842f65faf0a5080a55954877a55cebe"
+    },
+    "sources/glibc_2.41-12+deb13u3.dsc": {
+      "bytes": 7576,
+      "mode": 420,
+      "sha256": "aa1ab10010fcf169454a5c6a123094a3997392922593d86a3a5adc180a07ca40"
+    },
+    "sources/glibc_2.41.orig.tar.xz": {
+      "bytes": 20323540,
+      "mode": 420,
+      "sha256": "f24aa441021121a79266f0d75242706cab8843a47901fefe74527491807f1998"
+    },
+    "sources/ncurses_6.5+20250216-2.debian.tar.xz": {
+      "bytes": 50420,
+      "mode": 420,
+      "sha256": "546930a8992ae3325d8c38378f290265d969cf6333cfae9648ac6d69e1e8a8a6"
+    },
+    "sources/ncurses_6.5+20250216-2.dsc": {
+      "bytes": 3890,
+      "mode": 420,
+      "sha256": "00539cc2bc6bb84be1b8a8a5decf606682e14b6f39b76b9aa090e65d2c2d4580"
+    },
+    "sources/ncurses_6.5+20250216.orig.tar.gz": {
+      "bytes": 3774714,
+      "mode": 420,
+      "sha256": "b37baafa436e7133bb12a185cb8f60e1599b1947e9f0181c76f3190acf28b6eb"
+    },
+    "sources/ncurses_6.5+20250216.orig.tar.gz.asc": {
+      "bytes": 729,
+      "mode": 420,
+      "sha256": "64f4d17923322176c44079f18f170e2164a59d551d7e4e9c1a6e4eebedc5dd6f"
+    },
+    "sources/pcre2-source.tar.gz": {
+      "bytes": 3270397,
+      "mode": 420,
+      "sha256": "59a20ebc6f848f77cea0cb745a4f269b9f415bd088372b4e1b802edce6ba4e55"
+    },
+    "sources/ripgrep-source.tar.gz": {
+      "bytes": 607432,
+      "mode": 420,
+      "sha256": "af40d0f4cb7a55994906c009a7ba865047f0d487c95bceb8db59ffc4f2173d20"
+    },
+    "sources/ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz": {
+      "bytes": 82623880,
+      "mode": 420,
+      "sha256": "24e7f72bbd9b026bcbe4d188946702054b24e4062184e103d63baa1a5379f0e2"
+    },
+    "sources/zsh-exec-wrapper.patch": {
+      "bytes": 998,
+      "mode": 420,
+      "sha256": "696b7d923b8071554d00e811afb9a08fcad4baada796f7314d12ecd72d06152c"
+    },
+    "sources/zsh-source.tar.gz": {
+      "bytes": 4118906,
+      "mode": 420,
+      "sha256": "4dbbd45e64b4afa03d7cb363c2b1583619187f3d1508707fc532e4a77d5e6597"
+    },
+    "utilities/bin/awk": {
+      "bytes": 1096904,
+      "mode": 493,
+      "sha256": "366146635037ac539adece4bcfebd078e7614478738da7778b7d89a34c7d07f1"
+    },
+    "utilities/bin/basename": {
+      "bytes": 63976,
+      "mode": 493,
+      "sha256": "9fec9cd415f92c83532a4e587b3b2e55dee2c1a8501cc034800c16a4a159e677"
+    },
+    "utilities/bin/cat": {
+      "bytes": 72120,
+      "mode": 493,
+      "sha256": "665bd6a219f2ad3238f05eb785a6a9ae93b44395289f6fb951d8a3bef0631eb4"
+    },
+    "utilities/bin/chmod": {
+      "bytes": 89824,
+      "mode": 493,
+      "sha256": "884527e85b1668a1a50485e6473bbfe9b21264b232cf38e04069ced9f4df31f4"
+    },
+    "utilities/bin/cmp": {
+      "bytes": 78112,
+      "mode": 493,
+      "sha256": "cc46988c66d87501001c477e7954b9a662bf71c4428ea23550d7fbd0217a40cf"
+    },
+    "utilities/bin/cp": {
+      "bytes": 133016,
+      "mode": 493,
+      "sha256": "c931d8016bf9001f53628a5a059c5dd42b3849d44292a561cb552380d7cd5373"
+    },
+    "utilities/bin/cut": {
+      "bytes": 84120,
+      "mode": 493,
+      "sha256": "d9782a80f1e23bcbb1ea5627c4b7ac530995191bb805488e0797e75d474fe8f9"
+    },
+    "utilities/bin/date": {
+      "bytes": 129656,
+      "mode": 493,
+      "sha256": "1716b16dd31ec56f1d333bfaedb31edf861c2eb390865eda41f4643f62dba768"
+    },
+    "utilities/bin/diff": {
+      "bytes": 275848,
+      "mode": 493,
+      "sha256": "8a0b0dbaef03c908156dbd8a0abb5115e605d617c57d8a139c3ef141e0d5e4bf"
+    },
+    "utilities/bin/dirname": {
+      "bytes": 63352,
+      "mode": 493,
+      "sha256": "e18706f8a1ddc7ecfc60e633c96355de569f05778908ce64c31b03c0d0e8df00"
+    },
+    "utilities/bin/env": {
+      "bytes": 78536,
+      "mode": 493,
+      "sha256": "a09eccdd1bca01ec0b64f184a3e29713c49c381d06f9fea7b32fdea8532d77e2"
+    },
+    "utilities/bin/find": {
+      "bytes": 414040,
+      "mode": 493,
+      "sha256": "99a0f07c4ab2543cd8fb843c9d70fe041c33d13162af99f1af1b89f5c8ed8f54"
+    },
+    "utilities/bin/git": {
+      "bytes": 3513992,
+      "mode": 493,
+      "sha256": "2b5aa13a87073fc64037d16cbf9de206926dd96a75d38150d2405eb0c66628ba"
+    },
+    "utilities/bin/grep": {
+      "bytes": 293344,
+      "mode": 493,
+      "sha256": "1f2eeb9c8fb01ba023ac7d48f34c4bfa11fd40184a6a41da498a3ef6191a181f"
+    },
+    "utilities/bin/head": {
+      "bytes": 86880,
+      "mode": 493,
+      "sha256": "b1ebec5b002909b020f2dfdbe0b47fdb85037ef0efa7aec69ac23adc2747225b"
+    },
+    "utilities/bin/ln": {
+      "bytes": 94744,
+      "mode": 493,
+      "sha256": "88047d7771842e8032843b533c7e4a2c01a221f12c7c7fe57769c404c28da49b"
+    },
+    "utilities/bin/ls": {
+      "bytes": 214104,
+      "mode": 493,
+      "sha256": "2817202f9db6a5c8eb86d610ddc2968315303f64b532684a7d9dab58b57eb088"
+    },
+    "utilities/bin/mkdir": {
+      "bytes": 73536,
+      "mode": 493,
+      "sha256": "5807f01c26cc148354c7f7e1b348183d5c6266e607dc5de907c879b50ada0718"
+    },
+    "utilities/bin/mktemp": {
+      "bytes": 68664,
+      "mode": 493,
+      "sha256": "57b79c895b1add788e161bc915b50291b9cbc39d2861e0c3181eafe19008dd44"
+    },
+    "utilities/bin/mv": {
+      "bytes": 139776,
+      "mode": 493,
+      "sha256": "6954f2796abebb310b66082e0d61fa78e14d4ad5ff13ce07955a8b69269bd05a"
+    },
+    "utilities/bin/patch": {
+      "bytes": 176416,
+      "mode": 493,
+      "sha256": "6721c67a848b2ac076dcc276663e062b11376eb56e92a4949e39be18aa222f5d"
+    },
+    "utilities/bin/printf": {
+      "bytes": 236088,
+      "mode": 493,
+      "sha256": "8dccee0fbdedf2a566ba1a03bc13c3fff3abffb9dbef844c3bcd1ae018322af8"
+    },
+    "utilities/bin/pwd": {
+      "bytes": 69656,
+      "mode": 493,
+      "sha256": "4ea632b7c528748bcd94e52e0e9494fdf02a962dc336b8e41d55fae2e942b251"
+    },
+    "utilities/bin/readlink": {
+      "bytes": 76704,
+      "mode": 493,
+      "sha256": "c16705a14bef4991a6b6cf1d85063cddf2c28aae5e3c7e40a073d4c1b8bee4b6"
+    },
+    "utilities/bin/realpath": {
+      "bytes": 77600,
+      "mode": 493,
+      "sha256": "03c67c59dc88942f8291a93899417ed31aa60802d2abd7441a03bd5a51036c9c"
+    },
+    "utilities/bin/rg": {
+      "bytes": 5408904,
+      "mode": 493,
+      "sha256": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849"
+    },
+    "utilities/bin/rm": {
+      "bytes": 94256,
+      "mode": 493,
+      "sha256": "b7f654bfd12ca08b48c00e1492b016bfb9a4cbfcafe251a2efefabaeb501854e"
+    },
+    "utilities/bin/rmdir": {
+      "bytes": 65184,
+      "mode": 493,
+      "sha256": "e62bca7f2ddfc551dfbbc5822d5416823f684329cfc51244cca7acfb431b86ad"
+    },
+    "utilities/bin/sed": {
+      "bytes": 258648,
+      "mode": 493,
+      "sha256": "1c40ffe174e98d3b4885d924bfff83d89e1041e35a73ed51c5bb20d414c53512"
+    },
+    "utilities/bin/sha256sum": {
+      "bytes": 86584,
+      "mode": 493,
+      "sha256": "d13999bc56af71415395308039a69309bf2e2e494eb3d59b63800415f8c0d9b8"
+    },
+    "utilities/bin/sleep": {
+      "bytes": 73928,
+      "mode": 493,
+      "sha256": "0bf894bc236fbc896bcc131579da409003dc86c7a0cdc691177d4bf5452a6d4d"
+    },
+    "utilities/bin/sort": {
+      "bytes": 184024,
+      "mode": 493,
+      "sha256": "ba0f32fc17ac1ee45608f8a98073cb547a1dbbe66109de1da275bca036087f10"
+    },
+    "utilities/bin/stat": {
+      "bytes": 164896,
+      "mode": 493,
+      "sha256": "9fe3fc41533ab35f8fe2025b8ac604d23c47199a5d792ffa5c850dad2f1d359a"
+    },
+    "utilities/bin/tail": {
+      "bytes": 121328,
+      "mode": 493,
+      "sha256": "3b124f58555676c549d1b5e7136ecb91299537b3d67f451f322740a8a2c84db9"
+    },
+    "utilities/bin/tee": {
+      "bytes": 70272,
+      "mode": 493,
+      "sha256": "d73e8f7c8d2f6255d13f043053f95342c4bf51dbd4262e01293508559513940a"
+    },
+    "utilities/bin/test": {
+      "bytes": 70824,
+      "mode": 493,
+      "sha256": "500ef221b8acb23aa6ad415d0ac91fae3be67b9f1fd155f81e4c757665eb47d3"
+    },
+    "utilities/bin/timeout": {
+      "bytes": 91376,
+      "mode": 493,
+      "sha256": "2d0e084221240658f5daab7c73741b5dc5bd17be06d3109e8856d90246ccf4c2"
+    },
+    "utilities/bin/touch": {
+      "bytes": 110864,
+      "mode": 493,
+      "sha256": "59649162bde58410a6286620207c0c7856052bb90699233283de56d6824514b0"
+    },
+    "utilities/bin/tr": {
+      "bytes": 79536,
+      "mode": 493,
+      "sha256": "9f2a1c2aad4fc6049b8d147376a2a1eee2aa739c4509a85ef0efaca72f234b8c"
+    },
+    "utilities/bin/uniq": {
+      "bytes": 78144,
+      "mode": 493,
+      "sha256": "bfe5493fb4cb8dea6a60818494c442dc295954a56471623008a9e7cef1a27388"
+    },
+    "utilities/bin/wc": {
+      "bytes": 103056,
+      "mode": 493,
+      "sha256": "6ff84f4efe81c4fab02f6b0921d092044dd726bc59f1778f384774d8b466f2ec"
+    },
+    "utilities/bin/xargs": {
+      "bytes": 101504,
+      "mode": 493,
+      "sha256": "a5e2694e5299be674002f2a3f11c943fe13c50948ea6dcd81a04a9d260939c1e"
+    },
+    "utilities/bin/zsh": {
+      "bytes": 898480,
+      "mode": 493,
+      "sha256": "67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3"
+    },
+    "utilities/licenses/coreutils/AUTHORS": {
+      "bytes": 3839,
+      "mode": 420,
+      "sha256": "86c6ed4176226e35f0b8ec55ee10ee5956f88a96c6617054d28e3e50a4a264a0"
+    },
+    "utilities/licenses/coreutils/COPYING": {
+      "bytes": 35149,
+      "mode": 420,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "utilities/licenses/diffutils/AUTHORS": {
+      "bytes": 1640,
+      "mode": 420,
+      "sha256": "6af782a92c0fb8e2a940ecf6ad0c3b5221206f31183ff2e84c7805112c13dd7b"
+    },
+    "utilities/licenses/diffutils/COPYING": {
+      "bytes": 35147,
+      "mode": 420,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    "utilities/licenses/findutils/AUTHORS": {
+      "bytes": 1375,
+      "mode": 420,
+      "sha256": "a406e80dc71aabaf208eaf4f8514ff99c296bb07e28cffa426c0f71eaf5c09f7"
+    },
+    "utilities/licenses/findutils/COPYING": {
+      "bytes": 35149,
+      "mode": 420,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "utilities/licenses/gawk/AUTHORS": {
+      "bytes": 495,
+      "mode": 420,
+      "sha256": "e3c25acbdb1de25778f2c57e7baeb9fc7bc7e8c5c4a3fc6541f2cc701c44f7b7"
+    },
+    "utilities/licenses/gawk/COPYING": {
+      "bytes": 35147,
+      "mode": 420,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    "utilities/licenses/gawk/missing_d/COPYING.LIB": {
+      "bytes": 25202,
+      "mode": 420,
+      "sha256": "9d5d268bbcbdcd395a8b74ed9028ef7b326b915bb06196ea01c78685e3f57bba"
+    },
+    "utilities/licenses/git/COPYING": {
+      "bytes": 18765,
+      "mode": 420,
+      "sha256": "5b2198d1645f767585e8a88ac0499b04472164c0d2da22e75ecf97ef443ab32e"
+    },
+    "utilities/licenses/git/compat/regex/regex.c": {
+      "bytes": 3202,
+      "mode": 420,
+      "sha256": "943182e31f39fdae818c83e22f628668f82a45fde25ac05503d105246753cb50"
+    },
+    "utilities/licenses/git/reftable/LICENSE": {
+      "bytes": 1480,
+      "mode": 420,
+      "sha256": "8aa118e56e554e9086beb82494e8044d0856d5eb0b162a9061f3553a58f04d67"
+    },
+    "utilities/licenses/git/sha1dc/LICENSE.txt": {
+      "bytes": 1270,
+      "mode": 420,
+      "sha256": "9daac99c665ddc38fde6d7c91b9173c112d5e6c6e7e5f7d8bb8747c630efc83d"
+    },
+    "utilities/licenses/grep/AUTHORS": {
+      "bytes": 2769,
+      "mode": 420,
+      "sha256": "8e739ebb5aff4f3367b6e4682fd48d9080682d8c77f6b59835b661f2d3cf117e"
+    },
+    "utilities/licenses/grep/COPYING": {
+      "bytes": 35149,
+      "mode": 420,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "utilities/licenses/patch/AUTHORS": {
+      "bytes": 335,
+      "mode": 420,
+      "sha256": "528481ea03694753f86a597ae141e4f7cc39b29574d4b3e5f53d1daaabf4c803"
+    },
+    "utilities/licenses/patch/COPYING": {
+      "bytes": 35147,
+      "mode": 420,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    "utilities/licenses/sed/AUTHORS": {
+      "bytes": 318,
+      "mode": 420,
+      "sha256": "082ea0557bced7f7e444226c063a6801aaa95618a8a57136c3a3667b8e3bc1d0"
+    },
+    "utilities/licenses/sed/COPYING": {
+      "bytes": 35149,
+      "mode": 420,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "utilities/licenses/zig/LICENSE": {
+      "bytes": 1080,
+      "mode": 420,
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+    },
+    "utilities/licenses/zig/lib/libc/musl/COPYRIGHT": {
+      "bytes": 6204,
+      "mode": 420,
+      "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af"
+    },
+    "utilities/licenses/zlib/LICENSE": {
+      "bytes": 1002,
+      "mode": 420,
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    }
+  },
+  "name": "authoring-environment-inputs",
+  "provenance": {
+    "bootstrap_image": "docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c",
+    "elf_authoring_package_sha256": "1d39a7973504a4a5eb4101293cca142b83055a5a0f94e1d4286ded2563289b92",
+    "elf_authoring_program_sha256": "db7d1d1be4a257c75a5bae14e68c2bc825a3be3d2bc13a405436bc56272cfc37",
+    "runtime_image_members": {
+      "/usr/bin/x86_64-linux-gnu-readelf": [
+        "elf/bin/readelf",
+        493
+      ],
+      "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2": [
+        "elf/lib/ld-linux-x86-64.so.2",
+        493
+      ],
+      "/usr/lib/x86_64-linux-gnu/libc.so.6": [
+        "elf/lib/libc.so.6",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libdl.so.2": [
+        "elf/lib/libdl.so.2",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libctf-nobfd.so.0.0.0": [
+        "elf/lib/libctf-nobfd.so.0",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1": [
+        "elf/lib/libgcc_s.so.1",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libm.so.6": [
+        "elf/lib/libm.so.6",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libpthread.so.0": [
+        "elf/lib/libpthread.so.0",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/librt.so.1": [
+        "elf/lib/librt.so.1",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libsframe.so.1.0.0": [
+        "elf/lib/libsframe.so.1",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33": [
+        "elf/lib/libstdc++.so.6",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libtinfo.so.6.5": [
+        "elf/lib/libtinfo.so.6",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libutil.so.1": [
+        "elf/lib/libutil.so.1",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libz.so.1.3.1": [
+        "elf/lib/libz.so.1",
+        420
+      ],
+      "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7": [
+        "elf/lib/libzstd.so.1",
+        420
+      ],
+      "/usr/share/common-licenses/GPL-2": [
+        "notices/GPL-2",
+        420
+      ],
+      "/usr/share/common-licenses/GPL-3": [
+        "notices/GPL-3",
+        420
+      ],
+      "/usr/share/common-licenses/LGPL-2.1": [
+        "notices/LGPL-2.1",
+        420
+      ],
+      "/usr/share/doc/binutils/copyright": [
+        "notices/binutils-COPYRIGHT",
+        420
+      ],
+      "/usr/share/doc/libc6/copyright": [
+        "notices/glibc-COPYRIGHT",
+        420
+      ],
+      "/usr/share/doc/libstdc++6/copyright": [
+        "notices/gcc-COPYRIGHT",
+        420
+      ],
+      "/usr/share/doc/libtinfo6/copyright": [
+        "notices/ncurses-COPYRIGHT",
+        420
+      ],
+      "/usr/share/doc/libzstd1/copyright": [
+        "notices/zstd-COPYRIGHT",
+        420
+      ],
+      "/usr/share/doc/zlib1g/copyright": [
+        "notices/zlib-COPYRIGHT",
+        420
+      ]
+    },
+    "source_and_notice_inputs": [
+      {
+        "archive": "zsh-77045ef899e53b9598bebc5a41db93a548a40ca6.tar.gz",
+        "bytes": 4118906,
+        "sha256": "4dbbd45e64b4afa03d7cb363c2b1583619187f3d1508707fc532e4a77d5e6597",
+        "target": "sources/zsh-source.tar.gz",
+        "url": "https://codeload.github.com/zsh-users/zsh/tar.gz/77045ef899e53b9598bebc5a41db93a548a40ca6"
+      },
+      {
+        "archive": "zsh-LICENCE",
+        "bytes": 1963,
+        "sha256": "d06fdf3ef9b1ec69d6b9e170b0a9516fbad3523261ff1668bde3bfea6e0ef5f5",
+        "target": "notices/zsh-LICENCE",
+        "url": "https://raw.githubusercontent.com/zsh-users/zsh/77045ef899e53b9598bebc5a41db93a548a40ca6/LICENCE"
+      },
+      {
+        "archive": "zsh-exec-wrapper.patch",
+        "bytes": 998,
+        "sha256": "696b7d923b8071554d00e811afb9a08fcad4baada796f7314d12ecd72d06152c",
+        "target": "sources/zsh-exec-wrapper.patch",
+        "url": "https://raw.githubusercontent.com/openai/codex/891f1f4c8584a082fc4658cabd48f1a8b01354e0/codex-rs/shell-escalation/patches/zsh-exec-wrapper.patch"
+      },
+      {
+        "archive": "OpenAI-LICENSE",
+        "bytes": 10926,
+        "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+        "target": "notices/OpenAI-LICENSE",
+        "url": "https://raw.githubusercontent.com/openai/codex/891f1f4c8584a082fc4658cabd48f1a8b01354e0/LICENSE"
+      },
+      {
+        "archive": "OpenAI-NOTICE",
+        "bytes": 242,
+        "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+        "target": "notices/OpenAI-NOTICE",
+        "url": "https://raw.githubusercontent.com/openai/codex/891f1f4c8584a082fc4658cabd48f1a8b01354e0/NOTICE"
+      },
+      {
+        "archive": "ripgrep-e89fff89ac9af12e8d4ce9d5fd07beb408ca730f.tar.gz",
+        "bytes": 607432,
+        "sha256": "af40d0f4cb7a55994906c009a7ba865047f0d487c95bceb8db59ffc4f2173d20",
+        "target": "sources/ripgrep-source.tar.gz",
+        "url": "https://codeload.github.com/BurntSushi/ripgrep/tar.gz/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f"
+      },
+      {
+        "archive": "ripgrep-COPYING",
+        "bytes": 126,
+        "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+        "target": "notices/ripgrep-COPYING",
+        "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/COPYING"
+      },
+      {
+        "archive": "ripgrep-LICENSE-MIT",
+        "bytes": 1081,
+        "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+        "target": "notices/ripgrep-LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/LICENSE-MIT"
+      },
+      {
+        "archive": "ripgrep-UNLICENSE",
+        "bytes": 1211,
+        "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+        "target": "notices/ripgrep-UNLICENSE",
+        "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/UNLICENSE"
+      },
+      {
+        "archive": "pcre2-2dce7761b1831fd3f82a9c2bd5476259d945da4d.tar.gz",
+        "bytes": 3270397,
+        "sha256": "59a20ebc6f848f77cea0cb745a4f269b9f415bd088372b4e1b802edce6ba4e55",
+        "target": "sources/pcre2-source.tar.gz",
+        "url": "https://codeload.github.com/PCRE2Project/pcre2/tar.gz/2dce7761b1831fd3f82a9c2bd5476259d945da4d"
+      },
+      {
+        "archive": "pcre2-LICENCE.md",
+        "bytes": 3867,
+        "sha256": "9cf7ac6976099a1d856826d3ef1b093bd6b84489dc6100628ac79e740cf9885a",
+        "target": "notices/pcre2-LICENCE.md",
+        "url": "https://raw.githubusercontent.com/PCRE2Project/pcre2/2dce7761b1831fd3f82a9c2bd5476259d945da4d/LICENCE.md"
+      },
+      {
+        "archive": "pcre2-COPYING",
+        "bytes": 97,
+        "sha256": "99272c55f3dcfa07a8a7e15a5c1a33096e4727de74241d65fa049fccfdd59507",
+        "target": "notices/pcre2-COPYING",
+        "url": "https://raw.githubusercontent.com/PCRE2Project/pcre2/2dce7761b1831fd3f82a9c2bd5476259d945da4d/COPYING"
+      },
+      {
+        "archive": "glibc_2.41-12+deb13u3.dsc",
+        "bytes": 7576,
+        "sha256": "aa1ab10010fcf169454a5c6a123094a3997392922593d86a3a5adc180a07ca40",
+        "target": "sources/glibc_2.41-12+deb13u3.dsc",
+        "url": "https://snapshot.debian.org/file/ea65510b2f94dade85157f9935070bdea2a46b1c"
+      },
+      {
+        "archive": "glibc_2.41.orig.tar.xz",
+        "bytes": 20323540,
+        "sha256": "f24aa441021121a79266f0d75242706cab8843a47901fefe74527491807f1998",
+        "target": "sources/glibc_2.41.orig.tar.xz",
+        "url": "https://snapshot.debian.org/file/ecf54de179ba3fb468949af843c8270979e53cc8"
+      },
+      {
+        "archive": "glibc_2.41-12+deb13u3.debian.tar.xz",
+        "bytes": 494644,
+        "sha256": "de7d715bf7e559b78baebac4115122641842f65faf0a5080a55954877a55cebe",
+        "target": "sources/glibc_2.41-12+deb13u3.debian.tar.xz",
+        "url": "https://snapshot.debian.org/file/b7de3bbb5e0b8e99dfd9dabd2c9ddfead6c99b64"
+      },
+      {
+        "archive": "ncurses_6.5+20250216-2.dsc",
+        "bytes": 3890,
+        "sha256": "00539cc2bc6bb84be1b8a8a5decf606682e14b6f39b76b9aa090e65d2c2d4580",
+        "target": "sources/ncurses_6.5+20250216-2.dsc",
+        "url": "https://snapshot.debian.org/file/69f4cedccc8fe157ec94ea231017d65e37cde091"
+      },
+      {
+        "archive": "ncurses_6.5+20250216.orig.tar.gz",
+        "bytes": 3774714,
+        "sha256": "b37baafa436e7133bb12a185cb8f60e1599b1947e9f0181c76f3190acf28b6eb",
+        "target": "sources/ncurses_6.5+20250216.orig.tar.gz",
+        "url": "https://snapshot.debian.org/file/e9a1792b02cd603c5a094dadc5046d5440723c4b"
+      },
+      {
+        "archive": "ncurses_6.5+20250216.orig.tar.gz.asc",
+        "bytes": 729,
+        "sha256": "64f4d17923322176c44079f18f170e2164a59d551d7e4e9c1a6e4eebedc5dd6f",
+        "target": "sources/ncurses_6.5+20250216.orig.tar.gz.asc",
+        "url": "https://snapshot.debian.org/file/df154cc6de3378e3705f4db1ce663d38a9c765d9"
+      },
+      {
+        "archive": "ncurses_6.5+20250216-2.debian.tar.xz",
+        "bytes": 50420,
+        "sha256": "546930a8992ae3325d8c38378f290265d969cf6333cfae9648ac6d69e1e8a8a6",
+        "target": "sources/ncurses_6.5+20250216-2.debian.tar.xz",
+        "url": "https://snapshot.debian.org/file/025a3164026bef20a1872b0cc9107236d5738a4a"
+      }
+    ],
+    "utility_bootstrap_archives": {
+      "ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz": {
+        "bytes": 82623880,
+        "sha256": "24e7f72bbd9b026bcbe4d188946702054b24e4062184e103d63baa1a5379f0e2"
+      },
+      "ryeos-authoring-tools-1.0.0-x86_64-linux-musl.tar.gz": {
+        "bytes": 4782852,
+        "sha256": "7872d73354ffb67c2859c9c58f499c0471902abcc6bb855a1e5e0b5021543479"
+      }
+    },
+    "workload_members": {
+      "codex-path/rg": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
+      "codex-resources/zsh/bin/zsh": "67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3"
+    },
+    "workload_package_sha256": "bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda"
+  },
+  "relocate": [
+    "environment/bin/zsh",
+    "environment/lib/libc.so.6",
+    "environment/lib/libdl.so.2",
+    "environment/lib/libm.so.6",
+    "environment/lib/libpthread.so.0",
+    "environment/lib/librt.so.1",
+    "environment/lib/libtinfo.so.6",
+    "environment/lib/libutil.so.1"
+  ],
+  "schema": "ryeos.development.authoring-environment-inputs.v2",
+  "source_date_epoch": 1788566400,
+  "version": "1.0.0"
+}

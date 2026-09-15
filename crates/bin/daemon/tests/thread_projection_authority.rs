@@ -42,11 +42,7 @@ fn captured_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistor
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 /// A `ThreadLifecycleService` whose `KindProfileRegistry` is derived from the

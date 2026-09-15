@@ -13,21 +13,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
+use lillux::PinnedDirectory;
 use ryeos_engine::roots::{InstallRoot, RuntimeRoot};
 use serde::{Deserialize, Serialize};
 
 const DAEMON_CONFIG_MAX_BYTES: u64 = 64 * 1024;
 const RETIRED_ACCOUNTING_ISSUE_ACCEPTANCE_WINDOW_MS: u64 = 60_000;
-
-#[cfg(unix)]
-fn current_uid() -> u32 {
-    unsafe { libc::geteuid() }
-}
-
-#[cfg(not(unix))]
-fn current_uid() -> u32 {
-    0
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,6 +165,53 @@ pub fn retire_pre_node_policy_config(app_root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn publish_bootstrap_config(
+    config: &Config,
+    state_lock: &crate::state_lock::StateLock,
+    replace: bool,
+) -> Result<bool> {
+    state_lock.ensure_protects_app_root(&config.app_root)?;
+    let node_path = config.app_root.join(ryeos_engine::AI_DIR).join("node");
+    let node = PinnedDirectory::open(&node_path)?
+        .with_context(|| format!("open daemon config directory {}", node_path.display()))?;
+    let existing = node.open_pinned_regular(std::ffi::OsStr::new("config.yaml"), false)?;
+    if existing.is_some() && !replace {
+        return Ok(false);
+    }
+    let yaml = serde_yaml::to_string(config).context("serialize daemon bootstrap config")?;
+    node.atomic_write_pinned_if_same(
+        std::ffi::OsStr::new("config.yaml"),
+        existing.as_ref(),
+        yaml.as_bytes(),
+        0o600,
+    )
+    .context("publish daemon bootstrap config")?;
+    Ok(true)
+}
+
+/// Create the node's bootstrap location contract exactly once. The retained
+/// state lock is the mechanical proof that no daemon can concurrently consume
+/// a partially initialized configuration.
+pub fn seed_bootstrap_config(
+    config: &Config,
+    state_lock: &crate::state_lock::StateLock,
+) -> Result<bool> {
+    publish_bootstrap_config(config, state_lock, false)
+}
+
+/// Replace only a stopped node's complete bootstrap location contract. This is
+/// operator configuration, never semantic node policy or host-service launch
+/// authority.
+pub fn replace_bootstrap_config(
+    config: &Config,
+    state_lock: &crate::state_lock::StateLock,
+) -> Result<()> {
+    if !publish_bootstrap_config(config, state_lock, true)? {
+        unreachable!("replacement publication always writes")
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn runtime_root(&self) -> RuntimeRoot {
         RuntimeRoot::new(self.app_root.clone())
@@ -195,10 +233,28 @@ impl Config {
         self.runtime_root().node()
     }
 
-    pub fn load(sources: &ConfigSources) -> Result<Self> {
-        let compiled_default: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let defaults = Self::default_paths(compiled_default)?;
+    /// Resolve the app root before interpreting the rest of daemon config.
+    /// Supervised startup uses this narrow location result to acquire the
+    /// exact node state lock and publish terminal diagnostics even when the
+    /// complete bootstrap document is malformed. An explicit app root never
+    /// requires parsing account-owned configuration to discover itself.
+    pub fn selected_app_root(sources: &ConfigSources) -> Result<PathBuf> {
+        if let Some(root) = sources
+            .app_root
+            .clone()
+            .or_else(|| env::var_os("RYEOS_APP_ROOT").map(PathBuf::from))
+        {
+            return Ok(root);
+        }
+        if let Some(path) = &sources.config_file {
+            return Ok(Self::load_file(path)?
+                .app_root
+                .unwrap_or(Self::default_app_root()?));
+        }
+        Ok(Self::default_app_root()?)
+    }
 
+    pub fn load(sources: &ConfigSources) -> Result<Self> {
         // Resolve app_root from CLI/env BEFORE looking up
         // `<app_root>/.ai/node/config.yaml` so an explicit
         // `--app-root` (or `RYEOS_APP_ROOT`) is honored
@@ -206,16 +262,24 @@ impl Config {
         // would always read `<XDG default>/.ai/node/config.yaml` —
         // which causes test fixtures to surprise-load a developer's
         // real install config.
-        let ssd_explicit = sources
+        let explicit_app_root = sources
             .app_root
             .clone()
             .or_else(|| env::var_os("RYEOS_APP_ROOT").map(PathBuf::from));
 
+        let mut implicit_config_root = None;
         let file_cfg = if let Some(path) = &sources.config_file {
             Some(Self::load_file(path)?)
         } else {
-            let lookup_dir = ssd_explicit.as_deref().unwrap_or(&defaults.app_root);
-            let default_config = lookup_dir.join(".ai").join("node").join("config.yaml");
+            let lookup_dir = match explicit_app_root.as_ref() {
+                Some(path) => path.clone(),
+                None => Self::default_app_root()?,
+            };
+            implicit_config_root = Some(lookup_dir.clone());
+            let default_config = lookup_dir
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("config.yaml");
             if default_config.exists() {
                 Some(Self::load_file(&default_config).with_context(|| {
                     format!(
@@ -227,6 +291,42 @@ impl Config {
                 None
             }
         };
+
+        // Final app root: explicit CLI/env > config file > default.
+        let app_root = match explicit_app_root
+            .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.app_root.clone()))
+        {
+            Some(path) => path,
+            None => Self::default_app_root()?,
+        };
+        if let (Some(location_root), Some(stored_root)) = (
+            implicit_config_root.as_ref(),
+            file_cfg.as_ref().and_then(|cfg| cfg.app_root.as_ref()),
+        ) && stored_root != location_root
+        {
+            bail!(
+                "bootstrap config located under app root {} cannot redirect to app root {}",
+                location_root.display(),
+                stored_root.display()
+            );
+        }
+        if let Some(stored_root) = file_cfg.as_ref().and_then(|cfg| cfg.app_root.as_ref())
+            && stored_root != &app_root
+        {
+            bail!(
+                "stored config app_root {} does not match selected app root {}",
+                stored_root.display(),
+                app_root.display()
+            );
+        }
+
+        // Endpoint defaults are deliberately independent of app-root
+        // topology. An app root identifies an independently authoritative
+        // node; it does not imply a different network namespace or authorize
+        // RyeOS to select an unrequested endpoint. Concurrent local nodes
+        // must be configured with distinct explicit endpoints by their
+        // operator, exactly as nodes on separate hosts are.
+        let compiled_default: SocketAddr = "127.0.0.1:7400".parse().unwrap();
 
         // R1: Typed --bind precedence. CLI `--bind` is Option<SocketAddr>;
         // None means the operator omitted it.
@@ -248,16 +348,12 @@ impl Config {
                          pass --force to overwrite"
                     );
                 }
-                // --force: use CLI value, caller (bootstrap::init) will
-                // rewrite config.yaml so subsequent boots are consistent.
+                // `force` only resolves the candidate value. The stopped-node
+                // configuration owner must still publish it under StateLock.
                 cb
             }
         };
 
-        // Final app root: explicit CLI/env > config file > default.
-        let app_root = ssd_explicit
-            .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.app_root.clone()))
-            .unwrap_or_else(|| defaults.app_root.clone());
         let resolved_runtime_root = RuntimeRoot::new(app_root.clone());
         let canonical_operator_key_path = resolved_runtime_root.operator_signing_key_path();
         if let Some(path) = file_cfg
@@ -272,18 +368,36 @@ impl Config {
             );
         }
 
+        let file_uds = file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone());
+        let uds_path = match (file_uds, sources.uds_path.clone()) {
+            (None, None) => default_uds_path(&app_root),
+            (Some(path), None) | (None, Some(path)) => path,
+            (Some(stored), Some(requested)) if stored == requested => requested,
+            (Some(stored), Some(requested)) => {
+                if !sources.force {
+                    bail!(
+                        "conflict between CLI --uds-path ({}) and stored config.yaml ({}) — pass --force to overwrite",
+                        requested.display(),
+                        stored.display()
+                    );
+                }
+                requested
+            }
+        };
+
         let cfg = Self {
             bind: resolved_bind,
             db_path: sources
                 .db_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.db_path.clone()))
-                .unwrap_or_else(|| app_root.join(".ai").join("state").join("runtime.sqlite3")),
-            uds_path: sources
-                .uds_path
-                .clone()
-                .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone()))
-                .unwrap_or_else(|| defaults.uds_path.clone()),
+                .unwrap_or_else(|| {
+                    app_root
+                        .join(ryeos_engine::AI_DIR)
+                        .join("state")
+                        .join("runtime.sqlite3")
+                }),
+            uds_path,
             app_root: app_root.clone(),
             node_signing_key_path: file_cfg
                 .as_ref()
@@ -314,25 +428,18 @@ impl Config {
             .with_context(|| format!("failed to parse config file {}", path.display()))
     }
 
-    fn default_paths(bind: SocketAddr) -> Result<Self> {
+    fn default_app_root() -> Result<PathBuf> {
         let base_dirs = BaseDirs::new().context("could not determine base directories")?;
-        let app_root = base_dirs.data_dir().join("ryeos");
-        let runtime_root = RuntimeRoot::new(app_root.clone());
-
-        let socket_runtime_root = env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env::temp_dir().join(format!("ryeosd-{}", current_uid())));
-
-        Ok(Self {
-            bind,
-            db_path: runtime_root.state().join("runtime.sqlite3"),
-            uds_path: socket_runtime_root.join("ryeosd.sock"),
-            app_root: app_root.clone(),
-            node_signing_key_path: runtime_root.node_signing_key_path(),
-            operator_signing_key_path: runtime_root.operator_signing_key_path(),
-            authorized_keys_dir: runtime_root.authorized_keys_dir(),
-        })
+        Ok(base_dirs.data_dir().join("ryeos"))
     }
+}
+
+/// The control socket belongs to this node's runtime state, not a login
+/// session. Distinct app roots are already distinct node namespaces; an
+/// operator supplies an explicit shorter path when the platform's local-IPC
+/// pathname budget cannot represent a deeply nested app root.
+fn default_uds_path(app_root: &Path) -> PathBuf {
+    RuntimeRoot::new(app_root.to_path_buf()).daemon_control_socket()
 }
 
 #[cfg(test)]
@@ -364,6 +471,163 @@ mod tests {
         assert!(!cfg.app_root.exists());
         assert!(!cfg.db_path.parent().unwrap().exists());
         assert!(!cfg.uds_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn explicit_app_root_does_not_require_ambient_home_or_xdg_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let prior_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let prior_home = std::env::var_os("HOME");
+        // SAFETY: this module serializes its environment-mutating config tests.
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::remove_var("HOME");
+        }
+        let root = PathBuf::from("/absolute/node-root");
+        let loaded = Config::load(&ConfigSources {
+            app_root: Some(root.clone()),
+            ..Default::default()
+        });
+        // SAFETY: restore the serialized process environment before asserting.
+        unsafe {
+            match prior_runtime {
+                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            match prior_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.app_root, root);
+        assert_eq!(
+            loaded.uds_path,
+            RuntimeRoot::new(root).daemon_control_socket()
+        );
+        assert_eq!(loaded.bind, "127.0.0.1:7400".parse().unwrap());
+    }
+
+    #[test]
+    fn explicit_app_root_is_available_before_malformed_config_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("node");
+        let malformed = tmp.path().join("malformed.yaml");
+        std::fs::write(&malformed, "not: [valid").unwrap();
+        let sources = ConfigSources {
+            app_root: Some(root.clone()),
+            config_file: Some(malformed),
+            ..Default::default()
+        };
+
+        assert_eq!(Config::selected_app_root(&sources).unwrap(), root);
+        assert!(Config::load(&sources).is_err());
+    }
+
+    #[test]
+    fn default_control_endpoints_are_distinct_per_app_root() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first-node");
+        let second = tmp.path().join("second-node");
+
+        let first_endpoint = default_uds_path(&first);
+        let second_endpoint = default_uds_path(&second);
+
+        assert_ne!(first_endpoint, second_endpoint);
+        assert_eq!(
+            first_endpoint,
+            RuntimeRoot::new(first).daemon_control_socket()
+        );
+        assert_eq!(
+            second_endpoint,
+            RuntimeRoot::new(second).daemon_control_socket()
+        );
+    }
+
+    #[test]
+    fn distinct_app_roots_share_the_same_default_tcp_endpoint_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().join("first")),
+            uds_path: Some(tmp.path().join("first.sock")),
+            ..Default::default()
+        })
+        .unwrap();
+        let second = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().join("second")),
+            uds_path: Some(tmp.path().join("second.sock")),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(first.bind, "127.0.0.1:7400".parse().unwrap());
+        assert_eq!(second.bind, first.bind);
+    }
+
+    #[test]
+    fn stored_control_endpoint_requires_explicit_force_to_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("node");
+        let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let stored = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            uds_path: Some(tmp.path().join("stored.sock")),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(
+            node_dir.join("config.yaml"),
+            serde_yaml::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+        let requested = tmp.path().join("requested.sock");
+        let error = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            uds_path: Some(requested.clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("conflict between CLI --uds-path"));
+
+        let changed = Config::load(&ConfigSources {
+            app_root: Some(app_root),
+            uds_path: Some(requested.clone()),
+            force: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(changed.uds_path, requested);
+    }
+
+    #[test]
+    fn stored_config_cannot_redirect_the_selected_app_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().join("selected");
+        let other = tmp.path().join("other");
+        let node_dir = selected.join(ryeos_engine::AI_DIR).join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let foreign = Config::load(&ConfigSources {
+            app_root: Some(other.clone()),
+            uds_path: Some(tmp.path().join("other.sock")),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(
+            node_dir.join("config.yaml"),
+            serde_yaml::to_string(&foreign).unwrap(),
+        )
+        .unwrap();
+
+        let error = Config::load(&ConfigSources {
+            app_root: Some(selected.clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&other.display().to_string()));
+        assert!(message.contains(&selected.display().to_string()));
     }
 
     #[test]

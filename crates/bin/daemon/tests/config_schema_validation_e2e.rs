@@ -27,11 +27,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 /// Synthesize a YAML tool whose top-level body declares
@@ -112,6 +108,7 @@ fn plan_ctx(project_dir: &Path) -> PlanContext {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     }
 }
@@ -129,7 +126,14 @@ fn build_plan_rejects_params_violating_config_schema() {
     // count: "five" violates the schema (string vs integer).
     let bad_params = serde_json::json!({ "count": "five" });
 
-    let result = engine.build_plan(&ctx, &verified, &bad_params, &ctx.execution_hints, None);
+    let result = engine.build_plan(
+        &ctx,
+        &verified,
+        &bad_params,
+        &ctx.execution_hints,
+        None,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+    );
 
     let _ = fs::remove_dir_all(&project_dir);
 
@@ -157,7 +161,14 @@ fn build_plan_accepts_params_conforming_to_config_schema() {
 
     let good_params = serde_json::json!({ "count": 1 });
 
-    let result = engine.build_plan(&ctx, &verified, &good_params, &ctx.execution_hints, None);
+    let result = engine.build_plan(
+        &ctx,
+        &verified,
+        &good_params,
+        &ctx.execution_hints,
+        None,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+    );
 
     let _ = fs::remove_dir_all(&project_dir);
 

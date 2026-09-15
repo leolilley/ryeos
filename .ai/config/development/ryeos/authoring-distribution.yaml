@@ -1,0 +1,16 @@
+# ryeos:signed:2026-09-06T22:23:07Z:0915eb369ee468f698c0767c5830426823b1dbbdb0641f6c51e84b8c255a8a43:4GrahjGeb80E5et68IDkvExO7sqD2CgK0HrTquGtC2/X5QDqUo4eR6oMZhwQuaS5EID7fHi+lr2ufM9eaJ9JCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: authoring-distribution
+version: "1.0.0"
+description: Complete reproducible authoring distribution, including corresponding sources and notices
+# This non-executable consumer retains the distributable artifact through the
+# existing exact project binding. It is not a worker environment or an input
+# to independent reproduction. Worker environments select only its runtime
+# subtree; retaining that subtree alone would not retain corresponding sources.
+external_content:
+  - id: distribution
+    kind: tree
+    mode: pinned
+    digest: 31852861af3ec0384240611b8675ea600ae7d93b76cf6c5c1451276e0f7bd49c
+    mount_root: execution_runtime
+    mount: authoring-distribution

@@ -1,0 +1,21 @@
+[package]
+name = "fixture-dynamic-product-verifier"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep this fixture program out of the RyeOS workspace. Its exact lockfile and
+# static artifact are prepared explicitly before the disposable Bundle is
+# populated; ordinary workspace builds must not silently replace either.
+[workspace]
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+
+[profile.release]
+strip = "symbols"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -56,6 +56,10 @@ impl ParserDispatcher {
         )
     }
 
+    pub(crate) fn handler_registry(&self) -> &Arc<HandlerRegistry> {
+        &self.handlers
+    }
+
     /// Stable identity of the exact parser registry and handler set used for
     /// this request engine. Config snapshot caches bind to this before parsing.
     pub fn fingerprint(&self) -> String {

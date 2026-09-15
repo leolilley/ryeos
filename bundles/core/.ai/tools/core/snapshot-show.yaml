@@ -1,6 +1,7 @@
-# ryeos:signed:2026-08-11T02:28:20Z:0d8cbfbe9a02c87cae323598339f624d8c0fba5a27c35dbf791148b516522bdc:SGOwb9ohrVMqtK/K2Hs6jZQNRX4t08/eEvmIkI8hz/i041kcpZJvZR8N/QFr2Rc8c5s2cQy6I/0+vl8mSiEwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:19Z:93fcb7c5214f8775eb176723b28bce970845747197414685260c766210f1ff8d:F0r23dIwByYCNbu/GS79TCdAhlLCgUSsk4LJ0BQltNKRIdIoAXaT68Cn73LyBsvaLDDCuvHrJcmwxcNy3yR+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 category: "core"
 name: "snapshot-show"
 required_caps: ["ryeos.read.project.live"]

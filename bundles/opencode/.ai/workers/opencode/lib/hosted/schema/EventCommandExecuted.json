@@ -1,0 +1,48 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "command.executed"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "arguments": {
+          "type": "string"
+        },
+        "messageID": {
+          "type": "string",
+          "pattern": "^msg"
+        }
+      },
+      "required": [
+        "name",
+        "sessionID",
+        "arguments",
+        "messageID"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -167,6 +167,9 @@ pub struct PlanContext {
     pub current_site_id: String,
     pub origin_site_id: String,
     pub execution_hints: ExecutionHints,
+    /// Immutable daemon-authored scheduler coordinate. This is never accepted
+    /// from item parameters and is sealed across continuation/recovery.
+    pub scheduled_fire: Option<crate::scheduled_fire_context::ScheduledFireContext>,
     /// When true, the daemon should not call `execute_plan` after
     /// `build_plan` succeeds. The engine does not enforce this — it is
     /// safe structurally because `PlanContext` does not carry thread IDs.
@@ -182,10 +185,20 @@ pub struct EngineContext {
     pub app_root: PathBuf,
     pub isolation: Arc<crate::isolation::IsolationRuntime>,
     pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
+    pub isolation_immutable_project: Option<ryeos_state::PinnedProjectMaterialization>,
+    /// Exact view borrowed from the admitted workspace owner. Unlike
+    /// `isolation_workspace`, this is operational descriptor authority, not a
+    /// path for projectless materialization. Enforced RuntimeWorkspace launch
+    /// refuses absence instead of rebuilding an overlay from filesystem paths.
+    pub isolation_workspace_view: Option<lillux::InheritedDescriptorAuthority>,
     pub isolation_filesystem_authority_ceiling:
         crate::isolation::IsolationFilesystemAuthorityCeiling,
     pub isolation_network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     pub isolation_live_access_authority: Option<crate::isolation::IsolationLiveAccessAuthority>,
+    /// Exact daemon-admitted private state for this launch, not ambient node
+    /// state or an item-authored path. Isolation pins it beneath the node's
+    /// state root and refuses that root itself. Captured execution retains
+    /// this explicit grant while excluding node-policy filesystem mounts.
     pub isolation_state_root: Option<PathBuf>,
     pub isolation_checkpoint_dir: Option<PathBuf>,
     /// Exact daemon-created checkpoint directory paired with
@@ -199,14 +212,21 @@ pub struct EngineContext {
     pub isolation_node_trusted_keys_dir: Option<PathBuf>,
     pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,
     /// Exact already-open command authority for an admitted direct plan.
-    /// When present it must match the plan's serialized verified-command
-    /// identity; dispatch never reopens that command by pathname.
-    pub isolation_verified_command: Option<crate::isolation::IsolationDescriptorBoundCommand>,
+    /// It is either standalone immutable bytes or one member paired with its
+    /// complete pinned realization-tree authority. When present it must match
+    /// the plan's serialized verified-command identity; dispatch never reopens
+    /// that command by pathname.
+    pub isolation_verified_command: Option<crate::isolation::IsolationAdmittedCommand>,
     pub isolation_external_read_only_mounts: Vec<crate::isolation::IsolationReadOnlyMountAuthority>,
-    /// One daemon-created connected duplex channel with a signed target
-    /// environment binding. This is deliberately distinct from generic
-    /// inherited descriptors and cannot be supplied as a raw fd.
-    pub isolation_target_channel: Option<crate::isolation::IsolationTargetChannelAuthority>,
+    /// Exact daemon-prepared writable cache/config views for retained session
+    /// environment variables. They are compiled as descriptor-backed mounts,
+    /// never as ambient node-policy writable paths.
+    pub isolation_writable_runtime_view_mounts:
+        Vec<crate::isolation::IsolationWritableRuntimeViewMountAuthority>,
+    /// Daemon-created connected duplex channels with exact target-descriptor
+    /// and environment bindings. These are deliberately distinct from generic
+    /// inherited descriptors and cannot be supplied as raw file descriptors.
+    pub isolation_target_channels: Vec<crate::isolation::IsolationTargetChannelAuthority>,
     /// Explicit daemon-owned execution workspace used only by isolation.
     /// This does not change item-resolution authority or project semantics;
     /// it gives projectless admitted mechanics (for example a persistent
@@ -220,7 +240,7 @@ pub struct EngineContext {
     /// descriptor numbers are paired with signed protocol environment
     /// bindings before this context is constructed; no ambient descriptor is
     /// inherited.
-    pub inherited_fds: Vec<Arc<std::fs::File>>,
+    pub inherited_fds: Vec<lillux::InheritedDescriptorAuthority>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,
@@ -477,6 +497,13 @@ pub struct ExecutionPlan {
     pub entrypoint: PlanNodeId,
     pub capabilities: PlanCapabilities,
     pub materialization_requirements: Vec<MaterializationRequirement>,
+    /// Kind-schema-projected ceiling captured from the complete composed
+    /// subject. Launch intersects this with its independently admitted parent
+    /// ceiling; neither side can widen the other.
+    pub network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
+    /// Signed filesystem projection, frozen alongside networking. This is
+    /// required in serialized authority; predecessor plans are not reinterpreted.
+    pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     pub cache_key: String,
     /// Daemon supervision profile hint, derived from the root item's kind.
     #[serde(default)]

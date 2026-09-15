@@ -55,11 +55,7 @@ use crate::actions::build_bundle::{load_signing_key, rebuild_bundle_manifest};
 
 /// The cargo workspace root (parent of `crates/tools/core-tools/`).
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 /// Resolve the platform-author signing key path the test fixtures use

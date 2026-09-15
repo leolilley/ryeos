@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-24T01:11:11Z:b6ebb129f78884855816abd184fe4cbb8fcc51265c23b322145b72dfd6622038:QhISiPrCseI+7MVA2nrjPV/5eiRDIOd24Af0Yhqezajz/5+HrnL5vYceZFYmWCsE+Ll4txZbI9Rm+smruc+yAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-06T03:45:22Z:076b4710fc08b14b2bebd3dd6bf5ef7d14aaf9693c028ac2b373b734d93babd8:ET+o5s/GpdlyKzJlhoHyMcwTHr1tk/3Mlgx2o97w3KHwgiuDICbxgWiC/b0WUF9csLXKd2bvEb175/bd69iTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.0.0"
+version: "1.0.2"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -8,6 +8,12 @@ effective_trust:
   include_references: false
 resolution: []
 execution:
+  # A worker may narrow the node/protocol ceiling to its captured closure.
+  # Omission preserves ordinary hosted/login behavior; runtime roots alone
+  # must not be mistaken for a no-host-filesystem guarantee.
+  filesystem_authority_ceiling:
+    path: [filesystem_authority]
+    default: node_policy
   source_closure:
     derived: effective_source_closure
     location:
@@ -42,6 +48,7 @@ execution:
   external_content:
     realization_derived: effective_external_realizations
     allowed_roots: ["bundle:own"]
+    allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:
       max_total_bytes: 4294967296
@@ -69,6 +76,7 @@ composed_value_contract:
   optional:
     description: {type: single, prim: string}
     session_resources: {type: single, prim: mapping}
+    filesystem_authority: {type: single, prim: string}
 runtime:
   handlers:
     - type: config
@@ -85,6 +93,7 @@ runtime:
     - source
     - supported_target
     - session_resources
+    - filesystem_authority
 metadata:
   rules:
     name:

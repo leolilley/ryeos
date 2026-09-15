@@ -5,9 +5,9 @@
 //! escape-hatch path (item_ref direct mode). Token mode sends raw
 //! tokens to the daemon, which binds them server-side.
 //!
-//! The `--input` flag provides a JSON-first escape hatch for complex
-//! parameters (arrays, nested objects, numbers) that the heuristic
-//! binder cannot express.
+//! The `--input` flag provides a structured JSON/YAML file or stdin path, plus
+//! an inline-JSON escape hatch, for complex parameters (arrays, nested
+//! objects, numbers) that the heuristic binder cannot express.
 
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
 /// Parse `--input` arguments from tail and return the JSON value.
 ///
 /// Handles three forms:
-/// - `--input <file>` — reads file as JSON
+/// - `--input <file>` — reads a JSON or YAML file
 ///
 /// Descriptor-declared parameter short-circuits, shared by the daemon
 /// and offline dispatch paths so the two cannot drift:
@@ -58,6 +58,16 @@ pub fn bind_declared_shortcuts(
             )
             .map_err(|detail| command_binding_error(command, detail))?;
             return Ok(Some(value));
+        }
+        let residual = tail_without_input(tail);
+        let residual = if command.project.is_some() {
+            separate_project_control_flags(&residual)?.0
+        } else {
+            residual
+        };
+        if !residual.is_empty() {
+            return Err(command_binding_error(command,
+                "--input cannot be combined with undeclared positional arguments or parameter flags".into()));
         }
         return Ok(Some(input));
     }
@@ -111,12 +121,40 @@ fn merge_project_control_flags(
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
     };
+    let (_, controls) = separate_project_control_flags(tail)?;
+    obj.extend(controls);
+    Ok(input)
+}
 
+/// Keep argv project selectors separate from structured item input. In direct
+/// execution, an item's JSON `project`/`no_project` fields are not CLI controls.
+/// Aliases may explicitly map selectors into their service payload instead.
+pub(crate) fn separate_project_control_flags(
+    tail: &[String],
+) -> Result<(Vec<String>, serde_json::Map<String, Value>), CliDispatchError> {
+    let mut residual = Vec::with_capacity(tail.len());
+    let mut controls = serde_json::Map::new();
     let mut i = 0;
     while i < tail.len() {
         let token = &tail[i];
-        if token == "--no-project" {
-            obj.insert("no_project".to_string(), Value::Bool(true));
+        // A structured input source is one opaque argument, even if its file
+        // name happens to spell a selector. Never inspect its contents here.
+        if token == "--input" {
+            residual.push(token.clone());
+            if let Some(source) = tail.get(i + 1) {
+                residual.push(source.clone());
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if token == "--no-project" || token.starts_with("--no-project=") {
+            let value = match token.strip_prefix("--no-project=") {
+                None | Some("true") => Value::Bool(true),
+                Some("false") => Value::Bool(false),
+                Some(value) => Value::String(value.to_owned()),
+            };
+            insert_project_control(&mut controls, "no_project", value)?;
             i += 1;
             continue;
         }
@@ -124,7 +162,7 @@ fn merge_project_control_flags(
             .strip_prefix("--project=")
             .or_else(|| token.strip_prefix("-p="))
         {
-            obj.insert("project".to_string(), Value::String(path.to_string()));
+            insert_project_control(&mut controls, "project", Value::String(path.to_string()))?;
             i += 1;
             continue;
         }
@@ -138,7 +176,7 @@ fn merge_project_control_flags(
                     },
                 ));
             };
-            if path == "--no-project" || path == "--input" || path == "-p" || path == "--project" {
+            if path.starts_with('-') {
                 return Err(CliDispatchError::Config(
                     crate::error::CliConfigError::InvalidExecuteRef {
                         path: "<cli>".into(),
@@ -147,14 +185,32 @@ fn merge_project_control_flags(
                     },
                 ));
             }
-            obj.insert("project".to_string(), Value::String(path.clone()));
+            insert_project_control(&mut controls, "project", Value::String(path.clone()))?;
             i += 2;
             continue;
         }
+        residual.push(token.clone());
         i += 1;
     }
 
-    Ok(input)
+    Ok((residual, controls))
+}
+
+fn insert_project_control(
+    controls: &mut serde_json::Map<String, Value>,
+    field: &str,
+    value: Value,
+) -> Result<(), CliDispatchError> {
+    if controls.insert(field.to_owned(), value).is_some() {
+        return Err(CliDispatchError::Config(
+            crate::error::CliConfigError::InvalidExecuteRef {
+                path: "<cli>".into(),
+                item_ref: field.into(),
+                detail: format!("duplicate --{} selector", field.replace('_', "-")),
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// - `--input -` — reads stdin as JSON
@@ -163,24 +219,35 @@ fn merge_project_control_flags(
 /// Returns `None` if no `--input` flag is present (caller should fall
 /// back to heuristic binding).
 pub fn parse_input_arg(tail: &[String]) -> Result<Option<Value>, CliDispatchError> {
-    if let Some(input_idx) = tail.iter().position(|t| t == "--input") {
-        let input_arg = tail.get(input_idx + 1).ok_or_else(|| {
-            CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
-                path: "<cli>".into(),
-                item_ref: "--input".into(),
-                detail: "--input requires an argument (file path, inline JSON, or '-' for stdin)"
-                    .into(),
-            })
-        })?;
-        let text = read_input_source(input_arg)?;
-        Ok(Some(parse_input_value(&text, input_arg)?))
-    } else if let Some(arg) = tail.iter().find(|t| t.starts_with("--input=")) {
-        let path = &arg["--input=".len()..];
-        let text = read_input_source(path)?;
-        Ok(Some(parse_input_value(&text, path)?))
-    } else {
-        Ok(None)
+    let invalid = |detail: &str| {
+        CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
+            path: "<cli>".into(),
+            item_ref: "--input".into(),
+            detail: detail.into(),
+        })
+    };
+    let mut source = None;
+    let mut args = tail.iter();
+    while let Some(arg) = args.next() {
+        let candidate = if arg == "--input" {
+            Some(args.next().ok_or_else(|| invalid(
+                "--input requires an argument (file path, inline JSON, or '-' for stdin)"
+            ))?.as_str())
+        } else {
+            arg.strip_prefix("--input=")
+        };
+        if let Some(candidate) = candidate {
+            if source.replace(candidate).is_some() {
+                return Err(invalid("duplicate --input sources are not allowed"));
+            }
+        }
     }
+    source
+        .map(|source| {
+            let text = read_input_source(source)?;
+            parse_input_value(&text, source)
+        })
+        .transpose()
 }
 
 /// Parse `--input` content. YAML is a strict superset of JSON, so a
@@ -433,9 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn input_duplicate_last_wins() {
-        // Two --input flags: first one parses, second is ignored because
-        // position() finds the first match.
+    fn input_duplicate_sources_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.json");
         let file_b = dir.path().join("b.json");
@@ -448,13 +513,13 @@ mod tests {
             "--input".into(),
             file_b.to_string_lossy().into_owned(),
         ];
-        let result = parse_input_arg(&tail).unwrap().unwrap();
-        assert_eq!(result["source"], "a", "first --input wins");
+        let error = parse_input_arg(&tail).unwrap_err();
+        assert!(error.to_string().contains("duplicate --input"));
     }
 
     #[test]
-    fn input_with_equals_and_space_both_parse() {
-        // Both forms in the same tail — position() finds the space form first.
+    fn input_duplicate_mixed_forms_are_refused() {
+        // Mixing spellings does not establish an implicit source priority.
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.json");
         let file_b = dir.path().join("b.json");
@@ -466,7 +531,7 @@ mod tests {
             file_a.to_string_lossy().into_owned(),
             format!("--input={}", file_b.display()),
         ];
-        let result = parse_input_arg(&tail).unwrap().unwrap();
-        assert_eq!(result["form"], "space", "space form takes priority");
+        let error = parse_input_arg(&tail).unwrap_err();
+        assert!(error.to_string().contains("duplicate --input"));
     }
 }

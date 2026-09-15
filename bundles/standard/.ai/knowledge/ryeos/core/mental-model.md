@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:5e69c3282aecb5dc45d341d6a134aecd211cd68941cb591142d1f9226c4a73aa:/NzeFJzSYisqjCHRvRvM1kMKHUZsWPjE/JDNuPQZ4JqJIR5v7rB10QHW/nR7G00PmLPPjffZqCQp7maV2Q30DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T02:15:35Z:e1452dc0eb79f8bb59c84b02236774f69d76e2884b89a8628e0c59b842dc53e2:hxARYKWB4WfA07fYHDeyglbUGpS7GrIfd+5FXlgTyRCe9wieSPrdm7T+hG/zPOKOcybukEq004snR7NKHPATDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, overview]
-version: "1.0.0"
+version: "1.2.0"
 description: >
   The Rye OS mental model — how items, kinds, bundles, spaces, and the
   daemon fit together. Read this first to understand the system.
@@ -10,9 +10,35 @@ description: >
 
 # Rye OS Mental Model
 
-Rye OS is a **content-addressed, signed, capability-gated execution engine**
-for AI agents. Everything in the system is an *item* — a file in `.ai/`
-that carries typed metadata and optional body content.
+RyeOS is a **content-addressed, signed, capability-gated execution system**
+for ordinary and model-driven work. Authored behaviour and context are expressed
+as typed *items*. Executions retain their own admitted authority and history;
+they are distinct from the processes and models performing them.
+
+## Start with work, not a cast of agents
+
+A directive authors executable intent for a model. It is not necessarily an
+assistant persona, a persistent entity or a signing principal. The same
+definition can have many separately admitted executions.
+
+| Concept | Responsibility |
+|---|---|
+| Directive | Authored model-driven work, with composed context, requirements and limits |
+| Execution | One admitted invocation and its retained history |
+| Principal and authority | Who requests, authorises or stands behind an act |
+| Model/runtime | Performs the model-driven portion of execution |
+| Project/campaign | Organises objectives, methods, evidence and acceptance |
+
+Tools perform concrete operations; directives can make bounded judgments or
+run tool loops; graphs coordinate explicit transitions. Required evaluation
+and publication boundaries should not depend solely on a model declaring
+success. This division still leaves room for open-ended exploration within
+the admitted scope.
+
+An assistant can be built from these mechanisms. External clients may call
+their own abstractions agents; RyeOS does not require that framing to author
+work. See [Why RyeOS](why-ryeos.md), [Identity model](identity-model.md) and
+[Directives](../standard/directives/directives.md).
 
 ## The Big Picture
 
@@ -39,7 +65,7 @@ that carries typed metadata and optional body content.
 ## Core Concepts
 
 ### Items
-Every `.ai/` file is an **item**. Items have a *kind* (directive, tool,
+Authored items have a *kind* (directive, tool,
 knowledge, config, etc.) that determines how they are parsed, composed,
 and executed. Items live in directories determined by their kind schema
 (`location.directory`). The actual layout varies by space (bundle vs
@@ -49,7 +75,7 @@ for the full tree. The conceptual directory mapping:
 | Directory      | Kind(s)          | What Lives Here                     |
 |----------------|------------------|-------------------------------------|
 | `directives/`  | directive        | `.md` prompt workflows              |
-| `tools/`       | tool, streaming_tool | `.py`, `.yaml`, `.js` executables |
+| `tools/`       | tool             | `.py`, `.yaml`, `.js` executables |
 | `knowledge/`   | knowledge        | `.md`, `.yaml` context entries      |
 | `config/`      | config           | `.yaml` configuration items         |
 | `graphs/`      | graph            | `.yaml` state machines / DAGs       |
@@ -67,8 +93,9 @@ A **kind** is a schema + behavior contract. Each kind defines:
 - What composer handles inheritance/merging
 - How execution works (subprocess, in-process, delegated)
 
-There are 12 built-in kinds: `directive`, `tool`, `streaming_tool`, `knowledge`,
-`graph`, `config`, `handler`, `parser`, `protocol`, `runtime`, `service`, `node`.
+The installed signed bundle set determines available kinds. These include
+`directive`, `tool`, `knowledge`, `graph`, `config`, `handler`, `parser`,
+`protocol`, `runtime`, `service`, `node`, `worker` and `worker_execution`.
 
 ### Canonical Refs
 Items are addressed by **canonical ref**: `kind:path/to/item`

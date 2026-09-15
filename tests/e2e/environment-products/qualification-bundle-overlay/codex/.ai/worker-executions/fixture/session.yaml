@@ -1,0 +1,26 @@
+version: "1.0.0"
+category: fixture
+description: Execute the selected offline runtime under an active fixture credential
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: session
+  allowed_effect_classes: [pure_read]
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 300
+  recover_upstream_session: false
+  mode: {kind: session}
+  candidate_disposition: owner_decision
+  workload_client_delegation_caps: []
+limits:
+  duration_seconds: 360
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

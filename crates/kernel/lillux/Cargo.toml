@@ -1,6 +1,6 @@
 [package]
 name = "lillux"
-version = "0.5.82"
+version = "0.5.83"
 edition = "2024"
 description = "Lillux microkernel — Execute, Memory, Identity, Time"
 license.workspace = true
@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
+serde_stacker = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "rand_core", "pem"] }
 sha2 = { workspace = true }
 base64 = { workspace = true }

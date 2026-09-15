@@ -3,6 +3,7 @@ version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "author-context-doc"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Author a signed tv-tracker context doc under apps/tv-tracker/context/* via the daemon runtime.author_item callback. Generic over the doc slug; the daemon signs (this wrapper never holds a key). Authority is bounded to the context/* subtree — it cannot touch the base Identity/AnalysisBehavior/ChatInstructions docs or anything else."
 
 # Requests the wildcard context subtree. This wildcard MUST match the manifest

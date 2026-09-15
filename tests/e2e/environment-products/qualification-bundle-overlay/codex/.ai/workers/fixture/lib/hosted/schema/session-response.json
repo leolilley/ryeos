@@ -1,0 +1,1 @@
+{"additionalProperties":false,"properties":{"marker":{"const":"selected-runtime-program-v1"},"network_contacted":{"const":false},"schema":{"const":"test.selected_runtime_execution.v1"}},"required":["schema","marker","network_contacted"],"type":"object"}

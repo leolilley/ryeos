@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:21Z:6c37308187f096ba4e909f2e719a08fa89a75f751b5a5ee63f79b9e839151874:oCxo3og0XWd/2jAhEWe9d8YjJm8n+SPXuGVk0QFiPLD+XC82FJwpwYYVDVuqrq3VaFtTHpqBnrfEInQJcLx9BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:20Z:6e6e65fdf19af3609f3ede6f123adf904911c79084d3042a5dd81a95e32a585e:b4prRVl0KSo/2muP/cuwJKxrhXlGDruxe22YlwTy+QBkrvs6AaJ5aE1E1280Nt87926vwAVBT8XKcElHVBMJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/node"
 name: "logs"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: []
 description: "Tail the local node's trace events and startup stderr from the app root."
 

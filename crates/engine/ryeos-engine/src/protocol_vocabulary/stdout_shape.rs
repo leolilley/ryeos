@@ -71,10 +71,8 @@ pub enum DecodedFrame {
 
 /// Typed errors surfaced by the streaming frame reader.
 ///
-/// Replaces the predecessor wave's `VocabularyError::StreamingProtocolViolation`
-/// catch-all string. Production callers (the dispatch_streaming_subprocess
-/// path in ryeosd) match on these variants for structured logging and
-/// targeted recovery; tests assert on variants instead of substring.
+/// The ordinary subprocess output observer uses these categories for bounded
+/// diagnostics without persisting arbitrary malformed frame content.
 #[derive(Debug, thiserror::Error)]
 pub enum FrameReadError {
     #[error("io error reading frame length at offset {offset}: {source}")]
@@ -109,12 +107,30 @@ pub enum FrameReadError {
     NonExitTerminal { seq: u64, kind: StreamingChunkKind },
     #[error("Exit frame at seq {seq} missing required `exit_code` field")]
     ExitMissingCode { seq: u64 },
+    #[error("Exit frame at seq {seq} must be terminal")]
+    NonTerminalExit { seq: u64 },
     #[error("{kind:?} frame at seq {seq} missing required `data` field")]
     ChunkMissingData { kind: StreamingChunkKind, seq: u64 },
     #[error("unknown frame kind `{kind}` at seq {seq}")]
     UnknownKind { kind: String, seq: u64 },
     #[error("stream ended without a terminal Exit frame ({frames_seen} frames seen)")]
     StreamMissingExit { frames_seen: usize },
+}
+
+impl FrameReadError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::IoLength { .. } | Self::IoBody { .. } => "frame_io_failed",
+            Self::FrameTooLarge { .. } => "frame_too_large",
+            Self::InvalidJson { .. } => "frame_invalid_json",
+            Self::SeqOutOfOrder { .. } => "frame_bad_sequence",
+            Self::FrameAfterTerminal => "frame_after_terminal",
+            Self::NonExitTerminal { .. } | Self::NonTerminalExit { .. } => "frame_invalid_terminal",
+            Self::ExitMissingCode { .. } | Self::ChunkMissingData { .. } => "frame_missing_field",
+            Self::UnknownKind { .. } => "frame_unknown_kind",
+            Self::StreamMissingExit { .. } => "stream_missing_terminal",
+        }
+    }
 }
 
 /// Permissive intermediate parse so we can surface `UnknownKind` as a
@@ -198,19 +214,57 @@ pub fn decode_stdout_frame(
 ///
 /// A stream MAY emit zero `Stdout`/`Stderr` frames before its terminal
 /// `Exit` — that is "succeed silently" and is permitted.
-pub fn read_all_frames<R: Read>(mut reader: R) -> Result<Vec<StreamingChunk>, FrameReadError> {
-    let mut chunks = Vec::new();
-    let mut expected_seq: u64 = 0;
-    let mut seen_terminal = false;
-    let mut offset: usize = 0;
+pub fn read_all_frames<R: Read>(reader: R) -> Result<Vec<StreamingChunk>, FrameReadError> {
+    StreamingFrameReader::new(reader).collect()
+}
 
-    loop {
+/// Incremental observation of the existing framed protocol. Returning a
+/// terminal frame is not process settlement or even proof of clean EOF: keep
+/// consuming to validate the trailing boundary and independently wait for the
+/// exact process. The reader owns no process, queue, event store, or policy.
+pub struct StreamingFrameReader<R> {
+    reader: R,
+    expected_seq: u64,
+    seen_terminal: bool,
+    offset: usize,
+    finished: bool,
+}
+
+impl<R: Read> StreamingFrameReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            expected_seq: 0,
+            seen_terminal: false,
+            offset: 0,
+            finished: false,
+        }
+    }
+
+    fn read_next(&mut self) -> Result<Option<StreamingChunk>, FrameReadError> {
+        let offset = self.offset;
         let mut len_buf = [0u8; 4];
-        match reader.read_exact(&mut len_buf) {
+        // Reading the first byte separately distinguishes clean EOF from a
+        // truncated binary length header. Neither goes through a UTF-8 string.
+        match self.reader.read_exact(&mut len_buf[..1]) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return if self.seen_terminal {
+                    Ok(None)
+                } else {
+                    Err(FrameReadError::StreamMissingExit {
+                        frames_seen: self.expected_seq as usize,
+                    })
+                };
+            }
             Err(e) => return Err(FrameReadError::IoLength { offset, source: e }),
         }
+        if self.seen_terminal {
+            return Err(FrameReadError::FrameAfterTerminal);
+        }
+        self.reader
+            .read_exact(&mut len_buf[1..])
+            .map_err(|source| FrameReadError::IoLength { offset, source })?;
         let frame_len = u32::from_be_bytes(len_buf) as usize;
         if frame_len > MAX_FRAME_BYTES {
             return Err(FrameReadError::FrameTooLarge {
@@ -221,7 +275,7 @@ pub fn read_all_frames<R: Read>(mut reader: R) -> Result<Vec<StreamingChunk>, Fr
         }
         let body_offset = offset + 4;
         let mut frame_buf = vec![0u8; frame_len];
-        reader
+        self.reader
             .read_exact(&mut frame_buf)
             .map_err(|e| FrameReadError::IoBody {
                 offset: body_offset,
@@ -258,56 +312,58 @@ pub fn read_all_frames<R: Read>(mut reader: R) -> Result<Vec<StreamingChunk>, Fr
                 if raw.exit_code.is_none() {
                     return Err(FrameReadError::ExitMissingCode { seq: raw.seq });
                 }
+                if !raw.terminal {
+                    return Err(FrameReadError::NonTerminalExit { seq: raw.seq });
+                }
             }
         }
 
         // Seq monotonicity from 0.
-        if raw.seq != expected_seq {
+        if raw.seq != self.expected_seq {
             return Err(FrameReadError::SeqOutOfOrder {
-                expected: expected_seq,
+                expected: self.expected_seq,
                 actual: raw.seq,
             });
         }
-        expected_seq += 1;
-
-        if seen_terminal {
-            return Err(FrameReadError::FrameAfterTerminal);
-        }
+        self.expected_seq += 1;
 
         if raw.terminal {
             if kind != StreamingChunkKind::Exit {
                 return Err(FrameReadError::NonExitTerminal { seq: raw.seq, kind });
             }
-            seen_terminal = true;
+            self.seen_terminal = true;
         }
 
-        chunks.push(StreamingChunk {
+        self.offset = body_offset + frame_len;
+        Ok(Some(StreamingChunk {
             seq: raw.seq,
             kind,
             data: raw.data,
             exit_code: raw.exit_code,
             terminal: raw.terminal,
-        });
+        }))
+    }
+}
 
-        offset = body_offset + frame_len;
+impl<R: Read> Iterator for StreamingFrameReader<R> {
+    type Item = Result<StreamingChunk, FrameReadError>;
 
-        if seen_terminal {
-            let mut trailing = [0u8; 1];
-            match reader.read(&mut trailing) {
-                Ok(0) => break,
-                Ok(_) => return Err(FrameReadError::FrameAfterTerminal),
-                Err(source) => return Err(FrameReadError::IoLength { offset, source }),
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        match self.read_next() {
+            Ok(Some(chunk)) => Some(Ok(chunk)),
+            Ok(None) => {
+                self.finished = true;
+                None
+            }
+            Err(error) => {
+                self.finished = true;
+                Some(Err(error))
             }
         }
     }
-
-    if !seen_terminal {
-        return Err(FrameReadError::StreamMissingExit {
-            frames_seen: chunks.len(),
-        });
-    }
-
-    Ok(chunks)
 }
 
 #[cfg(test)]
@@ -444,6 +500,76 @@ mod tests {
         let mut out = len.to_vec();
         out.extend_from_slice(&bytes);
         out
+    }
+
+    #[test]
+    fn incremental_reader_delivers_binary_frame_before_reading_the_next_byte() {
+        struct NoReadAhead {
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for NoReadAhead {
+            fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
+                assert!(
+                    self.bytes.position() < self.bytes.get_ref().len() as u64,
+                    "a delivered frame must not wait for the next frame or process EOF"
+                );
+                self.bytes.read(target)
+            }
+        }
+        let mut body = serde_json::to_vec(&StreamingChunk {
+            seq: 0,
+            kind: StreamingChunkKind::Stdout,
+            data: Some("first".into()),
+            exit_code: None,
+            terminal: false,
+        })
+        .unwrap();
+        body.resize(128, b' ');
+        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+        assert_eq!(bytes[3], 0x80);
+        bytes.extend(body);
+        let mut frames = StreamingFrameReader::new(NoReadAhead {
+            bytes: io::Cursor::new(bytes),
+        });
+        let first = frames.next().unwrap().unwrap();
+        assert_eq!(first.data.as_deref(), Some("first"));
+        assert!(!first.terminal);
+    }
+
+    #[test]
+    fn incremental_terminal_frame_is_not_clean_eof_authority() {
+        let mut bytes = write_frame(&StreamingChunk {
+            seq: 0,
+            kind: StreamingChunkKind::Exit,
+            data: None,
+            exit_code: Some(0),
+            terminal: true,
+        });
+        bytes.push(0x80);
+        let mut frames = StreamingFrameReader::new(io::Cursor::new(bytes));
+        assert!(frames.next().unwrap().unwrap().terminal);
+        assert!(matches!(
+            frames.next(),
+            Some(Err(FrameReadError::FrameAfterTerminal))
+        ));
+        assert!(frames.next().is_none());
+        let mut truncated = StreamingFrameReader::new(io::Cursor::new(vec![0, 0]));
+        assert!(matches!(
+            truncated.next(),
+            Some(Err(FrameReadError::IoLength { .. }))
+        ));
+        assert!(truncated.next().is_none());
+    }
+
+    #[test]
+    fn exit_frame_requires_terminal_marker() {
+        let body = br#"{"seq":0,"kind":"exit","exit_code":0,"terminal":false}"#;
+        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+        bytes.extend(body);
+        assert!(matches!(
+            read_all_frames(bytes.as_slice()),
+            Err(FrameReadError::NonTerminalExit { seq: 0 })
+        ));
     }
 
     #[test]

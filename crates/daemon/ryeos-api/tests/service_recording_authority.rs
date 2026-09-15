@@ -87,6 +87,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             validate_only: false,
         },
         requested_call: None,
@@ -137,6 +138,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
         verified: false,
         authorized_key_class: None,
         authenticated_origin_site_id: None,
+        authenticated_grant_authority: None,
         metadata: Default::default(),
     };
     let result = invoker
@@ -370,6 +372,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
                 verified: false,
                 authorized_key_class: None,
                 authenticated_origin_site_id: None,
+                authenticated_grant_authority: None,
                 metadata: Default::default(),
             }),
             workspace_lifeline: None,
@@ -414,6 +417,7 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
                     ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient,
                 ),
                 authenticated_origin_site_id: None,
+                authenticated_grant_authority: None,
                 metadata: Default::default(),
             }),
             workspace_lifeline: None,

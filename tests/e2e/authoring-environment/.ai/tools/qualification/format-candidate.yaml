@@ -1,0 +1,54 @@
+# ryeos:signed:2026-09-09T04:55:48Z:59797f35d7267bd430bdfa1a7bc0b1a1788db5f77dec4e8d96a43e427729a51b:MwYeT1vBRkBuxdEgBF1XwSEC0nK+gdfENHgpQhLdtuQClnFSwYnPgQ6Qg+qEKUI4MOlqA0OkzvjcE9EUhMpWBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: qualification
+name: format-candidate
+version: "1.0.0"
+description: Independently check the frozen authoring E2E sample, not a general project evaluator
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: immutable_current_generation
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content:
+  - id: authoring-tools
+    kind: tree
+    mode: pinned
+    digest: 1ca7a7fe9ecc1d19c38c986ba9df435ff7bbe6d4ba020f2643564b8bba0c84e6
+    mount_root: execution_runtime
+    mount: authoring-tools
+env_config:
+  env:
+    PATH: ""
+  env_paths:
+    PATH: {prepend: [], append: []}
+config:
+  command: realization:authoring-tools/bin/zsh
+  args:
+    - -f
+    - -c
+    - literal: |
+        set -eu
+        setopt PIPE_FAIL
+        # The immutable base owns this evaluator. Never execute candidate
+        # scripts, resolve a host command, or grant this operation to the worker.
+        # Fixed sample bytes are this E2E's assertion, not generic RyeOS policy.
+        accepted=false
+        if [[ ! -L crates && ! -L crates/qualification &&
+              ! -L crates/qualification/sample.rs && -f crates/qualification/sample.rs ]] &&
+           printf 'pub fn value() -> u32 {\n    2\n}\n' |
+             "$1" -s -- crates/qualification/sample.rs -; then
+          accepted=true
+        fi
+        printf '{"schema_version":1,"base_snapshot_hash":"%s","candidate_snapshot_hash":"%s","accepted":%s,"evidence":{"fixture":"formatted-value-two","sample_bytes_match":%s}}\n' "$2" "$3" "$accepted" "$accepted"
+    - ryeos-candidate-evaluator
+    - /ryeos/realizations/authoring-tools/bin/cmp
+    - "${params.base_snapshot_hash}"
+    - "${params.candidate_snapshot_hash}"
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties:
+    base_snapshot_hash: {type: string, pattern: '^[a-f0-9]{64}$'}
+    candidate_snapshot_hash: {type: string, pattern: '^[a-f0-9]{64}$'}
+  required: [base_snapshot_hash, candidate_snapshot_hash]
+  additionalProperties: false

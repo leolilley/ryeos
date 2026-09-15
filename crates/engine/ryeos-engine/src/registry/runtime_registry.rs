@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
+pub use ryeos_handler_protocol::ProjectResultRequirement;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_ref::CanonicalRef;
@@ -42,14 +43,20 @@ const MAX_LAUNCH_RUNTIME_DATA_KEYS: usize = 32;
 const MAX_LAUNCH_CONFIG_INPUTS: usize = 16;
 const MAX_LAUNCH_RUNTIME_FACTS: usize = 128;
 const MAX_LAUNCH_EXECUTION_DEPENDENCIES: usize = 8;
-const MAX_LAUNCH_CONTENT_DEPENDENCIES: usize = 8;
-const MAX_LAUNCH_CONTENT_TARGETS: usize = 8;
-const MAX_LAUNCH_EXECUTABLE_SEARCH_ENTRIES: usize = 32;
+pub(crate) const MAX_LAUNCH_CONTENT_DEPENDENCIES: usize = 8;
+pub(crate) const MAX_LAUNCH_CONTENT_TARGETS: usize = 8;
+pub(crate) const MAX_LAUNCH_EXECUTABLE_SEARCH_ENTRIES: usize = 32;
+const MAX_LAUNCH_EVIDENCE_ATTACHMENTS: usize = 64;
+const MAX_LAUNCH_EVIDENCE_ATTACHMENT_BYTES: u64 = ryeos_state::objects::MAX_BUNDLE_EVENT_ATTACHMENTS
+    as u64
+    * ryeos_state::objects::MAX_BUNDLE_EVENT_ATTACHMENT_BYTES;
 const MAX_LAUNCH_ENVIRONMENT_CONTRIBUTIONS: usize = 8;
 const MAX_LAUNCH_ENVIRONMENT_TARGETS: usize = 8;
 const MAX_LAUNCH_ENVIRONMENT_VARIABLES: usize = 32;
 const MAX_LAUNCH_SECRET_NAMES: usize = 32;
-const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
+/// Maximum retained size of any one launch runtime fact. Fact producers must
+/// use this ceiling rather than declaring a larger, independently valid wire payload.
+pub const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
 const MAX_LAUNCH_NAME_BYTES: usize = 64;
 const MAX_CONFIG_IDENTITY_BYTES: usize = 512;
 const MAX_CONFIG_SEGMENT_BYTES: usize = 128;
@@ -95,6 +102,11 @@ pub struct RuntimeYaml {
     /// merges, and clamps values declared by this signed descriptor.
     #[serde(default)]
     pub limits: RuntimeLimitsDecl,
+    /// Optional pure projector for execution-specific result/call evidence.
+    /// Selection is by this runtime's exact signed ref and content digest,
+    /// never by the kind named in `serves`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_evidence: Option<ryeos_handler_protocol::ExecutionEvidenceProjectorDeclWire>,
     #[serde(default)]
     pub description: Option<String>,
     /// Replay-aware resume policy for this runtime. Presence ⇒ this runtime
@@ -167,11 +179,22 @@ pub struct LaunchContractDecl {
     /// launch preparer may select. Resolution and trust are always derived by
     /// the engine; the handler supplies only canonical item refs.
     pub execution_dependencies: LaunchExecutionDependencyPolicy,
+    // Keep deferred child execution out of this contract. The targets below
+    // belong to the managed runtime being launched, not to future ordinary
+    // RyeOS children. A child owns a separately admitted effective program;
+    // its content, command, effects, limits, and recovery authority must not
+    // be copied into this parent runtime declaration.
     /// Signed mechanical ceiling for non-executable bound items whose exact
     /// pinned realizations may contribute to named execution dependencies.
     /// Kind/space/trust remain authoritative in `ref_bindings` and are not
     /// repeated here.
     pub content_dependencies: LaunchContentDependencyPolicy,
+    /// Signed admission ceiling for exact bundle-event attachments supplied by
+    /// an invocation and bound into one private persistent-session workspace.
+    /// This is deliberately a sibling of static signed content dependencies:
+    /// the event coordinate is dynamic, while materialization and execution
+    /// identity use the same retained external-realization substrate.
+    pub evidence_attachments: LaunchEvidenceAttachmentPolicy,
     /// Signed mechanical ceiling for path-free environment contributions to
     /// named execution dependencies. Values may reference admitted content
     /// dependencies, but are not themselves content authority.
@@ -218,8 +241,19 @@ pub struct LaunchContentDependencyPolicy {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchContentExternalPolicy {
+    pub allowed_mount_roots: Vec<crate::external_content::ExternalContentMountRoot>,
     pub max_declarations: u16,
     pub large_content_max_total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchEvidenceAttachmentPolicy {
+    pub max_attachments: u16,
+    pub max_total_bytes: u64,
+    pub target: Option<String>,
+    pub destination_prefix: Option<String>,
+    pub allowed_access: Vec<ryeos_handler_protocol::EvidenceAttachmentAccessWire>,
 }
 
 impl LaunchContentExternalPolicy {
@@ -231,6 +265,7 @@ impl LaunchContentExternalPolicy {
             realization_derived: crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
                 .to_owned(),
             allowed_roots: Vec::new(),
+            allowed_mount_roots: self.allowed_mount_roots.clone(),
             max_declarations: usize::from(self.max_declarations),
             large_content: self.large_content_max_total_bytes.map(|maximum| {
                 crate::kind_registry::KindLargeContentGrant {
@@ -259,9 +294,23 @@ pub enum ExternalEffectAuthorityDecl {
 #[serde(deny_unknown_fields)]
 pub struct RefBindingDecl {
     pub required: bool,
+    pub source: RefBindingSource,
+    pub project_result_requirement: ProjectResultRequirement,
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<LaunchItemSpace>,
     pub allowed_trust: Vec<TrustClass>,
+}
+
+/// Signed owner of a managed runtime's ref-binding coordinate.
+///
+/// `caller` preserves explicit invocation input. `primary_field` projects one
+/// exact string from the already verified composed primary, avoiding a second
+/// caller-authored copy while leaving resolution and authorization unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RefBindingSource {
+    Caller,
+    PrimaryField { path: Vec<String> },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -699,6 +748,13 @@ pub(crate) fn validate_runtime_yaml(
             reason: format!("expected `kind: runtime`, got `kind: {}`", yaml.kind),
         });
     }
+    if let Some(projector) = &yaml.execution_evidence {
+        crate::execution_evidence::validate_execution_evidence_projector_declaration(projector)
+            .map_err(|reason| EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason,
+            })?;
+    }
     if yaml.serves.is_empty() {
         return Err(EngineError::RuntimeYamlInvalid {
             path: yaml_path.to_owned(),
@@ -933,6 +989,30 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
     }
     for (name, binding) in &contract.ref_bindings {
         validate_launch_name(yaml_path, "launch_contract.ref_bindings", name)?;
+        if let RefBindingSource::PrimaryField { path } = &binding.source {
+            if path.is_empty() || path.len() > 8 {
+                return runtime_yaml_error(
+                    yaml_path,
+                    format!(
+                        "launch_contract.ref_bindings.{name}.source.path must contain 1 to 8 fields"
+                    ),
+                );
+            }
+            for field in path {
+                if field.is_empty()
+                    || field.len() > 64
+                    || field.trim() != field
+                    || field.chars().any(char::is_control)
+                {
+                    return runtime_yaml_error(
+                        yaml_path,
+                        format!(
+                            "launch_contract.ref_bindings.{name}.source.path contains an invalid field"
+                        ),
+                    );
+                }
+            }
+        }
         validate_non_empty_unique(
             yaml_path,
             &format!("launch_contract.ref_bindings.{name}.allowed_kinds"),
@@ -1225,12 +1305,90 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
                 "launch_contract.content_dependencies.external_content.max_declarations is outside the substrate ceiling",
             );
         }
+        let mount_roots = external
+            .allowed_mount_roots
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if mount_roots.is_empty() || mount_roots.len() != external.allowed_mount_roots.len() {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch content-dependency mount roots must be nonempty and unique",
+            );
+        }
         if let Some(maximum) = external.large_content_max_total_bytes
             && (maximum == 0 || maximum > ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES)
         {
             return runtime_yaml_error(
                 yaml_path,
                 "launch content-dependency large-content ceiling is outside the substrate bound",
+            );
+        }
+    }
+
+    let evidence_policy = &contract.evidence_attachments;
+    let evidence_disabled = evidence_policy.max_attachments == 0;
+    if usize::from(evidence_policy.max_attachments) > MAX_LAUNCH_EVIDENCE_ATTACHMENTS
+        || evidence_policy.max_total_bytes > MAX_LAUNCH_EVIDENCE_ATTACHMENT_BYTES
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.evidence_attachments exceeds a daemon aggregate ceiling",
+        );
+    }
+    if evidence_disabled
+        != (evidence_policy.max_total_bytes == 0
+            && evidence_policy.target.is_none()
+            && evidence_policy.destination_prefix.is_none()
+            && evidence_policy.allowed_access.is_empty())
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.evidence_attachments must be wholly empty exactly when max_attachments is zero",
+        );
+    }
+    if !evidence_disabled {
+        if evidence_policy.max_total_bytes == 0
+            || evidence_policy.allowed_access.as_slice()
+                != [ryeos_handler_protocol::EvidenceAttachmentAccessWire::ReadOnly]
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                "enabled launch evidence attachments require a nonzero byte ceiling and exact read_only access",
+            );
+        }
+        let target =
+            evidence_policy
+                .target
+                .as_deref()
+                .ok_or_else(|| EngineError::RuntimeYamlInvalid {
+                    path: yaml_path.to_owned(),
+                    reason: "enabled launch evidence attachments require a target".to_owned(),
+                })?;
+        validate_launch_name(
+            yaml_path,
+            "launch_contract.evidence_attachments.target",
+            target,
+        )?;
+        let prefix = evidence_policy
+            .destination_prefix
+            .as_deref()
+            .ok_or_else(|| EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: "enabled launch evidence attachments require a destination_prefix"
+                    .to_owned(),
+            })?;
+        ryeos_state::objects::validate_canonical_project_relative_path(prefix).map_err(
+            |error| EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: format!(
+                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error}"
+                ),
+            },
+        )?;
+        if prefix == crate::AI_DIR || prefix.starts_with(&format!("{}/", crate::AI_DIR)) {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch evidence attachments cannot target the .ai control namespace",
             );
         }
     }
@@ -1275,11 +1433,12 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             || !contract.runtime_facts.is_empty()
             || contract.execution_dependencies.max_dependencies != 0
             || contract.content_dependencies.max_dependencies != 0
+            || contract.evidence_attachments.max_attachments != 0
             || contract.environment_contributions.max_contributions != 0)
     {
         return runtime_yaml_error(
             yaml_path,
-            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, execution dependencies, content dependencies, and environment contributions",
+            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, execution dependencies, content dependencies, evidence attachments, and environment contributions",
         );
     }
 
@@ -1373,8 +1532,8 @@ where
     values.iter().any(|value| !seen.insert(value))
 }
 
-fn validate_launch_name(yaml_path: &Path, field: &str, name: &str) -> Result<(), EngineError> {
-    let valid = !name.is_empty()
+pub(crate) fn valid_launch_name(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= MAX_LAUNCH_NAME_BYTES
         && name
             .bytes()
@@ -1384,8 +1543,11 @@ fn validate_launch_name(yaml_path: &Path, field: &str, name: &str) -> Result<(),
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         && !name.ends_with('_')
-        && !name.contains("__");
-    if !valid {
+        && !name.contains("__")
+}
+
+fn validate_launch_name(yaml_path: &Path, field: &str, name: &str) -> Result<(), EngineError> {
+    if !valid_launch_name(name) {
         return runtime_yaml_error(
             yaml_path,
             format!(
@@ -1441,6 +1603,29 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn bundled_runtime_descriptors_obey_launch_contract_bounds() {
+        let bundle_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../bundles");
+        let mut checked = 0;
+        for bundle in std::fs::read_dir(&bundle_root).unwrap() {
+            let runtimes = bundle.unwrap().path().join(".ai/runtimes");
+            if !runtimes.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(runtimes).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|value| value.to_str()) != Some("yaml") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap();
+                let yaml = parse_runtime_yaml(&path, &body).unwrap();
+                validate_runtime_yaml(&path, &yaml).unwrap();
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no bundled runtime descriptors were checked");
+    }
+
     fn minimal_yaml() -> RuntimeYaml {
         RuntimeYaml {
             kind: "runtime".to_owned(),
@@ -1475,6 +1660,13 @@ mod tests {
                     max_executable_search_entries: 0,
                     external_content: None,
                 },
+                evidence_attachments: LaunchEvidenceAttachmentPolicy {
+                    max_attachments: 0,
+                    max_total_bytes: 0,
+                    target: None,
+                    destination_prefix: None,
+                    allowed_access: vec![],
+                },
                 environment_contributions: LaunchEnvironmentContributionPolicy {
                     max_contributions: 0,
                     max_targets_per_contribution: 0,
@@ -1485,6 +1677,7 @@ mod tests {
             },
             observability: RuntimeObservabilityDecl::default(),
             limits: RuntimeLimitsDecl::default(),
+            execution_evidence: None,
             description: None,
             native_resume: None,
         }
@@ -1524,6 +1717,12 @@ mod tests {
         "    max_targets_per_dependency: 0\n",
         "    max_executable_search_entries: 0\n",
         "    external_content: null\n",
+        "  evidence_attachments:\n",
+        "    max_attachments: 0\n",
+        "    max_total_bytes: 0\n",
+        "    target: null\n",
+        "    destination_prefix: null\n",
+        "    allowed_access: []\n",
         "  environment_contributions:\n",
         "    max_contributions: 0\n",
         "    max_targets_per_contribution: 0\n",
@@ -1701,6 +1900,30 @@ mod tests {
     }
 
     #[test]
+    fn evidence_attachment_policy_is_closed_and_avoids_control_paths() {
+        let mut inconsistent = minimal_yaml();
+        inconsistent
+            .launch_contract
+            .evidence_attachments
+            .max_total_bytes = 1;
+        let error = validate_runtime_yaml(&test_path(), &inconsistent)
+            .expect_err("a partially enabled evidence policy must fail");
+        assert!(error.to_string().contains("wholly empty"));
+
+        let mut reserved = minimal_yaml();
+        reserved.launch_contract.evidence_attachments = LaunchEvidenceAttachmentPolicy {
+            max_attachments: 1,
+            max_total_bytes: 1024,
+            target: Some("worker".to_owned()),
+            destination_prefix: Some(".ai/evidence".to_owned()),
+            allowed_access: vec![ryeos_handler_protocol::EvidenceAttachmentAccessWire::ReadOnly],
+        };
+        let error = validate_runtime_yaml(&test_path(), &reserved)
+            .expect_err("evidence must not overlap the control namespace");
+        assert!(error.to_string().contains(".ai control namespace"));
+    }
+
+    #[test]
     fn runtime_limits_require_a_bounded_signed_contract() {
         let mut yaml = minimal_yaml();
         yaml.limits.config_identity = Some("example-runtime/limits".to_string());
@@ -1768,6 +1991,8 @@ mod tests {
             "model".to_string(),
             RefBindingDecl {
                 required: true,
+                source: RefBindingSource::Caller,
+                project_result_requirement: ProjectResultRequirement::None,
                 allowed_kinds: vec!["test_kind".to_string()],
                 allowed_spaces: vec![LaunchItemSpace::Node],
                 allowed_trust: vec![TrustClass::TrustedNode],

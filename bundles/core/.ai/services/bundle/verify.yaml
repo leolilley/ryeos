@@ -1,11 +1,12 @@
-# ryeos:signed:2026-08-17T23:05:46Z:558f527c0f646384a703c0b9ee97dda2cf50d3eda8ef8c84ba6564df753d83d0:Ml/cNZYtvtbI7ncWFUTNHGCO5RIkAhrFQbJZdBvGjdFI77e/LKB0VF0GaH1YDDfD9aw69eW7wcyv2q7MZpTLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-06T06:51:53Z:14265124e8987e0d2ee69c76d89da9b6dc8588428dcff3d235006ac8c1a6897b:6APOSOlHRGrAcYc5gVEYRaVPpbo7capB/STJ0woPiDiFZSE3m5c1Pz+L5UajqmWbWS0VZCqoksj9zbKv+AOlCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.verify
-availability: local
-local_execute: tool:ryeos/core/bundle/verify
-required_caps: []
+availability: both
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.bundle/verify"]
 schema:
   source: string
   registry_root: string?
   registry_roots: array?
-description: "Validate all bundle items, signatures, metadata anchoring, and manifest. Does not rewrite any files."
+description: "Configured-local-operator bundle preflight against the retained node generation. Source and explicit registry roots must be absolute paths. Uses the live daemon or the same standalone service when stopped; does not sign, publish, or rewrite source files."

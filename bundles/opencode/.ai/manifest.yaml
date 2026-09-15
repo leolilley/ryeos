@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-10T11:26:37Z:814cef3c4b0a292060195939a1509fa58393ebc8c153ffa5a8b3ae3072267a4b:1ctsG6I/i5+qQsEj+gVw6fagBzj5U+mIlyzUtOxzQdC7I1vouxNV/etq7rHPp8JnrUW2TKpTBkEZm/+fdkqfAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: opencode
+version: 0.1.0
+description: RyeOS-hosted opencode structured-session worker and activation surfaces
+provides_kinds: []
+requires_kinds:
+- config
+- handler
+- knowledge
+- protocol
+- runtime
+- worker
+- worker_execution
+uses_kinds: []

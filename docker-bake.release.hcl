@@ -18,6 +18,10 @@ variable "ARTIFACT_DIR" {
   default = "./release-artifacts"
 }
 
+variable "WORKLOAD_CLIENT_ARTIFACT_DIR" {
+  default = "./workload-client-release-artifacts"
+}
+
 variable "STANDARD_TAG" {
   default = "ryeos-standard:release-candidate"
 }
@@ -53,6 +57,12 @@ target "bundle-artifact" {
   # cache export only here so one multi-output solve does not upload the same
   # compiled graph once per image.
   cache-to = ["type=gha,scope=ryeos-release-unified,mode=max"]
+}
+
+target "workload-client-artifact" {
+  inherits = ["_release"]
+  target   = "workload-client-artifact"
+  output   = ["type=local,dest=${WORKLOAD_CLIENT_ARTIFACT_DIR}"]
 }
 
 target "standard" {

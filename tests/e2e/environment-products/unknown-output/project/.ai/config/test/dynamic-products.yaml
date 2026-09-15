@@ -1,0 +1,112 @@
+category: test
+version: "1.0.0"
+description: Exact producer and two-slot verifier allowance with unknown output identities
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: dynamic_root
+      path: products/dynamic
+      storage: content
+      bounds: {maximum_entries: 2, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 256}
+  products:
+    - name: auxiliary
+      source: {kind: workspace_output, root: dynamic_root}
+      path: products/dynamic/auxiliary
+      shape: file
+      storage: content
+      required: true
+      bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+    - name: subject
+      source: {kind: workspace_output, root: dynamic_root}
+      path: products/dynamic/subject
+      shape: file
+      storage: content
+      required: true
+      bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: auxiliary_to_verifier
+      producer:
+        canonical_ref: graph:test/dynamic-products
+        recipe_binding: product_recipe
+        product_name: auxiliary
+        parameters: {}
+      consumer: {canonical_ref: "tool:test/verify-dynamic-products", declaration_id: auxiliary}
+      required_product:
+        shape: file
+        storage: content
+        bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: subject_to_verifier
+      producer:
+        canonical_ref: graph:test/dynamic-products
+        recipe_binding: product_recipe
+        product_name: subject
+        parameters: {}
+      consumer: {canonical_ref: "tool:test/verify-dynamic-products", declaration_id: subject}
+      required_product:
+        shape: file
+        storage: content
+        bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: subject_to_consumer
+      producer:
+        canonical_ref: graph:test/dynamic-products
+        recipe_binding: product_recipe
+        product_name: subject
+        parameters: {}
+      consumer: {canonical_ref: "config:test/dynamic-qualified-consumer", declaration_id: subject}
+      required_product:
+        shape: file
+        storage: content
+        bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+      qualification:
+        policy_ref: config:test/dynamic-qualification
+        required_claims: [bounded_payload_pair]
+    - name: auxiliary_to_graph_verifier
+      producer:
+        canonical_ref: graph:test/dynamic-products
+        recipe_binding: product_recipe
+        product_name: auxiliary
+        parameters: {}
+      consumer: {canonical_ref: "graph:test/verify-dynamic-products", declaration_id: auxiliary}
+      required_product:
+        shape: file
+        storage: content
+        bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: subject_to_graph_verifier
+      producer:
+        canonical_ref: graph:test/dynamic-products
+        recipe_binding: product_recipe
+        product_name: subject
+        parameters: {}
+      consumer: {canonical_ref: "graph:test/verify-dynamic-products", declaration_id: subject}
+      required_product:
+        shape: file
+        storage: content
+        bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: subject_to_graph_consumer
+      producer:
+        canonical_ref: graph:test/dynamic-products
+        recipe_binding: product_recipe
+        product_name: subject
+        parameters: {}
+      consumer: {canonical_ref: "config:test/dynamic-graph-qualified-consumer", declaration_id: subject}
+      required_product:
+        shape: file
+        storage: content
+        bounds: {maximum_entries: 1, maximum_depth: 1, maximum_file_bytes: 128, maximum_total_bytes: 128}
+      qualification:
+        policy_ref: config:test/dynamic-graph-qualification
+        required_claims: [bounded_payload_pair]

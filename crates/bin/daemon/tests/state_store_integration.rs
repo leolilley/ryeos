@@ -107,7 +107,7 @@ mod integration_tests {
             project_root.clone(),
             format!("local:{}", project_root.display()),
             ryeos_state::objects::LiveProjectAccess::ReadWrite,
-            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+            ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
             ryeos_state::objects::EnvironmentAuthority::None,
             Vec::new(),
         )
@@ -143,6 +143,7 @@ mod integration_tests {
         let spec_hash = ryeos_app::runtime_db::follow_child_spec_hash(
             item_ref,
             &std::collections::BTreeMap::new(),
+            &Vec::new(),
             &serde_json::json!({}),
             None,
         )
@@ -203,6 +204,7 @@ mod integration_tests {
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(
             item_ref,
             &std::collections::BTreeMap::new(),
+            &Vec::new(),
             &serde_json::json!({}),
             None,
         )
@@ -304,13 +306,12 @@ mod integration_tests {
                 id,
                 &RuntimeLaunchMetadata::default()
                     .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
-                    .with_launch_driver(
-                        ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime,
-                    )
+                    .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
                     .with_resume_context(ResumeContext {
                         kind: kind.into(),
                         item_ref: item_ref.into(),
                         ref_bindings: std::collections::BTreeMap::new(),
+                        product_selections: Vec::new(),
                         launch_mode: "wait".into(),
                         parameters: serde_json::json!({}),
                         project_context: ProjectContext::LocalPath {
@@ -320,7 +321,8 @@ mod integration_tests {
                             std::env::temp_dir(),
                             format!("local:{}", std::env::temp_dir().display()),
                             ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                            ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(
+                            ),
                             ryeos_state::objects::EnvironmentAuthority::None,
                             Vec::new(),
                         )
@@ -345,6 +347,7 @@ mod integration_tests {
                             scopes: vec![],
                         }),
                         execution_hints: ExecutionHints::default(),
+                        scheduled_fire: None,
                         effective_caps: vec![],
                         parent_delegation_caps: None,
                         executor_ref: None,
@@ -375,6 +378,7 @@ mod integration_tests {
                         kind: kind.into(),
                         item_ref: item_ref.into(),
                         ref_bindings: std::collections::BTreeMap::new(),
+                        product_selections: Vec::new(),
                         launch_mode: "wait".into(),
                         parameters: serde_json::json!({}),
                         project_context: ProjectContext::None,
@@ -394,6 +398,7 @@ mod integration_tests {
                             scopes: vec![],
                         }),
                         execution_hints: ExecutionHints::default(),
+                        scheduled_fire: None,
                         effective_caps: vec![],
                         parent_delegation_caps: None,
                         executor_ref: None,
@@ -681,6 +686,7 @@ mod integration_tests {
                 67890,
                 &ryeos_app::process::ExecutionProcessIdentity {
                     schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    process_scope: None,
                     boot_id: "test-boot".to_string(),
                     target_pid: 12345,
                     target_start_time_ticks: 10,
@@ -751,6 +757,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
 
@@ -806,6 +813,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
         store
@@ -937,6 +945,7 @@ mod integration_tests {
             }],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
 
@@ -1053,6 +1062,7 @@ mod integration_tests {
                     artifacts: vec![],
                     managed_envelope: None,
                     result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
                     final_cost: None,
                 },
             )
@@ -1132,6 +1142,7 @@ mod integration_tests {
                     artifacts: vec![],
                     managed_envelope: None,
                     result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
                     final_cost: None,
                 },
             )
@@ -1206,6 +1217,7 @@ mod integration_tests {
                     artifacts: vec![],
                     managed_envelope: None,
                     result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
                     final_cost: None,
                 },
             )
@@ -1444,6 +1456,7 @@ mod integration_tests {
                     artifacts: vec![],
                     managed_envelope: None,
                     result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
                     final_cost: None,
                 },
             )
@@ -1549,6 +1562,7 @@ mod integration_tests {
             kind: "directive".into(),
             item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
+            product_selections: Vec::new(),
             launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
@@ -1558,7 +1572,7 @@ mod integration_tests {
                 std::env::temp_dir(),
                 format!("local:{}", std::env::temp_dir().display()),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
                 ryeos_state::objects::EnvironmentAuthority::None,
                 Vec::new(),
             )
@@ -1583,6 +1597,7 @@ mod integration_tests {
                 scopes: vec![],
             }),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             effective_caps: vec![],
             parent_delegation_caps: None,
             executor_ref: None,
@@ -1692,6 +1707,7 @@ mod integration_tests {
             kind: "directive".into(),
             item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
+            product_selections: Vec::new(),
             launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
@@ -1701,7 +1717,7 @@ mod integration_tests {
                 std::env::temp_dir(),
                 format!("local:{}", std::env::temp_dir().display()),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
                 ryeos_state::objects::EnvironmentAuthority::None,
                 Vec::new(),
             )
@@ -1726,6 +1742,7 @@ mod integration_tests {
                 scopes: vec![],
             }),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             effective_caps: vec![],
             parent_delegation_caps: None,
             executor_ref: None,
@@ -2118,6 +2135,7 @@ mod integration_tests {
             }],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
 
@@ -2262,6 +2280,7 @@ mod integration_tests {
             }],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: Some(ryeos_engine::contracts::FinalCost {
                 turns: 3,
                 input_tokens: 1500,
@@ -2377,6 +2396,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
         store
@@ -2390,6 +2410,7 @@ mod integration_tests {
                 99999,
                 &ryeos_app::process::ExecutionProcessIdentity {
                     schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    process_scope: None,
                     boot_id: "test-boot".to_string(),
                     target_pid: 99999,
                     target_start_time_ticks: 10,
@@ -2448,6 +2469,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
 
@@ -2495,6 +2517,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
 
@@ -2547,6 +2570,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
         store
@@ -2562,6 +2586,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
         let err = store
@@ -2597,6 +2622,7 @@ mod integration_tests {
             artifacts: vec![],
             managed_envelope: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             final_cost: None,
         };
 

@@ -19,6 +19,7 @@ fn shell(script: String) -> SubprocessRequest {
         timeout: 30.0,
         limits: None,
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     }
 }
@@ -123,6 +124,7 @@ fn exec_failure_is_reported_by_release_transition() {
         timeout: 30.0,
         limits: None,
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     };
     let pending = spawn_awaiting_attachment(request).expect("child reaches final pre-exec hold");
@@ -165,13 +167,14 @@ fn attachment_deadline_expiry_fails_closed() {
 
 #[test]
 fn supervised_target_uses_the_same_typed_attachment_transition() {
-    use std::os::fd::AsRawFd as _;
-
     let temp = tempfile::tempdir().expect("tempdir");
     let marker = temp.path().join("executed");
     let pipe = supervised_launcher_attachment_status_pipe().expect("attachment status pipe");
-    let status_fd = pipe.writer_fd();
-    let release_reader = pipe.attachment_release_reader.as_raw_fd();
+    let status_fd = pipe.writer_descriptor().unwrap() as i32;
+    let release_reader = pipe
+        .attachment_release_reader
+        .inherited_descriptor()
+        .unwrap();
     let script = format!(
         "(/bin/dd bs=1 count=1 <&{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\"",
         marker.display()
@@ -221,6 +224,45 @@ fn normal_spawn_rejects_an_attachment_bearing_supervisor() {
         "{}",
         error.stderr
     );
+}
+
+#[test]
+fn held_launcher_setup_failures_return_exact_cleanup_proof() {
+    for response in [
+        Some(r#"{"refused":{"code":"launch_refused","message":"fixture refusal"}}"#),
+        Some("invalid-json"),
+        Some(r#"{"child-pid":0}"#),
+        None,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("executed");
+        let pipe = supervised_launcher_attachment_status_pipe().unwrap();
+        let status_fd = pipe.writer_descriptor().unwrap();
+        let report = response.map_or_else(String::new, |document| {
+            format!("printf '%s\\n' '{document}' >&{status_fd};")
+        });
+        let mut request = shell(format!(
+            "{report} /bin/sleep 30; printf unexpected > {}",
+            marker.display()
+        ));
+        request.timeout = if response.is_none() { 0.2 } else { 5.0 };
+        request.inherited_fds.push(pipe.writer);
+        request.inherited_fds.push(pipe.attachment_release_reader);
+        request
+            .inherited_fds
+            .push(pipe.attachment_release_keepalive_writer);
+        request.supervised_status = Some(pipe.reader);
+        let Err(result) = spawn_awaiting_attachment(request) else {
+            panic!("invalid setup must not return a releasable process");
+        };
+        let proof = result
+            .aborted_before_attachment
+            .expect("checked group cleanup");
+        assert!(proof.pid > 0);
+        assert_eq!(i64::from(proof.pid), proof.pgid);
+        assert!(!is_alive(proof.pid), "owned launcher was not reaped");
+        assert!(!marker.exists());
+    }
 }
 
 #[test]
@@ -443,13 +485,14 @@ fn released_target_timeout_still_terminates_its_process_group() {
 
 #[test]
 fn supervised_output_overflow_before_release_fails_closed() {
-    use std::os::fd::AsRawFd as _;
-
     let temp = tempfile::tempdir().expect("tempdir");
     let marker = temp.path().join("executed");
     let pipe = supervised_launcher_attachment_status_pipe().expect("attachment status pipe");
-    let status_fd = pipe.writer_fd();
-    let release_reader = pipe.attachment_release_reader.as_raw_fd();
+    let status_fd = pipe.writer_descriptor().unwrap() as i32;
+    let release_reader = pipe
+        .attachment_release_reader
+        .inherited_descriptor()
+        .unwrap();
     let script = format!(
         "(/bin/dd bs=1 count=1 <&{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; /bin/dd if=/dev/zero bs=1024 count=4 2>/dev/null; wait \"$target\"",
         marker.display()

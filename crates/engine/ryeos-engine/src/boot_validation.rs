@@ -50,10 +50,11 @@ use ryeos_handler_protocol::{
     ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, FinancialAuthorityDeclWire,
     HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchConfigInputDeclWire,
     LaunchContentDependencyPolicyWire, LaunchContentExternalPolicyWire,
-    LaunchEnvironmentContributionPolicyWire, LaunchExecutionDependencyPolicyWire,
-    LaunchSecretPolicyDeclWire, RefBindingDeclWire, RuntimeFactDeclWire, RuntimeFactKindWire,
-    TrustClassWire, ValidateComposerConfigRequest, ValidateLaunchPreparerConfigRequest,
-    ValidateLaunchPreparerConfigResponse, ValidateParserConfigRequest,
+    LaunchEnvironmentContributionPolicyWire, LaunchEvidenceAttachmentPolicyWire,
+    LaunchExecutionDependencyPolicyWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
+    RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
+    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    ValidateParserConfigRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,14 +138,6 @@ pub enum BootIssue {
     /// A runtime kind item's terminator declares a `protocol_ref`
     /// that doesn't match the expected protocol for its kind.
     RuntimeProtocolMismatch {
-        kind: String,
-        protocol_ref: String,
-        expected: String,
-    },
-    /// A streaming_tool kind item's terminator declares a
-    /// `protocol_ref` that doesn't match the expected streaming
-    /// protocol.
-    StreamingToolProtocolMismatch {
         kind: String,
         protocol_ref: String,
         expected: String,
@@ -612,6 +605,17 @@ fn launch_preparer_validation_request(
                 name.clone(),
                 RefBindingDeclWire {
                     required: binding.required,
+                    project_result_requirement: binding.project_result_requirement,
+                    source: match &binding.source {
+                        crate::runtime_registry::RefBindingSource::Caller => {
+                            ryeos_handler_protocol::RefBindingSourceWire::Caller
+                        }
+                        crate::runtime_registry::RefBindingSource::PrimaryField { path } => {
+                            ryeos_handler_protocol::RefBindingSourceWire::PrimaryField {
+                                path: path.clone(),
+                            }
+                        }
+                    },
                     allowed_kinds: binding.allowed_kinds.clone(),
                     allowed_spaces: binding
                         .allowed_spaces
@@ -749,6 +753,13 @@ fn launch_preparer_validation_request(
                     large_content_max_total_bytes: external.large_content_max_total_bytes,
                 },
             ),
+        },
+        evidence_attachments: LaunchEvidenceAttachmentPolicyWire {
+            max_attachments: contract.evidence_attachments.max_attachments,
+            max_total_bytes: contract.evidence_attachments.max_total_bytes,
+            target: contract.evidence_attachments.target.clone(),
+            destination_prefix: contract.evidence_attachments.destination_prefix.clone(),
+            allowed_access: contract.evidence_attachments.allowed_access.clone(),
         },
         environment_contributions: LaunchEnvironmentContributionPolicyWire {
             max_contributions: contract.environment_contributions.max_contributions,
@@ -2004,6 +2015,7 @@ composed_value_contract:
             },
             callback_channel: CallbackChannel::None,
             session: None,
+            execution_evidence: None,
         }
     }
 
@@ -2088,6 +2100,7 @@ composed_value_contract:
             },
             callback_channel: CallbackChannel::None,
             session: None,
+            execution_evidence: None,
         };
 
         let synthetic_ref = CanonicalRef::parse("tool:synthetic/test").unwrap();

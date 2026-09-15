@@ -1877,7 +1877,135 @@ pub struct PinnedStateAuthority {
     trust_store: Arc<TrustStore>,
 }
 
+/// A valid continuation boundary which begins a different operator/remote
+/// operation, rather than malformed or unavailable retained history.
+#[derive(Debug)]
+pub struct MachineContinuationBoundary;
+
+impl std::fmt::Display for MachineContinuationBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("machine continuation cannot cross an operator or remote boundary")
+    }
+}
+
+impl std::error::Error for MachineContinuationBoundary {}
+
 impl PinnedStateAuthority {
+    /// Exact continuation lineage through one signed head, without a runtime
+    /// database or projection lookup. The caller supplies an existing CAS guard.
+    pub fn read_machine_continuation_lineage(
+        &self,
+        chain_root_id: &str,
+        terminal_thread_id: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<(String, Vec<ThreadSnapshot>)>> {
+        self.read_machine_continuation_segment(
+            chain_root_id,
+            chain_root_id,
+            terminal_thread_id,
+            guard,
+        )
+    }
+
+    /// The exact machine segment starting at an already admitted caller. An
+    /// earlier operator boundary in the same chain is outside this operation.
+    pub fn read_machine_continuation_segment(
+        &self,
+        chain_root_id: &str,
+        start_thread_id: &str,
+        terminal_thread_id: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<(String, Vec<ThreadSnapshot>)>> {
+        self.ensure_guard(guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self.refs_directory,
+            &self.cas_directory,
+            self.require_recovery()?,
+            chain_root_id,
+        )?;
+        chain::read_machine_continuation_lineage_with_trust(
+            self.cas_directory.path(),
+            self.refs_directory.path(),
+            &chain_lock,
+            chain_root_id,
+            start_thread_id,
+            terminal_thread_id,
+            1024,
+            65_536,
+            64 * 1024 * 1024,
+            self.trust_store.as_ref(),
+            &mut HeadCache::new(),
+        )
+    }
+
+    /// Read exact thread authority without a runtime database or global
+    /// projection mutex. The request-local cache is only a verified-head memo.
+    ///
+    /// Events are visited newest-first under the same signed head as the
+    /// returned snapshot. The callback must only accumulate local evidence:
+    /// it must not mutate state or acquire another chain lock. Its partial
+    /// observations are unusable unless this entire method succeeds.
+    pub fn visit_thread_snapshot_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        max_events: u64,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+        visit: impl FnMut(String, crate::objects::ThreadEvent),
+    ) -> anyhow::Result<Option<(String, ThreadSnapshot)>> {
+        self.ensure_guard(guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self.refs_directory,
+            &self.cas_directory,
+            self.require_recovery()?,
+            chain_root_id,
+        )?;
+        chain::visit_thread_snapshot_events_with_trust(
+            self.cas_directory.path(),
+            self.refs_directory.path(),
+            &chain_lock,
+            chain_root_id,
+            thread_id,
+            max_events,
+            max_bytes,
+            self.trust_store.as_ref(),
+            &mut HeadCache::new(),
+            visit,
+        )
+    }
+
+    /// Read exact thread authority without a runtime database or projection lookup.
+    pub fn read_thread_snapshot_with_event_presence(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        event_type: &str,
+        max_events: u64,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<(String, ThreadSnapshot, bool)>> {
+        self.ensure_guard(guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self.refs_directory,
+            &self.cas_directory,
+            self.require_recovery()?,
+            chain_root_id,
+        )?;
+        chain::read_thread_snapshot_with_event_presence_with_trust(
+            self.cas_directory.path(),
+            self.refs_directory.path(),
+            &chain_lock,
+            chain_root_id,
+            thread_id,
+            event_type,
+            max_events,
+            max_bytes,
+            self.trust_store.as_ref(),
+            &mut HeadCache::new(),
+        )
+    }
+
     /// Duplicate the already-pinned authority without resolving any mutable
     /// pathname. Long-lived staged publications use this to retain the exact
     /// runtime/CAS/ref generation beyond one synchronous capture phase.
@@ -4481,6 +4609,28 @@ impl StateDb {
         }))
     }
 
+    /// Inspect an exact thread's authenticated history and snapshot under one
+    /// signed head. Absence is proven only after the complete bounded walk.
+    pub fn read_authoritative_thread_snapshot_with_event_presence(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        event_type: &str,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<(String, ThreadSnapshot, bool)>> {
+        let authority = self.pinned_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.read_thread_snapshot_with_event_presence(
+            chain_root_id,
+            thread_id,
+            event_type,
+            max_events,
+            max_bytes,
+            &guard,
+        )
+    }
+
     /// Read the current chain-global and thread-local append anchors through
     /// the trust-verified signed head without traversing event history.
     pub fn read_authoritative_thread_append_anchor(
@@ -7049,6 +7199,376 @@ mod tests {
         );
         assert_eq!(event.event_type, "observation_without_snapshot_transition");
         assert_eq!(event.thread_seq, 1);
+    }
+
+    fn lineage_accounting_event(thread_id: &str) -> crate::ThreadEvent {
+        let attempt_id = format!("A-lineage-{thread_id}");
+        let payload = ryeos_accounting::ProviderAttemptBudgetTransitionV1 {
+            version: ryeos_accounting::PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
+            transition_id: ryeos_accounting::transition_id(&attempt_id, 1),
+            transition_sequence: 1,
+            attempt_id,
+            budget_authority_site_id: "S-site".into(),
+            ledger_epoch: 1,
+            execution_budget_id: "B-lineage".into(),
+            root_chain_id: "T-root".into(),
+            audit_chain_root_id: "T-root".into(),
+            directive_budget_id: None,
+            thread_id: thread_id.into(),
+            turn: 1,
+            attempt_number: 1,
+            transition: ryeos_accounting::AttemptBudgetState::Reserved,
+            observation: false,
+            config_hash: "a".repeat(64),
+            provider_id: "provider".into(),
+            model: "model".into(),
+            profile: None,
+            reserved_usd_nanos: 0,
+            budget_charge_usd_nanos: None,
+            provider_actual_usd_nanos: None,
+            released_usd_nanos: None,
+            charge_basis: None,
+            occurred_at_ms: 1000,
+            reason: None,
+        };
+        payload.validate().unwrap();
+        crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            thread_id,
+            crate::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
+        )
+        .payload(serde_json::to_value(payload).unwrap())
+        .build()
+    }
+
+    #[test]
+    fn authoritative_continuation_presence_survives_deferred_accounting() {
+        for continued in [false, true] {
+            let signer = TestSigner::default();
+            let (_dir, db) = open_temp_trusted(&signer);
+            let snapshot = test_root_snapshot("tool:system/verifier");
+            db.create_chain("T-root", snapshot.clone(), &signer)
+                .unwrap();
+            let mut events = vec![
+                crate::objects::thread_event::NewEvent::new(
+                    "T-root",
+                    "T-root",
+                    crate::event_types::THREAD_COMPLETED,
+                )
+                .build(),
+            ];
+            if continued {
+                events.push(
+                    crate::objects::thread_event::NewEvent::new(
+                        "T-root",
+                        "T-root",
+                        crate::event_types::THREAD_CONTINUED,
+                    )
+                    .payload(serde_json::json!({"successor_thread_id":"T-successor"}))
+                    .build(),
+                );
+            }
+            events.push(lineage_accounting_event("T-root"));
+            let appended = db
+                .append_events("T-root", "T-root", events, vec![], &signer)
+                .unwrap();
+            let (head, actual, present) = db
+                .read_authoritative_thread_snapshot_with_event_presence(
+                    "T-root",
+                    "T-root",
+                    crate::event_types::THREAD_CONTINUED,
+                    10,
+                    100_000,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(head, appended.value.chain_state_hash);
+            assert_eq!(actual.to_value(), snapshot.to_value());
+            assert_eq!(present, continued);
+            let authority = db.pinned_authority().unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let mut observed = Vec::new();
+            let visited = authority
+                .visit_thread_snapshot_events(
+                    "T-root",
+                    "T-root",
+                    10,
+                    100_000,
+                    &guard,
+                    |hash, event| observed.push((hash, event)),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(visited.0, head);
+            assert_eq!(visited.1.to_value(), actual.to_value());
+            assert!(!observed.is_empty());
+            assert!(observed.windows(2).all(|pair| {
+                pair[0].1.thread_seq == pair[1].1.thread_seq + 1
+                    && pair[0].1.prev_thread_event_hash.as_ref() == Some(&pair[1].0)
+            }));
+            assert_eq!(observed.last().unwrap().1.thread_seq, 1);
+            assert_eq!(
+                observed
+                    .iter()
+                    .any(|(_, event)| event.event_type == crate::event_types::THREAD_CONTINUED),
+                continued,
+            );
+            assert!(authority.visit_thread_snapshot_events(
+                "T-root", "T-root", 1, 100_000, &guard, |_, _| {},
+            ).is_err());
+            assert!(
+                authority
+                    .visit_thread_snapshot_events("T-root", "T-root", 10, 1, &guard, |_, _| {},)
+                    .is_err()
+            );
+            assert!(
+                authority
+                    .visit_thread_snapshot_events(
+                        "T-root",
+                        "T-absent",
+                        10,
+                        100_000,
+                        &guard,
+                        |_, _| panic!("absent thread cannot yield evidence"),
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                db.read_authoritative_thread_snapshot_with_event_presence(
+                    "T-root",
+                    "T-root",
+                    crate::event_types::THREAD_CONTINUED,
+                    1,
+                    100_000,
+                )
+                .is_err()
+            );
+            assert!(
+                db.read_authoritative_thread_snapshot_with_event_presence(
+                    "T-root",
+                    "T-root",
+                    crate::event_types::THREAD_CONTINUED,
+                    10,
+                    1,
+                )
+                .is_err()
+            );
+            assert!(
+                db.read_authoritative_thread_snapshot_with_event_presence(
+                    "T-root",
+                    "T-absent",
+                    crate::event_types::THREAD_CONTINUED,
+                    10,
+                    100_000,
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn machine_lineage_requires_exact_edges_and_birth_even_after_accounting() {
+        for (operator, wrong_birth, remote) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let signer = TestSigner::default();
+            let (_dir, db) = open_temp_trusted(&signer);
+            db.create_chain("T-root", test_root_snapshot("graph:example/build"), &signer)
+                .unwrap();
+            let mut successor = ThreadSnapshotBuilder::new(
+                "T-next",
+                "T-root",
+                "graph",
+                "graph:example/build",
+                "graph-runtime",
+            )
+            .build();
+            successor.upstream_thread_id = Some("T-root".into());
+            let birth = crate::objects::thread_event::NewEvent::new(
+                "T-root",
+                "T-next",
+                crate::event_types::THREAD_CREATED,
+            )
+            .payload(serde_json::json!({
+                "continuation_from": if wrong_birth { "T-other" } else { "T-root" }
+            }))
+            .build();
+            let mut edge = serde_json::json!({
+                "successor_thread_id": "T-next",
+                "reason": if remote { "remote_adoption" } else { "graph_follow_resume" }
+            });
+            if operator {
+                edge["successor_request_fingerprint"] = "a".repeat(64).into();
+            }
+            let continuation = crate::objects::thread_event::NewEvent::new(
+                "T-root",
+                "T-root",
+                crate::event_types::THREAD_CONTINUED,
+            )
+            .payload(edge)
+            .build();
+            db.add_thread_with_events_and_append(
+                "T-root",
+                successor,
+                vec![birth],
+                "T-root",
+                vec![continuation],
+                vec![],
+                &signer,
+            )
+            .unwrap();
+            // Accounting after the continuation must not hide the edge; nor
+            // should accounting on the final placement invalidate its lineage.
+            for id in ["T-root", "T-next"] {
+                db.append_events(
+                    "T-root",
+                    id,
+                    vec![lineage_accounting_event(id)],
+                    vec![],
+                    &signer,
+                )
+                .unwrap();
+            }
+            let authority = db.pinned_authority().unwrap();
+            let guard = authority.acquire_shared_guard().unwrap();
+            let result = authority.read_machine_continuation_lineage("T-root", "T-next", &guard);
+            if operator || wrong_birth || remote {
+                assert!(result.is_err());
+            } else {
+                let (_, snapshots) = result.unwrap().unwrap();
+                assert_eq!(
+                    snapshots
+                        .iter()
+                        .map(|s| s.thread_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["T-root", "T-next"]
+                );
+                assert!(
+                    authority
+                        .read_machine_continuation_lineage("T-root", "T-root", &guard)
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn machine_segment_starts_after_prior_operator_but_refuses_later_operator() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        db.create_chain("T-root", test_root_snapshot("graph:example/build"), &signer)
+            .unwrap();
+        for (source, next, operator) in [
+            ("T-root", "T-caller", true),
+            ("T-caller", "T-terminal", false),
+        ] {
+            let mut snapshot = ThreadSnapshotBuilder::new(
+                next,
+                "T-root",
+                "graph",
+                "graph:example/build",
+                "graph-runtime",
+            )
+            .build();
+            snapshot.upstream_thread_id = Some(source.into());
+            let mut edge =
+                serde_json::json!({"successor_thread_id":next,"reason":"graph_follow_resume"});
+            if operator {
+                edge["successor_request_fingerprint"] = "a".repeat(64).into();
+            }
+            db.add_thread_with_events_and_append(
+                "T-root",
+                snapshot,
+                vec![
+                    crate::objects::thread_event::NewEvent::new(
+                        "T-root",
+                        next,
+                        crate::event_types::THREAD_CREATED,
+                    )
+                    .payload(serde_json::json!({"continuation_from":source}))
+                    .build(),
+                ],
+                source,
+                vec![
+                    crate::objects::thread_event::NewEvent::new(
+                        "T-root",
+                        source,
+                        crate::event_types::THREAD_CONTINUED,
+                    )
+                    .payload(edge)
+                    .build(),
+                ],
+                vec![],
+                &signer,
+            )
+            .unwrap();
+        }
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let (_, segment) = authority
+            .read_machine_continuation_segment("T-root", "T-caller", "T-terminal", &guard)
+            .unwrap()
+            .unwrap();
+        assert_eq!(segment.len(), 2);
+        assert_eq!(segment[0].thread_id, "T-caller");
+        let error = authority
+            .read_machine_continuation_segment("T-root", "T-root", "T-terminal", &guard)
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<MachineContinuationBoundary>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn machine_lineage_does_not_infer_continuation_from_same_chain_upstream() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        db.create_chain("T-root", test_root_snapshot("graph:example/build"), &signer)
+            .unwrap();
+        let mut branch = ThreadSnapshotBuilder::new(
+            "T-branch",
+            "T-root",
+            "graph",
+            "graph:example/build",
+            "graph-runtime",
+        )
+        .build();
+        branch.upstream_thread_id = Some("T-root".into());
+        db.add_thread_with_events(
+            "T-root",
+            branch,
+            vec![
+                crate::objects::thread_event::NewEvent::new(
+                    "T-root",
+                    "T-branch",
+                    crate::event_types::THREAD_CREATED,
+                )
+                .payload(serde_json::json!({"continuation_from":"T-root"}))
+                .build(),
+            ],
+            &signer,
+        )
+        .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        assert!(
+            authority
+                .read_machine_continuation_lineage("T-root", "T-branch", &guard)
+                .is_err()
+        );
+        assert!(
+            authority
+                .read_machine_continuation_lineage("T-unrelated", "T-branch", &guard)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

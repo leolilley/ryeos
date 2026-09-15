@@ -1,0 +1,29 @@
+# ryeos:signed:2026-09-14T09:20:53Z:ccdf9c464d2be88f4b79ad5a85f5c7ff3dedc999b4496b6f473f1504d48fb62e:dHoCDoy/F+JlPAQXGeMAz8HFifOvfKwagAvEmoB5zlCTHy3wqSeoHfyZCW8NP2ewMJHDZPHUK6sinzwjsSIgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [remote, worker, run]
+description: "Launch one source-owned remote-worker workflow from an input object containing explicit destination-local target_product_selections; source_work_id is its stable handle and the accepted result explicitly directs the caller to resume"
+forms:
+  - slots:
+      - field: remote
+      - field: workflow_ref
+        matcher: canonical_ref
+      - field: credential_profile_id
+  - slots:
+      - field: workflow_ref
+        matcher: canonical_ref
+      - field: credential_profile_id
+defaults:
+  remote: default
+project:
+  resolution: required
+  default: discover_upward_ai
+  request_project_path: true
+  pin_at_admission: true
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:remote-worker-workflows/start
+  availability: daemon

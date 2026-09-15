@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "date": "2026-09-10",
+  "purpose": "Observed local-remote environment preparation and failed admission; not completed worker development qualification",
+  "driver": "Installed source RyeOS CLI, configured remote operator, independent disposable target on the same machine",
+  "source_site": "site:ae849a0a32ef295ef0420b47acd362ad2998f26c7611bbe6247d2e3da8682ef6",
+  "target_site": "site:0db14ae10fa3e060d175a9ebdd975f4041b0a3a271c99078436a4a4b0e533f60",
+  "owner_principal": "fp:187fab6cdcea75febdf44cda0874fd8da7dd67b70bb8592f90f93506c2393786",
+  "installed_daemon_sha256": "462cbfafb7499a205e04876db3f3a69393c6485c4f51cddcbf8ecbb09ce76dcc",
+  "source_revision": "41929b649",
+  "source_snapshot": "23f3690e3f8f15432ac080826107605d736158b720061643127579d23e3dd13e",
+  "target_snapshot": "82908e91a6a2826b79fbcf1b78722d9f7860cb808cff5e875fce6c9cf2ab2b5b",
+  "tree": "85a738c6a3f4470f7c6a0e51d2b830d6aa5edb564bc75b0578d10527e14e6766",
+  "files": 2638,
+  "prepared_inputs": {
+    "root": "T-f31c935a-4653-4919-f311-da9781f7afac",
+    "status": "completed",
+    "outcome_code": "success",
+    "witness_hash": "44b42f45bd4c93eff4f3b3f355e7451da4b8fdd17b368d52e3a9ead49e741ec0"
+  },
+  "build_support": {
+    "root": "T-30e660c7-a68d-8dba-0738-d0b236fb2e41",
+    "status": "completed",
+    "outcome_code": "success",
+    "witness_hash": "e08646497eb1df539aaff1ece9a04dfbba55c50a1fec789332d2a66b035d48be"
+  },
+  "utility_support_composition": {
+    "service": "svc-1788978140093-413b0961",
+    "binding_hash": "de60ca87313f691ee370317d6a89f52a757976f03fe2b51bb9bdf2afa5d449fb"
+  },
+  "utility_production": {
+    "root": "T-bc903be3-6e9b-b59b-1a2b-63fec91d8ee6",
+    "launch_id": "L-20260910000000000000000000000203",
+    "status": "failed",
+    "producer_executed": false,
+    "error": "node 'produce' failed: dispatch failed: internal: internal: cross-site execution cannot carry product selectors in the first composition lane"
+  },
+  "source_correction": {
+    "description": "Separate authenticated origin from execution placement; validate product selections against serving current site and preserve destination-local selectors through remote/run",
+    "new_authority_model_added": false,
+    "wire_field_added": "remote/run.product_selections",
+    "runtime_schema_changed": false,
+    "installed_execution_after_correction": false,
+    "focused_checks": [
+      "Destination request bounds/canonicality and signed schema: passed",
+      "Both-mode HTTP selector wire test: passed with loopback permission; initial sandbox denied listener",
+      "Remote-origin metadata roundtrip, exact identity and scheduled/malformed selector refusal: passed",
+      "External-content product API fixture: 9/9 passed; first compile exhausted disk, resumed after inactive debug-cache cleanup"
+    ],
+    "review": "Independent ownership and safety reviews found no blocker in the focused correction"
+  },
+  "open_gates": [
+    "Install corrected packaged daemon on disposable source/target nodes",
+    "Complete fresh utility/environment production and independent runtime qualification",
+    "Real repository Codex edit with child format/check/exact one-test evidence",
+    "Restart/reattach and exact completion fence",
+    "Whole candidate diff, independent assertions and source-HEAD-fenced return/integration",
+    "Final merge into next"
+  ],
+  "followup_20260910_after_merge": {
+    "scope": "Independent disposable local nodes only; historical attempt above retained unchanged",
+    "merged_into_next": "0421be54c",
+    "installed_daemon_sha256": "3249c5c894353444bd35afa62da69a744cba1afb0f2629e601faff324fec7c41",
+    "producer_target_snapshot": "d3bd37ed1c161c8382638276cc2a3fadd687a461f446f460163b49158bb07dfe",
+    "utility_production": {
+      "root": "T-6e0ea1c4-f784-97be-c7b2-7c7ec625aecf",
+      "launch_id": "L-20260910000000000000000000000204",
+      "capsule": "b0833ea381e39190040a093d8d9b90946a6acbf03042f71a6d10bd7561aa4415",
+      "status": "completed",
+      "outcome_code": "success",
+      "built_utilities_witness": "09d933c8e026968b7c70be39afb565edebed2f05c476c5106c6fa56403bdae7d",
+      "build_logs_witness": "346be7f940e9a1439a35fc5e0799a83857f834d8359341c3a07569b002777857"
+    },
+    "environment_production": {
+      "root": "T-16caa6a0-cc96-fea9-5e3c-8caec7806571",
+      "launch_id": "L-20260910000000000000000000000205",
+      "capsule": "dd9347308ca72b2d8b62c8fc9a041b6e18d9ef39f55252684ff625e87ef0599d",
+      "status": "completed",
+      "outcome_code": "success",
+      "runtime_witness": "b6b2c66c236d3483aa01b5b4019317c1ea51785e94d559eee3f13f68a65d8349",
+      "runtime_manifest": "462135d8fd8f9df1101b9100ba3661baaba4a07c7070288262d7dd8b22a50050"
+    },
+    "independent_verifier": {
+      "root": "T-3791358e-a9fa-509c-64a1-67dce9abe0b0",
+      "launch_id": "L-20260910000000000000000000000206",
+      "capsule": "6fa7a920e1c398e857e177fca321c3ea0d26def63dc97333b24cc78309281448",
+      "status": "completed",
+      "outcome_code": "exit:0",
+      "claims": ["authoring_runtime_closed"],
+      "command_count": 43,
+      "elf_count": 51,
+      "network_contacted": false
+    },
+    "qualification_publication": {
+      "status": "failed",
+      "error": "action requires a local_client configured operator",
+      "cause": "Current direct-verifier artifact reconstruction retained a local-client-only guard although the qualification owner admits authenticated remote operators",
+      "source_correction": "Reuse require_admitted_operator, retaining exact owner, scopes, authenticated origin, trusted Bundle and executable provenance checks",
+      "review": "Independent safety review found the correction appropriate and no further locality guard in this path",
+      "focused_api_tests": "9/9 passed; includes unadmitted-operator, owner, serving-site and grant-change negatives",
+      "corrected_installed_qualification": false
+    },
+    "snapshot_inventory": {
+      "rejected_source_snapshot": "18d5cdf86ca2da9e4c4e518c1365733d7b8ad4ffbf781a6cbcbc8fad0bc25ff6",
+      "transferred_or_exposed": false,
+      "finding": "Root-only checks missed retired local bundle artifacts and nested fixture-node history in the main checkout",
+      "policy_correction_commit": "9144c4b91",
+      "focused_capture_policy_test": "1/1 passed with authored-fixture retention checks"
+    },
+    "remaining": [
+      "Install the narrow direct-verifier authority correction and retry qualification against the existing completed verifier",
+      "Recapture and inspect corrected main snapshot, then transfer/reconcile and bind exact worker child consumers",
+      "Real repository worker edit, restricted child operations, restart/reattach, exact completion fence",
+      "Whole candidate diff, independent evaluation, source-HEAD-fenced return and explicit integration"
+    ]
+  },
+  "unchanged": [
+    "Primary node",
+    "Railway",
+    "Existing credential keys",
+    "Worker six-operation grant"
+  ]
+}

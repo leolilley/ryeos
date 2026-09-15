@@ -1,6 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:17Z:4464d68e2e7ba8582e28dd1aa68647a08b41812aab81f6afe63adacce429dbe8:RaQq6OdnmUxmLpU+XeeiHAae3CV+XHVv6W1cxqmvYUz1Znn6e3aX7zObz5oUbOfGsLHZeoOd00WbHOLQW6QtAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T04:33:06Z:2e789c3a57b94ef44c834eb4503d273279786ac074a6532d8fb01780c7e8d4af:+UdEMga5K3yntS9bueo9zCBSIEg0Brn82Ct+fuyOXpPhHa3XlGV/vukplGiPqmOo5V8JLhgTYPSwtOPZJqdpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.list
 required_caps: ["ryeos.execute.service.remote/list"]
-schema: {}
+schema:
+  project: string?
+  no_project: boolean?
 description: "List configured remote nodes"

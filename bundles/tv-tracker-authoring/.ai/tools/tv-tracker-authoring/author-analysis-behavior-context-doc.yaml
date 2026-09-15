@@ -3,6 +3,7 @@ version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "author-analysis-behavior-context-doc"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Author the signed tv-tracker AnalysisBehavior context doc via the daemon runtime.author_item callback. Authority is scoped to this one doc; the daemon signs (this wrapper never holds a key)."
 
 requires:

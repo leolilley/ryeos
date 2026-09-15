@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-04T05:54:47Z:964c31b945b688f20eb4559676eb47f905d3bb71b170012d5d77da24e25b662b:YBXBMBZQo5A4u6x5oTr/dClgXq/2cV1+qwyiXQEYmAO+FO7Y/ZQw79diuwf771Cls6HZzBwquBnk4eySmquACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T05:52:57Z:05a082c0861bd163f41462aff22036188e5772b9274c3e0678aab550640ad308:s+4qEj5uMb8l+0O2SUtrQ1ivh2T7Ywm7OmHSyJO4zQwQwXtGtUpm0o51uQ4LPISXOj+gcjhBv1jO6Agw2tMnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: graph
 default: true
@@ -15,9 +15,26 @@ launch_contract:
   primary_allowed_trust:
     - trusted_bundle
     - trusted_project
-  ref_bindings: {}
+  ref_bindings:
+    product_recipe:
+      required: false
+      project_result_requirement: retained_generation
+      source:
+        kind: primary_field
+        path: [product_recipe]
+      allowed_kinds:
+        - config
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
   preparation:
-    kind: none
+    kind: handler
+    handler: handler:ryeos/standard/graph-launch
+    config: {}
+    execution_cache: content_addressed
   config_inputs: {}
   execution_dependencies:
     max_dependencies: 0
@@ -30,6 +47,12 @@ launch_contract:
     max_targets_per_dependency: 0
     max_executable_search_entries: 0
     external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
   environment_contributions:
     max_contributions: 0
     max_targets_per_contribution: 0
@@ -42,7 +65,21 @@ launch_contract:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
-  runtime_facts: {}
+  runtime_facts:
+    product_recipe:
+      required: false
+      kind: json
+      max_bytes: 16384
+execution_evidence:
+  handler: handler:ryeos/standard/graph-execution-evidence
+  config: {}
+  limits:
+    max_request_bytes: 2097152
+    max_response_bytes: 2097152
+    max_events: 128
+    max_event_bytes: 65536
+    max_calls: 1
+    max_call_bytes: 65536
 description: "Interprets graph workflows"
 # Replay-aware: the walker checkpoints its frontier so a crashed graph run
 # resumes from its last checkpoint (defaults: 30s interval, 1 auto-resume).

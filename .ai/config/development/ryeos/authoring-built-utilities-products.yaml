@@ -1,0 +1,69 @@
+# ryeos:signed:2026-09-08T10:36:33Z:82a64c1be0def21308f5aeba2787ea85bd45e61d8780c4c47b0d8c338b3ae160:gwLkudiWrFYBs6wsfGvl1Z22UqMFFwIVFmS8ocXiM5LNJsCGRvCJ3RFe8AMIINB5YwDdbaqe3P1x5z6dRlbkAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained utilities and bounded diagnostics from the exact source build
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: build_logs
+      path: products/authoring-build-logs
+      storage: large_content
+      bounds:
+        maximum_entries: 9
+        maximum_depth: 1
+        maximum_file_bytes: 8388608
+        maximum_total_bytes: 75497472
+    - name: built_utilities
+      path: products/authoring-built-utilities
+      storage: large_content
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+  products:
+    - name: build_logs
+      source: {kind: workspace_output, root: build_logs}
+      path: products/authoring-build-logs
+      shape: tree
+      storage: large_content
+      required: false
+      bounds:
+        maximum_entries: 9
+        maximum_depth: 1
+        maximum_file_bytes: 8388608
+        maximum_total_bytes: 75497472
+    - name: built_utilities
+      source: {kind: workspace_output, root: built_utilities}
+      path: products/authoring-built-utilities
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: built_utilities_to_environment_production
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-built-utilities-production
+        recipe_binding: product_recipe
+        product_name: built_utilities
+        parameters: {}
+      consumer:
+        canonical_ref: graph:ryeos/development/authoring-environment-production
+        declaration_id: built-utilities
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []

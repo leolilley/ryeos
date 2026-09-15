@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-13T04:38:33Z:bda7d7ff2381b5073f2094d0b2d9557f672639d17f78bd3b3861902b41ecc29b:iSZ8qnByCNDeua0fSClYp/frrKqUq7NaJyVAIwsRg+CES9UHMP9e8ryGnIP6n1W6PR5qMKEBm515d5qb7I2LCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote-worker-workflows.start
+availability: daemon_only
+record_thread: true
+result_retention: full
+required_caps: ["ryeos.execute.service.remote/admin"]
+schema:
+  remote: string?
+  workflow_ref: string
+  credential_profile_id: string
+  task: object
+  target_product_selections: array
+description: "Start one source-owned bounded remote-worker workflow through target launch acceptance using an explicit canonical destination-local product-selection batch. Returns source_work_id and allowed_next_action=resume; it does not discover products, infer target completion, or pull a candidate."

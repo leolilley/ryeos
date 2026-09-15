@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:21Z:578797400274ac57509d29246361f49b2d9c615bdca1ee8c4397518d25a5e27f:HAjp6XcO9K/KIlinjXK+9Vf5nAOR1wpWOOwLPoSPXBnZRaMd2ppWhbbq+kme49ehY0vXTXHsytgSBGpwptgyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:21Z:4568b2c716367f17c3f2b685046c0371f238b4e042425e0626bf16169cb5313c:OylXRl3rJxJ3ccSIRvpTFV2GLjsBNZZLrYxg4KqjFzPebCcypAk+DpvZUlCrMcc+iNoaqT22pyzaU9dSrGtvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/subprocess"
 version: "1.0.0"
 executor_id: null
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Internal terminal executor for @subprocess. Not directly executable; wrap it with a tool that declares executor_id: \"@subprocess\" and a config block."
 
 terminal_executor:

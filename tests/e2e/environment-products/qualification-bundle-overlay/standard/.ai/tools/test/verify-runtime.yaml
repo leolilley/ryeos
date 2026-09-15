@@ -1,0 +1,31 @@
+category: test
+name: verify-runtime
+version: "1.0.0"
+description: Execute the exact fixed-pin runtime product and return its typed qualification result
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content:
+  - id: subject
+    kind: tree
+    mode: pinned
+    digest: 94c66e97825a25091abe924ae3de4715d26469332aa59f31cfb39854bdb59881
+    mount_root: execution_runtime
+    mount: qualification/subject
+env_config:
+  interpreter:
+    type: realization_member
+    realization_id: subject
+    relative_path: bin/program
+config:
+  command: "${interpreter}"
+  args:
+    - --qualification-probe
+    - 94c66e97825a25091abe924ae3de4715d26469332aa59f31cfb39854bdb59881
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

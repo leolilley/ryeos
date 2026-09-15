@@ -1,0 +1,44 @@
+# ryeos:signed:2026-09-08T10:36:32Z:00e3e2e765f99d92c11ea20c4a88f7a0ff781669bdb065d6e7797622b07d1d5b:dlT26zEIfh9Xjhvq37rl9XnzLzVYSCjrQFH5DnB9NL2I7vTFV9GP4w+kRCQtg5j8GyhOYgMrljgIySi+bdkrCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Build the finite authoring utilities as retained named products
+effects: recorded
+product_recipe: config:development/ryeos/authoring-built-utilities-products
+external_product_slots:
+  - id: authoring-build-support
+    relationship_ref: config:development/ryeos/authoring-build-support-products
+    relationship: build_support_to_utility_production
+    kind: tree
+    mount_root: execution_runtime
+    mount: authoring-build-support
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/authoring-built-utilities-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/build-utilities
+config:
+  start: build
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    build:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/authoring-environment-production/build-utilities
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        utilities: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.utilities}"

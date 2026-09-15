@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:cf24aa035ee4e99b9a74fdb133bd5dca28c4acc2ad43414fb2a195a7c6005764:MzWNfknJ+iRqZj5wlQTJ7VaR8KimGGVJDqqNuLm9soEYf8vxUjNHF8uHr55gu3qdVrpIQaxi/5rr+xxzHuBnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:d766a79cf87109ba36538b175b27f43944eb1ba34283d7d5f6573484d0ed0a01:CKjcWO3M24J8KZSozYPxrYtkZ2/n0t485+Yz/b+43ayM53dXDyrNJQTVNTKsrXvTnb+ugtO45HbL+ITDi4yICQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-principal"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.create-principal"]
 description: "Create a central-auth principal with roles, capabilities, and optional passphrase."
 

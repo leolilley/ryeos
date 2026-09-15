@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-13T03:32:01Z:ebca3041a1cbf58f7540ad354741220b8918166bb75818968565aaa74fb74854:RpYch/4UQYdgHmBnjYwtR41euorEFvlRn4Q1+PLTvNfYQizG6+PlC6MICzNnhRDGlxsSavSiHcrd++xnGaI1DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [remote, worker, resume]
+description: "Explicitly drive launch recovery or one exact target-completion observation using only source_work_id"
+forms:
+  - slots:
+      - field: source_work_id
+dispatch:
+  kind: execute_ref
+  execute: service:remote-worker-workflows/resume
+  availability: daemon

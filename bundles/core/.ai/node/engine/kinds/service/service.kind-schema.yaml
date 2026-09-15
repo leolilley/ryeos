@@ -1,5 +1,8 @@
-# ryeos:signed:2026-08-25T01:31:18Z:21034eac233430d7db17c2cb614cda2c3f592161a41ea5149b5e91017579260a:kCyTtZMahYGL/e9sLPVgJFnIeXv3SeiqGsPssfAjOU2A5WOg97CrK0IxMWQYNkQy06E4f5o3xArkShkBPc+yDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T03:28:04Z:ce1b10b9222803905c2bf36906be2d975be3ac5db9d3a3f279648f465102809f:On7r2B4/9/pjs4v+I+D3DWu3UUfVwocMen9tq3q/jZXA5Bux10zKGvhZosFlk3CICT+8+QKxT+X8kH//dBATDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
 version: "1.0.0"
 location:
   directory: services

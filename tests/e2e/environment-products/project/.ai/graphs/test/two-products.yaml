@@ -1,0 +1,35 @@
+version: "2.0.0"
+category: test
+description: Produce nested lossless products in admitted workspace-output roots
+effects: recorded
+product_recipe: config:test/two-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.test/two-products
+      - ryeos.execute.tool.test/produce
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/produce
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output:
+        produced: true

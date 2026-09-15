@@ -1,11 +1,10 @@
-<!-- ryeos:signed:2026-08-27T04:21:34Z:96e730d98c7a7fa7db70cdfc018d0f6fd84d0989324a135b76c2b325001e03f5:/xmQRgaSrrNcxTYDDGM+XR4HAt6c4fdOB6hAL2ig7Nmhguw2eMk/YvY/8D5542CW961pYnIegJA65xSP4ixtCw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: substrate-growth-roadmap
 title: RyeOS Substrate Growth Roadmap
 description: Boundary map from landed exact execution and portable hosted-worker placement through local inference, self-hosted implementation, broader federation, and deployment
 entry_type: reference
-version: "0.2.0"
+version: "0.3.0"
 ```
 
 # RyeOS substrate growth roadmap
@@ -141,6 +140,27 @@ threads, or launch capsules with a looser distributed identity.
 Owners: `knowledge:ryeos/future/distributed-substrate-deferred-advanced`,
 `knowledge:ryeos/future/hosted-node-trust-boundaries`, and
 `knowledge:ryeos/future/key-lifecycle`.
+
+## Cross-cutting discussion: governed adaptation
+
+The longer-term interpretation is an enduring working environment whose
+models and execution sites can change without erasing its scoped authority,
+work and evidence. See [the discussion synthesis](enduring-working-environment.md).
+This framing does not change the pull-forward order below.
+
+Two connections merit explicit design when their consumers arrive:
+
+- [Experience to reusable knowledge](experience-to-reusable-knowledge.md):
+  proposal, scoped evaluation, adoption, selected future use and correction.
+  Accepting a code result does not automatically approve reusable instructions.
+- [Governed adaptation and memory evidence](governed-adaptation-and-memory-evidence.md):
+  controlled recall/transfer experiments, opaque-state risks and distinctions
+  between attribution, behavioral influence and useful learning.
+
+Pull these forward when repeated work exposes a specific reusable lesson or
+adaptive update worth testing. Begin with existing knowledge, attestation,
+candidate and training owners; do not add a memory service, identity hierarchy
+or universal learning-update kind by inference from the research vision.
 
 ## Pull-forward order
 

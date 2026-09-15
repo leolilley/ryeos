@@ -133,6 +133,15 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // a kind identity): a parent that cannot be checkpoint-resumed could never be
     // woken to consume the child, so it must not be allowed to suspend for follow.
     let parent_launch_metadata = state.state_store.get_launch_metadata(&parent_thread_id)?;
+    if parent_launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.resume_context.as_ref())
+        .is_some_and(|resume| !resume.product_selections.is_empty())
+    {
+        bail!(
+            "follow: product-selected executions cannot suspend into a follow continuation in the first composition lane"
+        );
+    }
     let parent_is_native_resume = parent_launch_metadata
         .as_ref()
         .and_then(|metadata| metadata.native_resume.as_ref())
@@ -150,6 +159,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         .ok_or_else(|| {
             anyhow::anyhow!("follow: parent {parent_thread_id} has no sealed lifecycle authority")
         })?;
+    let scheduled_fire = parent_launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.resume_context.as_ref())
+        .and_then(|resume| resume.scheduled_fire.clone());
     if !parent_lifecycle_authority.permits_durable_handoff() {
         bail!("follow: request-scoped execution cannot suspend or spawn a durable cohort");
     }
@@ -172,6 +185,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             follow_child_spec_hash(
                 &child.item_ref,
                 &child.ref_bindings,
+                &child.product_selections,
                 &child.parameters,
                 child.facets.as_ref(),
             )
@@ -303,12 +317,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             let capture_parent_thread_id = parent_thread_id.clone();
             let capture_path = cap.provenance.effective_path().to_path_buf();
             let capture_base = base.to_owned();
+            // Root contacts may themselves need a capture permit to finish.
+            // Drain them before taking that permit, retaining the fence in
+            // the blocking closure even if this async caller is cancelled.
+            let root_contact_fence =
+                ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
+                    &state.state_store,
+                    &parent_thread_id,
+                )
+                .await?;
             let generation = crate::execution::run_bounded_project_capture(move || {
                 crate::execution::seal_callback_workspace_generation(
                     &capture_state,
                     &capture_parent_thread_id,
                     &capture_path,
                     &capture_base,
+                    &root_contact_fence,
                 )
             })
             .await?;
@@ -317,11 +341,17 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 base,
                 generation.snapshot_hash(),
             )?;
-            selected = selected.transition_operational_generation(
-                ryeos_state::objects::OperationalProjectAuthorityTransition::SelectPinnedChildGeneration {
-                    snapshot_hash: generation.snapshot_hash(),
-                },
-            )?;
+            let transition = ryeos_state::objects::OperationalProjectAuthorityTransition::SelectPinnedChildGeneration {
+                snapshot_hash: generation.snapshot_hash(),
+            };
+            selected = match generation.generation().output_capture_hash.as_deref() {
+                Some(capture_hash) => selected
+                    .transition_operational_generation_with_workspace_capture(
+                        transition,
+                        capture_hash,
+                    )?,
+                None => selected.transition_operational_generation(transition)?,
+            };
             sealed_cow_generation = Some(generation);
         }
 
@@ -426,6 +456,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         current_site_id: parent.current_site_id.clone(),
         origin_site_id: parent.origin_site_id.clone(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+        scheduled_fire: scheduled_fire.clone(),
         validate_only: false,
     };
     let child_project_binding =
@@ -442,6 +473,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &spec_hashes,
         &follow_key,
         resolution_engine,
+        &admission_provenance,
         &child_plan_context,
         &child_project_binding,
         &parent.current_site_id,
@@ -612,6 +644,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &parent_thread_id,
         &parent.current_site_id,
         &parent.origin_site_id,
+        scheduled_fire.as_ref(),
         parent_lifecycle_authority,
         &thread_auth.acting_principal,
         child_handler_context,
@@ -746,26 +779,33 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                                 &successor_id,
                             ),
                         );
-                    if let Some(frozen) = parent_successor_operational_generation.as_deref() {
+                    if let Some(frozen) = parent_successor_operational_generation.as_ref() {
                         let resume = successor_launch_metadata
                             .resume_context
                             .as_mut()
                             .ok_or_else(|| {
                                 anyhow::anyhow!("follow: successor lost its durable ResumeContext")
                             })?;
-                        resume.original_snapshot_hash = Some(frozen.to_string());
+                        resume.original_snapshot_hash = Some(frozen.snapshot_hash.clone());
                         resume.original_pushed_head_ref = None;
                         if matches!(
                             resume.project_authority,
                             ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
                         ) {
-                            resume.project_authority = resume
-                                .project_authority
-                                .transition_operational_generation(
-                                    ryeos_state::objects::OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
-                                        result_snapshot_hash: frozen,
-                                    },
-                                )?;
+                            let transition = ryeos_state::objects::OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                                result_snapshot_hash: &frozen.snapshot_hash,
+                            };
+                            resume.project_authority = match frozen.output_capture_hash.as_deref() {
+                                Some(capture_hash) => resume
+                                    .project_authority
+                                    .transition_operational_generation_with_workspace_capture(
+                                        transition,
+                                        capture_hash,
+                                    )?,
+                                None => resume
+                                    .project_authority
+                                    .transition_operational_generation(transition)?,
+                            };
                         }
                     }
                     let successor_resume = successor_launch_metadata
@@ -832,7 +872,17 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         &parent.chain_root_id,
                         &params.completion,
                         &successor_launch_metadata,
-                        child_snapshot_hash.as_deref(),
+                        child_snapshot_hash
+                            .as_ref()
+                            .map(
+                                |snapshot_hash| ryeos_state::objects::WorkspaceGenerationPair {
+                                    snapshot_hash: snapshot_hash.clone(),
+                                    output_capture_hash: child_project_authority
+                                        .workspace_outputs()
+                                        .and_then(|outputs| outputs.capture_hash.clone()),
+                                },
+                            )
+                            .as_ref(),
                     )?;
                     drop(successor_realization.publication);
                     if let Err(error) = state
@@ -1018,6 +1068,7 @@ fn admit_follow_child_requests(
     spec_hashes: &[String],
     follow_key: &str,
     resolution_engine: &std::sync::Arc<ryeos_engine::engine::Engine>,
+    admission_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     child_plan_context: &ryeos_engine::contracts::PlanContext,
     child_project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
     parent_current_site_id: &str,
@@ -1056,27 +1107,30 @@ fn admit_follow_child_requests(
                     )
                 })?;
             let child_runtime_ref = child_runtime.canonical_ref.to_string();
-            let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
-                ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-                    engine: resolution_engine,
-                    plan_context: child_plan_context.clone(),
-                    project_binding: child_project_binding.clone(),
-                    node_history_policy: state.node_history_policy()?,
-                    item_ref: &child.item_ref,
-                    launch_mode: "detached",
-                    parameters: child.parameters.clone(),
-                    ref_bindings: child.ref_bindings.clone(),
-                    usage_subject: None,
-                    usage_subject_asserted_by: None,
-                    creates_chain_root: true,
-                },
-            )
-            .with_context(|| {
-                format!(
-                    "follow: verified history-policy preflight for child '{}'",
-                    child.item_ref
+            let child_preflight =
+                ryeos_app::thread_lifecycle::preflight_root_execution_for_provenance(
+                    ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+                        engine: resolution_engine,
+                        plan_context: child_plan_context.clone(),
+                        project_binding: child_project_binding.clone(),
+                        node_history_policy: state.node_history_policy()?,
+                        item_ref: &child.item_ref,
+                        launch_mode: "detached",
+                        parameters: child.parameters.clone(),
+                        ref_bindings: child.ref_bindings.clone(),
+                        product_selections: child.product_selections.clone(),
+                        usage_subject: None,
+                        usage_subject_asserted_by: None,
+                        creates_chain_root: true,
+                    },
+                    admission_provenance,
                 )
-            })?;
+                .with_context(|| {
+                    format!(
+                        "follow: verified history-policy preflight for child '{}'",
+                        child.item_ref
+                    )
+                })?;
             let child_execution = child_preflight.root_admission.execution_request(
                 ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
                     &child_runtime.canonical_ref,
@@ -1086,6 +1140,7 @@ fn admit_follow_child_requests(
             )?;
             if child_execution.item_ref != child.item_ref
                 || child_execution.ref_bindings != child.ref_bindings
+                || child_execution.product_selections != child.product_selections
                 || child_execution.parameters != child.parameters
                 || child_execution.launch_mode != "detached"
                 || child_execution.current_site_id != parent_current_site_id
@@ -1131,6 +1186,7 @@ async fn prepare_follow_children(
     parent_thread_id: &str,
     parent_current_site_id: &str,
     parent_origin_site_id: &str,
+    scheduled_fire: Option<&ryeos_engine::contracts::ScheduledFireContext>,
     parent_lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     acting_principal: &str,
     child_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
@@ -1183,8 +1239,13 @@ async fn prepare_follow_children(
                     )
                     .join("admission-capsules")
                     .join(format!("follow-{item_index}"));
+                    let persisted_provenance = cap.provenance.clone_for_borrowed_child();
                     (
-                        sealed.restore(resolution_engine, &capsule_root)?,
+                        sealed.restore_for_reconstructed_provenance(
+                            resolution_engine,
+                            &capsule_root,
+                            &persisted_provenance,
+                        )?,
                         sealed.runtime_ref().to_string(),
                         Some(sealed.clone()),
                     )
@@ -1225,6 +1286,7 @@ async fn prepare_follow_children(
                     kind: child_execution.kind.clone(),
                     item_ref: child.item_ref.clone(),
                     ref_bindings: child.ref_bindings.clone(),
+                    product_selections: child.product_selections.clone(),
                     launch_mode: "detached".to_string(),
                     parameters: child.parameters.clone(),
                     project_context: seed_project_context,
@@ -1242,6 +1304,7 @@ async fn prepare_follow_children(
                     origin_site_id: parent_origin_site_id.to_owned(),
                     requested_by: requested_by.clone(),
                     execution_hints: ExecutionHints::default(),
+                    scheduled_fire: scheduled_fire.cloned(),
                     effective_caps: Vec::new(),
                     parent_delegation_caps: Some(
                         cap.effective_caps
@@ -1411,7 +1474,7 @@ fn readmit_fresh_follow_child_for_launch(
         &plan_context,
         launch_provenance,
     )?;
-    let preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
+    let preflight = ryeos_app::thread_lifecycle::preflight_root_execution_for_provenance(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
             engine,
             plan_context,
@@ -1421,10 +1484,12 @@ fn readmit_fresh_follow_child_for_launch(
             launch_mode: "detached",
             parameters: child.parameters.clone(),
             ref_bindings: child.ref_bindings.clone(),
+            product_selections: child.product_selections.clone(),
             usage_subject: None,
             usage_subject_asserted_by: None,
             creates_chain_root: true,
         },
+        launch_provenance,
     )?;
     let launch_request = preflight.root_admission.execution_request(
         ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
@@ -1444,6 +1509,7 @@ fn ensure_follow_admission_semantics_match(
     cohort: &ResolvedExecutionRequest,
     launch: &ResolvedExecutionRequest,
 ) -> Result<()> {
+    ensure_follow_product_selections_match(&cohort.product_selections, &launch.product_selections)?;
     if cohort.kind != launch.kind
         || cohort.item_ref != launch.item_ref
         || cohort.executor_ref != launch.executor_ref
@@ -1486,6 +1552,18 @@ fn ensure_follow_admission_semantics_match(
     {
         bail!(
             "follow: child admitted semantics changed between cohort admission and launch materialization"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_follow_product_selections_match(
+    cohort: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    launch: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+) -> Result<()> {
+    if cohort != launch {
+        bail!(
+            "follow: child product selections changed between cohort admission and launch materialization"
         );
     }
     Ok(())
@@ -1759,7 +1837,7 @@ fn enforce_follow_nesting_depth(state: &AppState, chain_root_id: &str) -> Result
 fn parent_successor_operational_generation(
     parent: &ryeos_state::objects::ExecutionProjectAuthority,
     child: &ryeos_state::objects::ExecutionProjectAuthority,
-) -> Option<String> {
+) -> Option<ryeos_state::objects::WorkspaceGenerationPair> {
     matches!(
         parent,
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
@@ -1767,7 +1845,18 @@ fn parent_successor_operational_generation(
             ..
         }
     )
-    .then(|| child.operational_snapshot_projection().map(str::to_owned))
+    .then(|| {
+        child
+            .operational_snapshot_projection()
+            .map(
+                |snapshot_hash| ryeos_state::objects::WorkspaceGenerationPair {
+                    snapshot_hash: snapshot_hash.to_owned(),
+                    output_capture_hash: child
+                        .workspace_outputs()
+                        .and_then(|outputs| outputs.capture_hash.clone()),
+                },
+            )
+    })
     .flatten()
 }
 
@@ -1800,8 +1889,32 @@ fn durable_follow_child_seed_project_identity(
 #[cfg(test)]
 mod tests {
     use super::{
-        durable_follow_child_seed_project_identity, parent_successor_operational_generation,
+        durable_follow_child_seed_project_identity, ensure_follow_product_selections_match,
+        parent_successor_operational_generation,
     };
+
+    fn product_selection(
+        declaration_id: &str,
+    ) -> ryeos_state::external_content::products::composition::ProductSelectionInput {
+        serde_json::from_value(serde_json::json!({
+            "target": {"kind": "root"},
+            "selection": {
+                "declaration_id": declaration_id,
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "qualification_hash": null,
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn follow_launch_materialization_cannot_substitute_child_products() {
+        let admitted = vec![product_selection("authoring-tools")];
+        assert!(ensure_follow_product_selections_match(&admitted, &admitted).is_ok());
+        let changed = vec![product_selection("another-product")];
+        assert!(ensure_follow_product_selections_match(&admitted, &changed).is_err());
+    }
     use ryeos_engine::contracts::ProjectContext;
     use ryeos_state::objects::{
         EnvironmentAuthority, ExecutionProjectAuthority, LiveProjectAccess,
@@ -1827,7 +1940,7 @@ mod tests {
             project.path().canonicalize().unwrap(),
             "project:test".to_string(),
             LiveProjectAccess::ReadWrite,
-            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+            ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
             EnvironmentAuthority::None,
             Vec::new(),
         )
@@ -1850,7 +1963,10 @@ mod tests {
         let child = pinned('b', PinnedProjectRealization::ReadOnly);
         assert_eq!(
             parent_successor_operational_generation(&parent, &child),
-            Some("b".repeat(64))
+            Some(ryeos_state::objects::WorkspaceGenerationPair {
+                snapshot_hash: "b".repeat(64),
+                output_capture_hash: None,
+            })
         );
     }
 

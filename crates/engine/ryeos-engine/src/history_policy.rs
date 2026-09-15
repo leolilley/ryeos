@@ -676,6 +676,9 @@ mod tests {
             content: None,
             execution: Some(ExecutionSchema {
                 effect_class_ceiling: None,
+                workspace_access: None,
+                network_authority_ceiling: None,
+                filesystem_authority_ceiling: None,
                 aliases: HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,

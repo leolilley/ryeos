@@ -147,7 +147,7 @@ impl StructuredErrorPayload {
 
 /// Exact public body for a typed dispatch failure.
 pub fn dispatch_error_value(error: &crate::dispatch_error::DispatchError) -> serde_json::Value {
-    match error {
+    match error.public_error() {
         crate::dispatch_error::DispatchError::StructuredService { body, .. } => body.clone(),
         _ => StructuredErrorPayload::from(error).to_value(),
     }
@@ -156,7 +156,8 @@ pub fn dispatch_error_value(error: &crate::dispatch_error::DispatchError) -> ser
 impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
     fn from(e: &crate::dispatch_error::DispatchError) -> Self {
         use crate::dispatch_error::DispatchError;
-        let mut payload = match e {
+        let public_error = e.public_error();
+        let mut payload = match public_error {
             DispatchError::RequiredSecretMissing {
                 env_var,
                 source_kind,
@@ -164,7 +165,7 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 remediation,
                 ..
             } => Self::required_secret_missing(
-                e.to_string(),
+                public_error.to_string(),
                 env_var,
                 source_kind,
                 source_name,
@@ -177,22 +178,24 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
             } => Self {
                 item_ref: Some(item_ref.clone()),
                 remediation: Some(remediation.clone()),
-                ..Self::generic(e.code(), e.to_string())
+                ..Self::generic(public_error.code(), public_error.to_string())
             },
-            DispatchError::MissingCap { required } => Self::missing_cap(e.to_string(), required),
+            DispatchError::MissingCap { required } => {
+                Self::missing_cap(public_error.to_string(), required)
+            }
             DispatchError::ServiceNotInstalled {
                 service_ref,
                 installed_bundles,
                 ..
             } => Self::service_not_installed(
-                e.to_string(),
+                public_error.to_string(),
                 service_ref,
                 installed_bundles.clone(),
                 "install the bundle that provides this service item on the target node, \
                  or deploy an image profile that includes it",
             ),
             DispatchError::ComposedValueContractViolation { details, .. } => {
-                Self::contract_violation(e.to_string(), details.clone())
+                Self::contract_violation(public_error.to_string(), details.clone())
             }
             DispatchError::LaunchPreparationFailed {
                 code,
@@ -207,16 +210,16 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                     serde_json::to_value(details)
                         .expect("launch diagnostic scalar map always serializes")
                 }),
-                ..Self::generic(code, e.to_string())
+                ..Self::generic(code, public_error.to_string())
             },
             DispatchError::LaunchPolicyForbidden { code, binding, .. }
             | DispatchError::LaunchResourceNotFound { code, binding, .. } => Self {
                 binding: binding.clone(),
-                ..Self::generic(code, e.to_string())
+                ..Self::generic(code, public_error.to_string())
             },
-            _ => Self::generic(e.code(), e.to_string()),
+            _ => Self::generic(public_error.code(), public_error.to_string()),
         };
-        payload.retryable = e.retryable();
+        payload.retryable = public_error.retryable();
         payload
     }
 }
@@ -328,6 +331,31 @@ mod tests {
         assert_eq!(value["code"], "execution_not_restart_eligible");
         assert_eq!(value["item_ref"], "tool:test/node-policy");
         assert_eq!(value["remediation"], "use verified content");
+        assert_eq!(value["retryable"], false);
+    }
+
+    #[test]
+    fn prebirth_wrapper_preserves_launch_preparation_details() {
+        let mut details = std::collections::BTreeMap::new();
+        details.insert(
+            "root".to_string(),
+            ryeos_handler_protocol::LaunchDiagnosticScalarWire::String("distribution".to_string()),
+        );
+        let error = crate::dispatch_error::DispatchError::pre_birth_admission_refused(
+            crate::dispatch_error::DispatchError::LaunchPreparationFailed {
+                code: "invalid_output_partition".to_string(),
+                message: "output partition is invalid".to_string(),
+                classification: "configuration".to_string(),
+                binding: Some("build".to_string()),
+                details: Box::new(details),
+            },
+        );
+
+        let value = dispatch_error_value(&error);
+        assert_eq!(value["code"], "invalid_output_partition");
+        assert_eq!(value["classification"], "configuration");
+        assert_eq!(value["binding"], "build");
+        assert_eq!(value["details"]["root"], "distribution");
         assert_eq!(value["retryable"], false);
     }
 }

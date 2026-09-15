@@ -671,7 +671,7 @@ pub async fn run_foreach_sequential(
                     &mut observation_budget,
                     DispatchObservation::from_success(
                         item_dispatch_id.clone(),
-                        child_thread_id,
+                        child_thread_id.clone(),
                         &val,
                         dispatch.clone(),
                     ),
@@ -700,7 +700,7 @@ pub async fn run_foreach_sequential(
                     )
                     .with_foreach(var, item)
                     .with_result(&val)
-                    .with_dispatch_option(dispatch.as_ref())
+                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref())
                     .render_json(assign)
                     {
                         Ok(value) => {

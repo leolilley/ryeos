@@ -239,10 +239,44 @@ fn validate_policy_generation(
             );
         }
     }
-    let digest = ryeos_state::objects::canonical_value_digest(
-        &serde_json::to_value(&policies).context("serialize node policy generation")?,
-    )?;
+    let digest = policy_bodies_digest(&policies)?;
     Ok(NodePolicyGeneration { policies, digest })
+}
+
+fn policy_bodies_digest(policies: &BTreeMap<String, Value>) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(
+        &serde_json::to_value(policies).context("serialize node policy generation")?,
+    )
+}
+
+/// Explicit replacement does not need to interpret the retired member's
+/// schema. Verify the complete predecessor's signatures, replace exactly the
+/// requested member, then compile every resulting member before publication.
+/// Runtime loaders remain strict; this is not a predecessor reader or fallback.
+pub fn prepare_policy_member_replacement(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    policy_table: &NodePolicyTable,
+    section: &str,
+    body: Value,
+    source_file: &Path,
+) -> Result<NodePolicyUpdate> {
+    policy_table
+        .get(section)
+        .context("unknown replacement policy section")?;
+    let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
+        .context("node has no explicit signed policy generation")?;
+    let mut policies = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    if !policies.contains_key(section) {
+        bail!("node policy generation has no `{section}` member to replace");
+    }
+    let expected = ExpectedPolicyGeneration::ExactDigest(policy_bodies_digest(&policies)?);
+    policies.insert(section.to_owned(), body);
+    let generation = validate_policy_generation(policy_table, policies, source_file)?;
+    Ok(NodePolicyUpdate {
+        generation,
+        expected,
+    })
 }
 
 /// Load and validate the exact node-signed policy generation.
@@ -326,6 +360,17 @@ fn load_policy_generation_from_directory(
     trust_store: &ryeos_engine::trust::TrustStore,
     policy_table: &NodePolicyTable,
 ) -> Result<NodePolicyGeneration> {
+    let policies = read_signed_policy_bodies(app_root, directory, trust_store)?;
+    validate_policy_generation(policy_table, policies, directory.path())
+}
+
+/// Signature/shape verification shared by strict loading and explicit cuts.
+/// Raw bodies never grant launch authority without full section compilation.
+fn read_signed_policy_bodies(
+    app_root: &Path,
+    directory: &lillux::PinnedDirectory,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<BTreeMap<String, Value>> {
     let node_fingerprint = crate::node_config::loader::node_identity_fingerprint(app_root)?;
     let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
     let mut policies = BTreeMap::new();
@@ -368,7 +413,7 @@ fn load_policy_generation_from_directory(
             bail!("duplicate node policy section `{section_name}`");
         }
     }
-    validate_policy_generation(policy_table, policies, directory.path())
+    Ok(policies)
 }
 
 /// Publish one complete validated generation. The caller must hold the same
@@ -409,13 +454,8 @@ pub fn publish_policy_update(
             let current = current
                 .as_ref()
                 .context("node policy generation disappeared before replacement")?;
-            let found = load_policy_generation_from_directory(
-                app_root,
-                current,
-                trust_store,
-                &policy_table,
-            )?
-            .digest;
+            let found =
+                policy_bodies_digest(&read_signed_policy_bodies(app_root, current, trust_store)?)?;
             if &found != expected {
                 bail!(
                     "node policy generation changed before publication: expected {expected}, found {found}"
@@ -549,7 +589,7 @@ mod tests {
     #[test]
     fn every_authored_init_profile_compiles_as_one_complete_generation() {
         let profile_directory =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles/.ai/node/init/profiles");
+            ryeos_engine::test_support::workspace_root().join("bundles/.ai/node/init/profiles");
         let mut profiles = std::fs::read_dir(&profile_directory)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -570,5 +610,94 @@ mod tests {
                 .validated_generation(&table, &path)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
         }
+    }
+
+    #[test]
+    fn explicit_member_cut_preserves_other_policies_and_checks_exact_predecessor() {
+        use ryeos_engine::trust::{TrustStore, TrustedSigner};
+        let root = tempfile::tempdir().unwrap();
+        let node = root.path().join(ryeos_engine::AI_DIR).join("node");
+        let identity_path = node.join("identity/private_key.pem");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        let identity = NodeIdentity::create(&identity_path).unwrap();
+        let trust = TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: identity.fingerprint().to_owned(),
+            verifying_key: *identity.verifying_key(),
+            label: None,
+        }]);
+        let directory = policy_directory(root.path());
+        std::fs::create_dir_all(&directory).unwrap();
+        let profile_path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/.ai/node/init/profiles/full.yaml");
+        let profile: NodeInitProfile =
+            serde_yaml::from_str(&std::fs::read_to_string(profile_path).unwrap()).unwrap();
+        let mut policies = profile.policies;
+        let replacement = policies["isolation"].clone();
+        policies.insert(
+            "isolation".into(),
+            serde_json::json!({"retired_shape": true}),
+        );
+        for (section, body) in &policies {
+            std::fs::write(
+                directory.join(format!("{section}.yaml")),
+                crate::node_document::render_signed_item(section, "policy", body, &identity)
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        let table = NodePolicyTable::new();
+        assert!(load_policy_generation(root.path(), &trust, &table).is_err());
+        let source = root.path().join("replacement.yaml");
+        let update = prepare_policy_member_replacement(
+            root.path(),
+            &trust,
+            &table,
+            "isolation",
+            replacement.clone(),
+            &source,
+        )
+        .unwrap();
+        for (section, body) in &policies {
+            if section != "isolation" {
+                assert_eq!(&update.generation.policies[section], body);
+            }
+        }
+        // A different obsolete body is still a different predecessor. Exact
+        // byte authority matters even though the retired schema is opaque.
+        std::fs::write(
+            directory.join("isolation.yaml"),
+            crate::node_document::render_signed_item(
+                "isolation",
+                "policy",
+                &serde_json::json!({"different_retired_shape": true}),
+                &identity,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
+            root.path(),
+        ))
+        .unwrap();
+        let error =
+            publish_policy_update(root.path(), &update, &identity, &trust, &lock).unwrap_err();
+        assert!(
+            error.to_string().contains("changed before publication"),
+            "{error:#}"
+        );
+        let update = prepare_policy_member_replacement(
+            root.path(),
+            &trust,
+            &table,
+            "isolation",
+            replacement,
+            &source,
+        )
+        .unwrap();
+        publish_policy_update(root.path(), &update, &identity, &trust, &lock).unwrap();
+        assert_eq!(
+            load_policy_generation(root.path(), &trust, &table).unwrap(),
+            update.generation
+        );
     }
 }

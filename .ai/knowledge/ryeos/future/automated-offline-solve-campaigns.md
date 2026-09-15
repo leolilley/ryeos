@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-09-01T22:50:22Z:3ca2f399de684a3797f41ae34e26f218da756e1cd16800a03a2cfc9414260dc1:jduSaBndl2Gu8j4ZFbsz3GIOX0NS4aUCsas7inR1X7wZgtK4UKXHHiofAdjjq5VlkSTo/sGkE0aUVUVzTg6hAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: automated-offline-solve-campaigns
@@ -8,7 +7,7 @@ description: >-
   reasoning, graph-managed search, evidence-driven learning, and
   network-independent solve execution
 entry_type: design
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # Automated offline solve campaigns
@@ -313,6 +312,32 @@ weights, dataset, program, recipe, seed, target realization, and resource
 policy. It stages immutable checkpoint/model artifacts, then a separate
 held-out graph compares the candidate with its parent. Only explicit signed
 project or operator authority creates a newly selectable model profile.
+
+Adaptation, useful improvement and authorized promotion are distinct claims.
+Poisoned or harmful updates can still be adaptation; admission policy does not
+define them out of existence. Candidate acceptance requires the declared
+evaluation, including regressions and resource cost, not merely a valid
+artifact signature or an implementer's success report.
+
+When measuring a learning benefit, retain the declared trial set, failures and
+retries; keep held-out answers out of proposals, retrieval inputs and training.
+Distinguish effect replay, retrieved knowledge, capsule continuation and actual
+model-state updates through matched controls. Evaluate a model replacement
+with its own treatment/control pair rather than attributing cross-model
+differences solely to memory.
+
+Permission to read evidence is not permission to reuse its derivatives across
+projects, disclose them to another provider or train on them. A retained summary
+or adapter can remain sensitive after source deletion. Selecting an earlier
+model generation does not undo external actions, recall disclosed information,
+or demonstrate that a later process forgot it.
+
+Reusable textual lessons have a separate adoption lifecycle from model
+training and code acceptance. See [experience to reusable knowledge](experience-to-reusable-knowledge.md)
+and [governed adaptation and memory evidence](governed-adaptation-and-memory-evidence.md)
+for the proposed controls and staged experiments. These do not introduce a new
+training substrate or make the experiments prerequisites for ordinary recorded
+solve work.
 
 The intended flywheel is:
 

@@ -50,13 +50,14 @@ use ryeos_accounting::{
     SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, TokenAccounting, UsdNanos,
     VerifiedPreparedSpendBound, transition_id,
 };
+use ryeos_engine::launch_envelope_types::AggregateExecutionLimits;
 use ryeos_state::sqlite_schema;
 
 use crate::accounting_anchor::{AccountingAnchor, AnchorAgreement, genesis_chain_digest};
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
-const ACCOUNTING_SCHEMA_VERSION: i32 = 2;
+const ACCOUNTING_SCHEMA_VERSION: i32 = 3;
 pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
@@ -287,8 +288,41 @@ CREATE TABLE accounting_handoff_import (
 PRAGMA user_version=2;
 "#;
 
+const SCHEMA_V3_SQL: &str = r#"
+CREATE TABLE execution_resource_budget (
+    execution_budget_id TEXT PRIMARY KEY,
+    root_chain_id TEXT NOT NULL,
+    limits_json TEXT NOT NULL,
+    limits_digest TEXT NOT NULL,
+    deadline_at_ms INTEGER,
+    max_worker_executions INTEGER CHECK (max_worker_executions IS NULL OR max_worker_executions > 0),
+    max_provider_contacts INTEGER CHECK (max_provider_contacts IS NULL OR max_provider_contacts > 0),
+    used_worker_executions INTEGER NOT NULL CHECK (used_worker_executions >= 0),
+    used_provider_contacts INTEGER NOT NULL CHECK (used_provider_contacts >= 0),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE execution_resource_claim (
+    execution_budget_id TEXT NOT NULL,
+    dimension TEXT NOT NULL CHECK (dimension IN ('worker_execution', 'provider_contact')),
+    coordinate TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('admitted', 'released_uncontacted', 'denied')),
+    denial_reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (execution_budget_id, dimension, coordinate),
+    FOREIGN KEY (execution_budget_id) REFERENCES execution_resource_budget(execution_budget_id)
+);
+
+CREATE INDEX idx_execution_resource_claim_budget
+    ON execution_resource_claim(execution_budget_id, dimension, outcome);
+
+PRAGMA user_version=3;
+"#;
+
 fn current_schema_sql() -> String {
-    format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}")
+    format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}")
 }
 
 const fn col(
@@ -524,6 +558,34 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("updated_at_ms", "INTEGER", false, true),
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "execution_resource_budget",
+                columns: &[
+                    col("execution_budget_id", "TEXT", true, true),
+                    col("root_chain_id", "TEXT", false, true),
+                    col("limits_json", "TEXT", false, true),
+                    col("limits_digest", "TEXT", false, true),
+                    col("deadline_at_ms", "INTEGER", false, false),
+                    col("max_worker_executions", "INTEGER", false, false),
+                    col("max_provider_contacts", "INTEGER", false, false),
+                    col("used_worker_executions", "INTEGER", false, true),
+                    col("used_provider_contacts", "INTEGER", false, true),
+                    col("created_at_ms", "INTEGER", false, true),
+                    col("updated_at_ms", "INTEGER", false, true),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "execution_resource_claim",
+                columns: &[
+                    col("execution_budget_id", "TEXT", true, true),
+                    col("dimension", "TEXT", true, true),
+                    col("coordinate", "TEXT", true, true),
+                    col("request_digest", "TEXT", false, true),
+                    col("outcome", "TEXT", false, true),
+                    col("denial_reason", "TEXT", false, false),
+                    col("created_at_ms", "INTEGER", false, true),
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -572,6 +634,12 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_handoff_debit_account",
                 table: "accounting_handoff_debit",
                 columns: &["account_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_execution_resource_claim_budget",
+                table: "execution_resource_claim",
+                columns: &["execution_budget_id", "dimension", "outcome"],
                 unique: false,
             },
         ],
@@ -693,6 +761,44 @@ pub struct AccountRow {
     pub committed: UsdNanos,
     pub held: UsdNanos,
     pub health: AuthorityAccountHealth,
+}
+
+/// Closed non-financial dimensions settled beneath one existing execution
+/// budget. This is deliberately not a second budget identity: the financial
+/// allowance, operational claims, and every descendant all share the same
+/// daemon-minted `execution_budget_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionResourceDimension {
+    WorkerExecution,
+    ProviderContact,
+}
+
+impl ExecutionResourceDimension {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerExecution => "worker_execution",
+            Self::ProviderContact => "provider_contact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionResourceBudgetSnapshot {
+    pub execution_budget_id: String,
+    pub root_chain_id: String,
+    pub limits_digest: String,
+    pub deadline_at_ms: Option<i64>,
+    pub max_worker_executions: Option<u32>,
+    pub max_provider_contacts: Option<u32>,
+    pub used_worker_executions: u32,
+    pub used_provider_contacts: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionResourceClaimOutcome {
+    Admitted { replayed: bool },
+    ReleasedUncontacted { replayed: bool },
+    Denied { reason: String, replayed: bool },
 }
 
 /// Authoritative live reservation gauges. These sum each attempt once from
@@ -1002,6 +1108,293 @@ fn canonical_fingerprint(value: &serde_json::Value) -> Result<String> {
     Ok(lillux::cas::sha256_hex(
         canonical_json_string(value)?.as_bytes(),
     ))
+}
+
+fn aggregate_deadline(now_ms: i64, duration_seconds: u64) -> Result<Option<i64>> {
+    if duration_seconds == 0 {
+        return Ok(None);
+    }
+    let duration_ms = duration_seconds
+        .checked_mul(1_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("aggregate duration exceeds the timestamp range"))?;
+    now_ms
+        .checked_add(duration_ms)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("aggregate deadline exceeds the timestamp range"))
+}
+
+fn nonzero_u32_i64(value: u32) -> Option<i64> {
+    (value != 0).then_some(i64::from(value))
+}
+
+fn validate_resource_claim_coordinate(coordinate: &str) -> Result<()> {
+    const MAX_RESOURCE_COORDINATE_BYTES: usize = 512;
+    if coordinate.is_empty()
+        || coordinate.len() > MAX_RESOURCE_COORDINATE_BYTES
+        || coordinate.trim() != coordinate
+        || coordinate.chars().any(char::is_control)
+    {
+        bail!(
+            "aggregate resource claim coordinate must be 1..={MAX_RESOURCE_COORDINATE_BYTES} \
+             printable bytes without surrounding whitespace"
+        );
+    }
+    Ok(())
+}
+
+fn load_execution_resource_budget(
+    conn: &Connection,
+    execution_budget_id: &str,
+) -> Result<Option<ExecutionResourceBudgetSnapshot>> {
+    let row: Option<(
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        i64,
+    )> = conn
+        .query_row(
+            "SELECT execution_budget_id, root_chain_id, limits_digest, deadline_at_ms,
+                    max_worker_executions, max_provider_contacts,
+                    used_worker_executions, used_provider_contacts
+             FROM execution_resource_budget WHERE execution_budget_id = ?1",
+            rusqlite::params![execution_budget_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .context("load aggregate execution budget")?;
+    row.map(
+        |(
+            execution_budget_id,
+            root_chain_id,
+            limits_digest,
+            deadline_at_ms,
+            max_worker_executions,
+            max_provider_contacts,
+            used_worker_executions,
+            used_provider_contacts,
+        )| {
+            Ok(ExecutionResourceBudgetSnapshot {
+                execution_budget_id,
+                root_chain_id,
+                limits_digest,
+                deadline_at_ms,
+                max_worker_executions: max_worker_executions
+                    .map(u32::try_from)
+                    .transpose()
+                    .context("stored worker-execution ceiling is outside u32")?,
+                max_provider_contacts: max_provider_contacts
+                    .map(u32::try_from)
+                    .transpose()
+                    .context("stored provider-contact ceiling is outside u32")?,
+                used_worker_executions: u32::try_from(used_worker_executions)
+                    .context("stored worker-execution usage is outside u32")?,
+                used_provider_contacts: u32::try_from(used_provider_contacts)
+                    .context("stored provider-contact usage is outside u32")?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn decode_resource_claim_outcome(
+    outcome: &str,
+    denial_reason: Option<String>,
+    replayed: bool,
+) -> Result<ExecutionResourceClaimOutcome> {
+    match (outcome, denial_reason) {
+        ("admitted", None) => Ok(ExecutionResourceClaimOutcome::Admitted { replayed }),
+        ("released_uncontacted", None) => {
+            Ok(ExecutionResourceClaimOutcome::ReleasedUncontacted { replayed })
+        }
+        ("denied", Some(reason)) => Ok(ExecutionResourceClaimOutcome::Denied { reason, replayed }),
+        _ => bail!("stored aggregate resource claim has an invalid outcome envelope"),
+    }
+}
+
+fn validate_execution_resource_budgets(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT execution_budget_id, root_chain_id, limits_json, limits_digest,
+                deadline_at_ms, max_worker_executions, max_provider_contacts,
+                used_worker_executions, used_provider_contacts, created_at_ms
+         FROM execution_resource_budget ORDER BY execution_budget_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (
+        execution_budget_id,
+        root_chain_id,
+        limits_json,
+        limits_digest,
+        deadline_at_ms,
+        max_worker_executions,
+        max_provider_contacts,
+        used_worker_executions,
+        used_provider_contacts,
+        created_at_ms,
+    ) in rows
+    {
+        let limits: AggregateExecutionLimits = serde_json::from_str(&limits_json)
+            .context("decode retained aggregate execution limits")?;
+        let canonical = canonical_json_string(&serde_json::to_value(&limits)?)?;
+        if canonical != limits_json
+            || lillux::cas::sha256_hex(canonical.as_bytes()) != limits_digest
+            || aggregate_deadline(created_at_ms, limits.duration_seconds)? != deadline_at_ms
+            || nonzero_u32_i64(limits.worker_executions) != max_worker_executions
+            || nonzero_u32_i64(limits.provider_contacts) != max_provider_contacts
+        {
+            bail!(
+                "execution resource budget {execution_budget_id} contradicts its retained limits"
+            );
+        }
+        let account_birth: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT root_chain_id, created_at_ms FROM budget_account
+                 WHERE account_kind='execution' AND scope_id=?1
+                   AND execution_budget_id=?1",
+                rusqlite::params![execution_budget_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if account_birth.as_ref().map(|(root, _)| root.as_str()) != Some(root_chain_id.as_str())
+            || account_birth.as_ref().map(|(_, created)| *created) != Some(created_at_ms)
+        {
+            bail!(
+                "execution resource budget {execution_budget_id} lost its root account birth binding"
+            );
+        }
+        let (claimed_workers, claimed_contacts): (i64, i64) = conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN dimension='worker_execution' AND outcome='admitted'
+                                  THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN dimension='provider_contact' AND outcome='admitted'
+                                  THEN 1 ELSE 0 END), 0)
+             FROM execution_resource_claim WHERE execution_budget_id=?1",
+            rusqlite::params![execution_budget_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if claimed_workers != used_worker_executions
+            || claimed_contacts != used_provider_contacts
+            || max_worker_executions.is_some_and(|maximum| used_worker_executions > maximum)
+            || max_provider_contacts.is_some_and(|maximum| used_provider_contacts > maximum)
+        {
+            bail!("execution resource budget {execution_budget_id} counters contradict its claims");
+        }
+    }
+    let mut statement = conn.prepare(
+        "SELECT execution_budget_id, dimension, coordinate, request_digest, outcome,
+                denial_reason, created_at_ms
+         FROM execution_resource_claim
+         ORDER BY execution_budget_id, dimension, coordinate",
+    )?;
+    let claims = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (
+        execution_budget_id,
+        dimension,
+        coordinate,
+        request_digest,
+        outcome,
+        denial_reason,
+        created_at_ms,
+    ) in claims
+    {
+        validate_resource_claim_coordinate(&coordinate).with_context(|| {
+            format!("aggregate resource claim {execution_budget_id}/{dimension} coordinate")
+        })?;
+        HexDigest::new(request_digest)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!("aggregate resource claim {execution_budget_id}/{dimension} request digest")
+            })?;
+        let budget = load_execution_resource_budget(conn, &execution_budget_id)?
+            .ok_or_else(|| anyhow::anyhow!("aggregate resource claim lost its budget"))?;
+        let budget_created_at_ms: i64 = conn.query_row(
+            "SELECT created_at_ms FROM execution_resource_budget
+             WHERE execution_budget_id=?1",
+            rusqlite::params![execution_budget_id],
+            |row| row.get(0),
+        )?;
+        if created_at_ms < budget_created_at_ms {
+            bail!(
+                "aggregate resource claim {execution_budget_id}/{dimension}/{coordinate} predates \
+                 its execution budget"
+            );
+        }
+        let before_deadline = budget
+            .deadline_at_ms
+            .is_none_or(|deadline| created_at_ms < deadline);
+        let valid = match (
+            dimension.as_str(),
+            outcome.as_str(),
+            denial_reason.as_deref(),
+        ) {
+            ("worker_execution", "admitted", None)
+            | ("provider_contact", "admitted", None)
+            | ("provider_contact", "released_uncontacted", None) => before_deadline,
+            (
+                "worker_execution" | "provider_contact",
+                "denied",
+                Some("aggregate_duration_exhausted"),
+            ) => budget
+                .deadline_at_ms
+                .is_some_and(|deadline| created_at_ms >= deadline),
+            ("worker_execution", "denied", Some("aggregate_worker_executions_exhausted")) => {
+                before_deadline && budget.max_worker_executions.is_some()
+            }
+            ("provider_contact", "denied", Some("aggregate_provider_contacts_exhausted")) => {
+                before_deadline && budget.max_provider_contacts.is_some()
+            }
+            _ => false,
+        };
+        if !valid {
+            bail!(
+                "aggregate resource claim {execution_budget_id}/{dimension}/{coordinate} has \
+                 contradictory retained testimony"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn optional_usd_nanos(value: Option<u64>) -> Result<Option<UsdNanos>> {
@@ -1442,6 +1835,335 @@ impl AccountingDb {
                 limit,
                 now_ms,
             )
+        })
+    }
+
+    /// Establish the non-financial aggregate limits owned by one existing
+    /// execution budget. The absolute deadline is minted exactly once, at the
+    /// root account's first admission, and every descendant must present the
+    /// same effective limits. Neither recovery nor child birth can restart the
+    /// clock or replace the counters.
+    pub fn ensure_execution_resource_budget(
+        &self,
+        execution_budget_id: &str,
+        limits: &AggregateExecutionLimits,
+    ) -> Result<ExecutionResourceBudgetSnapshot> {
+        let limits_value =
+            serde_json::to_value(limits).context("serialize aggregate execution limits")?;
+        let limits_json = canonical_json_string(&limits_value)?;
+        let limits_digest = lillux::cas::sha256_hex(limits_json.as_bytes());
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "aggregate execution budget birth", || {
+            if let Some(existing) = load_execution_resource_budget(&conn, execution_budget_id)? {
+                let stored_limits_json: String = conn
+                    .query_row(
+                        "SELECT limits_json FROM execution_resource_budget
+                         WHERE execution_budget_id = ?1",
+                        rusqlite::params![execution_budget_id],
+                        |row| row.get(0),
+                    )
+                    .context("load aggregate execution limits identity")?;
+                if existing.limits_digest != limits_digest || stored_limits_json != limits_json {
+                    bail!(
+                        "execution budget {execution_budget_id} already has different aggregate \
+                         limits; refusing to replace execution-tree authority"
+                    );
+                }
+                return Ok(existing);
+            }
+
+            let execution = self
+                .load_account(&conn, "execution", execution_budget_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "execution budget account {execution_budget_id} is absent; aggregate \
+                        authority cannot be minted"
+                    )
+                })?;
+            // The execution account birth is already durable before this row
+            // can be inserted. Anchor the absolute deadline to that retained
+            // timestamp so a crash in this narrow journal gap cannot restart
+            // the wall-clock window at recovery time.
+            let account_created_at_ms: i64 = conn
+                .query_row(
+                    "SELECT created_at_ms FROM budget_account
+                     WHERE account_kind='execution' AND scope_id=?1
+                       AND execution_budget_id=?1",
+                    rusqlite::params![execution_budget_id],
+                    |row| row.get(0),
+                )
+                .context("load execution account birth timestamp")?;
+            let deadline_at_ms =
+                aggregate_deadline(account_created_at_ms, limits.duration_seconds)?;
+            let max_worker_executions = nonzero_u32_i64(limits.worker_executions);
+            let max_provider_contacts = nonzero_u32_i64(limits.provider_contacts);
+            conn.execute(
+                "INSERT INTO execution_resource_budget (
+                    execution_budget_id, root_chain_id, limits_json, limits_digest,
+                    deadline_at_ms, max_worker_executions, max_provider_contacts,
+                    used_worker_executions, used_provider_contacts, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?9)",
+                rusqlite::params![
+                    execution_budget_id,
+                    execution.root_chain_id,
+                    limits_json,
+                    limits_digest,
+                    deadline_at_ms,
+                    max_worker_executions,
+                    max_provider_contacts,
+                    account_created_at_ms,
+                    wall_clock_ms(),
+                ],
+            )
+            .context("insert aggregate execution budget")?;
+            load_execution_resource_budget(&conn, execution_budget_id)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "aggregate execution budget {execution_budget_id} disappeared after insertion"
+                )
+            })
+        })
+    }
+
+    /// Read the durable execution-tree resource ledger. This projection is
+    /// authoritative after daemon restart because it is backed by the same
+    /// non-disposable database as the execution's financial account.
+    pub fn execution_resource_budget_snapshot(
+        &self,
+        execution_budget_id: &str,
+    ) -> Result<Option<ExecutionResourceBudgetSnapshot>> {
+        let conn = self.lock_conn()?;
+        load_execution_resource_budget(&conn, execution_budget_id)
+    }
+
+    /// Read one exact retained claim decision without creating or advancing a
+    /// resource coordinate. Recovery uses this to verify a root-chain budget
+    /// refusal before repairing its rebuildable command projection.
+    pub fn execution_resource_claim_outcome(
+        &self,
+        execution_budget_id: &str,
+        dimension: ExecutionResourceDimension,
+        coordinate: &str,
+        request_digest: &str,
+    ) -> Result<Option<ExecutionResourceClaimOutcome>> {
+        validate_resource_claim_coordinate(coordinate)?;
+        HexDigest::new(request_digest.to_owned())
+            .map_err(anyhow::Error::msg)
+            .context("aggregate resource claim request digest is not canonical sha256")?;
+        let conn = self.lock_conn()?;
+        let recorded: Option<(String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT request_digest, outcome, denial_reason
+                 FROM execution_resource_claim
+                 WHERE execution_budget_id = ?1 AND dimension = ?2 AND coordinate = ?3",
+                rusqlite::params![execution_budget_id, dimension.as_str(), coordinate],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .context("load aggregate resource claim")?;
+        recorded
+            .map(|(stored_digest, outcome, reason)| {
+                if stored_digest != request_digest {
+                    bail!("aggregate resource claim contradicts its request digest");
+                }
+                decode_resource_claim_outcome(&outcome, reason, true)
+            })
+            .transpose()
+    }
+
+    /// Conservatively reserve one exact logical worker or one exact external
+    /// turn contact. Worker claims and contacted or contact-ambiguous turn
+    /// claims are never released: admission means that unit may have happened.
+    /// A turn claim may transition to `released_uncontacted` only after exact
+    /// durable testimony proves that its worker epoch ended before contact.
+    /// Exact replay returns the retained decision, while a coordinate reused
+    /// with a different request digest is an integrity failure.
+    pub fn claim_execution_resource(
+        &self,
+        execution_budget_id: &str,
+        dimension: ExecutionResourceDimension,
+        coordinate: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<ExecutionResourceClaimOutcome> {
+        validate_resource_claim_coordinate(coordinate)?;
+        HexDigest::new(request_digest.to_string())
+            .map_err(anyhow::Error::msg)
+            .context("aggregate resource claim request digest is not canonical sha256")?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "aggregate execution resource claim", || {
+            let recorded: Option<(String, String, Option<String>)> = conn
+                .query_row(
+                    "SELECT request_digest, outcome, denial_reason
+                     FROM execution_resource_claim
+                     WHERE execution_budget_id = ?1 AND dimension = ?2 AND coordinate = ?3",
+                    rusqlite::params![execution_budget_id, dimension.as_str(), coordinate],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .context("load aggregate resource claim replay")?;
+            if let Some((stored_digest, outcome, reason)) = recorded {
+                if stored_digest != request_digest {
+                    bail!(
+                        "aggregate resource coordinate {}/{}/{} was reused with a different \
+                         request digest",
+                        execution_budget_id,
+                        dimension.as_str(),
+                        coordinate
+                    );
+                }
+                return decode_resource_claim_outcome(&outcome, reason, true);
+            }
+
+            let budget =
+                load_execution_resource_budget(&conn, execution_budget_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "aggregate execution budget {execution_budget_id} is absent; resource \
+                         admission fails closed"
+                    )
+                })?;
+            let budget_created_at_ms: i64 = conn.query_row(
+                "SELECT created_at_ms FROM execution_resource_budget
+                 WHERE execution_budget_id=?1",
+                rusqlite::params![execution_budget_id],
+                |row| row.get(0),
+            )?;
+            if now_ms < budget_created_at_ms {
+                bail!("aggregate resource claim time predates its execution budget");
+            }
+            let (maximum, used, exhausted_reason, used_column) = match dimension {
+                ExecutionResourceDimension::WorkerExecution => (
+                    budget.max_worker_executions,
+                    budget.used_worker_executions,
+                    "aggregate_worker_executions_exhausted",
+                    "used_worker_executions",
+                ),
+                ExecutionResourceDimension::ProviderContact => (
+                    budget.max_provider_contacts,
+                    budget.used_provider_contacts,
+                    "aggregate_provider_contacts_exhausted",
+                    "used_provider_contacts",
+                ),
+            };
+            // Do not grow the claim ledger for an actually-unbounded
+            // dimension. With no shared deadline and no counter there is no
+            // aggregate authority to consume or replay.
+            if budget.deadline_at_ms.is_none() && maximum.is_none() {
+                return Ok(ExecutionResourceClaimOutcome::Admitted { replayed: false });
+            }
+            let denial_reason = if budget
+                .deadline_at_ms
+                .is_some_and(|deadline| now_ms >= deadline)
+            {
+                Some("aggregate_duration_exhausted")
+            } else if maximum.is_some_and(|maximum| used >= maximum) {
+                Some(exhausted_reason)
+            } else {
+                None
+            };
+            let outcome = if denial_reason.is_some() {
+                "denied"
+            } else {
+                "admitted"
+            };
+            conn.execute(
+                "INSERT INTO execution_resource_claim (
+                    execution_budget_id, dimension, coordinate, request_digest,
+                    outcome, denial_reason, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    execution_budget_id,
+                    dimension.as_str(),
+                    coordinate,
+                    request_digest,
+                    outcome,
+                    denial_reason,
+                    now_ms,
+                ],
+            )
+            .context("record aggregate execution resource claim")?;
+            if denial_reason.is_none() {
+                let statement = format!(
+                    "UPDATE execution_resource_budget SET {used_column} = {used_column} + 1, \
+                     updated_at_ms = ?1 WHERE execution_budget_id = ?2"
+                );
+                let updated = conn
+                    .execute(&statement, rusqlite::params![now_ms, execution_budget_id])
+                    .context("advance aggregate execution resource counter")?;
+                if updated != 1 {
+                    bail!(
+                        "aggregate execution budget {execution_budget_id} disappeared while \
+                         admitting a resource claim"
+                    );
+                }
+            }
+            match denial_reason {
+                Some(reason) => Ok(ExecutionResourceClaimOutcome::Denied {
+                    reason: reason.to_string(),
+                    replayed: false,
+                }),
+                None => Ok(ExecutionResourceClaimOutcome::Admitted { replayed: false }),
+            }
+        })
+    }
+
+    /// Release a provider-contact reservation only after the hosted command
+    /// authority has proved that the worker epoch ended before the possible-
+    /// contact boundary. Worker-execution claims are never releasable.
+    pub fn release_provider_contact_uncontacted(
+        &self,
+        execution_budget_id: &str,
+        coordinate: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool> {
+        validate_resource_claim_coordinate(coordinate)?;
+        HexDigest::new(request_digest.to_string())
+            .map_err(anyhow::Error::msg)
+            .context("aggregate resource release request digest is not canonical sha256")?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "aggregate provider-contact release", || {
+            let recorded: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT request_digest, outcome FROM execution_resource_claim
+                     WHERE execution_budget_id = ?1 AND dimension = 'provider_contact'
+                       AND coordinate = ?2",
+                    rusqlite::params![execution_budget_id, coordinate],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .context("load aggregate provider-contact claim for release")?;
+            let Some((stored_digest, outcome)) = recorded else {
+                // An unbounded contact dimension intentionally records no
+                // claim; there is then nothing to release.
+                return Ok(false);
+            };
+            if stored_digest != request_digest {
+                bail!("aggregate provider-contact release contradicts its request digest");
+            }
+            match outcome.as_str() {
+                "released_uncontacted" => return Ok(true),
+                "denied" => {
+                    bail!("a denied aggregate provider-contact claim cannot be released")
+                }
+                "admitted" => {}
+                _ => bail!("stored aggregate provider-contact claim has invalid state"),
+            }
+            let changed = conn.execute(
+                "UPDATE execution_resource_claim SET outcome='released_uncontacted'
+                 WHERE execution_budget_id = ?1 AND dimension = 'provider_contact'
+                   AND coordinate = ?2 AND request_digest = ?3 AND outcome='admitted'",
+                rusqlite::params![execution_budget_id, coordinate, request_digest],
+            )?;
+            let budget_changed = conn.execute(
+                "UPDATE execution_resource_budget
+                    SET used_provider_contacts = used_provider_contacts - 1, updated_at_ms = ?2
+                  WHERE execution_budget_id = ?1 AND used_provider_contacts > 0",
+                rusqlite::params![execution_budget_id, now_ms],
+            )?;
+            if changed != 1 || budget_changed != 1 {
+                bail!("aggregate provider-contact release lost its claim/budget CAS");
+            }
+            Ok(false)
         })
     }
 
@@ -4218,6 +4940,26 @@ impl AccountingDb {
             )?;
             return Ok(frontier_from_transfer(&transfer));
         }
+        let resources = load_execution_resource_budget(&conn, &scope.execution_budget_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "handoff execution accounting scope has no aggregate resource authority"
+                )
+            })?;
+        if resources.deadline_at_ms.is_some()
+            || resources.max_worker_executions.is_some()
+            || resources.max_provider_contacts.is_some()
+            || resources.used_worker_executions != 0
+            || resources.used_provider_contacts != 0
+        {
+            // The existing cross-site accounting transfer conserves monetary
+            // allowance, but it has no distributed operational-counter
+            // transfer. Minting the target budget from its local account birth
+            // would restart the deadline and counters. Refuse before fencing
+            // the source launch until that same anchored handoff protocol owns
+            // an aggregate-resource frontier too.
+            bail!("finite or consumed aggregate execution resources cannot cross a worker handoff");
+        }
         immediate_transaction(&conn, "source handoff admission fence", || {
             let open_generations = {
                 let mut stmt = conn.prepare(
@@ -5231,6 +5973,11 @@ impl AccountingDb {
         if unbound_open_gates != 0 {
             reasons.push(format!(
                 "{unbound_open_gates} predecessor launch gate(s) lack current directive-scope authority"
+            ));
+        }
+        if let Err(error) = validate_execution_resource_budgets(&conn) {
+            reasons.push(format!(
+                "aggregate execution budget integrity failed: {error:#}"
             ));
         }
 
@@ -7050,9 +7797,9 @@ fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Exact one-step forward migration for the non-disposable financial ledger.
-/// Unknown, foreign, or already-divergent predecessor schemas are never
-/// normalized by the migration.
+/// Exact forward migration for the non-disposable accounting ledger. Unknown,
+/// foreign, or already-divergent predecessor schemas are never normalized by
+/// the migration.
 fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
     let application_id: i32 = conn
         .query_row("PRAGMA application_id", [], |row| row.get(0))
@@ -7060,41 +7807,76 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read accounting schema version before migration")?;
-    if application_id != ACCOUNTING_APP_ID || version != 1 {
+    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2) {
         return Ok(());
     }
-    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_V1_SQL, path)
-        .context("accounting v1 predecessor is not exact; refusing migration")?;
+    let predecessor_sql = match version {
+        1 => SCHEMA_V1_SQL.to_string(),
+        2 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}"),
+        _ => unreachable!("version domain checked above"),
+    };
+    sqlite_schema::assert_complete_schema_sql(conn, &predecessor_sql, path).with_context(|| {
+        format!("accounting v{version} predecessor is not exact; refusing migration")
+    })?;
     conn.execute_batch("BEGIN IMMEDIATE")
-        .context("begin accounting v2 migration")?;
+        .context("begin accounting schema migration")?;
     let result = (|| -> Result<()> {
-        conn.execute_batch(SCHEMA_V2_SQL)
-            .context("apply accounting v2 handoff-ledger schema")?;
-        // A v1 gate committed execution-budget authority only; it had no
-        // field capable of granting one directive budget to the launch.
-        // Preserve that exact meaning as an explicit null v2 binding for
-        // every retained gate. Never infer a broader launch scope from later
-        // per-attempt directive rows.
-        conn.execute(
-            "INSERT INTO launch_accounting_scope_binding (
-                thread_id, launch_generation, directive_budget_id
-             ) SELECT thread_id, launch_generation, NULL
-               FROM launch_accounting_gate",
-            [],
-        )
-        .context("materialize exact v1 execution-only launch-gate bindings")?;
-        assert_current(conn, path).context("validate accounting v2 schema before commit")?;
+        if version == 1 {
+            conn.execute_batch(SCHEMA_V2_SQL)
+                .context("apply accounting v2 handoff-ledger schema")?;
+            // A v1 gate committed execution-budget authority only; it had no
+            // field capable of granting one directive budget to the launch.
+            // Preserve that exact meaning as an explicit null v2 binding for
+            // every retained gate. Never infer a broader launch scope from
+            // later per-attempt directive rows.
+            conn.execute(
+                "INSERT INTO launch_accounting_scope_binding (
+                    thread_id, launch_generation, directive_budget_id
+                 ) SELECT thread_id, launch_generation, NULL
+                   FROM launch_accounting_gate",
+                [],
+            )
+            .context("materialize exact v1 execution-only launch-gate bindings")?;
+        }
+        conn.execute_batch(SCHEMA_V3_SQL)
+            .context("apply accounting v3 aggregate-resource schema")?;
+        backfill_unlimited_execution_resource_budgets(conn)?;
+        assert_current(conn, path).context("validate migrated accounting schema before commit")?;
         Ok(())
     })();
     match result {
         Ok(()) => conn
             .execute_batch("COMMIT")
-            .context("commit accounting v2 migration"),
+            .context("commit accounting schema migration"),
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(error)
         }
     }
+}
+
+/// Executions retained from before aggregate limits existed had exactly no
+/// such limit. Materialize that historical truth rather than attempting to
+/// reconstruct limits from mutable launch projections.
+fn backfill_unlimited_execution_resource_budgets(conn: &Connection) -> Result<()> {
+    let limits = AggregateExecutionLimits::default();
+    let limits_json = canonical_json_string(&serde_json::to_value(limits)?)?;
+    let limits_digest = lillux::cas::sha256_hex(limits_json.as_bytes());
+    let now_ms = wall_clock_ms();
+    conn.execute(
+        "INSERT INTO execution_resource_budget (
+            execution_budget_id, root_chain_id, limits_json, limits_digest,
+            deadline_at_ms, max_worker_executions, max_provider_contacts,
+            used_worker_executions, used_provider_contacts, created_at_ms, updated_at_ms
+         )
+         SELECT execution_budget_id, root_chain_id, ?1, ?2, NULL, NULL, NULL, 0, 0,
+                created_at_ms, ?3
+         FROM budget_account
+         WHERE account_kind = 'execution'",
+        rusqlite::params![limits_json, limits_digest, now_ms],
+    )
+    .context("backfill unlimited aggregate authority for predecessor executions")?;
+    Ok(())
 }
 
 /// Read-or-mint the persisted `(site, epoch)` identity. A fresh ledger mints
@@ -7584,6 +8366,261 @@ mod tests {
             "expected healthy ledger, got {:?}",
             report.reasons
         );
+    }
+
+    #[test]
+    fn aggregate_budget_birth_and_deadline_survive_the_account_birth_crash_gap() {
+        let (dir, db) = setup();
+        // Inject an earlier birth through the same transactional helper used
+        // by root admission. Recovery cannot accidentally share its clock
+        // tick, so rebasing the deadline to recovery time deterministically
+        // fails without a sleep or rewriting persisted authority afterward.
+        let born_at = 1_000_i64;
+        {
+            let conn = db.lock_conn().unwrap();
+            immediate_transaction(&conn, "test execution account birth", || {
+                db.create_account_prepared_in_tx(
+                    &conn,
+                    EXEC,
+                    "execution",
+                    EXEC,
+                    THREAD,
+                    None,
+                    born_at,
+                )
+            })
+            .unwrap();
+        }
+        drop(db);
+
+        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let limits = AggregateExecutionLimits {
+            duration_seconds: 60,
+            worker_executions: 2,
+            provider_contacts: 3,
+        };
+        let admitted = db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+        assert_eq!(admitted.root_chain_id, THREAD);
+        assert_eq!(admitted.deadline_at_ms, Some(born_at + 60_000));
+        drop(db);
+
+        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        assert_eq!(
+            db.ensure_execution_resource_budget(EXEC, &limits).unwrap(),
+            admitted
+        );
+        assert!(
+            db.ensure_execution_resource_budget(EXEC, &AggregateExecutionLimits::default())
+                .is_err()
+        );
+        assert_eq!(
+            db.execution_resource_budget_snapshot(EXEC).unwrap(),
+            Some(admitted)
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn aggregate_parallel_worker_claims_are_bounded_and_replay_after_restart() {
+        let (dir, db) = setup();
+        db.create_execution_account_prepared(EXEC, THREAD, None)
+            .unwrap();
+        let limits = AggregateExecutionLimits {
+            worker_executions: 2,
+            ..Default::default()
+        };
+        db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+        let requests: Vec<_> = (0..8)
+            .map(|index| {
+                let coordinate = format!("worker-{index}");
+                let digest = lillux::cas::sha256_hex(coordinate.as_bytes());
+                (coordinate, digest)
+            })
+            .collect();
+        let outcomes = std::thread::scope(|scope| {
+            let handles: Vec<_> = requests
+                .iter()
+                .map(|(coordinate, digest)| {
+                    let db = &db;
+                    scope.spawn(move || {
+                        db.claim_execution_resource(
+                            EXEC,
+                            ExecutionResourceDimension::WorkerExecution,
+                            coordinate,
+                            digest,
+                            wall_clock_ms(),
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ExecutionResourceClaimOutcome::Admitted { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, ExecutionResourceClaimOutcome::Denied { reason, .. } if reason == "aggregate_worker_executions_exhausted")).count(), 6);
+        drop(db);
+
+        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        for ((coordinate, digest), original) in requests.iter().zip(outcomes) {
+            let replay = db
+                .claim_execution_resource(
+                    EXEC,
+                    ExecutionResourceDimension::WorkerExecution,
+                    coordinate,
+                    digest,
+                    wall_clock_ms(),
+                )
+                .unwrap();
+            match original {
+                ExecutionResourceClaimOutcome::Admitted { .. } => {
+                    assert_eq!(
+                        replay,
+                        ExecutionResourceClaimOutcome::Admitted { replayed: true }
+                    );
+                }
+                ExecutionResourceClaimOutcome::Denied { reason, .. } => {
+                    assert_eq!(
+                        replay,
+                        ExecutionResourceClaimOutcome::Denied {
+                            reason,
+                            replayed: true
+                        }
+                    );
+                }
+                other => panic!("unexpected original worker claim: {other:?}"),
+            }
+        }
+        assert_eq!(
+            db.ensure_execution_resource_budget(EXEC, &limits)
+                .unwrap()
+                .used_worker_executions,
+            2
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn aggregate_uncontacted_release_preserves_exact_claim_and_denial_decisions() {
+        let (dir, db) = setup();
+        db.create_execution_account_prepared(EXEC, THREAD, None)
+            .unwrap();
+        let limits = AggregateExecutionLimits {
+            provider_contacts: 1,
+            ..Default::default()
+        };
+        db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+        let digest = lillux::cas::sha256_hex(b"contact-request");
+        let dimension = ExecutionResourceDimension::ProviderContact;
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "attempt-1", &digest, wall_clock_ms())
+                .unwrap(),
+            ExecutionResourceClaimOutcome::Admitted { replayed: false }
+        );
+        let denied = db
+            .claim_execution_resource(EXEC, dimension, "attempt-2", &digest, wall_clock_ms())
+            .unwrap();
+        assert!(matches!(
+            denied,
+            ExecutionResourceClaimOutcome::Denied { .. }
+        ));
+        assert!(
+            db.release_provider_contact_uncontacted(
+                EXEC,
+                "attempt-1",
+                &lillux::cas::sha256_hex(b"other-request"),
+                wall_clock_ms()
+            )
+            .is_err()
+        );
+        assert!(
+            !db.release_provider_contact_uncontacted(EXEC, "attempt-1", &digest, wall_clock_ms())
+                .unwrap()
+        );
+        assert!(
+            db.release_provider_contact_uncontacted(EXEC, "attempt-1", &digest, wall_clock_ms())
+                .unwrap()
+        );
+        drop(db);
+
+        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "attempt-1", &digest, wall_clock_ms())
+                .unwrap(),
+            ExecutionResourceClaimOutcome::ReleasedUncontacted { replayed: true }
+        );
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "attempt-2", &digest, wall_clock_ms())
+                .unwrap(),
+            ExecutionResourceClaimOutcome::Denied {
+                reason: "aggregate_provider_contacts_exhausted".to_owned(),
+                replayed: true
+            }
+        );
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "attempt-3", &digest, wall_clock_ms())
+                .unwrap(),
+            ExecutionResourceClaimOutcome::Admitted { replayed: false }
+        );
+        assert_eq!(
+            db.ensure_execution_resource_budget(EXEC, &limits)
+                .unwrap()
+                .used_provider_contacts,
+            1
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn aggregate_deadline_denies_new_work_but_preserves_existing_claims() {
+        let (_dir, db) = setup();
+        db.create_execution_account_prepared(EXEC, THREAD, None)
+            .unwrap();
+        let limits = AggregateExecutionLimits {
+            duration_seconds: 1,
+            ..Default::default()
+        };
+        let budget = db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+        let deadline = budget.deadline_at_ms.unwrap();
+        let digest = lillux::cas::sha256_hex(b"worker-request");
+        let dimension = ExecutionResourceDimension::WorkerExecution;
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "existing", &digest, deadline - 1)
+                .unwrap(),
+            ExecutionResourceClaimOutcome::Admitted { replayed: false }
+        );
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "new", &digest, deadline)
+                .unwrap(),
+            ExecutionResourceClaimOutcome::Denied {
+                reason: "aggregate_duration_exhausted".to_owned(),
+                replayed: false
+            }
+        );
+        assert_eq!(
+            db.claim_execution_resource(EXEC, dimension, "existing", &digest, deadline + 1)
+                .unwrap(),
+            ExecutionResourceClaimOutcome::Admitted { replayed: true }
+        );
+        assert!(
+            db.claim_execution_resource(
+                EXEC,
+                dimension,
+                "existing",
+                &lillux::cas::sha256_hex(b"changed-request"),
+                deadline + 1
+            )
+            .is_err()
+        );
+        assert_healthy_verify(&db);
     }
 
     #[test]

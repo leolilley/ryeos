@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-17T23:06:01Z:5bcd5dc9a93c16cb4b9e68dc947237dd361dfa8c8e15e4f8725673d202017d91:FNzhBRG51oMi1Dakz7l84Nsrw9YJg7Jlf8+P+9Lm2lklm9K+FDuH5n2i6gzMSCLPy71KUas3i9GCqtBMAIbADA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-05T00:45:32Z:c384e12ee8632e71c4ec0c34ee6a1a125a1e9c159ddbbf654c6fe1feb00578a5:KQwJIBouhu4usbElIv7jjFXxchG397b5rMVkomDtLH+n1AP1GkhyCZ+7xqtWUrLn2Wa/2vZNXW+70fXr85M4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/tools
 tags: [tool, sign, signatures, authoring]
@@ -44,6 +44,7 @@ external_content:
       root: project_files
       path: data/training
     mode: pinned
+    mount_root: project
     mount: data/training
 ```
 

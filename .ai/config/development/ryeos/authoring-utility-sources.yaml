@@ -1,0 +1,86 @@
+# ryeos:signed:2026-09-07T07:43:46Z:98c631f0d32cf029464bda4eb70322c6cc9310e5262b6885ffcdb9364efa122f:LFwoA/nUe3JTPjFHxVV+xcOT1zYZfXWEiD7ptPNchSS+frWjWx+OuTEunC1LQM7sdN+JI3FnvF9B/mqPeohsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "authoring-utility-sources",
+  "version": "1.0.0",
+  "schema": "ryeos.development.authoring-utility-sources.v1",
+  "input_image": "docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c",
+  "source_date_epoch": 1788566400,
+  "publisher_notices": [
+    {"path": "/usr/share/common-licenses/LGPL-2.1", "target": "licenses/LGPL-2.1", "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"}
+  ],
+  "sources": [
+    {
+      "name": "zig", "version": "0.15.2", "directory": "zig-x86_64-linux-0.15.2",
+      "archive": "zig-x86_64-linux-0.15.2.tar.xz",
+      "url": "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz",
+      "sha256": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239", "bytes": 53733924,
+      "licenses": ["LICENSE", "lib/libc/musl/COPYRIGHT"]
+    },
+    {
+      "name": "coreutils", "version": "9.11", "directory": "coreutils-9.11",
+      "archive": "coreutils-9.11.tar.xz", "url": "https://ftp.gnu.org/gnu/coreutils/coreutils-9.11.tar.xz",
+      "sha256": "394024eda0a5955217ceda9cd1201e65dc8fa3aa29c2951135a49521d57c3cc3", "bytes": 6562420,
+      "configure": ["--disable-nls", "--disable-acl", "--disable-xattr", "--without-selinux", "--without-libgmp", "--disable-libcap", "--disable-libsmack"],
+      "programs": {
+        "basename": "src/basename", "cat": "src/cat", "chmod": "src/chmod", "cp": "src/cp", "cut": "src/cut", "date": "src/date", "dirname": "src/dirname", "env": "src/env", "head": "src/head", "ln": "src/ln", "ls": "src/ls", "mkdir": "src/mkdir", "mktemp": "src/mktemp", "mv": "src/mv", "printf": "src/printf", "pwd": "src/pwd", "readlink": "src/readlink", "realpath": "src/realpath", "rm": "src/rm", "rmdir": "src/rmdir", "sha256sum": "src/sha256sum", "sleep": "src/sleep", "sort": "src/sort", "stat": "src/stat", "tail": "src/tail", "tee": "src/tee", "test": "src/test", "timeout": "src/timeout", "touch": "src/touch", "tr": "src/tr", "uniq": "src/uniq", "wc": "src/wc"
+      },
+      "licenses": ["COPYING", "AUTHORS"]
+    },
+    {
+      "name": "sed", "version": "4.10", "directory": "sed-4.10",
+      "archive": "sed-4.10.tar.xz", "url": "https://ftp.gnu.org/gnu/sed/sed-4.10.tar.xz",
+      "sha256": "b8e72182b2ec96a3574e2998c47b7aaa64cc20ce000d8e9ac313cc07cecf28c7", "bytes": 1732800,
+      "configure": ["--disable-nls", "--disable-acl", "--disable-xattr", "--without-selinux"],
+      "programs": {"sed": "sed/sed"}, "licenses": ["COPYING", "AUTHORS"]
+    },
+    {
+      "name": "diffutils", "version": "3.12", "directory": "diffutils-3.12",
+      "archive": "diffutils-3.12.tar.xz", "url": "https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz",
+      "sha256": "7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd", "bytes": 1938800,
+      "configure": ["--disable-nls"],
+      "programs": {"diff": "src/diff", "cmp": "src/cmp"}, "licenses": ["COPYING", "AUTHORS"]
+    },
+    {
+      "name": "findutils", "version": "4.11.0", "directory": "findutils-4.11.0",
+      "archive": "findutils-4.11.0.tar.xz", "url": "https://ftp.gnu.org/gnu/findutils/findutils-4.11.0.tar.xz",
+      "sha256": "bfd19cb06cc71f3352d567e90284d8cdac02ac89774bbeadf0b533b0c11432fd", "bytes": 2451424,
+      "configure": ["--disable-nls", "--without-selinux"],
+      "programs": {"find": "find/find", "xargs": "xargs/xargs"}, "licenses": ["COPYING", "AUTHORS"]
+    },
+    {
+      "name": "gawk", "version": "5.4.1", "directory": "gawk-5.4.1",
+      "archive": "gawk-5.4.1.tar.xz", "url": "https://ftp.gnu.org/gnu/gawk/gawk-5.4.1.tar.xz",
+      "sha256": "07f6f7342b7febe4313fc2c2542ad93d64fe20ad8717200109f105a826f5fd37", "bytes": 3838416,
+      "configure": ["--disable-nls", "--disable-extensions", "--without-readline", "--without-mpfr"],
+      "programs": {"awk": "gawk"}, "licenses": ["COPYING", "AUTHORS", "missing_d/COPYING.LIB"]
+    },
+    {
+      "name": "patch", "version": "2.8", "directory": "patch-2.8",
+      "archive": "patch-2.8.tar.xz", "url": "https://ftp.gnu.org/gnu/patch/patch-2.8.tar.xz",
+      "sha256": "f87cee69eec2b4fcbf60a396b030ad6aa3415f192aa5f7ee84cad5e11f7f5ae3", "bytes": 907208,
+      "configure": ["--disable-xattr"],
+      "programs": {"patch": "src/patch"}, "licenses": ["COPYING", "AUTHORS"]
+    },
+    {
+      "name": "grep", "version": "3.12", "directory": "grep-3.12",
+      "archive": "grep-3.12.tar.xz", "url": "https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz",
+      "sha256": "2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9", "bytes": 1918448,
+      "configure": ["--disable-nls", "--disable-perl-regexp"],
+      "programs": {"grep": "src/grep"}, "licenses": ["COPYING", "AUTHORS"]
+    },
+    {
+      "name": "zlib", "version": "1.3.2", "directory": "zlib-1.3.2",
+      "archive": "zlib-1.3.2.tar.xz", "url": "https://zlib.net/zlib-1.3.2.tar.xz",
+      "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3", "bytes": 1320064,
+      "programs": {}, "licenses": ["LICENSE"]
+    },
+    {
+      "name": "git", "version": "2.55.0", "directory": "git-2.55.0",
+      "runtime_shell": "bin/zsh",
+      "archive": "git-2.55.0.tar.xz", "url": "https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz",
+      "sha256": "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357", "bytes": 8177180,
+      "programs": {"git": "git"}, "licenses": ["COPYING", "reftable/LICENSE", "sha1dc/LICENSE.txt", "compat/regex/regex.c"]
+    }
+  ]
+}

@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-08-11T02:28:36Z:b676e9dc897e41b5436fb325168b66b6cf64017c0624fa07ad7efed3e6bbf80d:tyV++HqZdVIVwKtMAhfissuyWET5KG1V8WXWpW2Xiif4/7LSM+8I+sVqvhuFG90bkgn2aRfbJ8+LeB8eYxSpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T01:55:13Z:3437218e29ffd349df967641728f5be1557f6ecb64624effdf35a1dbe97a12ac:vZzyQ35dwAigOp3qoQb6vRZtV/7z1e5ukyknf/jsGZMPtyMdPfruFLivP3+3UjMABLHCP5q+XQymZImOaN2qDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [reference, terminology, naming, conventions]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Terminology and naming conventions for the Rust Rye OS system —
   binary names, namespaces, kind names, case rules, and key terms.
@@ -59,17 +59,19 @@ protocol:ryeos/core/runtime
 
 ## Kind Names
 
-12 kinds, all lowercase. Multi-word kinds use `snake_case`:
+Kinds come from the installed signed bundle set. Names are lowercase;
+multi-word kinds use `snake_case`:
 
 ```
 config        directive       graph
 handler       knowledge       node
 parser        protocol        runtime
-service       streaming_tool  tool
+service       tool            worker
+worker_execution
 ```
 
-`tool` and `streaming_tool` share the same directory (`tools/`).
-Differentiation is by execution protocol, not file location.
+`tools/` has one Tool authority. Its explicit `execution_protocol` selects
+terminal or framed output and whether callbacks are admitted.
 
 ## MCP Interface
 
@@ -123,7 +125,7 @@ ryeos vault put / list / remove / rewrap
 | Rust source files    | snake_case      | `canonical_ref.rs`, `plan_builder.rs` |
 | Main binaries        | kebab-case      | `ryeos`, `ryeosd`                 |
 | Handler binaries     | `rye-` + kebab  | `rye-composer-identity`           |
-| Kind names           | lowercase       | `tool`, `streaming_tool`          |
+| Kind names           | lowercase       | `tool`, `worker_execution`          |
 | YAML keys            | snake_case      | `binary_ref`, `required_caps`     |
 | CLI verbs            | kebab-case      | `bundle-install`, `thread-list`   |
 | CLI aliases          | single letter   | `s` → sign, `f` → fetch           |

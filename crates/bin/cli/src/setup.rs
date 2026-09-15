@@ -203,6 +203,7 @@ impl LocalSetupClient {
             &serde_json::json!({
                 "item_ref": validation.r#ref.as_str(),
                 "ref_bindings": {},
+                "product_selections": [],
                 "parameters": {
                     "provider_id": projection.provider_id.as_str(),
                     "model": model,

@@ -247,6 +247,7 @@ fn prepare_item_ref(
         current_site_id: state.threads.site_id().to_string(),
         origin_site_id: state.threads.site_id().to_string(),
         execution_hints: Default::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
 
@@ -386,6 +387,7 @@ async fn execute_prepared_item_ref(
         validate_only: false,
         params: req.params.clone(),
         ref_bindings: req.ref_bindings.clone(),
+        product_selections: Vec::new(),
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
         project_path: &prepared.project.effective_path,
         provenance,

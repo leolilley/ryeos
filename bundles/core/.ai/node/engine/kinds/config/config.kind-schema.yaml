@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-27T08:43:19Z:364d611ccd4a455804b07b7763627b8d07e58fc79490572a5bd09ca79d865861:3oa3pBxuNTFRDPVNhHkIn0FpMfAw6IrbYNzdyqusJOheiWsSH1WbMt3pjoYu4//QLxVGfwRkpfiCJvybsWepAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-06T01:05:53Z:b5f07cc8078b89e199657d6e8ec22d998514116c1b81fbe8d55387f1337a879a:PrW9OwP8W3smkSKUn6NE9NSy5CgciUgQmVVU0TOvTgAD+dK9RPN8nhLTGrJY2WQ+BHDtLepVQ3Y6Kcr9uYVDDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/config"
-version: "1.1.0"
+version: "1.1.1"
 location:
   directory: config
 effective_trust:
@@ -12,6 +12,7 @@ content:
   external_content:
     realization_derived: effective_external_realizations
     allowed_roots: []
+    allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:
       max_total_bytes: 4294967296

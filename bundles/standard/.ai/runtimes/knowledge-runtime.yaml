@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-04T05:54:47Z:2208e771c7d89d96222eb507e83dd98e0250449cf7638f9d4920d4a2ecce253d:aI6djGwgMMAjxkCl+eXaU/YcVEgCHZQksYOR5LQq2sw6FO53cVXn69tA9a0CElv0knIWQmylGfXhY7m7ktF5Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T01:24:39Z:9751005fbd5c84e5821b0313dee07d63a7bbe98642413a8cd7a5ae6e02050c9f:/nLZC84LBU4AoPxhpPAmsm3X9a1qvGAzwPOTad2XXZvjYr8PPL4yi2qHWCG9Mqg2QQUGGhLFrgiSG3ItzJUGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: knowledge
 default: true
@@ -30,6 +30,12 @@ launch_contract:
     max_targets_per_dependency: 0
     max_executable_search_entries: 0
     external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
   environment_contributions:
     max_contributions: 0
     max_targets_per_contribution: 0

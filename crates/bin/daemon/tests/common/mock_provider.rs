@@ -169,7 +169,7 @@ impl MockProvider {
     /// FIFO). Returns once the server is bound and listening.
     ///
     /// Binds `127.0.0.1:0` directly and reads back the kernel-assigned
-    /// port — no `next_port()` TOCTOU window between port-pick and bind.
+    /// port, avoiding the race between a separate port selection and bind.
     pub async fn start(canned: Vec<MockResponse>) -> Self {
         Self::start_with_response_delay(canned, std::time::Duration::ZERO).await
     }

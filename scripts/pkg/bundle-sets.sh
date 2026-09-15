@@ -8,10 +8,12 @@
 # installation cannot silently drift on bundle membership.
 #
 # `ryeos_bundle_set_names <set>` echoes the ordered bundle names for a set, one
-# per line. `ryeos_bundle_set_node_init_profile <set>` echoes the one explicit,
-# same-named source-root init profile required by that distribution. Every
-# known set has a profile; an unknown set fails. Selection is publisher-authored
-# bootstrap data supplied to `ryeos init`, never inferred from bundle presence.
+# per line. `ryeos_bundle_set_node_init_profile <set>` echoes that
+# distribution's default source-root init profile. A separately selected
+# profile may map to the same exact bundle set through
+# `ryeos_node_init_profile_bundle_set`; policy selection must not invent a
+# duplicate distribution. Selection is publisher-authored bootstrap data
+# supplied to `ryeos init`, never inferred from bundle presence.
 #
 # `central-auth` is a member of every set: it ships in the source tree and is
 # discovered/parsed at init, so its manifest must stay current — but it owns no
@@ -19,23 +21,22 @@
 # populate-bundles.sh).
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full full-sandbox central-host standard hosted-node hosted-workflow
+  printf '%s\n' full central-host standard hosted-node hosted-workflow
 }
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference ;;
-    full-sandbox)    printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference sandbox-linux-bubblewrap ;;
+    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference ;;
     central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
     standard)        printf '%s\n' core central-auth standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
-    hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex ;;
+    hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex opencode ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference tv-tracker-authoring
+      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring
       ;;
     *) return 1 ;;
   esac
@@ -45,7 +46,18 @@ ryeos_bundle_set_names() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  ryeos_bundle_set_ids
+  printf '%s\n' full central-host standard hosted-node hosted-workflow development
+}
+
+# Exact installed bundle set required by one publisher-authored profile.
+# Profiles select policy, not payload membership: more than one closed policy
+# generation may intentionally operate the same distribution.
+ryeos_node_init_profile_bundle_set() {
+  case "$1" in
+    full|central-host|standard|hosted-node|hosted-workflow) printf '%s\n' "$1" ;;
+    development) printf '%s\n' full ;;
+    *) return 1 ;;
+  esac
 }
 
 ryeos_node_init_profile_file_names() {
@@ -87,20 +99,25 @@ ryeos_validate_node_init_root() {
 # exact bundle set and that it carries a nonempty, canonical policy mapping
 # before population signs it or an installer replaces live state.
 ryeos_validate_node_init_profile() {
-  local set_name="$1"
+  local profile_name="$1"
   local profile_file="$2"
-  local expected_bundles actual_bundles actual_policies policy_name duplicates
+  local set_name expected_bundles actual_bundles actual_policies policy_name duplicates
+
+  set_name="$(ryeos_node_init_profile_bundle_set "$profile_name")" || {
+    printf 'unknown node init profile: %s\n' "$profile_name" >&2
+    return 1
+  }
 
   [[ -f "$profile_file" && ! -L "$profile_file" ]] || {
     printf 'missing or unsafe node init profile for %s: %s\n' \
-      "$set_name" "$profile_file" >&2
+      "$profile_name" "$profile_file" >&2
     return 1
   }
   [[ "$(grep -Ec '^schema: 1$' "$profile_file")" -eq 1 \
       && "$(grep -Ec '^exact_bundles:$' "$profile_file")" -eq 1 \
       && "$(grep -Ec '^policies:$' "$profile_file")" -eq 1 ]] || {
     printf 'node init profile has an invalid top-level schema for %s: %s\n' \
-      "$set_name" "$profile_file" >&2
+      "$profile_name" "$profile_file" >&2
     return 1
   }
 
@@ -110,13 +127,13 @@ ryeos_validate_node_init_profile() {
       | sed -nE 's/^  - ([A-Za-z0-9_-]+)$/\1/p'
   )"
   [[ "$actual_bundles" == "$expected_bundles" ]] || {
-    printf 'node init profile exact_bundles mismatch for %s\n' "$set_name" >&2
+    printf 'node init profile exact_bundles mismatch for %s\n' "$profile_name" >&2
     return 1
   }
 
   actual_policies="$(ryeos_node_init_profile_policy_names "$profile_file")"
   [[ -n "$actual_policies" ]] || {
-    printf 'node init profile has an empty policy inventory for %s\n' "$set_name" >&2
+    printf 'node init profile has an empty policy inventory for %s\n' "$profile_name" >&2
     return 1
   }
   while IFS= read -r policy_name; do
@@ -125,21 +142,21 @@ ryeos_validate_node_init_profile() {
         && "$policy_name" != *"__"* \
         && "$policy_name" != *"--"* ]] || {
       printf 'node init profile has a noncanonical policy name for %s: %s\n' \
-        "$set_name" "$policy_name" >&2
+        "$profile_name" "$policy_name" >&2
       return 1
     }
   done <<< "$actual_policies"
   duplicates="$(printf '%s\n' "$actual_policies" | sort | uniq -d)"
   [[ -z "$duplicates" ]] || {
     printf 'node init profile has duplicate policy names for %s: %s\n' \
-      "$set_name" "$duplicates" >&2
+      "$profile_name" "$duplicates" >&2
     return 1
   }
 }
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|full-sandbox|central-host|standard|hosted-node|hosted-workflow)
+    full|central-host|standard|hosted-node|hosted-workflow)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -153,8 +170,8 @@ ryeos_bundle_set_bin_managed_names() {
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
     # central-auth (Python tool support) and tv-tracker-authoring (reuses
     # bin:core/ryeos-core-tools) own no compiled
-    # binaries; local-inference and sandbox own separately built payloads.
-    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "sandbox-linux-bubblewrap" ]] && continue
+    # binaries; local-inference owns separately built payloads.
+    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" ]] && continue
     printf '%s\n' "$name"
   done
 }

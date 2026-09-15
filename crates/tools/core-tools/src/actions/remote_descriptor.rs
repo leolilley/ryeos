@@ -12,9 +12,9 @@ use crate::actions::hosted_policy::{LoadedHostedNodePolicy, load_hosted_policy};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExportRemoteDescriptorParams {
-    /// App root directory for the node being described.
+    /// Node system space selected by the signed Tool contract.
     #[serde(default)]
-    pub app_root: Option<String>,
+    pub system_space_dir: Option<String>,
     /// Name callers should use for the remote.
     pub name: String,
     /// Public HTTPS URL callers should use to reach the node.
@@ -97,7 +97,7 @@ pub fn run_export_remote_descriptor(
         bail!("url must not be empty");
     }
 
-    let app_root = resolve_app_root(params.app_root)?;
+    let app_root = resolve_app_root(params.system_space_dir)?;
     let identity_path = app_root
         .join(".ai")
         .join("node")
@@ -385,7 +385,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec![],
@@ -411,7 +411,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "http://node.example.com".into(),
             capabilities: vec![],
@@ -439,7 +439,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-local".into(),
             url: "http://127.0.0.1:8000".into(),
             capabilities: vec![],
@@ -464,7 +464,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-local".into(),
             url: "http://[::1]:8000".into(),
             capabilities: vec![],
@@ -489,7 +489,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "http://127.example.com".into(),
             capabilities: vec![],
@@ -517,7 +517,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec![],
@@ -545,7 +545,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec!["provider-dashboard".into()],
@@ -570,7 +570,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy(tmp.path());
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec!["remote-execute".into()],
@@ -596,7 +596,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy_with_choices(tmp.path(), false, true);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-disabled".into(),
             url: "https://node.example.com".into(),
             capabilities: vec![],
@@ -621,7 +621,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy_with_choices(tmp.path(), true, false);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            app_root: Some(tmp.path().to_string_lossy().to_string()),
+            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-local".into(),
             url: "http://127.0.0.1:8000".into(),
             capabilities: vec![],

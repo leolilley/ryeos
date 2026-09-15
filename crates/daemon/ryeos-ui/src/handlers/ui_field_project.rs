@@ -76,6 +76,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         current_site_id: state.threads.site_id().to_string(),
         origin_site_id: state.threads.site_id().to_string(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: true,
     };
     let ui_state = crate::state::get_ui_state(&state).context("UI state is not registered")?;

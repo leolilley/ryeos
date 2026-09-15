@@ -1,5 +1,8 @@
-# ryeos:signed:2026-09-04T06:00:33Z:eca40b1ba629cf921459eaac256f5c0c723339498540c023ca71355c555efa93:HfCpdrWnvg4tqo4B1dtKG2XfbNleexg03SqSp7m4NdufKdkizLeolZFqRt5fAkOQwoKd3BXA0spncvjmjtCGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T05:52:27Z:7d2b905fdbc1824a976fe3702468ce762fffa2b7bc44c0b8dffeda2507f6541a:snXo+remVeT16aCZOYjRzp9rlfxEJSGhyLUakNrYN0rV3oYsp5SXQpBd4mWQVne6cYwLxGEEw7ZnmEX9zNV8BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
 version: "1.1.0"
 location:
   directory: runtimes
@@ -71,10 +74,12 @@ composed_value_contract:
           runtime_facts: { type: single, prim: mapping }
           execution_dependencies: { type: single, prim: mapping }
           content_dependencies: { type: single, prim: mapping }
+          evidence_attachments: { type: single, prim: mapping }
           environment_contributions: { type: single, prim: mapping }
           financial_authority: { type: single, prim: mapping }
           external_effect_authority: { type: single, prim: mapping }
   optional:
+    execution_evidence: { type: single, prim: mapping }
     default: { type: single, prim: boolean }
     required_caps:
       type: single

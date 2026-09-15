@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:03Z:8bf3c7913f1940523299666db8ba6a00d1ffe12e44de14678cc3b0dd6c8bdf60:Sb/f+Ti6J94cnQIEikuCF+4UDx2EQVKDzjmDpLXEMgVYL6yYuyKvYWTIPNQGXbNYy7/8dFe01KilxLJo2vmcBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T05:52:27Z:22766ce9db25b3045ad1557ebf5dae77412eefd68bc3fac6d0d039e9b861ddc1:Pka+Rs5I3ngHSjkz3UDeAN7Hp4+9sA3r4wHd25g2qmk+wXEPZlz6X8CO4XoZFQ5hI6PaeZ90iWE7aVD/vWGyBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/handler"
 version: "1.0.0"
 location:
@@ -27,7 +27,7 @@ composed_value_contract:
     category: { type: single, prim: string }
     name: { type: single, prim: string }
     kind: { type: single, prim: string, enum: [handler] }
-    serves: { type: single, prim: string, enum: [parser, composer, launch_preparer, effective_validator] }
+    serves: { type: single, prim: string, enum: [parser, composer, launch_preparer, effective_validator, execution_evidence_projector] }
     binary_ref: { type: single, prim: string }
     abi_version: { type: single, prim: string }
   optional:

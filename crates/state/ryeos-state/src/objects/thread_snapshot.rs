@@ -27,7 +27,9 @@ use super::validate_object_kind;
 /// destination and admitted compare-and-swap base.
 /// v11: captured node-history policy provenance uses the flat exact signed
 /// item identity rather than the predecessor tagged config wrapper.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 11;
+/// v12: live project authority records fixed-parent confinement and the
+/// admitted execution namespace as the symlink boundary.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
 
 /// Maximum compact-JSON bytes retained across a terminal snapshot's result and
 /// error values. Terminal content has its own bounded contract: it is not an
@@ -269,7 +271,7 @@ where
 /// Validate the engine's kind-agnostic canonical-ref grammar without
 /// resolving the kind against any registry. Authoritative state must reject a
 /// malformed captured subject during every typed load/rebuild.
-fn validate_canonical_item_ref(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_canonical_item_ref(value: &str) -> anyhow::Result<()> {
     let (kind, remainder) = value
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("bare refs are not canonical"))?;
@@ -729,9 +731,9 @@ pub struct ThreadSnapshot {
     /// snapshot-backed project contexts intentionally remain unattributed.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub project_root: Option<PathBuf>,
-    /// Canonical tagged project authority. `project_root` and snapshot-hash
-    /// fields below are query/projection columns and must agree with this value;
-    /// they are never used to infer execution semantics.
+    /// Immutable admitted project authority. `project_root` and the base
+    /// snapshot projection must agree with it. Terminal result coordinates
+    /// below are established separately and never rewrite this launch contract.
     pub project_authority: super::ExecutionProjectAuthority,
     /// CAS object sealing the exact admitted program, runtime, project,
     /// lifecycle, capability, and isolation authority used to launch this
@@ -754,6 +756,10 @@ pub struct ThreadSnapshot {
     /// Null if no changes or not applicable.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub result_project_snapshot_hash: Option<String>,
+    /// Lossless outputs paired with the terminal source generation. This is
+    /// result authority, never a mutation of the admitted project authority.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub result_workspace_output_capture_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -897,6 +903,7 @@ impl ThreadSnapshot {
             }
         }
         self.project_authority.validate()?;
+        self.validate_result_workspace_output_shape()?;
         if self.project_root.as_deref() != self.project_authority.project_root_projection() {
             anyhow::bail!("project_root projection contradicts project_authority");
         }
@@ -982,6 +989,10 @@ impl ThreadSnapshot {
                 self.result_project_snapshot_hash.as_deref(),
             ),
             (
+                "result_workspace_output_capture_hash",
+                self.result_workspace_output_capture_hash.as_deref(),
+            ),
+            (
                 "admitted_launch_capsule_hash",
                 self.admitted_launch_capsule_hash.as_deref(),
             ),
@@ -991,6 +1002,83 @@ impl ThreadSnapshot {
                 validate_canonical_hash(label, hash)?;
             }
         }
+        Ok(())
+    }
+
+    fn validate_result_workspace_output_shape(&self) -> anyhow::Result<()> {
+        let capture = self.result_workspace_output_capture_hash.as_ref();
+        if capture.is_some()
+            && (!self.status.is_terminal() || self.result_project_snapshot_hash.is_none())
+        {
+            anyhow::bail!("terminal workspace outputs require a terminal source result generation");
+        }
+        let partition = self.project_authority.workspace_outputs();
+        if capture.is_some()
+            && (partition.is_none()
+                || !self.project_authority.records_terminal_project_generation())
+        {
+            anyhow::bail!("terminal workspace outputs require admitted retained output authority");
+        }
+        if self.result_project_snapshot_hash.is_some() && partition.is_some() && capture.is_none() {
+            anyhow::bail!(
+                "output-bearing terminal source generation is missing its paired capture"
+            );
+        }
+        Ok(())
+    }
+
+    /// Verify the result edge against its exact immutable producer and source
+    /// coordinates before publishing or replaying an authoritative chain head.
+    pub fn verify_result_workspace_output_capture(
+        &self,
+        cas: &lillux::CasStore,
+    ) -> anyhow::Result<()> {
+        self.validate_result_workspace_output_shape()?;
+        let Some(hash) = self.result_workspace_output_capture_hash.as_deref() else {
+            return Ok(());
+        };
+        let value = crate::object_closure::load_exact_cas_object_with_cas(
+            cas,
+            hash,
+            super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64,
+        )?;
+        let capture = super::WorkspaceOutputCapture::from_value(&value)?;
+        let admitted = self
+            .project_authority
+            .workspace_outputs()
+            .context("terminal output partition is missing")?;
+        if capture.producer_chain_root_id != self.chain_root_id
+            || capture.producer_thread_id != self.thread_id
+            || Some(capture.admitted_launch_capsule_hash.as_str())
+                != self.admitted_launch_capsule_hash.as_deref()
+            || Some(capture.base_project_snapshot_hash.as_str())
+                != self.base_project_snapshot_hash.as_deref()
+            || Some(capture.result_project_snapshot_hash.as_str())
+                != self.result_project_snapshot_hash.as_deref()
+            || capture.partition != admitted.partition
+        {
+            anyhow::bail!(
+                "terminal workspace output capture contradicts its exact admitted producer or generation"
+            );
+        }
+        let base = crate::project_materialization::load_project_snapshot_bounded(
+            cas,
+            &capture.base_project_snapshot_hash,
+        )?
+        .context("terminal workspace output base snapshot is missing")?;
+        let result = crate::project_materialization::load_project_snapshot_bounded(
+            cas,
+            &capture.result_project_snapshot_hash,
+        )?
+        .context("terminal workspace output result snapshot is missing")?;
+        let policy = crate::project_materialization::load_project_policy_bounded(
+            cas,
+            &capture.partition.project_snapshot_policy_hash,
+        )?
+        .context("terminal workspace output policy is missing")?;
+        capture
+            .partition
+            .validate_source_output_pair(&base, &result, &policy)?;
         Ok(())
     }
 
@@ -1026,6 +1114,7 @@ pub struct ThreadSnapshotBuilder {
     captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     base_project_snapshot_hash: Option<String>,
     result_project_snapshot_hash: Option<String>,
+    result_workspace_output_capture_hash: Option<String>,
     created_at: String,
     updated_at: String,
     started_at: Option<String>,
@@ -1073,6 +1162,7 @@ impl ThreadSnapshotBuilder {
             captured_history_policy: None,
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
             created_at: now.clone(),
             updated_at: now,
             started_at: None,
@@ -1147,6 +1237,11 @@ impl ThreadSnapshotBuilder {
 
     pub fn result_project_snapshot_hash(mut self, hash: impl Into<String>) -> Self {
         self.result_project_snapshot_hash = Some(hash.into());
+        self
+    }
+
+    pub fn result_workspace_output_capture_hash(mut self, hash: impl Into<String>) -> Self {
+        self.result_workspace_output_capture_hash = Some(hash.into());
         self
     }
 
@@ -1245,6 +1340,7 @@ impl ThreadSnapshotBuilder {
             captured_history_policy: self.captured_history_policy,
             base_project_snapshot_hash: self.base_project_snapshot_hash,
             result_project_snapshot_hash: self.result_project_snapshot_hash,
+            result_workspace_output_capture_hash: self.result_workspace_output_capture_hash,
             created_at: self.created_at,
             updated_at: self.updated_at,
             started_at: self.started_at,
@@ -1296,6 +1392,182 @@ mod tests {
         .created_at("2026-04-21T12:00:00Z".to_string())
         .updated_at("2026-04-21T12:00:00Z".to_string())
         .build()
+    }
+
+    fn output_result_fixture(
+        cas: &lillux::CasStore,
+    ) -> (ThreadSnapshot, super::super::WorkspaceOutputCapture) {
+        use super::super::{
+            EnvironmentAuthority, ExecutionProjectAuthority, PinnedProjectRealization,
+            PinnedTerminalPublication, ProjectSnapshot, ProjectSnapshotPolicy,
+            WORKSPACE_OUTPUT_CAPTURE_KIND, WORKSPACE_OUTPUT_CAPTURE_SCHEMA,
+            WORKSPACE_OUTPUT_PARTITION_SCHEMA, WorkspaceOutputCapture, WorkspaceOutputCaptureState,
+            WorkspaceOutputPartition, WorkspaceOutputRoot,
+        };
+        use crate::external_content::products::{ProductBounds, ProductStorage};
+        use crate::project_sync::ProjectSyncScope;
+        let policy = ProjectSnapshotPolicy::new(
+            ProjectSyncScope::FullProject,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let policy_hash = cas.store_object(&policy.to_value()).unwrap();
+        let base = ProjectSnapshot {
+            project_tree_hash: "a".repeat(64),
+            effective_policy_hash: policy_hash.clone(),
+            parent_hashes: Vec::new(),
+            message: None,
+            source: "test".into(),
+            created_at: "2026-04-21T12:00:00Z".into(),
+        };
+        let base_hash = cas.store_object(&base.to_value()).unwrap();
+        let result = ProjectSnapshot {
+            parent_hashes: vec![base_hash.clone()],
+            ..base
+        };
+        let result_hash = cas.store_object(&result.to_value()).unwrap();
+        let bounds = ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 1024,
+            maximum_total_bytes: 4096,
+        };
+        let mut partition = WorkspaceOutputPartition {
+            schema: WORKSPACE_OUTPUT_PARTITION_SCHEMA.into(),
+            recipe_binding: "product_recipe".into(),
+            recipe_ref: "config:test/products".into(),
+            recipe_raw_content_digest: "b".repeat(64),
+            declarations_hash: "c".repeat(64),
+            project_snapshot_policy_hash: policy_hash,
+            roots: vec![WorkspaceOutputRoot {
+                name: "runtime".into(),
+                path: "products/runtime".into(),
+                storage: ProductStorage::Content,
+                declared_bounds: bounds.clone(),
+                effective_bounds: bounds,
+            }],
+            products: Vec::new(),
+            partition_identity: String::new(),
+            capture_policy_digest: String::new(),
+        };
+        partition.partition_identity = partition.derived_partition_identity().unwrap();
+        partition.capture_policy_digest = partition.derived_capture_policy_digest(&policy).unwrap();
+        let authority = ExecutionProjectAuthority::pinned(
+            format!("snapshot:{base_hash}"),
+            None,
+            base_hash.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainResult,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+        .condition_initial_workspace_outputs(partition.clone())
+        .unwrap();
+        let mut snapshot = child_snapshot();
+        snapshot.project_authority = authority;
+        snapshot.base_project_snapshot_hash = Some(base_hash.clone());
+        snapshot.admitted_launch_capsule_hash = Some("d".repeat(64));
+        snapshot.result_project_snapshot_hash = Some(result_hash.clone());
+        snapshot.status = ThreadStatus::Completed;
+        snapshot.finished_at = Some(snapshot.updated_at.clone());
+        let capture = WorkspaceOutputCapture {
+            schema: WORKSPACE_OUTPUT_CAPTURE_SCHEMA.into(),
+            kind: WORKSPACE_OUTPUT_CAPTURE_KIND.into(),
+            producer_chain_root_id: snapshot.chain_root_id.clone(),
+            producer_thread_id: snapshot.thread_id.clone(),
+            admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash.clone().unwrap(),
+            base_project_snapshot_hash: base_hash,
+            result_project_snapshot_hash: result_hash,
+            partition,
+            outputs: BTreeMap::from([(
+                "runtime".into(),
+                WorkspaceOutputCaptureState::EmptyDirectory,
+            )]),
+        };
+        snapshot.result_workspace_output_capture_hash =
+            Some(cas.store_object(&capture.to_value().unwrap()).unwrap());
+        (snapshot, capture)
+    }
+
+    #[test]
+    fn terminal_output_capture_is_required_nullable_and_exactly_paired() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(temporary.path().join("cas"));
+        let (snapshot, _) = output_result_fixture(&cas);
+        snapshot.validate().unwrap();
+        snapshot
+            .verify_result_workspace_output_capture(&cas)
+            .unwrap();
+        let admitted = snapshot.project_authority.clone();
+        assert_eq!(
+            admitted.workspace_outputs().unwrap().capture_hash,
+            None,
+            "terminal result does not rewrite admission"
+        );
+        let mut wire = snapshot.to_value();
+        wire.as_object_mut()
+            .unwrap()
+            .remove("result_workspace_output_capture_hash");
+        assert!(ThreadSnapshot::from_current_value(wire).is_err());
+        let mut changed = snapshot.clone();
+        changed.result_workspace_output_capture_hash = None;
+        assert!(
+            changed.validate().is_err(),
+            "source-only publication cannot drop an admitted output partition"
+        );
+        changed = snapshot.clone();
+        changed.result_project_snapshot_hash = None;
+        assert!(changed.validate().is_err());
+        changed.result_workspace_output_capture_hash = None;
+        changed.validate().unwrap(); // Failure before capture may retain neither.
+        changed = snapshot.clone();
+        changed.status = ThreadStatus::Running;
+        changed.finished_at = None;
+        assert!(changed.validate().is_err());
+        let mut ordinary = child_snapshot();
+        ordinary.status = ThreadStatus::Completed;
+        ordinary.finished_at = Some(ordinary.updated_at.clone());
+        ordinary.result_project_snapshot_hash = snapshot.result_project_snapshot_hash;
+        ordinary.result_workspace_output_capture_hash =
+            snapshot.result_workspace_output_capture_hash;
+        assert!(
+            ordinary.validate().is_err(),
+            "ordinary execution cannot acquire output authority at terminal"
+        );
+    }
+
+    #[test]
+    fn terminal_output_capture_rejects_wrong_producer_capsule_partition_and_generation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(temporary.path().join("cas"));
+        let (snapshot, capture) = output_result_fixture(&cas);
+        for mutate in [
+            (|c: &mut super::super::WorkspaceOutputCapture| c.producer_thread_id = "T-other".into())
+                as fn(&mut super::super::WorkspaceOutputCapture),
+            |c| c.producer_chain_root_id = "T-other-root".into(),
+            |c| c.admitted_launch_capsule_hash = "e".repeat(64),
+            |c| c.base_project_snapshot_hash = "e".repeat(64),
+            |c| c.result_project_snapshot_hash = "e".repeat(64),
+            |c| {
+                c.partition.recipe_raw_content_digest = "e".repeat(64);
+                c.partition.partition_identity = c.partition.derived_partition_identity().unwrap();
+            },
+        ] {
+            let mut wrong = capture.clone();
+            mutate(&mut wrong);
+            let mut terminal = snapshot.clone();
+            terminal.result_workspace_output_capture_hash =
+                Some(cas.store_object(&wrong.to_value().unwrap()).unwrap());
+            assert!(
+                terminal
+                    .verify_result_workspace_output_capture(&cas)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

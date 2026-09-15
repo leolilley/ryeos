@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "date": "2026-09-07",
+  "purpose": "Observed evidence index, not admission or publication authority",
+  "node_fingerprint": "0db14ae10fa3e060d175a9ebdd975f4041b0a3a271c99078436a4a4b0e533f60",
+  "source_revision": "53a1776ad plus uncommitted build-support sources and Config",
+  "gates": {
+    "admitted_support_assembly": true,
+    "retained_result_import": true,
+    "nested_subprocess_probe": true,
+    "fresh_utility_build": true,
+    "worker_driven_development": false,
+    "production_tool_entry": true,
+    "tool_and_e2e_executable_equality": true
+  },
+  "authority": {
+    "filesystem": "captured_execution",
+    "network": "isolated",
+    "include_operator_vault": false,
+    "project_head_advanced": false,
+    "worker_grants_changed": false,
+    "node_policy_changed": true,
+    "node_policy_change": "Operator-approved target-only isolation.open_files 1024 -> 4096 via stopped-node policy-apply; no other fields changed"
+  },
+  "assembly": {
+    "thread_id": "T-72a7185b-9e8b-8d63-e432-0c42e940df93",
+    "chain_root_id": "T-72a7185b-9e8b-8d63-e432-0c42e940df93",
+    "capsule_hash": "3cd2b5f6c123ae26b031dc46a66df489e49e91d81134657f0c1dc9de9442d21b",
+    "base_snapshot": "662f93da49086c504adc8c784833d90a7333924e601eee179cda343e6b104363",
+    "result_snapshot": "c21cb1e6ce7d90ab44108d4518708511bf575bda215225f04fb32c69fdc341a7",
+    "outcome_code": "exit:0",
+    "inventory_sha256": "a6493351c5706fac3c65c08b68a34f1c9f8e475e75031cdbd7587450356a081c",
+    "files": 88,
+    "bytes": 21394807,
+    "input_manifest": "244b3c53b0e26d21d250e8264597a71e11539e586b3b37d9c66957e8471085bf"
+  },
+  "observed_import": {
+    "manifest_hash": "c9363d72e898e5ca0b0cb6b607602fe55d7ea7f13689706065752134b0a8e183",
+    "request_digest": "3865b9a3cd05aee794c210072935ef55a4d35535dde637ad0f909b75bfb5fab4",
+    "entry_count": 94,
+    "total_bytes": 21394807
+  },
+  "nested_probe_attempt": {
+    "thread_id": "T-1e0e9d04-01de-1259-1da4-191aafa5a3fc",
+    "capsule_hash": "2ba29dd07cc5b22bc064c7ad2f3e981529eb1949f04d8c27645ccea8b5114243",
+    "base_snapshot": "ca187e23e8d888a10fe5a9f4a4e155a680c1107911e2cbadd368a786de57631c",
+    "result_snapshot": "686df2ca22b4c57cff77fb32ff5b05c6f1dc1e362a8c2b5aef58ff8af08a7c9f",
+    "outcome_code": "exit:1",
+    "helper_load_checks_completed": 37,
+    "failed_stage": "Make/static musl compile",
+    "diagnostic": "Zig ProcessFdQuotaExceeded",
+    "admitted_node_open_files": 1024,
+    "log_project_file_hash": "5640f037e863bb0cf7e6efc5563db21e6b5017b9b28226a045b700ec9fdb9cd1",
+    "log_blob_hash": "b64ae9883001a38f0d9acf85a16c67e926a20c5c6e061dc9cca63967b905bb38",
+    "log_bytes": 233579,
+    "bindings": {
+      "support": "965f6d776de424fb76967c03fa2d24bf435a3ddc7694af716a4676aa9df6027b",
+      "python": "6c7ce423642347d29211779114c1068ed4f516882581d107738ca56cef3a10bc",
+      "platform": "f46cad613cb627120ca8b774a3b3e321f42936caea38f74779bf59f8642aa241"
+    },
+    "followup": "Preserved failed evidence. The separate rerun below uses approved node policy and private scratch, not a compiler wrapper or ambient library."
+  },
+  "utility_build_attempts": [
+    {
+      "thread_id": "T-fc585722-db72-e965-8ac5-17708044184f",
+      "capsule_hash": "a75ec2f1cdb9f96ba32e49ecdb1d45bf261a37b1fe116019c6822a875eaa40a8",
+      "base_snapshot": "0b442704328523649998cde6c5fea488fcc6205019f754cea765fbfe4bd4a527",
+      "result_snapshot": "9fb217e3b0f0ebf0479e62ea7f52c232536ed168b5330792052fa1b055475469",
+      "outcome_code": "exit:1",
+      "failed_stage": "Coreutils configure: no acceptable ld found in PATH",
+      "followup": "Select existing admitted Stage0 native/bin/ld.lld as LD; no new compiler or host PATH",
+      "bindings": {
+        "support": "cfcb30b0f6749ee29ce128ef8811358fde45df3c7f8d3ebdfaafc65eb5caac58",
+        "python": "073dbdfb350623bcc485ec50fdd9106d829d920113904a01850534c97e1552ba",
+        "platform": "c6013a0d76ae9222672819cf8e522e83bcf2591ef13f43a4f3ff33b48c423a60",
+        "sources": "148d2a0c19d85f30ea727a14d0cd88725e2a3660b1f0af2bd4fa3b9b6d923a83"
+      }
+    },
+    {
+      "thread_id": "T-cffce2fe-9b9b-0805-2b07-30cadb83eef7",
+      "capsule_hash": "9c8dff28b0935defd44b45d3096f89d23b8cf6f8235ded61af4b52a2493a53bf",
+      "base_snapshot": "caa7b009b2e3b2779e6eab90e3755e4c94e00b541aef9196a4b18951ebdffbda",
+      "result_snapshot": "36418810395bf3d2839bd32e7f50af958b2ac5f0188d1d22cfa4f523b7c47c22",
+      "outcome_code": "exit:1",
+      "completed_build_stages": [
+        "coreutils",
+        "sed",
+        "diffutils",
+        "findutils",
+        "gawk",
+        "patch",
+        "grep",
+        "zlib"
+      ],
+      "diagnostic": "Git generator used /bin/sh; zlib configure diagnostics also require tee. Not a complete subprocess-closure pass.",
+      "followup": "Select exact tee helper; distinguish Git build SHELL_PATH from the final runtime shell in Config. Preserve this partial result."
+    }
+  ],
+  "nested_probe_pass": {
+    "thread_id": "T-b3980d1d-6c57-d0f6-1cd6-ffb83787ac79",
+    "capsule_hash": "86b185c7b4701b213624d05795da62485a5b0bf23a32c125699debff90fd4bc2",
+    "base_snapshot": "3f110cfe7ada133c8148e51b55250013a8eea8029958c2bacd52b685ed06b5c6",
+    "result_snapshot": "6b42ab1b6e06f3d1652a3793f5141afc269eb27344809af6fe1e4d2837f49b68",
+    "outcome_code": "exit:0",
+    "helper_load_checks_completed": 37,
+    "admitted_node_open_files": 4096,
+    "nested_output_sha256": "52cfca0053294e86d4644b47d16ba9cf69b8fefcd016940b21da56b4047b9df3",
+    "static_output": true,
+    "retained_product_files": 6,
+    "compiler_cache_retained": false,
+    "fresh_utility_build": false,
+    "bindings": {
+      "support": "32e4a232bfef69719779881b05acf5fb44d15d0467e42774c7311ae7ef5141ae",
+      "python": "53c8b3b51d2103293d3d6528112434b86224237b81f873afa35b008cdadb3e91",
+      "platform": "3fa7cc9c758258b20da49919cef7f438f598caaccb9acf7112f9c0c2a66c37dc"
+    }
+  },
+  "production_tool_entry": {
+    "tool_ref": "tool:ryeos/development/authoring-environment-production/build-utilities",
+    "thread_id": "T-1632d8ec-05a1-793c-595a-339807f6104d",
+    "chain_root_id": "T-1632d8ec-05a1-793c-595a-339807f6104d",
+    "capsule_hash": "585a35737e8bef549a1f8d697e691e842eb529ccd15cef8dafa72478b44f44bd",
+    "base_snapshot": "e044593ecea6b9783fe4279425e38c6f05a5854807b8629fa4ed6ddbee5b8ef2",
+    "result_snapshot": "898194ba71287e1a29d7d9f5a06f2b89d9f6969d7b8a716e4aa5750d524d0ed3",
+    "started_at": "2026-09-07T08:14:42Z",
+    "finished_at": "2026-09-07T08:20:31Z",
+    "outcome_code": "exit:0",
+    "files": 80,
+    "bytes": 92435329,
+    "inventory_sha256": "b8494f5a0329e239138c25df57a73b1d0638c7800c61e6c9e5ba29a560641c33",
+    "binding_published": false,
+    "worker_driven": false,
+    "source_head_after_execution": "e044593ecea6b9783fe4279425e38c6f05a5854807b8629fa4ed6ddbee5b8ef2",
+    "observed_import": {
+      "manifest_hash": "d9c9cf9cf840e24b6bf74684591e06dbf055d0fcbf59e9853684c4c43f1ba67f",
+      "request_digest": "a7b17fa43285fed8a2c7952ef9f61a0a8052806e94039a7ae4231d608d78b659",
+      "entry_count": 102,
+      "total_bytes": 92435329
+    },
+    "independent_manifest_comparison": {
+      "e2e_manifest_hash": "49dff6f3873a62f47e06147f6b745f19afa0d4b69cdc9d8637b8a190b91c6c2f",
+      "e2e_import_request_digest": "6767a4ea8bc52861acd9afe3b7f031eb8e7b669ae4ea82b6edd1229b8705c509",
+      "compared_fields": "Every complete bin/ entry: path, kind, blob_hash, size and mode",
+      "binary_entries_matched": 41,
+      "git_blob_hash": "cfeb59f522b9370b3eea1ec949000cb663245111e168a22fd47f23c1fde80fee",
+      "tool_only_paths": ["corresponding-sources/ryeos-production/utility_production.py"],
+      "changed_existing_paths": ["build-evidence.json", "corresponding-sources/ryeos-production/utilities.py"],
+      "whole_artifact_equality": false
+    },
+    "bindings": {
+      "support": "b62f17aef393a7ad887eed0ceb07c20b3cfdadd4e258bcfa0865c32a54352704",
+      "python": "8492bae2e62f358cb3659e22fefc3192b3c7d2d816d3b8d2158e259edebebb17",
+      "platform": "a7af77b3a29886567b77f7d1ccbb44682fe56a8a1fb52cceb25168fa12c660de",
+      "sources": "69bd92999001a562050e40375b9cf7dc86b89e22ae6b27d2cc492be2aad9db53"
+    }
+  },
+  "current_support_contract": {
+    "purpose": "Exact post-relocation output observed after the RUNPATH-before-PT_INTERP recipe correction; not qualification authority",
+    "source_snapshot": "018d56e7d662ca7b76186e21060723935ba4d80e6dab85065e0490b7dc3fd456",
+    "producer_thread": "T-2b6fb5bb-c1b8-56bc-0794-c57849e9a417",
+    "product_witness_hash": "c7ddc511736addba9fe1e509584fbbd91eb7b61b54e7cc71df9cbb096df63627",
+    "product_manifest_hash": "57c5c8ce6b2dbb1888b500029f15716883576d9c98d778a17824c681924f0062",
+    "input_contract_sha256": "b2b960e695bfa862f1874b1de48c47ab55abbcb69e2e1c634a8d70dd36ff972b",
+    "relocation_recipe_content_digest": "7456daa992ae8a0b98551f2db8d65afbf6799139553df434064db25e1e28e08b",
+    "inventory_sha256": "a74f701cda735f5f959b900ae26af9bc8ceff83ef6c86f971ff092c74ea7e934",
+    "files": 89,
+    "bytes": 21421985
+  },
+  "support_with_tee": {
+    "assembly": {
+      "thread_id": "T-759204ab-1756-c500-0865-a2a5eafb3bac",
+      "capsule_hash": "32cf61ce9f0105e72e119b94604ce427df9d5daf7a374d8ca57a55ad4d56f298",
+      "base_snapshot": "139198e642ea8e1a5d8d3a5524e726e2791ec5016be4292ddb34e9e6dfd07589",
+      "result_snapshot": "8d195736bf591d5f3da8b4bc68ac84c77a6c859ea5d1ffe72db7734a6599c6f7",
+      "inventory_sha256": "e160361010e018c512ae7559e937c5bc3ea7594e92b5ae2beae84ff9556b4ec6",
+      "files": 89,
+      "bytes": 21465537,
+      "outcome_code": "exit:0",
+      "input_manifest": "8e24fb2c2adb1fd4e79ee19b313811906cba6c634b6eb574f0d7f202c7c8a222"
+    },
+    "observed_import": {
+      "manifest_hash": "f6bcd9d28b9bb3da0da3911cc8f021d75c326d38ac05329d38e2246ed7bea477",
+      "request_digest": "07e95ae6363377f9ace30b7be556eef1314b893b4819dc63e2ad4c2a36e7ef1b",
+      "entry_count": 95,
+      "total_bytes": 21465537
+    },
+    "nested_probe_pass": {
+      "thread_id": "T-1df77ef7-1beb-e905-d908-fa2638b525a1",
+      "capsule_hash": "7b4230d809f5033a10bdec507487b78688c4095efebe7f3dfdb8fa13bfc9a0ef",
+      "base_snapshot": "f87c1db677416fa6dd2a00f7a133ee42499dec81cabff16ff5e45a74c0d47a7b",
+      "result_snapshot": "ff0bf18f79ce2845130ff07858781c83cf0a3412194b16d02dad71c44697af84",
+      "outcome_code": "exit:0",
+      "helpers_loaded": 38,
+      "nested_output_sha256": "52cfca0053294e86d4644b47d16ba9cf69b8fefcd016940b21da56b4047b9df3",
+      "static_output": true
+    },
+    "fresh_utility_build_pass": {
+      "thread_id": "T-2278d1d4-ed51-00ad-3f72-547f38d868b7",
+      "capsule_hash": "9f200a09de25976c48d8d9a352a5b5388e3a0487557feac6c2ce728d0eca0a53",
+      "base_snapshot": "f87c1db677416fa6dd2a00f7a133ee42499dec81cabff16ff5e45a74c0d47a7b",
+      "result_snapshot": "cd8ca673c2df53eddfb52d26ddf9bbb6f9c187d099975862e6d132d8c6044e9d",
+      "outcome_code": "exit:0",
+      "files": 79,
+      "bytes": 92431098,
+      "inventory_sha256": "a2e5cc3b4b52447a39e0bc5641467be252b335f3ec2d34a5a89834ef41e5edea",
+      "git_runtime_shell_verified": true,
+      "worker_driven": false,
+      "bindings": {
+        "support": "c1bc0115c4db77fb6ba6d55a65ba49e362b0a6a91b8c3a881a4919b60555bea1",
+        "python": "390ec39fc78a611cdb2256dd3f7907d0ad5ed4173e987e1d8e1eb7411632cf63",
+        "platform": "b04276079f12c70a92b769e3b9e8c367099840791da92f481cccfcca5f9cab2f",
+        "sources": "0fb39fc1151322cbabee8d4e9de6ab9947a4dc2c36f8b0410739b3ae929a3475",
+        "authoring_runtime": "85b0bfb822b54c33afc988e4c259ca890aaca78556f0eb99382ef0659a8e978c"
+      }
+    }
+  }
+}

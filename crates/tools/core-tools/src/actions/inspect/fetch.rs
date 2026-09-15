@@ -72,6 +72,7 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
 

@@ -22,6 +22,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use ryeos_effect_contract::{DispatchResultProjection, RetainedEffectResult};
+
 /// Runtime-neutral provenance for one callback-dispatched action.
 ///
 /// The daemon owns this statement. Kind runtimes may project it into their
@@ -40,6 +42,9 @@ pub struct RuntimeDispatchEvidence {
     pub record_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replayed_from: Option<String>,
+    /// Selects the owner of the callback-visible result contract. This is
+    /// daemon evidence, never inferred from the returned JSON or item kind.
+    pub result_projection: DispatchResultProjection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +73,7 @@ pub enum RuntimeDispatchPublication {
 
 impl RuntimeDispatchEvidence {
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.result_projection.validate()?;
         for (field, value) in [
             ("dispatch action digest", Some(self.action_digest.as_str())),
             ("dispatch effect identity", self.effect_identity.as_deref()),
@@ -111,7 +117,92 @@ impl RuntimeDispatchEvidence {
                 && self.replayed_from.is_none() => {}
             _ => anyhow::bail!("dispatch evidence fields are mutually inconsistent"),
         }
+        if matches!(
+            &self.result_projection,
+            DispatchResultProjection::RetainedEffect { .. }
+        ) && !matches!(
+            (self.source, self.effect_class),
+            (
+                RuntimeDispatchSource::Executed | RuntimeDispatchSource::EffectRecord,
+                RuntimeDispatchEffectClass::Recorded | RuntimeDispatchEffectClass::Sealed,
+            )
+        ) {
+            anyhow::bail!(
+                "a retained-effect result projection requires durable executed or replay evidence"
+            );
+        }
         Ok(())
+    }
+
+    /// Validate and project the daemon-owned retained answer, when selected.
+    ///
+    /// The envelope remains the existing bounded subprocess-shaped leaf wire;
+    /// this authority changes who owns its result, not its transport. The
+    /// accepted value must hash to the retained CAS object before a runtime can
+    /// expose it to authored control flow.
+    pub fn retained_effect_result(
+        &self,
+        value: &Value,
+    ) -> anyhow::Result<Option<ValidatedRetainedEffectResult>> {
+        self.validate()?;
+        let DispatchResultProjection::RetainedEffect { retained_result } = &self.result_projection
+        else {
+            return Ok(None);
+        };
+        let envelope: RetainedEffectEnvelope = serde_json::from_value(value.clone())
+            .map_err(|error| anyhow::anyhow!("invalid retained-effect result envelope: {error}"))?;
+        if envelope.outcome_code.0.is_some() {
+            anyhow::bail!("retained-effect result envelope must carry null outcome_code");
+        }
+        if !envelope.error.is_null() {
+            anyhow::bail!("retained-effect result envelope must carry null error");
+        }
+        if !envelope.artifacts.is_empty() {
+            anyhow::bail!("retained-effect result envelope must not carry artifacts");
+        }
+        if envelope.replayed_from != self.replayed_from {
+            anyhow::bail!("retained-effect result replay provenance contradicts dispatch evidence");
+        }
+        let result_digest = ryeos_effect_contract::canonical_value_digest(&envelope.result)?;
+        if result_digest != retained_result.object_hash() {
+            anyhow::bail!("retained-effect result does not match its admitted object hash");
+        }
+        Ok(Some(ValidatedRetainedEffectResult {
+            result: envelope.result,
+            replayed_from: envelope.replayed_from,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedRetainedEffectResult {
+    pub result: Value,
+    pub replayed_from: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedEffectEnvelope {
+    outcome_code: RequiredNullableString,
+    result: Value,
+    error: Value,
+    artifacts: Vec<Value>,
+    #[serde(default)]
+    replayed_from: Option<String>,
+}
+
+#[derive(Debug)]
+struct RequiredNullableString(Option<String>);
+
+impl<'de> Deserialize<'de> for RequiredNullableString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -126,7 +217,7 @@ impl RuntimeDispatchEvidence {
 ///
 /// Both return identical-shape unary outcomes; this struct binds
 /// that contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallbackDispatchResponse {
     /// Finalized (or, for detached launches, currently-running)
@@ -150,6 +241,31 @@ pub struct CallbackDispatchResponse {
 }
 
 impl CallbackDispatchResponse {
+    /// Classify execution success using the existing terminator contract, not
+    /// an item kind or payload keys guessed by each ingress. Service results
+    /// are domain values even when they contain `status`/`success`; the
+    /// daemon-authored `thread.recorded` discriminator identifies that case.
+    /// A replay may carry a null thread and a retained runtime envelope.
+    pub fn execution_succeeded(&self) -> bool {
+        if self.dispatch.validate().is_err() {
+            return false;
+        }
+        if matches!(self.thread.get("recorded"), Some(Value::Bool(_))) {
+            return true;
+        }
+        if !self.thread.is_null() {
+            let status = self
+                .thread
+                .get("status")
+                .and_then(Value::as_str)
+                .and_then(ryeos_state::objects::ThreadStatus::from_str_lossy);
+            if status != Some(ryeos_state::objects::ThreadStatus::Completed) {
+                return false;
+            }
+        }
+        crate::envelope::envelope_succeeded(&self.result)
+    }
+
     /// Try to extract a continuation ID from `result.continuation_id`.
     /// Returns `None` for terminal results.
     ///
@@ -174,6 +290,7 @@ mod tests {
             publication: RuntimeDispatchPublication::NotApplicable,
             record_hash: None,
             replayed_from: None,
+            result_projection: DispatchResultProjection::DispatchedSubject,
         }
     }
 
@@ -215,6 +332,42 @@ mod tests {
     }
 
     #[test]
+    fn workload_success_uses_dispatch_contract_not_domain_payload() {
+        let mut response = CallbackDispatchResponse {
+            thread: json!({"status":"completed"}),
+            result: json!({"success":false}),
+            dispatch: live_dispatch(),
+        };
+        assert!(!response.execution_succeeded());
+        response.result = json!({"success":true});
+        // A status-looking domain fragment is not a terminal envelope. Reuse
+        // the same complete contract that graph/follow dispatch validates.
+        assert!(!response.execution_succeeded());
+        response.result = json!({
+            "success": true,
+            "status": "completed",
+            "result": {},
+            "outputs": {},
+            "warnings": [],
+            "cost": null
+        });
+        assert!(response.execution_succeeded());
+        for status in ["failed", "cancelled", "running", "unknown"] {
+            response.thread = json!({"status":status});
+            assert!(!response.execution_succeeded(), "{status}");
+        }
+        response.thread = Value::Null;
+        assert!(response.execution_succeeded());
+        response.result = json!({"success":false,"status":"failed"});
+        assert!(!response.execution_succeeded());
+        // Service results can contain domain-level failure/status values.
+        response.thread = json!({"recorded":true});
+        assert!(response.execution_succeeded());
+        response.dispatch.action_digest = "not-a-digest".to_owned();
+        assert!(!response.execution_succeeded());
+    }
+
+    #[test]
     fn continuation_id_extracts_from_result() {
         let response = CallbackDispatchResponse {
             thread: json!({"id": "T-parent"}),
@@ -241,6 +394,81 @@ mod tests {
         assert!(
             msg.contains("data") || msg.contains("status") || msg.contains("unknown field"),
             "expected deny_unknown_fields error mentioning the old field, got: {msg}"
+        );
+    }
+
+    fn retained_dispatch(replayed: bool, object_hash: String) -> RuntimeDispatchEvidence {
+        let record_hash = "cd".repeat(32);
+        RuntimeDispatchEvidence {
+            source: if replayed {
+                RuntimeDispatchSource::EffectRecord
+            } else {
+                RuntimeDispatchSource::Executed
+            },
+            effect_class: RuntimeDispatchEffectClass::Recorded,
+            action_digest: "ab".repeat(32),
+            effect_identity: Some("bc".repeat(32)),
+            publication: if replayed {
+                RuntimeDispatchPublication::NotApplicable
+            } else {
+                RuntimeDispatchPublication::Inserted
+            },
+            record_hash: Some(record_hash.clone()),
+            replayed_from: replayed.then_some(record_hash),
+            result_projection: DispatchResultProjection::RetainedEffect {
+                retained_result: RetainedEffectResult::ProductBuildAcceptedResult { object_hash },
+            },
+        }
+    }
+
+    #[test]
+    fn retained_effect_projection_requires_exact_value_and_replay_evidence() {
+        let result = json!({"products": [{"name": "runtime"}]});
+        let object_hash = ryeos_effect_contract::canonical_value_digest(&result).unwrap();
+        for replayed in [false, true] {
+            let evidence = retained_dispatch(replayed, object_hash.clone());
+            let envelope = json!({
+                "outcome_code": null,
+                "result": result,
+                "error": null,
+                "artifacts": [],
+                "replayed_from": replayed.then(|| "cd".repeat(32)),
+            });
+            let projected = evidence
+                .retained_effect_result(&envelope)
+                .unwrap()
+                .expect("retained projection");
+            assert_eq!(projected.result, result);
+            assert_eq!(projected.replayed_from, evidence.replayed_from);
+
+            let mut changed = envelope.clone();
+            changed["result"]["products"][0]["name"] = json!("other");
+            assert!(evidence.retained_effect_result(&changed).is_err());
+        }
+    }
+
+    #[test]
+    fn retained_effect_projection_refuses_live_or_unbound_transport() {
+        let result = json!({"products": []});
+        let object_hash = ryeos_effect_contract::canonical_value_digest(&result).unwrap();
+        let mut evidence = retained_dispatch(false, object_hash);
+        evidence.effect_class = RuntimeDispatchEffectClass::Live;
+        evidence.effect_identity = None;
+        evidence.record_hash = None;
+        evidence.publication = RuntimeDispatchPublication::NotApplicable;
+        assert!(evidence.validate().is_err());
+
+        let evidence = retained_dispatch(false, "ab".repeat(32));
+        assert!(
+            evidence
+                .retained_effect_result(&json!({
+                    "outcome_code": null,
+                    "result": {"products": []},
+                    "error": null,
+                    "artifacts": [],
+                    "unexpected": true,
+                }))
+                .is_err()
         );
     }
 }

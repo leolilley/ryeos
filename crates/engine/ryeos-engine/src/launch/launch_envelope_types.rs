@@ -35,7 +35,17 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
-pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 2;
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 3;
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +241,7 @@ impl EnvelopeRequest {
             parent_capabilities: None,
             depth: 0,
             suppress_stimulus: false,
+            scheduled_fire: None,
         }
     }
 }
@@ -288,6 +299,45 @@ pub struct EnvelopeRequest {
     /// branch (`previous_thread_id` present); a fresh launch always injects.
     #[serde(default)]
     pub suppress_stimulus: bool,
+    /// Daemon-authored scheduled-fire coordinate. It is separate from
+    /// `inputs`, so user parameters cannot forge or shadow it.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub scheduled_fire: Option<crate::scheduled_fire_context::ScheduledFireContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateExecutionLimits {
+    /// Whole execution-tree wall-clock window. The daemon converts this
+    /// relative limit into one durable absolute deadline when it mints the
+    /// root execution budget. Descendants inherit that deadline; restart does
+    /// not restart the clock.
+    #[serde(default)]
+    pub duration_seconds: u64,
+    /// Total logical persistent worker executions admitted beneath the root.
+    /// Physical worker recovery does not consume another unit.
+    #[serde(default)]
+    pub worker_executions: u32,
+    /// Total external turn contacts admitted for bounded hosted workers.
+    /// Verified-uncontacted command attempts consume no unit.
+    #[serde(default)]
+    pub provider_contacts: u32,
+}
+
+impl AggregateExecutionLimits {
+    pub fn is_unlimited(&self) -> bool {
+        self.duration_seconds == 0 && self.worker_executions == 0 && self.provider_contacts == 0
+    }
+}
+
+impl Default for AggregateExecutionLimits {
+    fn default() -> Self {
+        Self {
+            duration_seconds: 0,
+            worker_executions: 0,
+            provider_contacts: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +358,13 @@ pub struct HardLimits {
     pub depth: u32,
     #[serde(default)]
     pub duration_seconds: u64,
+    /// Execution-tree ceilings settled under the shared daemon-minted
+    /// execution budget. These complement, rather than replace, the fields
+    /// above: ordinary limits remain per execution while aggregate limits are
+    /// consumed once across every descendant carrying the same accounting
+    /// scope.
+    #[serde(default)]
+    pub aggregate: AggregateExecutionLimits,
     /// Runtime-declared numeric dimensions, keyed by opaque names from the
     /// serving runtime's signed descriptor. `0` is the unlimited sentinel.
     #[serde(default)]
@@ -333,6 +390,7 @@ impl Default for HardLimits {
             spawns: 0,
             depth: 0,
             duration_seconds: 0,
+            aggregate: AggregateExecutionLimits::default(),
             runtime: BTreeMap::new(),
             runtime_contract: None,
         }
@@ -595,6 +653,17 @@ mod tests {
                 parent_capabilities: None,
                 depth: 0,
                 suppress_stimulus: false,
+                scheduled_fire: Some(
+                    crate::scheduled_fire_context::ScheduledFireContext::new(
+                        "nightly.solve".to_owned(),
+                        "nightly.solve@1700000000000".to_owned(),
+                        1_700_000_000_000,
+                        1_700_000_000_100,
+                        "normal".to_owned(),
+                        "a".repeat(64),
+                    )
+                    .unwrap(),
+                ),
             },
             policy: EnvelopePolicy {
                 effective_caps: vec!["ryeos.execute.tool.*".to_string()],
@@ -649,6 +718,21 @@ mod tests {
         );
         assert!(parsed.resolution.composed.derived.is_empty());
         assert!(parsed.resolution.composed.policy_facts.is_empty());
+        assert_eq!(
+            parsed.request.scheduled_fire.unwrap().fire_id,
+            "nightly.solve@1700000000000"
+        );
+    }
+
+    #[test]
+    fn envelope_request_requires_explicit_scheduled_fire_slot() {
+        let value = serde_json::json!({
+            "inputs": {},
+            "depth": 0,
+            "suppress_stimulus": false
+        });
+        let error = serde_json::from_value::<EnvelopeRequest>(value).unwrap_err();
+        assert!(error.to_string().contains("scheduled_fire"));
     }
 
     #[test]

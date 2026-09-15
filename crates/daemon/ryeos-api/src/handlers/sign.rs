@@ -40,33 +40,17 @@ pub async fn handle(
     }
 
     let engine = Arc::clone(&state.engine);
+    let ignore_matcher = Arc::clone(&state.ignore_matcher);
     let project_path = PathBuf::from(request.project_path);
     let item_refs = request.item_refs;
     let report = tokio::task::spawn_blocking(move || {
-        let mut batch = ryeos_core_tools::actions::sign::BatchReport::default();
-        let batch_mode = item_refs.len() > 1;
-        for item_ref in item_refs {
-            match ryeos_core_tools::actions::sign::run_sign_online(
-                &item_ref,
-                &project_path,
-                &engine,
-                &signing_key,
-            ) {
-                Ok(report) => batch.extend(report),
-                Err(error) if batch_mode => {
-                    batch
-                        .failed
-                        .push(ryeos_core_tools::actions::sign::ItemOutcome {
-                            item_ref,
-                            signature: None,
-                            error: Some(format!("{error:#}")),
-                            warnings: Vec::new(),
-                        });
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok::<_, anyhow::Error>(batch)
+        ryeos_core_tools::actions::sign::run_sign_online_batch(
+            &item_refs,
+            &project_path,
+            &engine,
+            &ignore_matcher,
+            &signing_key,
+        )
     })
     .await
     .context("sign authoring worker stopped")??;

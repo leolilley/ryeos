@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-05T02:30:04Z:62d14d823aaf7de6bfb97a04221449914f51cf8fdebffbb631410c03e98ece96:UcABftabrQ7u+atgD3yySxADkXtcMghN+pcGf6bLE3uUItOAAGulcE7m58O1kWhYmtJryXHILQh9uN0uB0lTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, profile, list]
+description: "List your credential profiles on the selected node without reading private credential files"
+help:
+  usage: "ryeos codex profile list [--limit <1..200>] [--after <profile-id>]"
+  examples:
+    - "ryeos codex profile list"
+    - "ryeos codex profile list --limit 10 --after personal"
+dispatch:
+  kind: execute_ref
+  execute: service:credential-profiles/list
+  availability: daemon

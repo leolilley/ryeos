@@ -53,7 +53,7 @@ SOURCE_QUALIFIER_WORKFLOW_PATH = (
     REPOSITORY / ".github/workflows/qualify-local-inference-source.yml"
 )
 AUTHOR_PATH = REPOSITORY / "scripts/release/author-local-inference-realizations.py"
-NODE_QUALIFIER_PATH = REPOSITORY / "scripts/release/qualify-local-inference-node.sh"
+NODE_QUALIFIER_PATH = REPOSITORY / "tests/e2e/local-inference-node/qualify.sh"
 RELEASE_VERIFIER_PATH = (
     REPOSITORY / "scripts/release/verify-local-inference-release.py"
 )
@@ -61,11 +61,6 @@ ACTIVATION_KNOWLEDGE_PATH = (
     BUNDLE / ".ai/knowledge/local-inference/activation.md"
 )
 FULL_PROFILE_PATH = REPOSITORY / "bundles/.ai/node/init/profiles/full.yaml"
-FULL_SANDBOX_PROFILE_PATH = (
-    REPOSITORY / "bundles/.ai/node/init/profiles/full-sandbox.yaml"
-)
-
-
 def worker_source_manifest_digest() -> str:
     entries = []
     total = 0
@@ -265,10 +260,10 @@ class LocalInferenceContractTests(unittest.TestCase):
         )
         self.assertEqual(managed["max_concurrent_activations"], 1)
 
-    def test_full_init_profiles_admit_the_exact_release(self) -> None:
+    def test_full_init_profile_admits_the_exact_release(self) -> None:
         realizations = self.release["realizations"]
         bounds = [item["bounds"] for item in realizations]
-        for path in (FULL_PROFILE_PATH, FULL_SANDBOX_PROFILE_PATH):
+        for path in (FULL_PROFILE_PATH,):
             profile = yaml.safe_load(path.read_text(encoding="utf-8"))
             external = profile["policies"]["external_content"]
             self.assertEqual(
@@ -386,7 +381,7 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertTrue(SESSION_PROTOCOL_TEST_PATH.is_file())
         self.assertNotIn("test_session_protocol.py", workflow)
         self.assertIn(
-            "scripts/release/qualify-local-inference-node.sh",
+            "tests/e2e/local-inference-node/qualify.sh",
             source_qualifier,
         )
         self.assertIn("--bundle-set full", source_qualifier)

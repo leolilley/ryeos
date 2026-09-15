@@ -31,6 +31,9 @@ pub(crate) struct DispatchSourceConfig {
     /// Absolute path to the project root for engine resolution.
     pub project_path: String,
     pub ref_bindings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     /// Business parameters forwarded to `dispatch::dispatch` as `params`.
     #[serde(default)]
     pub parameters: serde_json::Value,
@@ -123,6 +126,18 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             .map_err(|error| {
                 RouteDispatchError::BadRequest(format!("invalid ref_bindings: {error}"))
             })?;
+        ryeos_state::external_content::products::composition::validate_product_selection_inputs(
+            &config.product_selections,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        if !config.product_selections.is_empty()
+            && (!matches!(self.authority, DispatchAuthority::CallerPrincipal)
+                || ctx.principal.is_none())
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "product selectors require a configured local caller authority".to_string(),
+            ));
+        }
         for (name, bound_ref) in &config.ref_bindings {
             let canonical =
                 ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref).map_err(|error| {
@@ -173,6 +188,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             current_site_id: site_id.clone(),
             origin_site_id,
             execution_hints: Default::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
 
@@ -203,6 +219,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             validate_only: false,
             params: config.parameters,
             ref_bindings: config.ref_bindings,
+            product_selections: config.product_selections,
             acting_principal: principal_id.as_str(),
             project_path: &project_ctx.effective_path,
             provenance,

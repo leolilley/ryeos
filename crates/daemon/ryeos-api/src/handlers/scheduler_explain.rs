@@ -34,7 +34,7 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(spec.requester_fingerprint.as_str()))?;
+    ctx.require_owner(Some(spec.execution.principal_id()))?;
 
     let last_fire = state
         .scheduler_db
@@ -56,13 +56,17 @@ pub async fn handle(
         serde_json::json!({
             "fire_id": f.fire_id,
             "scheduled_at": f.scheduled_at,
-            "fired_at": f.fired_at,
+            "reserved_at": f.reserved_at,
+            "dispatched_at": f.dispatched_at,
             "completed_at": f.completed_at,
             "thread_id": f.thread_id,
             "status": f.status,
             "trigger_reason": f.trigger_reason,
             "outcome": f.outcome,
             "signer_fingerprint": f.signer_fingerprint,
+            "schedule_spec_hash": f.schedule_spec_hash,
+            "project_authority": f.project_authority,
+            "admitted_capsule_hash": f.admitted_capsule_hash,
         })
     });
 
@@ -79,11 +83,11 @@ pub async fn handle(
         "overlap_policy": spec.overlap_policy,
         "lateness_grace_secs": spec.lateness_grace_secs,
         "signer_fingerprint": spec.signer_fingerprint,
-        "requester_fingerprint": spec.requester_fingerprint,
+        "execution": spec.execution,
         "now": now,
         "last_fire": last_fire_json,
         "last_scheduled_at": plan.last_scheduled_at,
-        "last_fire_at": plan.last_fire_at,
+        "last_dispatched_at": plan.last_dispatched_at,
         "current_due_at": plan.current_due_at,
         "current_due_within_grace": plan.current_due_within_grace,
         "misfire_horizon_exclusive": plan.misfire_horizon_exclusive,

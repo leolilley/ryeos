@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:09Z:27483e58548a62c1e553236a58a790ed6f9e6250ef08a195c45bdf4e3689202b:5kNfJv7LHa5/cGzzY5SqEHTZs39Xu0VuwQz8gmTfghKECZMhzpWf9WyWNiPRSNEpFOCAfdTiW0LnDoqYgtS1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T04:33:06Z:495832f1f3a3812900166829b88365970221957f5acfeb06dee0db0d39ded9e9:Bi4M9arxk+AC60WxAJBj6v96gDmfaqcLPaDmXOhVSNVtr++3/8TQTYzLss4TLM1OVpK+zhULreOpkvnqBG6IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - execute
@@ -14,6 +14,7 @@ forms:
 project:
   resolution: optional
   bind_parameter: project
+  bind_no_project_parameter: no_project
   no_project_flag: true
 defaults:
   ref_bindings: {}

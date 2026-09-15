@@ -527,7 +527,9 @@ fn validate_new_thread_project_snapshots(
     snapshot: &ThreadSnapshot,
     continuation_source: Option<&str>,
 ) -> anyhow::Result<()> {
-    if snapshot.result_project_snapshot_hash.is_some() {
+    if snapshot.result_project_snapshot_hash.is_some()
+        || snapshot.result_workspace_output_capture_hash.is_some()
+    {
         anyhow::bail!("new created snapshot cannot carry a result project snapshot hash");
     }
     if snapshot.base_project_snapshot_hash.is_some() {
@@ -764,6 +766,7 @@ fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Th
         .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
     let snapshot = ThreadSnapshot::from_current_value(value)
         .with_context(|| format!("decode authoritative snapshot object {hash}"))?;
+    snapshot.verify_result_workspace_output_capture(cas)?;
     let canonical = lillux::canonical_json(&snapshot.to_value())
         .with_context(|| format!("canonicalize authoritative snapshot {hash}"))?;
     let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
@@ -1001,6 +1004,17 @@ pub(super) fn validate_snapshot_transition_identity(
         (None, Some(_)) if next.status.is_terminal() => {}
         _ => anyhow::bail!(
             "result_project_snapshot_hash may only be established by a terminal transition and is immutable afterwards"
+        ),
+    }
+
+    match (
+        previous.result_workspace_output_capture_hash.as_ref(),
+        next.result_workspace_output_capture_hash.as_ref(),
+    ) {
+        (left, right) if left == right => {}
+        (None, Some(_)) if next.status.is_terminal() => {}
+        _ => anyhow::bail!(
+            "result_workspace_output_capture_hash may only be established by a terminal transition and is immutable afterwards"
         ),
     }
 
@@ -1430,6 +1444,23 @@ mod tests {
         running.updated_at = "2026-01-01T00:00:01Z".into();
         running.started_at = Some("2026-01-01T00:00:01Z".into());
         validate_snapshot_transition_identity(&continuation, &running).unwrap();
+    }
+
+    #[test]
+    fn result_output_capture_can_only_join_an_immutable_terminal_transition() {
+        let running = child(ThreadStatus::Running, "2026-01-01T00:00:01Z");
+        let mut premature = running.clone();
+        premature.result_workspace_output_capture_hash = Some("a".repeat(64));
+        assert!(validate_snapshot_transition_identity(&running, &premature).is_err());
+        let mut terminal = child(ThreadStatus::Completed, "2026-01-01T00:00:02Z");
+        terminal.started_at = running.started_at.clone();
+        terminal.result_workspace_output_capture_hash = Some("a".repeat(64));
+        validate_snapshot_transition_identity(&running, &terminal).unwrap();
+        let mut rewritten = terminal.clone();
+        rewritten.result_workspace_output_capture_hash = Some("b".repeat(64));
+        assert!(validate_snapshot_transition_identity(&terminal, &rewritten).is_err());
+        rewritten.result_workspace_output_capture_hash = None;
+        assert!(validate_snapshot_transition_identity(&terminal, &rewritten).is_err());
     }
 
     #[test]

@@ -745,6 +745,36 @@ fn read_entry_thread_event_chain(
     entry: &ChainThreadEntry,
 ) -> anyhow::Result<Vec<(String, ThreadEvent)>> {
     let mut reverse = Vec::new();
+    visit_entry_thread_event_chain(
+        cas_root,
+        chain_lock,
+        chain_root_id,
+        thread_id,
+        entry,
+        u64::MAX,
+        u64::MAX,
+        |hash, event| {
+            reverse.push((hash, event));
+        },
+    )?;
+    reverse.reverse();
+    Ok(reverse)
+}
+
+fn visit_entry_thread_event_chain(
+    cas_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    entry: &ChainThreadEntry,
+    max_events: u64,
+    max_bytes: u64,
+    mut visit: impl FnMut(String, ThreadEvent),
+) -> anyhow::Result<u64> {
+    if entry.last_thread_seq > max_events {
+        anyhow::bail!("authoritative thread history exceeds the event inspection bound");
+    }
+    let mut inspected_bytes = 0u64;
     let mut expected_sequence = entry.last_thread_seq;
     let mut event_hash = entry.last_event_hash.clone();
     while expected_sequence != 0 {
@@ -753,12 +783,31 @@ fn read_entry_thread_event_chain(
                 "authoritative event chain for thread {thread_id} ended before sequence {expected_sequence}"
             )
         })?;
+        let limit = (crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64)
+            .min(max_bytes.saturating_sub(inspected_bytes));
+        let (file, size) = cas_store_for_lock(cas_root, Some(chain_lock))?
+            .open_object(&hash)?
+            .ok_or_else(|| anyhow!("thread event history CAS object is absent: {hash}"))?;
+        if size > limit {
+            anyhow::bail!("thread event history object exceeds the byte inspection bound");
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(file, limit + 1), &mut bytes)?;
+        if bytes.len() as u64 > limit || lillux::sha256_hex(&bytes) != hash {
+            anyhow::bail!("thread event history object changed or exceeded its byte bound");
+        }
         let event: ThreadEvent =
-            read_cas_object(cas_root, Some(chain_lock), &hash, "thread event history")?;
+            serde_json::from_slice(&bytes).context("decode bounded thread event history")?;
         let canonical = lillux::canonical_json(&event.to_value())
             .context("failed to canonicalize thread event history")?;
+        inspected_bytes = inspected_bytes
+            .checked_add(canonical.len() as u64)
+            .filter(|bytes| *bytes <= max_bytes)
+            .ok_or_else(|| {
+                anyhow!("authoritative thread history exceeds the byte inspection bound")
+            })?;
         let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
-        if canonical_hash != hash {
+        if canonical_hash != hash || canonical.as_bytes() != bytes.as_slice() {
             anyhow::bail!(
                 "thread event history is not canonically encoded: expected {hash}, canonical {canonical_hash}"
             );
@@ -773,14 +822,200 @@ fn read_entry_thread_event_chain(
             );
         }
         event_hash.clone_from(&event.prev_thread_event_hash);
-        reverse.push((hash, event));
+        visit(hash, event);
         expected_sequence -= 1;
     }
     if event_hash.is_some() {
         anyhow::bail!("thread event history for {thread_id} extends before sequence one");
     }
-    reverse.reverse();
-    Ok(reverse)
+    Ok(inspected_bytes)
+}
+
+/// Prove an exact root-to-terminal machine continuation path under one head.
+/// A common upstream or chain membership is not a continuation edge. All
+/// per-thread links are checked, including testimony appended after an edge.
+pub(crate) fn read_machine_continuation_lineage_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    start_thread_id: &str,
+    terminal_thread_id: &str,
+    max_placements: usize,
+    mut remaining_events: u64,
+    mut remaining_bytes: u64,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<(String, Vec<ThreadSnapshot>)>> {
+    let Some((head_hash, chain_state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut cursor = start_thread_id.to_owned();
+    let mut previous: Option<String> = None;
+    let mut visited = std::collections::BTreeSet::new();
+    let mut snapshots = Vec::new();
+    loop {
+        if snapshots.len() >= max_placements || !visited.insert(cursor.clone()) {
+            anyhow::bail!("machine continuation lineage exceeds its bound or contains a cycle");
+        }
+        let entry = chain_state
+            .threads
+            .get(&cursor)
+            .ok_or_else(|| anyhow!("machine continuation placement is absent: {cursor}"))?;
+        let snapshot =
+            read_current_snapshot_for_mutation(cas_root, Some(chain_lock), &chain_state, &cursor)?;
+        remaining_bytes = remaining_bytes
+            .checked_sub(serde_json::to_vec(&snapshot.to_value())?.len() as u64)
+            .context("machine continuation snapshots exceed the bounded lineage payload")?;
+        let mut edges = Vec::new();
+        let mut birth = None;
+        let bytes = visit_entry_thread_event_chain(
+            cas_root,
+            chain_lock,
+            chain_root_id,
+            &cursor,
+            entry,
+            remaining_events,
+            remaining_bytes,
+            |_, event| {
+                if event.thread_seq == 1 {
+                    birth = Some(event.clone());
+                }
+                if event.event_type == crate::event_types::THREAD_CONTINUED {
+                    edges.push(event);
+                }
+            },
+        )?;
+        remaining_events -= entry.last_thread_seq;
+        remaining_bytes -= bytes;
+        if let Some(source) = &previous {
+            let birth = birth.context("machine successor has no authoritative birth")?;
+            if snapshot.upstream_thread_id.as_deref() != Some(source)
+                || birth.event_type != crate::event_types::THREAD_CREATED
+                || birth
+                    .payload
+                    .get("continuation_from")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(source)
+            {
+                anyhow::bail!(
+                    "machine successor does not have the exact source continuation birth"
+                );
+            }
+        }
+        snapshots.push(snapshot);
+        if cursor == terminal_thread_id {
+            if !edges.is_empty() {
+                anyhow::bail!("requested machine terminal has a continuation successor");
+            }
+            return Ok(Some((head_hash, snapshots)));
+        }
+        if edges.len() != 1 {
+            anyhow::bail!("machine source has no unique authoritative continuation edge");
+        }
+        let edge = edges.pop().expect("one edge");
+        let reason = edge
+            .payload
+            .get("reason")
+            .and_then(serde_json::Value::as_str);
+        if edge.payload.get("successor_request_fingerprint").is_some()
+            || edge.payload.get("remote_adoption").is_some()
+            || reason == Some(crate::queries::ContinuationReasonMarker::OperatorFollowUp.as_str())
+            || reason == Some("remote_adoption")
+        {
+            return Err(crate::state_db::MachineContinuationBoundary.into());
+        }
+        let next = edge
+            .payload
+            .get("successor_thread_id")
+            .and_then(serde_json::Value::as_str)
+            .context("machine continuation has no exact successor identity")?
+            .to_owned();
+        previous = Some(cursor);
+        cursor = next;
+    }
+}
+
+/// Snapshot and event presence from the same signed head. Traverse only this
+/// exact thread's authenticated links, retaining one bounded event at a time.
+pub(crate) fn visit_thread_snapshot_events_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    max_events: u64,
+    max_bytes: u64,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    visit: impl FnMut(String, ThreadEvent),
+) -> anyhow::Result<Option<(String, ThreadSnapshot)>> {
+    let Some((head_hash, chain_state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(entry) = chain_state.threads.get(thread_id) else {
+        return Ok(None);
+    };
+    let snapshot =
+        read_current_snapshot_for_mutation(cas_root, Some(chain_lock), &chain_state, thread_id)?;
+    visit_entry_thread_event_chain(
+        cas_root,
+        chain_lock,
+        chain_root_id,
+        thread_id,
+        entry,
+        max_events,
+        max_bytes,
+        visit,
+    )?;
+    Ok(Some((head_hash, snapshot)))
+}
+
+/// Snapshot and event presence from the same signed head.
+pub(crate) fn read_thread_snapshot_with_event_presence_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    event_type: &str,
+    max_events: u64,
+    max_bytes: u64,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<(String, ThreadSnapshot, bool)>> {
+    let mut present = false;
+    let snapshot = visit_thread_snapshot_events_with_trust(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        thread_id,
+        max_events,
+        max_bytes,
+        trust_store,
+        head_cache,
+        |_, event| {
+            present |= event.event_type == event_type;
+        },
+    )?;
+    Ok(snapshot.map(|(head_hash, snapshot)| (head_hash, snapshot, present)))
 }
 
 pub(crate) fn prospective_mutation_timestamp_floor(

@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "file.watcher.updated"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "add",
+            "change",
+            "unlink"
+          ]
+        }
+      },
+      "required": [
+        "file",
+        "event"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

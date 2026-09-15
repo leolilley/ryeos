@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-08T03:28:05Z:d34546fe5a9a5fe023a222317efb1601d981a0ff79103c23392ce83d15c7e79d:j5VrKkOEQEtjLvpb9i9MMJnUYUTIqdiTClKNBVqVoJdWOkzO1KjgWXxnoCn4U1LmUlW7eykCiXuPeFH3KJosDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, compose-product]
+description: Compose a complete exact product selection into one signed consumer
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content compose-product '{\"consumer_ref\":\"tool:example/verify\",\"project_context\":null,\"selections\":[...],\"maximum_bytes\":1048576}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/compose-product

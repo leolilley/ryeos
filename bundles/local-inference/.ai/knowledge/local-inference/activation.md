@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T13:27:39Z:87bfc0dcd963b50f49fe1d57f1c7b676ab8b14bf667e1919310b296939b383bc:G08nne15FJZLJ7axpNo3w+br+GfXcR3uWa5rkDhYU60Z8oKzqXbSLn/DULWuHKEOMdWb3mgeZDPslWNeJ8Q2CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-05T00:45:54Z:0af2ecaa3b1cafcc0752eaf8bd735ac2e2a2ead9d21fd4c0106ade8e6b919bea:C8RSKijGQ9jX9mx/mozt9DPNCky2TRej0mJtF81/ck8/q3/51IDWtIPiyZyPDTlbnoMYwd1oxprofbM0Ey0sBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
@@ -23,11 +23,10 @@ The ordinary full source installation includes the local-inference bundle:
 sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ~~~
 
-Installation does not acquire model/runtime bytes. A fresh explicit `full` or
-`full-sandbox` initialization publishes a bounded publisher-authored
-acquisition and persistent-process baseline; reinstalling an existing node
-preserves that node's current policy generation. Bubblewrap is optional node
-hardening and is not an activation prerequisite.
+Installation does not acquire model/runtime bytes. A fresh explicit `full`
+initialization publishes a bounded publisher-authored acquisition and
+persistent-process baseline; reinstalling an existing node preserves that
+node's current policy generation.
 
 The bundle ships two exact recorded Qwen3-0.6B CPU profiles:
 
@@ -69,15 +68,15 @@ worker does not execute from a release archive, mutable cache, vendor checkout,
 or public assembly directory.
 
 Disabled isolation is trusted signed local execution, not OS confinement.
-RyeOS reports it honestly. A separately installed compatible backend may
-enforce stronger filesystem/network isolation without changing the recorded
-provider contract.
+RyeOS reports it honestly. Core carries a self-contained compatible native
+backend that an explicit node policy may select to enforce stronger
+filesystem/network isolation without changing the recorded provider contract.
 
 ## Node policy
 
 Apply a node-policy replacement only while the daemon is stopped. Online or
 cache-only managed activation needs no named filesystem root. The following is
-the current `full`/`full-sandbox` installed-bundle union with a recommended
+the current `full` installed-bundle union with a recommended
 higher residual reserve. When applying this change, start from the node's
 current complete `external_content` member and change only the two
 `minimum_free_bytes` values; do not remove capacity or hosts required by other
@@ -121,7 +120,7 @@ redirect ceiling, rechecks canonical HTTPS and the host allowlist on every hop,
 and still requires each exact signed archive digest.
 
 The 8 GiB residual free-space floor above is an operator recommendation, not
-workload identity. The publisher-authored `full` and `full-sandbox` baseline
+workload identity. The publisher-authored `full` baseline
 uses a reviewed 2 GiB floor so fresh source qualification can run on the
 storage-constrained hosted runner after deleting build targets. A higher local
 override changes admission testimony, never archive, manifest, program, or
@@ -149,7 +148,7 @@ limits:
   max_total_backlog_bytes: 16777216
 ~~~
 
-A fresh `full` or `full-sandbox` installation selects a publisher-signed init
+A fresh `full` installation selects a publisher-signed init
 profile whose capacities cover the exact acquisition and worker requirements
 above, with the reviewed 2 GiB residual free-space baseline, and publishes one
 complete node-signed generation under `.ai/node/policies/`. `external_content.yaml` and

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-09",
+  "status": "incomplete",
+  "scope": "installed_two_node_loopback_nine_file_fixture",
+  "prior_evidence": "hosted-worker-qualification.json",
+  "primary_node_mutated": false,
+  "model": {
+    "id": "gpt-5.3-codex-spark",
+    "effort": "low",
+    "authentication": "retained_approved_chatgpt_subscription"
+  },
+  "base": {
+    "source_snapshot": "5bc8992d79349e61e947da398ce0c2754b1ec9d984ad9985ad0f631cfd8cbf3b",
+    "target_snapshot": "b110d308943f24980aa679755982044043657808f310e192cc3d265a6131df99",
+    "tree": "783c0d2cd140e703372d12f338877b5f8bb3f752e5848550e0abdef7d108ac8e"
+  },
+  "attempts": [
+    {
+      "name": "v15",
+      "daemon_sha256": "6b280ad6d532046057ec4ca6c3c798d2e8bddd177a17866f910563f57c8820fe",
+      "root": "T-c3d25060-5109-b2d8-7493-9aa25d5f2484",
+      "turn": "01a084f8-53d9-7173-ba2e-321405b6546d",
+      "command_sequence": 2,
+      "completion_operation_id": "7d1548ac29d388bfcfa316deaf5f407bb62d20abfb819cd954a5af7a9a00e309",
+      "outcome": "completed_turn_failed_task",
+      "failure": "three structured callbacks refused before child admission: owner grant compared against downgraded child authority",
+      "candidate": "192bbfd5d0c9aad3efcb718a2d6ce63e570dc3810cd469bb9494093ff1bbc560",
+      "candidate_validation": "30a6d439c393ddfd1f435179a4983b46a52f0396db0c1b7447d253d799b5b5c9",
+      "disposition": "retained_unpublished"
+    },
+    {
+      "name": "v16",
+      "daemon_sha256": "b7898ae6f9cd0816d7be3863b11f06b5297be8ff07b0cce48a8b9ccf9c2f3edc",
+      "root": "T-4ecaaa79-1754-ba90-1e2f-361cad886fe1",
+      "turn": "01a08521-c6c0-7870-b8d2-a22563a011bf",
+      "completion_fence": {
+        "admitted_capsule_hash": "9e4429c412a01aafc3b96a36a9cfe084c5698fded502dfd7b575c12a27f21205",
+        "command_sequence": 2,
+        "completion_operation_id": "9cb91c82b5a67271ea40562ef1c570ee6d849bc9d562ae719f6546760dd43366",
+        "placement_thread_id": "T-4ecaaa79-1754-ba90-1e2f-361cad886fe1",
+        "request_digest": "827fe10ed18740414f36025dc5f6d1b993477192828b9b8b9415b7edc8332aec",
+        "turn_id": "01a08521-c6c0-7870-b8d2-a22563a011bf",
+        "worker_boot_epoch": 1
+      },
+      "outcome": "completed_turn_failed_task",
+      "child": {
+        "thread": "T-0676141d-68d9-3541-bd66-793bf6f973da",
+        "item_ref": "tool:ryeos/development/format-check",
+        "input_snapshot": "a625f42643c2ace9bf1f27ae352cd14d2c4bdabc16ea15b3d84cd94f107c0b5d",
+        "outcome": "engine_error_before_process_start",
+        "failure": "read-only project authority erased configured writable project grant and captured filtering omitted a readable project mount"
+      },
+      "candidate": "c56116ae855e83ccf0147b2db25fb17e1fb6ed6b39a33929a72301ff171ef35c",
+      "candidate_validation": "e52409eff0290623c28756c57cbd4d1891cb5c08e3eb117b5154326194972e93",
+      "disposition": "retained_unpublished"
+    }
+  ],
+  "independent_evaluators": [
+    {
+      "launch": "L-202609090000000000000000000015e1",
+      "thread": "T-646b122b-0495-eccf-e93a-f4b3f085b8ef",
+      "outcome": "failed_before_process_start",
+      "failure": "base admitted request paired with candidate materialization during planning"
+    },
+    {
+      "launch": "L-202609090000000000000000000015e2",
+      "thread": "T-47dbae11-c683-96c6-014b-9bc688337747",
+      "outcome": "failed_before_process_start",
+      "failure": "same missing read-only project mount as v16 child"
+    }
+  ],
+  "remaining": [
+    "installed read-only mount correction and write-refusal qualification",
+    "successful worker edit/failed-check/shared-format/passing-check sequence",
+    "independent negative and positive candidate evaluation",
+    "active worker restart and exact reattachment",
+    "qualified result return with source HEAD fencing",
+    "installed native restricted-CLI child execution (synthetic dual-ingress transport tests are separate)",
+    "full repository qualification, environment-work merge and combined-build qualification, and real remote deployment"
+  ]
+}

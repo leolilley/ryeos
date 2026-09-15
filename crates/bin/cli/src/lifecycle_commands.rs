@@ -15,6 +15,7 @@
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
 //!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
+//!   - `ryeos node host setup` — one-time administrator-owned host association
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -112,6 +113,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "host", "setup"],
+        summary: "Provision one administrator-owned local hosted-worker service",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
         tokens: &["help"],
         summary: "Open the compact TTY help screen",
         category: "meta",
@@ -198,6 +204,10 @@ pub async fn try_dispatch(
             run_node_policy_apply_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("host")) if argv.get(2).map(String::as_str) == Some("setup") => {
+            run_node_host_setup_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("start", _) => {
             run_start_command(&argv[1..], console)
                 .await
@@ -212,6 +222,64 @@ pub async fn try_dispatch(
         }
         _ => Ok(false),
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node host setup",
+    about = "Provision one explicit administrator-owned hosted-worker service",
+    long_about = "Creates the supported local host association for this existing node and account. It records the selected account, durable app-root identity, installed daemon image and Lillux process-scope delegation in administrator-owned host configuration, then leaves the service down. It never reads worker input or node policy as root. This is a one-time host operation; normal ryeos start/stop/status remain unprivileged afterwards.",
+    no_binary_name = true
+)]
+struct NodeHostSetupArgs {
+    /// Existing app root (defaults to the normal local node).
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Persist this node's TCP endpoint before installing supervision.
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+
+    /// Persist this node's local lifecycle endpoint before supervision.
+    #[arg(long)]
+    uds_path: Option<PathBuf>,
+
+    /// Required acknowledgement that this installs a root-owned service
+    /// association for the current account and node.
+    #[arg(long)]
+    confirm: bool,
+}
+
+fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeHostSetupArgs>(argv, _console)? else {
+        return Ok(());
+    };
+    if !args.confirm {
+        anyhow::bail!("host setup requires --confirm");
+    }
+    let existing = ryeos_node::NodeConfig::load_local(args.app_root)?;
+    ryeos_node::require_initialized(&existing.app_root)?;
+    let config = ryeos_node::supervision::configure_host_endpoints(
+        &existing.app_root,
+        args.bind,
+        args.uds_path,
+    )?;
+    let account = lillux::ControllerAccount::current().map_err(anyhow::Error::msg)?;
+    let daemon = std::env::current_exe()
+        .context("locate installed ryeos CLI")?
+        .parent()
+        .context("installed ryeos CLI has no binary directory")?
+        .join("ryeosd");
+    let arguments = vec![
+        "host-provision".into(),
+        "--app-root".into(),
+        config.app_root.into_os_string(),
+        "--controller-account-json".into(),
+        serde_json::to_string(&account)?.into(),
+    ];
+    lillux::run_as_administrator(&daemon, &arguments)
+        .with_context(|| format!("run administrator host setup through {}", daemon.display()))?;
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -273,6 +341,8 @@ fn run_node_policy_generation_reset_command(
     .context("load local node location for policy-generation reset")?;
     let report = ryeos_node::run_init(&ryeos_node::InitOptions {
         app_root: config.app_root,
+        bind: None,
+        uds_path: None,
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: Some(args.node_profile.clone()),
@@ -358,14 +428,14 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         .context("load node identity for policy apply")?;
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
         .context("load trust store for current node policies")?;
-    let current = ryeos_app::node_policy::generation::load_policy_generation(
+    let update = ryeos_app::node_policy::generation::prepare_policy_member_replacement(
         &config.app_root,
         &trust_store,
         &table,
+        &args.section,
+        body,
+        &args.source,
     )?;
-    let mut policies = current.policies().clone();
-    policies.insert(args.section.clone(), body);
-    let update = current.prepare_replacement(&table, policies, &args.source)?;
     let policy_dir = ryeos_app::node_policy::generation::publish_policy_update(
         &config.app_root,
         &update,
@@ -402,7 +472,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
 #[command(
     name = "ryeos node reset replay-indexes",
     about = "Activate the current replay-index contract",
-    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. Predecessor dispatch-effect rows are discarded; provider-call evidence, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
+    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. The immediate predecessor retires dispatch-effect rows only; skipped replay generations retire all replay-index rows, including provider-call rows. Current indexes are unchanged. Credentials, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
     no_binary_name = true
 )]
 struct NodeReplayResetArgs {
@@ -438,23 +508,46 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     let path = config
         .runtime_state_dir()
         .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
-    let db = ryeos_state::OperationalDb::open_for_explicit_replay_reset(&path)
+    let (db, report) = ryeos_state::OperationalDb::open_for_explicit_replay_reset(&path)
         .with_context(|| format!("activate replay indexes in {}", path.display()))?;
     drop(db);
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "activated",
             "database": path,
-            "discarded": ["dispatch_effect_records"],
-            "preserved": ["provider_call_records"],
+            "replay_indexes": report,
         }))?;
     } else {
-        console.text(&format!(
-            "Replay indexes activated: {}\nPredecessor dispatch-effect records were discarded; provider-call records, thread history, and other operational state were preserved.\n",
-            path.display()
-        ))?;
+        let mut status =
+            crate::tty::StatusBanner::new(crate::tty::Tone::Success, "REPLAY INDEX RESET COMPLETE");
+        status.detail = Some(path.display().to_string());
+        status.rows = vec![
+            crate::tty::Row::key_value("replay indexes", replay_reset_summary(report)),
+            crate::tty::Row::key_value(
+                "preserved",
+                "credentials, thread history, CAS bytes and non-replay operational state",
+            ),
+        ];
+        console.success(&status)?;
     }
     Ok(())
+}
+
+fn replay_reset_summary(report: ryeos_state::operational::ReplayIndexResetReport) -> String {
+    use ryeos_state::operational::ReplayIndexResetScope;
+    let scope = match report.scope {
+        ReplayIndexResetScope::Unchanged => "unchanged",
+        ReplayIndexResetScope::DispatchEffects => {
+            "retire dispatch-effect rows; retain provider-call rows"
+        }
+        ReplayIndexResetScope::AllReplayRecords => {
+            "retire all replay rows, including provider-call rows"
+        }
+    };
+    format!(
+        "epoch {} -> {}: {scope}",
+        report.stored_epoch, report.current_epoch
+    )
 }
 
 #[derive(Parser, Debug)]
@@ -643,7 +736,7 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
 #[command(
     name = "ryeos node reset execution-history",
     about = "Retire the local execution-history epoch while the daemon is stopped",
-    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, and publish an empty current thread projection. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
+    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, activate stale replay indexes, and publish an empty current thread projection. Replay activation retires dispatch-effect rows for the immediate predecessor, or all replay rows including provider-call rows for skipped generations. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
     no_binary_name = true
 )]
 struct ExecutionHistoryResetArgs {
@@ -737,6 +830,10 @@ fn run_execution_history_reset_command(
         crate::tty::Row::key_value("chain heads", report.chain_heads.to_string()),
         crate::tty::Row::key_value("project heads", report.project_heads.to_string()),
         crate::tty::Row::key_value(
+            "replay indexes",
+            replay_reset_summary(report.replay_indexes),
+        ),
+        crate::tty::Row::key_value(
             "chain/recovery artifacts",
             (report.chain_ref_artifacts + report.pending_transitions).to_string(),
         ),
@@ -753,7 +850,10 @@ fn run_execution_history_reset_command(
         ),
         crate::tty::Row::key_value(
             "scheduler rows",
-            report.scheduler_rows.total_rows().to_string(),
+            report.scheduler_rows.total_rows().map_or_else(
+                || "unavailable (incompatible schema)".to_string(),
+                |rows| rows.to_string(),
+            ),
         ),
         crate::tty::Row::key_value(
             "scheduler journal artifacts",
@@ -812,7 +912,7 @@ fn run_identity_command(argv: &[String], console: &crate::tty::Console) -> Resul
     };
     let report = ryeos_core_tools::actions::inspect::identity::run_identity(
         ryeos_core_tools::actions::inspect::identity::IdentityParams {
-            app_root: args.app_root.map(|p| p.to_string_lossy().into_owned()),
+            system_space_dir: args.app_root.map(|p| p.to_string_lossy().into_owned()),
             project_path: None,
         },
     )
@@ -849,6 +949,14 @@ struct InitArgs {
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
     app_root: Option<PathBuf>,
+
+    /// TCP endpoint persisted in this node's bootstrap configuration.
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+
+    /// Local lifecycle endpoint persisted with the TCP endpoint.
+    #[arg(long)]
+    uds_path: Option<PathBuf>,
 
     /// Source directory containing bundle subdirectories.
     /// Each immediate child with a `.ai/` subdirectory is installed as a bundle.
@@ -900,6 +1008,8 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
 
     let opts = ryeos_node::InitOptions {
         app_root,
+        bind: args.bind,
+        uds_path: args.uds_path,
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: args.node_profile,
@@ -1034,11 +1144,38 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
     let Some(args) = parse_or_render_help::<StatusArgs>(argv, console)? else {
         return Ok(());
     };
-    let controller = LifecycleController::from_env(local_env(args.app_root)?);
-    let status = controller
-        .status()
-        .await
-        .context("ryeos node status failed")?;
+    let app_root = LocalLifecycleEnv::selected_app_root(args.app_root)?;
+    let status = match LocalLifecycleEnv::load(Some(app_root.clone())) {
+        Ok(env) => LifecycleController::from_env(env)
+            .status()
+            .await
+            .context("ryeos node status failed")?,
+        Err(config_error) => {
+            // Bootstrap configuration cannot provide a trustworthy endpoint,
+            // but a configured supervisor has independent root-owned failure
+            // testimony. Read it only through the exact protected association;
+            // never invent a direct-node endpoint or launch fallback here.
+            let supervised_failure =
+                match ryeos_node::supervision::InstalledService::discover_app_root(&app_root)? {
+                    Some(service) => {
+                        service.check_supervisor()?;
+                        if service.desired_state()? == ryeos_node::supervision::DesiredState::Up {
+                            service.launch_failure_status_without_config(&app_root)?
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                };
+            supervised_failure
+                .or_else(|| ryeos_node::status::retained_startup_failure(&app_root))
+                .with_context(|| {
+                    format!(
+                        "node bootstrap configuration is invalid and no retained startup failure is available: {config_error:#}"
+                    )
+                })?
+        }
+    };
     if args.json {
         crate::tty::write_json(&status)?;
     } else {
@@ -1631,13 +1768,11 @@ struct StartArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
-    /// TCP bind address for ryeosd, e.g. 127.0.0.1:17400.
-    /// Overrides stored config for this start invocation.
+    /// Persist this TCP endpoint if the node is stopped, then start it.
     #[arg(long)]
     bind: Option<SocketAddr>,
 
-    /// Lifecycle/control Unix socket path for ryeosd.
-    /// Useful when running a second local daemon alongside the default node.
+    /// Persist this local lifecycle endpoint if the node is stopped, then start it.
     #[arg(long)]
     uds_path: Option<PathBuf>,
 }
@@ -1646,16 +1781,27 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
     let Some(args) = parse_or_render_help::<StartArgs>(argv, console)? else {
         return Ok(());
     };
-    let env =
-        LocalLifecycleEnv::load_with_overrides(args.app_root, args.bind, args.uds_path, true)?;
+    let env = LocalLifecycleEnv::load(args.app_root)?;
     let controller = LifecycleController::from_env(env);
+    let endpoints = ryeos_node::StartEndpointConfiguration {
+        bind: args.bind,
+        uds_path: args.uds_path,
+    };
     let mut progress = crate::tty::LifecycleProgress::new(
         crate::tty::LifecycleProgressAction::Boot,
         console.capabilities(),
     );
     let report = match progress.as_mut() {
-        Some(progress) => controller.start_with_progress(progress).await,
-        None => controller.start().await,
+        Some(progress) => {
+            controller
+                .start_with_endpoint_configuration(endpoints, Some(progress))
+                .await
+        }
+        None => {
+            controller
+                .start_with_endpoint_configuration(endpoints, None)
+                .await
+        }
     }
     .context("ryeos start failed")?;
     if let Some(progress) = progress {
@@ -1813,7 +1959,6 @@ async fn run_stop_command(argv: &[String], console: &crate::tty::Console) -> Res
     let Some(args) = parse_or_render_help::<StopArgs>(argv, console)? else {
         return Ok(());
     };
-    let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let options = StopOptions {
         force: args.force,
         ..StopOptions::default()
@@ -1822,9 +1967,24 @@ async fn run_stop_command(argv: &[String], console: &crate::tty::Console) -> Res
         crate::tty::LifecycleProgressAction::Shutdown,
         console.capabilities(),
     );
-    let report = match progress.as_mut() {
-        Some(progress) => controller.stop_with_progress(options, progress).await,
-        None => controller.stop(options).await,
+    let app_root = LocalLifecycleEnv::selected_app_root(args.app_root)?;
+    let report = match LocalLifecycleEnv::load(Some(app_root.clone())) {
+        Ok(env) => {
+            let controller = LifecycleController::from_env(env);
+            match progress.as_mut() {
+                Some(progress) => controller.stop_with_progress(options, progress).await,
+                None => controller.stop(options).await,
+            }
+        }
+        Err(config_error) => {
+            ryeos_node::stop::stop_supervised_with_invalid_config(&app_root, options.timeout)
+                .await
+                .with_context(|| {
+                    format!(
+                        "node bootstrap configuration is invalid ({config_error:#}); supervised inhibition failed"
+                    )
+                })
+        }
     }
     .context("ryeos stop failed")?;
     if let Some(progress) = progress {
@@ -2022,6 +2182,32 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_reset_reporting_distinguishes_current_and_skipped_epochs() {
+        use ryeos_state::operational::{ReplayIndexResetReport, ReplayIndexResetScope};
+        for (scope, expected) in [
+            (ReplayIndexResetScope::Unchanged, "unchanged"),
+            (
+                ReplayIndexResetScope::DispatchEffects,
+                "retain provider-call rows",
+            ),
+            (
+                ReplayIndexResetScope::AllReplayRecords,
+                "retire all replay rows, including provider-call rows",
+            ),
+        ] {
+            let report = ReplayIndexResetReport {
+                stored_epoch: 1,
+                current_epoch: 3,
+                scope,
+            };
+            assert!(replay_reset_summary(report).contains(expected));
+            let encoded = serde_json::to_value(report).unwrap();
+            assert_eq!(encoded["stored_epoch"], 1);
+            assert_eq!(encoded["current_epoch"], 3);
+        }
+    }
 
     fn execution_history_reset_args(dry_run: bool, confirm: bool) -> ExecutionHistoryResetArgs {
         ExecutionHistoryResetArgs {

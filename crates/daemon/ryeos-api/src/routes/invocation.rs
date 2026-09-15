@@ -43,6 +43,8 @@ pub struct RoutePrincipal {
     /// `None` for local clients and non-RyeOS verifiers. Execute routes must
     /// never populate this from request data.
     pub authenticated_origin_site_id: Option<String>,
+    pub authenticated_grant_authority:
+        Option<ryeos_engine::principal_contract::AuthenticatedGrantAuthority>,
     /// Verifier-supplied metadata for downstream consumption.
     ///
     /// `BTreeMap` for deterministic JSON serialization order.
@@ -59,6 +61,7 @@ impl RoutePrincipal {
             verified: false,
             authorized_key_class: None,
             authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
             metadata: BTreeMap::new(),
         }
     }
@@ -67,13 +70,27 @@ impl RoutePrincipal {
     /// This conversion is mechanical: no class or origin is inferred from the
     /// principal string.
     pub fn handler_context(&self) -> ryeos_app::handler_context::HandlerContext {
-        ryeos_app::handler_context::HandlerContext::new_with_authority(
-            self.id.clone(),
-            self.scopes.clone(),
-            self.verified,
+        match (
             self.authorized_key_class,
-            self.authenticated_origin_site_id.clone(),
-        )
+            self.authenticated_grant_authority.clone(),
+        ) {
+            (Some(class), Some(authority)) if self.verified => {
+                ryeos_app::handler_context::HandlerContext::new_with_grant_authority(
+                    self.id.clone(),
+                    self.scopes.clone(),
+                    class,
+                    self.authenticated_origin_site_id.clone(),
+                    authority,
+                )
+            }
+            _ => ryeos_app::handler_context::HandlerContext::new_with_authority(
+                self.id.clone(),
+                self.scopes.clone(),
+                self.verified,
+                self.authorized_key_class,
+                self.authenticated_origin_site_id.clone(),
+            ),
+        }
     }
 }
 

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-18T22:04:51Z:8f2011f6bd5eb556fe18a43af6794cb31bb2e225492696882b036217b531633a:Fn43j8YQ0hD973zgmk+nUQRqo3Pbo6AFypRTu/MuSmBFMnkXvODvNTYNjgF9FyunInKO05JFaiKc3JKFn3peBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T01:55:11Z:faf00a85628597d873a9d51222b2e7c15c8a3d0296e847eff2a6a401b8974eb7:ju4FWqp+EiTeJadHUxJ6YAxQf7dVTcXS4SYb2S3S9RZ1xbWOeXf9kZ/Q36oDEUn5yU+WaPhLerq3N7BrpXGWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Signed subprocess wire protocols and schema-driven protocol selection.
 ---
@@ -86,12 +86,11 @@ rejected because the envelopes are not interchangeable.
 
 ## Streaming Tool Protocol (`protocol:ryeos/core/tool_streaming`)
 
-Protocol for tools that emit streaming output. Used by the
-`streaming_tool` kind.
+Protocol selected explicitly by ordinary Tools that emit streaming output.
 
 | Aspect      | Value                         |
 |-------------|-------------------------------|
-| **stdin**   | `parameters_json` — JSON params |
+| **stdin**   | `opaque` — unchanged signed executor-plan input |
 | **stdout**  | `streaming_chunks` — length-prefixed JSON frames |
 | **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH` |
 | **lifecycle** | `managed` — daemon tracks process |
@@ -107,12 +106,11 @@ The kind schema determines which protocol to use:
 
 | Kind            | Protocol                    |
 |-----------------|-----------------------------|
-| `tool`          | `tool_callback`          |
-| `streaming_tool` | `tool_streaming`        |
+| `tool`          | explicit item selection: `tool_callback`, `opaque`, or `tool_streaming` |
 | `runtime`       | `runtime`                |
 | method-bearing kind | its `execution.method_dispatch.protocol` (currently `method_runtime`) |
 
-You don't specify the protocol on each item. The signed kind schema selects a
-signed protocol descriptor—through its subprocess terminator or method
-dispatch declaration—and the launcher follows that descriptor without a
-kind-name/protocol-name table in code.
+The signed kind schema owns protocol selection. Tool authors must provide
+`execution_protocol` from its closed allowlist. Other schemas may select a fixed
+descriptor through their subprocess terminator or method declaration. The
+launcher follows verified wire mechanics without a kind-name/protocol-name table.

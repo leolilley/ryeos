@@ -80,6 +80,33 @@ logs/
 # Project .ai/knowledge/ is INCLUDED (project documentation)
 /.ai/*
 !.ai/knowledge/
+!/.ai/manifest.source.yaml
+!/.ai/manifest.yaml
+!/.ai/config/
+/.ai/config/*
+!/.ai/config/execution/
+/.ai/config/execution/*
+!/.ai/config/execution/project-snapshot.yaml
+!/.ai/config/execution/execution.yaml
+!/.ai/config/development/
+/.ai/config/development/*
+!/.ai/config/development/ryeos/
+!/.ai/config/development/ryeos/*.yaml
+!/.ai/graphs/
+/.ai/graphs/*
+!/.ai/graphs/ryeos/
+/.ai/graphs/ryeos/*
+!/.ai/graphs/ryeos/development/
+!/.ai/graphs/ryeos/development/**
+!/.ai/tools/
+/.ai/tools/*
+!/.ai/tools/ryeos/
+/.ai/tools/ryeos/*
+!/.ai/tools/ryeos/development/
+!/.ai/tools/ryeos/development/**
+# Source-local Tool libraries are authored source, not Python bytecode caches.
+/.ai/tools/ryeos/development/**/__pycache__/
+/.ai/tools/ryeos/development/**/*.pyc
 */.ai/
 !bundles/.ai/
 !bundles/.ai/**

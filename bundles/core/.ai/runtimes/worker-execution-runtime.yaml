@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-04T05:54:47Z:bbd7d5e1a2b0e657752e18ed45c6c67699809abcc29c0db4f5809c4d72d83698:S1An1Oy5IthsDdlFgTF6AWiowkkWNyazl+xMXYl/AiEyfT5RgTZa1PeP+4keTBAYzvpSBCYS3g+yFanAI2ItBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T01:19:33Z:af43ea685bbb2c2dbce22184f38a3581cb689ba1352353dfe7a77b0669f5e45f:XATqV/XhIpy/rmDW9bik3Vf0w6xJsX5VaG3OrfaUn9uyQK/I+wvrr6bgHP/QiRTcAbTJXbZK9FLx5CKtw0IyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: worker_execution
 default: true
@@ -16,6 +16,9 @@ launch_contract:
   ref_bindings:
     environment:
       required: false
+      project_result_requirement: none
+      source:
+        kind: caller
       allowed_kinds: [config]
       allowed_spaces: [bundle, project]
       allowed_trust: [trusted_bundle, trusted_project]
@@ -36,8 +39,15 @@ launch_contract:
     max_targets_per_dependency: 1
     max_executable_search_entries: 16
     external_content:
+      allowed_mount_roots: [project, execution_runtime]
       max_declarations: 8
       large_content_max_total_bytes: 4294967296
+  evidence_attachments:
+    max_attachments: 16
+    max_total_bytes: 536870912
+    target: session_worker
+    destination_prefix: evidence
+    allowed_access: [read_only]
   environment_contributions:
     max_contributions: 1
     max_targets_per_contribution: 1
@@ -48,5 +58,9 @@ launch_contract:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: [worker_execution]
-  runtime_facts: {}
+  runtime_facts:
+    workload_client_request:
+      required: false
+      kind: json
+      max_bytes: 16384
 description: Owns one root execution while its admitted session-bound worker is live.

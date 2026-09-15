@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:09Z:2bfa05d3247c159ca9f52c06836ed46edde98540d78b0690f625a48e1bc22eeb:ckUsqd+45zyC3pH1MLLSfr7t1CvVPGlEpMhNnr012oKdiD1X1BC/pY++LlgdWIgJ2BAAexekqw1I5t7AHAgeBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:39Z:98ad43b7d1403d6751a1aa92d08afb26f6d9587a1d627f7e054ff7a0229083b0:TV1EufABxdZIBzUXYVfAxV5ocKOBeNJNc/VD6ghj0GZO2xEsnmLA3dzK9GqAOj4TSKGVkhyoJ6Yvg0J08Q1XBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Search the web via Tavily — a fast, reliable search API built for LLM use. Returns ranked result titles, URLs, and snippets. Requires TAVILY_API_KEY."
 
 # Resolved from host env by name (vault > host env > .env) and injected into the

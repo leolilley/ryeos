@@ -150,6 +150,7 @@ pub(super) fn prepare_managed_launch(
                     node_history_policy,
                     subject.thread_profile.clone(),
                     request.ref_bindings.clone(),
+                    request.product_selections.clone(),
                     request.usage_subject.clone(),
                     request.usage_subject_asserted_by.clone(),
                 )
@@ -182,6 +183,7 @@ pub(super) fn prepare_managed_launch(
             parameters: request.params.clone(),
             root_raw_content_digest: resolved_item.raw_content_digest.clone(),
             ref_bindings: request.ref_bindings.clone(),
+            product_selections: request.product_selections.clone(),
             resolved_item,
             plan_context: ctx.plan_ctx.clone(),
             root_admission: None,

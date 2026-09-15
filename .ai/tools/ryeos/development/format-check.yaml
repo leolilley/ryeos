@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-11T11:45:13Z:79c073d32baf9a07242be4e03a3e1096831c265b6c094a4804da9db9545ff571:NYUt5lR2enDYyOl/xenxvmdqKdPU96y2ITe7pHrjUPC7XDPyfiHgGpTpyGH06PJNpJCvJxzlmnouKXW3nmv/BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/development
+name: format-check
+version: "1.0.0"
+description: Check one explicit RyeOS Rust source file with the admitted formatter
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: immutable_current_generation
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content: []
+external_product_slots:
+  - id: platform
+    relationship_ref: config:development/ryeos/platform-products
+    relationship: platform_to_format_check
+    kind: tree
+    mount_root: execution_runtime
+    mount: platform
+config:
+  command: realization:platform/rust/bin/rustfmt
+  args: [--check, --edition, "${params.edition}", --config, skip_children=true, "${params.path}"]
+  timeout_secs: 60
+config_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      maxLength: 4096
+      pattern: '^crates/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.rs$'
+    edition:
+      type: string
+      enum: ["2021", "2024"]
+  required: [path, edition]
+  additionalProperties: false

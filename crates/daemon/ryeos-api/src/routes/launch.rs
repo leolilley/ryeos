@@ -89,6 +89,10 @@ fn map_launch_planning_check_error(error: anyhow::Error) -> LaunchSpawnError {
     }
 }
 
+fn permits_missing_thread_diagnostic_root(error: &DispatchError) -> bool {
+    error.permits_prebirth_diagnostic_root()
+}
+
 struct LaunchPlanningTaskGuard {
     state: AppState,
     reserved_thread_id: String,
@@ -139,6 +143,8 @@ fn abort_launch_task_with_typed_error(
 /// item_ref/project/parameters identity.
 pub(crate) struct DispatchLaunchOptions {
     pub ref_bindings: BTreeMap<String, String>,
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     /// Exact ingress-authenticated authority. `None` is retained for
     /// node-internal launches and must never be upgraded during recovery.
     pub handler_context: Option<ryeos_app::handler_context::HandlerContext>,
@@ -183,6 +189,8 @@ impl DispatchLaunchOptions {
         root_dispatch_evidence: ryeos_executor::dispatch::RootDispatchEvidence,
         execution_workspace: &std::path::Path,
         ref_bindings: BTreeMap<String, String>,
+        product_selections:
+            ryeos_state::external_content::products::composition::ProductSelectionInputs,
         lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
         handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     ) -> anyhow::Result<Self> {
@@ -209,6 +217,9 @@ impl DispatchLaunchOptions {
         if root_admission.ref_bindings() != &ref_bindings {
             anyhow::bail!("dispatch launch secondary identities do not match sealed admission");
         }
+        if root_admission.product_selections() != &product_selections {
+            anyhow::bail!("dispatch launch product selectors do not match sealed admission");
+        }
         let project_path = execution_workspace.canonicalize().with_context(|| {
             format!(
                 "canonicalize dispatch launch workspace {}",
@@ -226,6 +237,7 @@ impl DispatchLaunchOptions {
         }
         Ok(Self {
             ref_bindings,
+            product_selections,
             handler_context,
             launch_mode: "wait".to_string(),
             target_site_id: None,
@@ -265,6 +277,8 @@ pub(crate) fn preflight_dispatch_launch(
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     parameters: &Value,
     ref_bindings: &BTreeMap<String, String>,
+    product_selections:
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
     principal_id: &str,
     principal_scopes: &[String],
     origin_site_id: &str,
@@ -283,6 +297,7 @@ pub(crate) fn preflight_dispatch_launch(
         provenance,
         parameters,
         ref_bindings,
+        product_selections,
         principal_id,
         principal_scopes,
         origin_site_id,
@@ -303,6 +318,8 @@ struct BorrowedDispatchPreflight<'a> {
     provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     parameters: &'a Value,
     ref_bindings: &'a BTreeMap<String, String>,
+    product_selections:
+        &'a ryeos_state::external_content::products::composition::ProductSelectionInputs,
     principal_id: &'a str,
     principal_scopes: &'a [String],
     origin_site_id: &'a str,
@@ -349,6 +366,7 @@ fn preflight_dispatch_launch_core(
         current_site_id: request.state.threads.site_id().to_string(),
         origin_site_id: request.origin_site_id.to_string(),
         execution_hints: Default::default(),
+        scheduled_fire: None,
         validate_only: request.validate_only,
     };
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
@@ -364,15 +382,17 @@ fn preflight_dispatch_launch_core(
         request.provenance,
     )
     .map_err(DispatchError::Internal)?;
-    ryeos_executor::dispatch::preflight_root_dispatch(
+    ryeos_executor::dispatch::preflight_root_dispatch_for_provenance(
         request.item_ref.as_str(),
         request.item_ref.kind(),
         request.parameters,
         request.ref_bindings,
+        request.product_selections,
         request.usage_subject,
         request.usage_subject_asserted_by,
         &project_binding,
         &exec_ctx,
+        request.provenance,
         request.state,
         request.launch_timings,
     )
@@ -386,6 +406,8 @@ pub(crate) struct OwnedDispatchPreflight {
     pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     pub parameters: Value,
     pub ref_bindings: BTreeMap<String, String>,
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     pub principal_id: String,
     pub principal_scopes: Vec<String>,
     pub origin_site_id: String,
@@ -420,6 +442,7 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
             provenance: &request.provenance,
             parameters: &request.parameters,
             ref_bindings: &request.ref_bindings,
+            product_selections: &request.product_selections,
             principal_id: &request.principal_id,
             principal_scopes: &request.principal_scopes,
             origin_site_id: &request.origin_site_id,
@@ -525,6 +548,7 @@ fn spawn_dispatch_launch_inner(
     let root_admission = options.root_admission;
     let root_dispatch_evidence = options.root_dispatch_evidence;
     let ref_bindings = options.ref_bindings;
+    let product_selections = options.product_selections;
     let handler_context = options.handler_context;
     let captured_generation = options.captured_generation;
     let first_poll_timer = launch_timings.as_ref().map(|timings| {
@@ -576,6 +600,7 @@ fn spawn_dispatch_launch_inner(
             validate_only,
             params: parameters,
             ref_bindings,
+            product_selections,
             acting_principal: principal_id.as_str(),
             project_path: project_path_buf.as_path(),
             provenance,
@@ -686,6 +711,14 @@ fn spawn_dispatch_launch_inner(
                         }
                     }
                     Ok(None) => {
+                        if !permits_missing_thread_diagnostic_root(&e) {
+                            tracing::debug!(
+                                thread_id = %pre_minted_thread_id,
+                                code = e.code(),
+                                "launch failed before authoritative root admission; skipping diagnostic root fallback"
+                            );
+                            return Err(LaunchSpawnError::Dispatch(e));
+                        }
                         let failure_request = match root_admission
                             .execution_request_for_selected_route(
                                 launch_mode.clone(),
@@ -843,6 +876,17 @@ mod tests {
         };
         let e = LaunchSpawnError::Dispatch(de);
         assert_eq!(e.code(), "not_root_executable");
+    }
+
+    #[test]
+    fn only_prebirth_refusal_disables_missing_thread_diagnostic_root() {
+        let ordinary = DispatchError::Conflict("admitted launch failure".to_string());
+        assert!(permits_missing_thread_diagnostic_root(&ordinary));
+
+        let prebirth = DispatchError::pre_birth_admission_refused(DispatchError::Conflict(
+            "authority conditioning failed".to_string(),
+        ));
+        assert!(!permits_missing_thread_diagnostic_root(&prebirth));
     }
 
     #[tokio::test(flavor = "current_thread")]

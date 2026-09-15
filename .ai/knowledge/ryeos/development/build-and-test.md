@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T02:25:04Z:04e5b742ca532562bc6d48ff2b3c8bd9cbd1f7463d38ce6f731a1cf08f1cdb01:wVR/FHW+sb6hPdkb22ofXkz/X2vhzxqgyK3u9iH9G3GHg7nGtklINIpm3p8VSR+DMG/0i4yuRRZKrk8gKjFUCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-07T06:05:34Z:fbc984b45e09df6173f616214c05e7d46861fa2cedd8bcc6b4b780c0501a51e9:a8lQ14sR0pVJYLoHC64vrL99MGEnI8FsHat6kq4RldM4R57FYBDFzV7Nfyia4aY4wFTQ0ZNuFNRV/oI8LYODBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -235,6 +235,6 @@ work around it by adding kind-specific CLI dispatch logic.
 |---|---|---|
 | `scripts/gate.sh` | canonical validation | nextest by default; builds/signs bundles first only with `--refresh-bundles` |
 | `scripts/populate-bundles.sh` | bundle authoring refresh | derived state only; safe to rerun |
-| `scripts/dev/qualify-configured-remote.sh` | generic full-project remote round-trip probe | requires an already-running, configured, exactly authorized remote with the exact binding; retains integrity-only operational evidence outside the project |
+| `tests/e2e/configured-remote/qualify.sh` | generic full-project remote round-trip probe | requires an already-running, configured, exactly authorized remote with the exact binding; retains integrity-only operational evidence outside the project |
 | `scripts/pkg/install-local-direct.sh` | fast local packaged install | uses `/usr/bin` + `/usr/share/ryeos`; populates only with explicit `--populate` |
-| `scripts/smoke-execute-stream.sh` | signed `/execute/stream` SSE smoke | needs URL, key, audience |
+| `tests/e2e/execute-stream/smoke.sh` | signed `/execute/stream` SSE smoke | needs URL, key, audience |

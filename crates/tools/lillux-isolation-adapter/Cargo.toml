@@ -1,0 +1,15 @@
+[package]
+name = "ryeos-lillux-isolation-adapter"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "ryeos-lillux-isolation-adapter"
+path = "src/main.rs"
+
+[dependencies]
+lillux = { workspace = true }
+ryeos-isolation-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

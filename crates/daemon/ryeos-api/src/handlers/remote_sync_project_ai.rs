@@ -76,7 +76,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &authority,
         &binding.local_project_path,
         &binding.remote_project_path,
-        Some(&remote_ignore),
+        &remote_ignore,
     )
     .await?;
 

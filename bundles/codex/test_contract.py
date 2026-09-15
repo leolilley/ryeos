@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-12T04:00:24Z:1682163c03cbea062b011361fcd369b23cb91ac83aa18bc2a66726b7cfc6aae3:AIs4yXWz/nkmTptmlmv8R9othPm3awSJ7SYN0lS14SmvQqsedOxLxVYYGtu6E/Bzw7PMdk6Nl5bG+2oslUsUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -5,10 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import re
 import stat
+import tomllib
 import unittest
 
 import yaml
@@ -30,6 +31,7 @@ README_PATH = BUNDLE / "README.md"
 WORKER_EXECUTION_PATHS = (
     BUNDLE / ".ai/worker-executions/codex/login.yaml",
     BUNDLE / ".ai/worker-executions/codex/session.yaml",
+    BUNDLE / ".ai/worker-executions/codex/bounded-turn.yaml",
 )
 
 
@@ -68,6 +70,97 @@ def source_manifest_digest() -> str:
 
 
 class CodexContractTests(unittest.TestCase):
+    def test_runtime_realizations_never_write_project_mountpoints(self) -> None:
+        # These are process dependencies, not project data. Creating their
+        # mountpoints in a writable project overlay contaminates frozen source.
+        for path in (WORKER_PATH, WORKER_PATH.with_name("hosted-authoring.yaml"), ENVIRONMENT_PATH):
+            definition = yaml.safe_load(path.read_text())
+            self.assertTrue(definition["external_content"])
+            for realization in definition["external_content"]:
+                self.assertEqual(realization["mount_root"], "execution_runtime", path)
+
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            profile = json.loads((SOURCE / name).read_text())
+            baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+            argument = next(arg for arg in profile["workload_args"] if arg.startswith("permissions="))
+            self.assertEqual(tomllib.loads(argument)["permissions"], baseline["permissions"])
+            filesystem = baseline["permissions"]["ryeos-workspace-only"]["filesystem"]
+            worker_path = WORKER_PATH if name == "structured-session.profile.json" else WORKER_PATH.with_name("hosted-authoring.yaml")
+            worker = yaml.safe_load(worker_path.read_text())
+            for realization in worker["external_content"]:
+                self.assertEqual(filesystem["/ryeos/realizations/" + realization["mount"]], "read")
+            if name == "structured-session.profile.json":
+                environment = yaml.safe_load(ENVIRONMENT_PATH.read_text())
+                for realization in environment["external_content"]:
+                    self.assertEqual(filesystem["/ryeos/realizations/" + realization["mount"]], "read")
+            self.assertEqual(filesystem[":root"], "deny")
+            self.assertFalse(baseline["permissions"]["ryeos-workspace-only"]["network"]["enabled"])
+            expected_code_mode_host = name == "authoring.profile.json"
+            self.assertEqual(
+                baseline["features"]["code_mode_host"], expected_code_mode_host
+            )
+            self.assertFalse(baseline["features"]["code_mode"]["enabled"])
+            feature_args = [arg for arg in profile["workload_args"]
+                            if arg.startswith("features=")]
+            self.assertEqual(len(feature_args), 1)
+            self.assertIn(
+                f"code_mode_host={'true' if expected_code_mode_host else 'false'}",
+                feature_args[0],
+            )
+
+    def test_turn_settings_notification_is_typed_bounded_testimony(self) -> None:
+        schema_path = SOURCE / "schema/ThreadSettingsUpdatedNotification.json"
+        schema = json.loads(schema_path.read_text())
+        self.assertEqual(schema["title"], "ThreadSettingsUpdatedNotification")
+        self.assertEqual(set(schema["required"]), {"threadId", "threadSettings"})
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            profile = json.loads((SOURCE / name).read_text())
+            notification = next(n for n in profile["notifications"]
+                                if n["method"] == "thread/settings/updated")
+            self.assertEqual(notification["schema"], "schema/ThreadSettingsUpdatedNotification.json")
+            self.assertEqual(notification["upstream_session_pointer"], "/message/params/threadId")
+            self.assertTrue(notification["durable"])
+            self.assertEqual(notification["observations"], [])
+            fields = notification["payload"]["fields"]
+            self.assertEqual(set(fields), {"thread_id", "model", "model_provider", "settings_digest"})
+            self.assertEqual(fields["settings_digest"]["op"], "digest")
+            for field in ("thread_id", "model", "model_provider"):
+                self.assertEqual(fields[field]["max_string_bytes"], 256)
+
+    def test_shell_environment_retains_only_exact_child_transport_and_locale(self) -> None:
+        for profile_name in ("structured-session.profile.json", "authoring.profile.json"):
+            profile = json.loads((SOURCE / profile_name).read_text())
+            args = [arg for arg in profile["workload_args"]
+                    if arg.startswith("shell_environment_policy=")]
+            self.assertEqual(len(args), 1)
+            policy = tomllib.loads(args[0])["shell_environment_policy"]
+            baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+            self.assertEqual(policy, baseline["shell_environment_policy"])
+            # Includes filter the inherited set. The allowlist must
+            # remain finite: never expose all RYEOS_* or credential variables.
+            self.assertEqual(policy["inherit"], "all")
+            self.assertFalse(policy["ignore_default_excludes"])
+            self.assertNotIn("set", policy)
+            self.assertEqual({key for key, value in policy["filters"].items()
+                              if value == "include"}, {
+                "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+                "TZ", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_PAGER",
+            } | ({"TMPDIR"} if profile_name == "authoring.profile.json" else set()))
+            for name in ("HOME", "CODEX_HOME", "DBUS_*", "SSH_*", "*PROXY"):
+                self.assertEqual(policy["filters"][name], "exclude")
+
+    def test_profile_discovery_uses_owner_scoped_generic_service(self) -> None:
+        command = yaml.safe_load((BUNDLE / ".ai/node/commands/profile-list.yaml").read_text())
+        service = yaml.safe_load((BUNDLE.parent / "core/.ai/services/credential-profiles/list.yaml").read_text())
+        self.assertEqual(command["tokens"], ["codex", "profile", "list"])
+        self.assertEqual(command["dispatch"]["execute"], "service:credential-profiles/list")
+        self.assertEqual(command["dispatch"]["availability"], "daemon")
+        self.assertEqual(service["endpoint"], "credential-profiles.list")
+        self.assertEqual(service["required_caps"], ["ryeos.execute.service.credential-profiles/list"])
+        self.assertEqual(service["state_access"], "read_only_existing")
+        self.assertTrue(service["ui_read_only"])
+        self.assertEqual(set(service["schema"]), {"limit", "after"})
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
@@ -174,9 +267,29 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(manifest_digest, "f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5")
         self.assertIn(f"    digest: {manifest_digest}", environment)
         self.assertIn("    - realization_id: command-tools", environment)
-        self.assertIn("schema: ryeos.worker_environment.v3", environment)
+        self.assertIn("schema: ryeos.worker_environment.v6", environment)
+        self.assertIn("external_product_slots: []", environment)
         self.assertIn("  process_environment: {}", environment)
         self.assertIn("      relative_directory: bin", environment)
+        self.assertIn("workload_client: null", environment)
+
+    def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
+        self.assertEqual(self.profile["schema_version"], 6)
+        self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
+        self.assertIsNone(self.profile["workload_client"])
+        immutable_args = "\n".join(self.profile["workload_args"])
+        self.assertNotIn("/tmp/.ryeos-wc", immutable_args)
+        self.assertNotIn("RYEOS_WORKLOAD_CLIENT_ENDPOINT", immutable_args)
+        self.assertIn('":tmpdir"="deny"', immutable_args)
+        self.assertIn('":slash_tmp"="deny"', immutable_args)
+        self.assertNotIn('"RYEOS_*"="exclude"', immutable_args)
+
+        baseline = (SOURCE / self.profile["baseline_config"]).read_text()
+        self.assertNotIn("/tmp/.ryeos-wc", baseline)
+        self.assertNotIn("RYEOS_WORKLOAD_CLIENT_ENDPOINT", baseline)
+        self.assertIn('":tmpdir" = "deny"', baseline)
+        self.assertIn('":slash_tmp" = "deny"', baseline)
+        self.assertNotIn('"RYEOS_*" = "exclude"', baseline)
 
     def test_hosted_workflow_profile_admits_the_signed_worker(self) -> None:
         worker = yaml.safe_load(WORKER_PATH.read_text(encoding="utf-8"))
@@ -195,10 +308,10 @@ class CodexContractTests(unittest.TestCase):
         match = re.search(r"(?m)^HOSTED_SCOPES='([^']+)'$", readme)
         self.assertIsNotNone(match, "runbook HOSTED_SCOPES declaration is absent")
         hosted_scopes = set(match.group(1).split(","))
+        self.assertIn("ryeos.execute.service.credential-profiles/list", hosted_scopes)
         declared_runtime_scopes = set()
         for path in WORKER_EXECUTION_PATHS:
-            body = "\n".join(path.read_text(encoding="utf-8").splitlines()[1:])
-            execution = yaml.safe_load(body)
+            execution = yaml.safe_load(path.read_text(encoding="utf-8"))
             declared_runtime_scopes.update(
                 execution["requires"]["capabilities"]["declared"]
             )
@@ -223,22 +336,40 @@ class CodexContractTests(unittest.TestCase):
         ):
             self.assertNotIn(internal_scope, hosted_scopes)
 
-    def test_portable_session_has_a_finite_conserved_execution_allowance(self) -> None:
-        session_path = BUNDLE / ".ai/worker-executions/codex/session.yaml"
-        body = "\n".join(session_path.read_text(encoding="utf-8").splitlines()[1:])
-        session = yaml.safe_load(body)
+    def test_worker_profiles_bound_time_without_claiming_subscription_spend(self) -> None:
+        # These profiles enforce process/execution time, not the frontier
+        # subscription's financial allowance. Financial limits belong only to
+        # an execution that has admitted provider-accounting authority.
+        for path in WORKER_EXECUTION_PATHS:
+            with self.subTest(profile=path.stem):
+                execution = yaml.safe_load(path.read_text(encoding="utf-8"))
+                self.assertNotIn("spend_usd", execution["limits"])
+                self.assertGreater(execution["config"]["max_lifetime_seconds"], 0)
+                self.assertGreaterEqual(
+                    execution["limits"]["duration_seconds"],
+                    execution["config"]["max_lifetime_seconds"],
+                )
 
-        # worker-execution-runtime has no direct provider financial authority:
-        # this is the finite RyeOS execution allowance that can be transferred
-        # exactly across placements, not evidence of ChatGPT subscription spend.
-        allowance = session["limits"]["spend_usd"]
-        self.assertIsInstance(allowance, str)
-        self.assertRegex(allowance, r"^(0|[1-9][0-9]*)(\.[0-9]+)?$")
-        try:
-            parsed = Decimal(allowance)
-        except InvalidOperation as error:
-            self.fail(f"session allowance is not a canonical decimal: {error}")
-        self.assertGreater(parsed, Decimal(0))
+    def test_worker_profiles_combine_mode_disposition_and_delegation_ceiling(self) -> None:
+        for path in WORKER_EXECUTION_PATHS:
+            with self.subTest(profile=path.stem):
+                execution = yaml.safe_load(path.read_text(encoding="utf-8"))
+                config = execution["config"]
+                bounded = path.stem == "bounded-turn"
+                self.assertEqual(
+                    config["mode"]["kind"], "bounded_turn" if bounded else "session"
+                )
+                self.assertEqual(
+                    config["candidate_disposition"],
+                    "retained_for_review" if bounded else "owner_decision",
+                )
+                self.assertEqual(
+                    config["workload_client_delegation_caps"],
+                    [] if path.stem == "login" else ["ryeos.execute.tool.*"],
+                )
+                if bounded:
+                    self.assertEqual(execution["limits"]["turns"], 1)
+                    self.assertEqual(config["mode"]["max_uncontacted_attempts"], 3)
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
         activation = ACTIVATION_PATH.read_text(encoding="utf-8")
@@ -471,11 +602,12 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
-        worker = WORKER_PATH.read_text(encoding="utf-8")
-        source = worker[worker.index("\nsource:\n") :]
-        match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)
-        self.assertIsNotNone(match, "worker source digest is absent")
-        self.assertEqual(match.group(1), source_manifest_digest())
+        for path in (WORKER_PATH, WORKER_PATH.with_name("hosted-authoring.yaml")):
+            worker = path.read_text(encoding="utf-8")
+            source = worker[worker.index("\nsource:\n") :]
+            match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)
+            self.assertIsNotNone(match, "worker source digest is absent")
+            self.assertEqual(match.group(1), source_manifest_digest())
 
 
 if __name__ == "__main__":

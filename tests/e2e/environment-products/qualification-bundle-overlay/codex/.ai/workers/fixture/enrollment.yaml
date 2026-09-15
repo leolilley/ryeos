@@ -1,0 +1,29 @@
+category: fixture
+version: "1.0.0"
+executor_id: "@subprocess"
+description: Offline credential-enrollment adapter over the fixture's fixed runtime pin
+execution_protocol: protocol:ryeos/core/structured_session
+session_resources:
+  real_uid_process_limit: 4096
+supported_target:
+  os: linux
+  arch: x86_64
+source:
+  root: lib/hosted
+  entry: profile.json
+  digest: FIXTURE_SOURCE_DIGEST
+external_content:
+  - id: runtime
+    kind: tree
+    mode: pinned
+    digest: 94c66e97825a25091abe924ae3de4715d26469332aa59f31cfb39854bdb59881
+    mount_root: execution_runtime
+    mount: runtime
+config:
+  command: bin:core/ryeos-structured-session-bridge
+  args: ["${source.entry}"]
+  env:
+    PATH: ""
+    LANG: C
+    LC_ALL: C
+  timeout_secs: 0

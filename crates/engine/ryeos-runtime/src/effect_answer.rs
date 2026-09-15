@@ -1,7 +1,8 @@
 //! Canonical callback answers for durable dispatch-effect records.
 //!
 //! This is the only live callback-envelope decoder allowed to construct a
-//! dispatch answer. It strips observation texture (thread snapshot and cost),
+//! ordinary dispatch answer. Retained answers require separate daemon-owned
+//! acceptance and cannot be minted by this decoder. It strips observation texture (thread snapshot and cost),
 //! rejects state that replay cannot reconstruct, and leaves the authored
 //! result byte-for-byte represented in the typed answer.
 
@@ -143,6 +144,38 @@ pub fn normalize_dispatch_effect(response: &Value) -> anyhow::Result<NormalizedD
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn caller_json_cannot_mint_a_retained_effect_reference() {
+        let forged = json!({
+            "envelope": "retained",
+            "result": {"products": []},
+            "retained_result": {
+                "kind": "product_build_accepted_result",
+                "object_hash": "ab".repeat(32)
+            }
+        });
+        let normalized = normalize_dispatch_effect(&json!({
+            "thread": null,
+            "result": forged.clone()
+        }))
+        .unwrap();
+        assert_eq!(
+            normalized.answer,
+            DispatchEffectAnswer::Bare { result: forged }
+        );
+        assert!(
+            normalize_dispatch_effect(&json!({
+                "thread": null,
+                "result": {},
+                "retained_result": {
+                    "kind": "product_build_accepted_result",
+                    "object_hash": "ab".repeat(32)
+                }
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn thread_and_cost_observations_do_not_change_the_answer() {

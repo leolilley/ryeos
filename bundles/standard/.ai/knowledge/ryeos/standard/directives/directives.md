@@ -1,63 +1,74 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:01c99c3dcc8aedb18cec7fb0ad555402858c43609b408811dc112a7aa307468e:xgY3pjUzEM3Fs3gH+phgbBmUDlEDjLMB6M+azNmqR3om+nzNupLX2iI3ALrXYiJacZo7CfXxhmX8gqwTykkpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T02:15:39Z:7ba03840f38ab2ba3b1330394e2ec62e5a28e2fd52ee72f4a90736b733c55dfd:JuJ/hspftKWwmmHgQPCsXh1/mge0dxbzhpUsuxCC3ok+wKm/uhisv9z3YBcrTKjlq426mKaZ+HR7FExmIYlBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
-version: "2.0.1"
+version: "2.1.0"
 description: >
-  How directives work — YAML frontmatter, XML process body,
+  How directives work — YAML frontmatter, free-form prompt body,
   inheritance (extends), capability requirements, limits, and context blocks.
 ---
 
 # Directives
 
-Directives are the primary LLM-facing item in Rye OS. A directive is a
-markdown file with a YAML frontmatter header (metadata) and an XML process
-body (instructions for the LLM to follow).
+**A directive authors executable intent for a model—not necessarily an
+enduring assistant persona.** It is the primary model-driven item in RyeOS:
+authored instructions, composed context, capability requirements and limits.
+A markdown file carries the definition; an admitted invocation performs it.
+
+## Why a directive, rather than an agent?
+
+Start by asking what work requires judgment, what inputs it receives and what
+it may do. You do not first need to invent a persistent character, workspace
+owner or independent identity.
+
+A directive may classify one observation, propose an experiment, or conduct a
+longer tool-using investigation within its limits. The runtime's model/tool
+loop overlaps with what other systems call an agent loop. The distinction is
+what the item names: executable work, not necessarily an enduring entity.
+
+The definition, its individual executions, the model/runtime and the principal
+authorising the work are different things. A model's role description is
+prompt content; it does not create a key or grant capabilities. See
+[Identity model](../../core/identity-model.md).
+
+## Compose judgment into a system
+
+Tools perform operations, directives exercise model-driven judgment, and graphs
+coordinate explicit transitions. The project defines objectives and required
+evidence. A campaign can use a directive without delegating its acceptance
+criteria or publication authority to that directive.
+
+For example, a directive can propose a candidate from admitted observations;
+a tool can evaluate it; a graph can require that result before a separately
+authorised publication. A successful directive return establishes completion,
+not that the proposal is correct or approved.
+
+This is a design pattern, not a requirement to put every decision in a graph.
+Direct execution and open-ended investigation remain valid within their
+admitted contracts. Assistant experiences can also be built on this substrate.
 
 ## File Format
 
 ```markdown
 ---
-description: "Deploy the project to staging"
+description: "Review a proposed deployment from supplied evidence"
 version: "1.0.0"
-extends: "directive:base/workflow"
 model:
   tier: high
 requires:
   capabilities:
-    declared:
-      - ryeos.execute.tool.ryeos.file-system.*
+    declared: []
 limits:
   turns: 10
   tokens: 8000
   spend_usd: "0.5"
   duration_seconds: 300
-context:
-  - position: system
-    ref: "knowledge:ryeos/core/signing"
-  - position: system
-    content: "Project uses pnpm and deploys to AWS."
 ---
 
-<process>
-  <step name="validate">
-    <instruction>
-      Validate that ${inputs.environment} is one of: staging, production.
-    </instruction>
-  </step>
+Review the proposed deployment to ${inputs.environment} using the supplied
+evidence. Identify unresolved risks and missing checks. Distinguish observed
+facts from assumptions, and return a concise recommendation.
 
-  <step name="deploy">
-    <instruction>
-      Deploy the project:
-      `rye_execute(item_id="tool:my/project/deploy", parameters={"env": "${inputs.environment}"})`
-    </instruction>
-  </step>
-
-  <step name="confirm">
-    <render>
-    Deployed to ${inputs.environment} successfully.
-    </render>
-  </step>
-</process>
+This review does not authorise or perform deployment.
 ```
 
 The `name` and `category` fields are NOT in the frontmatter — they are
@@ -65,21 +76,22 @@ derived automatically from the file path:
 - `name` comes from the filename (e.g., `deploy.md` → name: `deploy`)
 - `category` comes from the parent directory (e.g., `my-project/deploy.md` → category: `my-project`)
 
-## Body: XML Process Tags
+## Body: prompt text
 
-The body uses structured XML tags to give the LLM clear, parseable instructions:
+The body is free-form prompt text, commonly written in Markdown. RyeOS does
+not require XML, a `<process>` wrapper, an `<Identity>` section, or any ordering
+between role instructions and task instructions. Authors may use headings,
+lists or tags when useful, but they are prompt structure, not an execution DSL.
 
-- `<process>` — top-level container for all steps
-- `<step name="...">` — named execution step, optional `condition` attribute
-- `<instruction>` — tells the LLM what to do (followed silently)
-- `<render>` — text output verbatim to the user (not interpreted by the LLM)
-- `<Identity>` — establishes the LLM's persona (placed before `<process>`)
+In particular, a `<render>` tag does not bypass model interpretation or
+guarantee verbatim output. Named steps and condition attributes in prompt text
+do not establish mechanically enforced ordering or branching. Use executable
+workflow contracts where those guarantees are required. A prompted role does
+not establish cryptographic identity or authority.
 
-Rules:
-- Output `<render>` blocks verbatim — do not summarize or rephrase
-- Follow `<instruction>` blocks silently — do not narrate the thinking
-- Steps run in order unless a `condition` is specified
-- Use rye-expr/1 `${inputs.name}` expressions for input interpolation. Use
+### Input interpolation
+
+Use rye-expr/1 `${inputs.name}` expressions for input interpolation. Use
   `${inputs.name ?? "default"}` for a nullish fallback and `${json(inputs.value)}`
   when structured data must be embedded in text. Directive bodies expose only
   the `inputs` root, and each reference must name one exact input. Dynamic

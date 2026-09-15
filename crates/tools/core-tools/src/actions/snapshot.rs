@@ -46,19 +46,10 @@ pub struct SnapshotShowParams {
 }
 
 pub fn run_status(params: SnapshotStatusParams) -> Result<Value> {
-    if std::env::var_os("RYEOSD_THREAD_ID").is_some() {
-        return invoke("status", serde_json::to_value(params)?);
-    }
-    let app_root = std::env::var_os("RYEOS_APP_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| dirs::data_dir().map(|path| path.join("ryeos")))
-        .context("cannot resolve app root for offline snapshot status")?;
-    ryeos_app::runtime_project_snapshot_service::offline_status(
-        &app_root,
-        &params.project_path,
-        params.include_unchanged,
-        params.time_budget_ms,
-    )
+    // The operator CLI uses the node-owned Both-mode service. This Tool is
+    // exclusively a callback client, just like log/create/show; no missing
+    // callback may trigger local node-key, state, or policy bootstrap.
+    invoke("status", serde_json::to_value(params)?)
 }
 
 pub fn run_log(params: SnapshotLogParams) -> Result<Value> {

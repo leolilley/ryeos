@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-04T06:00:33Z:8db62f784c73540345662edaf8354168a899cf6f6ac87675af3f1ef5a0c50193:N77KkxugHx31fLiaEHxkjCbDLSsMF97PZ48GxJ9rAI8BDfpwKTxb3clb+EtWqLNdwJQfbCaM/W8ZZDRmmhndCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-12T04:00:24Z:722b59d3ebbbe95bd5899a693da2bb852a1ecba541232153b56099a35d854a62:Rwc/Hb7ipGosV7/RbjwrzFYwoxWKIlVEqamIyplbFo9R5DQgk5dCRXdqstihnsnW/u3A6L/Un9I6IlJiBTryAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.7.0"
+version: "1.10.2"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -10,18 +10,30 @@ description: >
 
 # Hosted Codex activation and acceptance
 
+The pinned `thread/settings/updated` notification is explicitly schema-validated
+and correlated to the bound upstream session. Its durable event retains only
+the bounded thread/model/provider identifiers and a settings digest, not raw
+paths or instructions. It is workload testimony, not a change to RyeOS grants
+or lifecycle authority. Turn-level model/effort selection can emit this event
+before the start response; it must not be mistaken for an unknown protocol
+message. Other undeclared notifications remain fail-closed.
+
+The worker-environment v6 sources explicitly set `external_product_slots: []`.
+These installed bundle environments retain literal pins; dynamic product slots
+are limited to separately admitted pinned-project environment Configs.
+
 The Codex bundle hosts the pinned Codex App Server using ChatGPT subscription
 authentication managed by Codex. It does not route Codex through RyeOS local
 inference. The executable, its same-version code-mode host, its packaged
 model-command runtime resources, and App Server schemas are pinned by
 activation and source closure.
 
-The signed session item carries a finite RyeOS `spend_usd` execution allowance
-so the accounting ledger can conserve one exact allowance across placement
-handoff. The worker-execution runtime has no provider financial authority and
-Codex does not expose ChatGPT-subscription charges to this contract. The
-allowance is therefore placement authority only: it is not observed usage, a
-billing limit, or evidence of subscription spend.
+The signed Codex worker profiles do not claim a finite RyeOS `spend_usd`
+allowance. The worker-execution runtime has no provider financial authority,
+and Codex does not expose authoritative ChatGPT-subscription charges to this
+contract. Unattended execution can still use the shared whole-tree duration,
+logical-worker, and bounded hosted-turn contact ceilings; none of those is
+presented as subscription billing evidence.
 
 This is installed operator knowledge shipped by the Codex bundle. It documents
 how to activate and accept that optional integration; it is not a RyeOS
@@ -32,12 +44,36 @@ knowledge bundle.
 
 ## Activation
 
+Before creating another login, discover the existing profiles on the selected
+node through the CLI:
+
+```sh
+ryeos codex profile list
+ryeos codex profile get <profile-id>
+```
+
+The list is restricted to the authenticated operator and contains profile IDs,
+lifecycle state, credential generation, whether the profile is in use, and
+creation/update timestamps. It does not read private homes or expose account,
+login, or token contents. An empty `profiles` array means this owner has no
+registered profiles on that node; it says nothing about another node or the
+ordinary Codex CLI login. Deleted profiles are omitted. The default page size
+is 50 (maximum 200); pass `--limit` and then `--after <next_cursor>` for further
+pages until `next_cursor` is null.
+
+This is the generic owner-authorized `service:credential-profiles/list` surface.
+A configured remote operator must have the explicit
+`ryeos.execute.service.credential-profiles/list` capability and use the normal
+configured-operator forwarding route to inspect profiles on a remote node.
+
 1. Publish the `hosted-workflow` set containing `core`, `central-auth`,
    `standard`, `hosted-node`, and `codex`. Generic worker-execution runtime/preparer
    binaries belong to `core`; the generic knowledge kind belongs to
    `standard`; bridge/profile and all Codex-specific data belong to `codex`.
-2. Before starting the hosted daemon, author both node-owned policies outside
-   the live node namespace. Managed activation requires no named filesystem
+2. Use the installed profile's complete node-owned policy generation. Only
+   when changing its values, prepare replacement members outside the live node
+   namespace and apply them with the stopped-node command below. Managed
+   activation requires no named filesystem
    root: the daemon acquires exact signed bytes into its typed private runtime
    root and feeds them through the existing import and consumer-binding
    authorities. The external-content policy must explicitly grant the one
@@ -87,7 +123,7 @@ knowledge bundle.
      max_total_backlog_bytes: 67108864
    ```
 
-   A fresh `hosted-workflow`, `full`, or `full-sandbox` installation selects a
+   A fresh `hosted-workflow` or `full` installation selects a
    publisher-signed init profile containing these values and publishes one
    complete node-signed generation under `<system>/.ai/node/policies/`.
    `external_content.yaml` and `persistent_sessions.yaml` are mandatory
@@ -120,7 +156,7 @@ knowledge bundle.
    cache.
 
    `config:codex/environments/default` uses the closed
-   `ryeos.worker_environment.v3` contract. Its `executable_search` contributes
+   `ryeos.worker_environment.v6` contract. Its `executable_search` contributes
    only the exact activated command-tool tree to `PATH`. Its independent
    `process_environment` map may contribute bounded literals, paths inside an
    explicitly named activated realization, or directories below the
@@ -129,9 +165,71 @@ knowledge bundle.
    placement. The complete retained map is limited to 32 entries and 4096
    serialized bytes. Values are never inherited from the daemon, read from the Codex
    credential home, or encoded as authored absolute paths. The pinned base
-   environment currently leaves `process_environment` empty; a separately
-   promoted development environment must name its own exact toolchain content
-   and cache bindings rather than borrowing tools from the container image.
+   environment currently leaves `process_environment` empty and its required-
+   nullable `workload_client` field is `null`. A separately promoted
+   development environment selects structured-session invocation and its finite
+   execution request; no unused restricted CLI realization is required.
+   Toolchain/dependency content
+   remains owned by each requested child tool rather than being borrowed from
+   the container image or added to the outer Codex process.
+
+   The authoring profile uses pinned App Server `dynamicTools` registration and
+   `item/tool/call` delivery. Its signed initialization explicitly enables the
+   pinned `experimentalApi` capability; this is a vendor protocol requirement,
+   not a separate RyeOS bundle or inference backend. The exact 0.147.0 binary's
+   credential-free registration probe passed; that alone is not model execution
+   or installed development-loop evidence. `ryeos_execute` accepts the existing
+   bounded execution request; the daemon retains and revalidates authority.
+
+   The minimal hosted profile disables Codex's Code Mode host. The authoring
+   profile enables the exact pinned same-version host for Codex's ordinary
+   read/edit/shell tools, while model-authored JavaScript Code Mode remains
+   disabled. This host is not a RyeOS execution authority: finite child RyeOS
+   operations are still registered as direct dynamic tools and revalidated by
+   the daemon. Model tool selection remains an acceptance property of the exact
+   Codex/model/profile generation; a completed turn without an edit or child
+   operation is not successful development evidence.
+
+   Ordinary shell/editing commands remain Codex commands. The Codex profiles
+   mount their executable resources and command tools in the existing immutable
+   execution-runtime namespace, not under the editable project. Their finite
+   nested-sandbox read permissions cover these exact pinned inputs. Runtime
+   mountpoint setup must not become source edits in a frozen candidate; inspect
+   the complete candidate diff independently of the task-specific evaluator.
+   Moving these mounts changes the admitted worker program and capsule, not
+   installed-bundle literal binding identity (consumer ref and publisher).
+   Revalidate exact retained manifests, bindings and current grants under the
+   new signed source; do not infer that unchanged bytes need acquisition or
+   that an old running capsule silently adopts the new program.
+
+   The Codex profiles
+   no longer expose `/tmp/.ryeos-wc` or its endpoint variable. Native CLI ingress
+   remains a separate RyeOS interface; connectivity from Codex's nested sandbox
+   is not qualified and must not be claimed from a protocol callback test.
+
+   `turn.start` selects `turn/started` as request-correlated early progress.
+   Its signed `/message/params/threadId` correlation must match the bound
+   thread before the bridge emits progress; another thread cannot establish
+   the active command's turn authority.
+   The generic wire-v2 progress acknowledgement precedes dispatch of a dynamic
+   tool request and publication of later turn notifications. The tool facade
+   has the exact name `ryeos_execute` and an absent/null namespace; another
+   namespace is refused. Registration uses the pinned experimental schema's
+   `type: function`. Vendor registration at fresh start is proven separately
+   from its restoration and actual callback execution after resume.
+   The authoring environment supplies `TMPDIR` through the existing typed
+   runtime-view directory contract. Its profile requires that variable before
+   workload launch, permits only that scratch directory, and keeps general
+   `/tmp` denied. No host path or ambient tmp default is selected.
+
+   Both signed Codex profiles pass only PATH, selected locale/terminal
+   variables, authored GIT_CONFIG_NOSYSTEM/GIT_CONFIG_GLOBAL/GIT_PAGER settings,
+   and authoring's declared `TMPDIR` into shell
+   children. They filter the bridge's admitted environment with a finite
+   include list. HOME, CODEX_HOME, credentials, proxy configuration and
+   other RYEOS variables are not child environment. Protocol invocation exposes
+   neither an operator CLI endpoint nor a new credential. See the
+   [Codex shell-environment semantics](https://learn.chatgpt.com/docs/config-file/config-advanced#shell-environment-policy).
 4. Keep the source operator private key at its operator endpoint and the
    hosted node's independent local operator private key at the hosted node.
    First admit the source node key on the target
@@ -262,6 +360,31 @@ reattach may advance the worker boot epoch after restart, but it does not
 replace the owner-route frontier proved by that fence; placement and admitted
 capsule must still match exactly.
 
+`worker_execution:codex/bounded-turn` packages that same generic protocol for
+one followed, unattended turn. Its signed routes and retry ceiling are fixed by
+the profile; invocation input supplies the credential profile, the two typed
+route payloads, and any separately admitted read-only evidence attachments.
+Only a root-proved uncontacted command can move to the next attempt. Successful
+completion freezes the private CoW result and terminalizes it as
+`retained_for_review`, so a graph follow receives a reviewable candidate and
+the exact command/turn/fence evidence without polling session status. This is
+additional to `codex/session`, which remains the interactive owner-directed
+session surface.
+
+The daemon applies the same bounded admission checks to runtime callbacks and
+owner commands: each route payload must match the sealed goal, attempts must
+stay within the signed ceiling, and retries require exact uncontacted
+predecessor testimony. New contact requires an approval-free idle session with
+no unresolved observation projection. Approval ingestion and the durable
+contact commit share a short transition gate; approvals accepted after that
+commit are post-contact events, not permission to start another turn.
+
+The creation-anchored worker lifetime and any aggregate execution deadline
+survive restart and also bound queued worker writes. A pending command or an
+already-reserved contact allowance cannot extend either deadline. Exact settled
+replay remains readable after expiry; a possible-contact boundary without a
+proven result remains unknown and is never resent.
+
 ## Mechanical policy boundary
 
 The signed profile launches Codex with immutable argv containing every
@@ -271,12 +394,11 @@ home, so RyeOS atomically resets the mode-0400 compatibility seed before every
 worker generation and never treats workload-authored changes as retained
 policy. If the node enables a generic enforced isolation backend, RyeOS
 additionally overlays that file read-only, but hosted Codex does not require
-RyeOS's optional Bubblewrap isolation bundle or another RyeOS isolation
-backend. OpenAI's standalone package requires its own private
+the node to enable RyeOS isolation. OpenAI's standalone package requires its own private
 `codex-resources/bwrap` companion for restricted Linux command execution, so
 the activation selects that exact file with the Codex executable, code-mode
 host, Zsh, and `rg`. This is workload-owned pinned content: it does not select
-RyeOS's Bubblewrap isolation backend, discover a host `bwrap`, or acquire
+RyeOS's isolation backend, discover a host `bwrap`, or acquire
 BusyBox. Immutable CLI overrides fix login, credential
 store, built-in provider, empty MCP map, approval routing, permission profile,
 command network, shell environment, and disabled helpers for process life.
@@ -298,11 +420,11 @@ compatibility seed still require exact non-link types and atomic reset before a
 credential-bearing process generation is released.
 
 For pinned Codex 0.147 the `on-request` approval policy is inherited from
-immutable CLI configuration. Request-level `approvalPolicy` is intentionally
-omitted because the stable App Server rejects a granular field unless the
-forbidden `experimentalApi` capability is enabled, while the pinned exec
-boundary rejects explicit sandbox escalation when the immutable policy itself
-uses the granular variant. Supported approval requests can therefore become a
+immutable CLI configuration. Request-level `approvalPolicy` is forbidden;
+enabling the authoring profile's pinned `experimentalApi` capability for
+dynamic tools does not let callers override this baseline. The pinned exec
+boundary also rejects explicit sandbox escalation when the immutable policy
+uses the granular variant. Supported approval requests can become a
 durable RyeOS approval request. Every retained App Server approval class is
 nevertheless `deny_only`:
 RyeOS can deliver decline/cancel, but an accept decision is refused before

@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-08T08:44:46Z:4f8b4f4b43fecb548e3b2cae5846ca5e458a6efea301cf8b14c1b30203992790:acjubXv3pKhxtkcgOxGbjOvO7qhUJlCa/yqIQ+kqvt23bfHLYY3BMqqRnsLMBpK/27jUa8Z0Ms5PGB8aj//xDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification
+version: "1.0.0"
+description: Independent policy for the exact selected native authoring runtime
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: tool:ryeos/environments/qualification/native-authoring/verify
+  subject_declaration_id: authoring-runtime
+  allowed_claims: [authoring_runtime_closed]
+  verifier_parameters: {}

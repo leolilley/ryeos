@@ -34,7 +34,10 @@ pub(crate) struct ThreadLaunchClaim {
     state: AppState,
     thread_id: String,
     claim_id: String,
-    owner: ryeos_app::runtime_db::LaunchOwner,
+    /// Exact canonical owner bytes already admitted by the durable claim.
+    /// Recovery handoff can install its failure owner without a new fallible
+    /// serialization gap after claim rotation.
+    canonical_owner: String,
 }
 
 impl ThreadLaunchClaim {
@@ -49,12 +52,12 @@ impl ThreadLaunchClaim {
             ryeos_app::runtime_db::daemon_generation_id(),
         )? {
             Some(claim) => {
-                let owner = claim.owner;
+                let canonical_owner = claim.claimed_by;
                 Ok(ThreadLaunchClaimOutcome::Claimed(Box::new(Self {
                     state: state.clone(),
                     thread_id: thread_id.to_string(),
                     claim_id,
-                    owner,
+                    canonical_owner,
                 })))
             }
             None => Ok(ThreadLaunchClaimOutcome::AlreadyClaimed),
@@ -74,12 +77,12 @@ impl ThreadLaunchClaim {
             ryeos_app::runtime_db::daemon_generation_id(),
         )? {
             Some(claim) => {
-                let owner = claim.owner;
+                let canonical_owner = claim.claimed_by;
                 Ok(Self {
                     state: state.clone(),
                     thread_id: thread_id.to_string(),
                     claim_id,
-                    owner,
+                    canonical_owner,
                 })
             }
             None => anyhow::bail!(
@@ -117,7 +120,7 @@ impl ThreadLaunchClaim {
                     state: state.clone(),
                     thread_id: thread_id.to_string(),
                     claim_id,
-                    owner: claim.owner,
+                    canonical_owner: claim.claimed_by,
                 },
                 next_attempt,
             },
@@ -131,7 +134,10 @@ impl ThreadLaunchClaim {
     }
 
     pub(crate) fn canonical_owner(&self) -> anyhow::Result<String> {
-        Ok(lillux::canonical_json(&serde_json::to_value(&self.owner)?)?)
+        // Preserve the Result-shaped API used by existing launch paths, but do
+        // not reserialize here. The durable claim owner was canonicalized and
+        // stored atomically by StateStore before this guard was constructed.
+        Ok(self.canonical_owner.clone())
     }
 }
 

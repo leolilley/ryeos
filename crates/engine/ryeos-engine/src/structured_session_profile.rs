@@ -2,7 +2,7 @@
 //!
 //! A profile is authority-bearing executable policy.  This compiler runs
 //! while the worker source closure is being admitted, before any process is
-//! launched.  It accepts only the fixed v1 vocabulary and exact local schema
+//! launched. It accepts only the current closed vocabulary and exact local schema
 //! blobs captured in the same signed source closure.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +16,37 @@ use ryeos_state::objects::AdmittedStructuredSessionProfile;
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+/// v6 makes the HTTP/SSE ignored-event representation explicit. Earlier
+/// profiles relied on a transport-side inference between an event envelope
+/// and its properties; that made the signed schema ambiguous. This remains a
+/// clean authority cut, so prior profiles are not reinterpreted.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 6;
+
+/// The closed workload transport vocabulary. The admission compiler and the
+/// bridge must accept exactly this set; adding a transport is a schema
+/// version decision, never a per-profile discovery.
+pub const STRUCTURED_SESSION_TRANSPORTS: [&str; 2] = ["stdio_jsonrpc", "http_sse"];
+
+/// Provider-neutral ingress mapping compiled as part of the signed protocol
+/// profile. It names wire fields, never a Tool implementation or live grant.
+/// Keep this type shared with the bridge; do not add a second runtime parser
+/// that accepts deeper or different authority than source admission.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuredSessionInvocationMapping {
+    pub registration_route: String,
+    pub registration_field: String,
+    pub registration: Value,
+    pub method: String,
+    pub request_schema: String,
+    pub response_schema: String,
+    pub session_pointer: String,
+    pub operation_pointer: String,
+    pub call_pointer: String,
+    pub required_values: BTreeMap<String, Value>,
+    pub request: Value,
+    pub response: Value,
+}
 
 pub fn compile(
     profile_bytes: &[u8],
@@ -29,13 +60,15 @@ pub fn compile(
     let object = profile
         .as_object()
         .ok_or_else(|| anyhow!("structured-session profile must be an object"))?;
-    let required = [
+    let mut required = [
         "schema_version",
         "configuration_authority",
         "workload_realization_id",
         "workload_executable",
         "workload_args",
         "workload_home_env",
+        "required_process_environment",
+        "workload_client",
         "baseline_config",
         "baseline_destination",
         "portable_state",
@@ -47,12 +80,127 @@ pub fn compile(
         "notifications",
         "ignored_notifications",
         "server_requests",
-    ];
+    ]
+    .to_vec();
+    if object.get("schema_version").and_then(Value::as_u64)
+        != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
+    {
+        bail!("structured-session profile schema is not admitted");
+    }
+    required.push("transport");
+    let http_transport = match object.get("transport").and_then(Value::as_str) {
+        Some(transport @ "http_sse") => {
+            if !STRUCTURED_SESSION_TRANSPORTS.contains(&transport) {
+                bail!("structured-session transport is not admitted");
+            }
+            true
+        }
+        Some("stdio_jsonrpc") => false,
+        _ => bail!("structured-session transport is not admitted"),
+    };
+    required.push("http_sse");
+    let mut http_credentials: Vec<&str> = Vec::new();
+    match (http_transport, object.get("http_sse")) {
+        (true, Some(credentials)) => {
+            let credentials = credentials.as_object().ok_or_else(|| {
+                anyhow!("structured-session HTTP credential environment block is invalid")
+            })?;
+            require_keys(
+                credentials,
+                &[
+                    "username_env",
+                    "password_env",
+                    "listener_stdout_prefix",
+                    "readiness_path",
+                    "readiness_schema",
+                    "event_path",
+                    "event_type_pointer",
+                    "event_properties_pointer",
+                    "ignored_notification_projection",
+                ],
+                &["seed_path_env"],
+            )?;
+            for key in ["username_env", "password_env"] {
+                let name = value_string(credentials, key)?;
+                crate::protocol_vocabulary::validate_env_name(name)
+                    .map_err(|error| anyhow!(error))?;
+                if http_credentials.contains(&name) {
+                    bail!("structured-session HTTP credential environments are duplicated");
+                }
+                http_credentials.push(name);
+            }
+            if let Some(seed) = credentials
+                .get("seed_path_env")
+                .filter(|value| !value.is_null())
+            {
+                let name = seed.as_str().ok_or_else(|| {
+                    anyhow!("structured-session seed path environment must be text")
+                })?;
+                crate::protocol_vocabulary::validate_env_name(name)
+                    .map_err(|error| anyhow!(error))?;
+                if http_credentials.contains(&name) {
+                    bail!("structured-session HTTP environment names are duplicated");
+                }
+                http_credentials.push(name);
+            }
+            let prefix = value_string(credentials, "listener_stdout_prefix")?;
+            if prefix.is_empty()
+                || prefix.len() > 512
+                || prefix.chars().any(char::is_control)
+                || !prefix.contains("http://127.0.0.1:")
+            {
+                bail!("structured-session HTTP listener prefix is not an exact loopback contract");
+            }
+            for key in ["readiness_path", "event_path"] {
+                validate_http_path(value_string(credentials, key)?, &[], false)?;
+            }
+            validate_relative_path(value_string(credentials, "readiness_schema")?)?;
+            for key in ["event_type_pointer", "event_properties_pointer"] {
+                validate_pointer(value_string(credentials, key)?)?;
+            }
+            match value_string(credentials, "ignored_notification_projection")? {
+                "envelope" | "properties" => {}
+                _ => {
+                    bail!("structured-session HTTP ignored-notification projection is not admitted")
+                }
+            }
+        }
+        (true, None) => {
+            bail!("structured-session HTTP transport lacks its credential environment block")
+        }
+        (false, Some(Value::Null)) => {}
+        (false, Some(_)) => {
+            bail!("structured-session HTTP credential block requires the HTTP transport");
+        }
+        (false, None) => {
+            bail!("structured-session HTTP credential block must be present and nullable");
+        }
+    }
     if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
         bail!("structured-session profile has an unknown or missing top-level field");
     }
-    if object.get("schema_version").and_then(Value::as_u64) != Some(1) {
-        bail!("structured-session profile schema is not admitted");
+    let home_env = value_string(object, "workload_home_env")?;
+    let mut admitted_environment: Vec<&str> = vec![home_env, "LANG", "LC_ALL", "HOME", "PATH"];
+    for name in bounded_array(object, "required_process_environment", 0, 64)? {
+        let name = name
+            .as_str()
+            .ok_or_else(|| anyhow!("required process environment name is not text"))?;
+        admitted_environment.push(name);
+    }
+    for name in &http_credentials {
+        if admitted_environment.contains(name) {
+            bail!(
+                "structured-session HTTP credential environment collides with admitted environment"
+            );
+        }
+    }
+    if http_transport
+        && !object
+            .get("initialization")
+            .and_then(Value::as_array)
+            .is_some_and(|steps| steps.is_empty())
+    {
+        bail!("structured-session HTTP transport admits no initialization handshake");
     }
     if object
         .get("configuration_authority")
@@ -62,11 +210,42 @@ pub fn compile(
         bail!("structured-session configuration authority is not immutable argv");
     }
     validate_identifier(value_string(object, "workload_realization_id")?)?;
-    validate_file_name(value_string(object, "workload_executable")?)?;
+    validate_workload_executable_member(value_string(object, "workload_executable")?)?;
     validate_file_name(value_string(object, "baseline_config")?)?;
     validate_file_name(value_string(object, "baseline_destination")?)?;
     crate::protocol_vocabulary::validate_env_name(value_string(object, "workload_home_env")?)
         .map_err(|error| anyhow!(error))?;
+    let mut previous_environment = None;
+    for name in bounded_array(object, "required_process_environment", 0, 64)? {
+        let name = name
+            .as_str()
+            .ok_or_else(|| anyhow!("required process environment name is not text"))?;
+        crate::protocol_vocabulary::validate_env_name(name).map_err(|error| anyhow!(error))?;
+        if previous_environment.is_some_and(|previous| previous >= name) {
+            bail!("required process environment names must be sorted and unique");
+        }
+        previous_environment = Some(name);
+    }
+    match object.get("workload_client") {
+        Some(Value::Null) => {}
+        Some(Value::Object(workload_client)) => {
+            require_keys(
+                workload_client,
+                &["cli_endpoint_env", "structured_session"],
+                &[],
+            )?;
+            if !workload_client["cli_endpoint_env"].is_null()
+                && workload_client["cli_endpoint_env"].as_str()
+                    != Some(crate::protocol_vocabulary::WORKLOAD_CLIENT_ENDPOINT_ENV)
+            {
+                bail!("structured-session CLI endpoint environment is not current");
+            }
+            if workload_client.values().all(Value::is_null) {
+                bail!("structured-session workload client declares no ingress");
+            }
+        }
+        _ => bail!("structured-session workload_client must be present and nullable"),
+    }
     if let Some(portable_state) = object
         .get("portable_state")
         .filter(|value| !value.is_null())
@@ -107,6 +286,12 @@ pub fn compile(
         "credential_delete",
     ];
     let mut schema_ids = BTreeSet::new();
+    if http_transport {
+        let http = object["http_sse"]
+            .as_object()
+            .expect("HTTP contract was validated above");
+        schema_ids.insert(value_string(http, "readiness_schema")?.to_owned());
+    }
     for route in routes {
         let route = route
             .as_object()
@@ -132,6 +317,11 @@ pub fn compile(
                 "session_binding",
                 "forbidden_fields",
                 "post_success_routes",
+                "progress_notifications",
+                "http_method",
+                "http_path",
+                "http_body_schema",
+                "http_path_parameters",
             ],
         )?;
         let id = value_string(route, "id")?;
@@ -141,6 +331,11 @@ pub fn compile(
         if !route_ids.insert(id.to_owned()) || !upstream_methods.insert(method.to_owned()) {
             bail!("structured-session route id or method is duplicated");
         }
+        let binding_action = route
+            .get("session_binding")
+            .and_then(Value::as_object)
+            .and_then(|binding| binding.get("action"))
+            .and_then(Value::as_str);
         if !allowed_effects.contains(&value_string(route, "effect_class")?) {
             bail!("structured-session route has an unknown effect class");
         }
@@ -219,6 +414,42 @@ pub fn compile(
         if route.contains_key("post_success_routes") {
             validate_string_array(route, "post_success_routes", 8, false)?;
         }
+        if route.contains_key("progress_notifications") {
+            validate_string_array(route, "progress_notifications", 1, false)?;
+            for method in route["progress_notifications"].as_array().unwrap() {
+                if route["session_binding"]["action"] != "require" {
+                    bail!("command progress requires an already-bound upstream session");
+                }
+                let notification = object
+                    .get("notifications")
+                    .and_then(Value::as_array)
+                    .and_then(|notifications| {
+                        notifications
+                            .iter()
+                            .find(|notification| notification["method"] == *method)
+                    })
+                    .ok_or_else(|| anyhow!("command progress names an undeclared notification"))?;
+                if notification["durable"] != true
+                    || !notification["upstream_session_pointer"].is_string()
+                    || notification["observations"]
+                        .as_array()
+                        .is_none_or(|values| values.len() != 1)
+                {
+                    bail!("command progress must select one durable lifecycle observation");
+                }
+                validate_progress_observation(
+                    &notification["observations"][0],
+                    "/message/params/",
+                )?;
+                if route["observations"]
+                    .as_array()
+                    .is_none_or(|values| values.len() != 1)
+                {
+                    bail!("progress route must corroborate one final lifecycle start");
+                }
+                validate_progress_observation(&route["observations"][0], "/response/result/")?;
+            }
+        }
         for field in [
             "workspace_fields",
             "forbidden_non_null_fields",
@@ -239,6 +470,7 @@ pub fn compile(
         if binding_request_field.is_some_and(|field| controlled_fields.contains(field)) {
             bail!("structured-session binding field overlaps another route field policy");
         }
+        validate_route_transport_addressing(route, http_transport, binding_action)?;
         validate_predicates(route.get("response_predicates"), 32)?;
         validate_observations(route.get("observations"), 16)?;
         if !matches!(
@@ -254,6 +486,9 @@ pub fn compile(
         }
         schema_ids.insert(value_string(route, "request_schema")?.to_owned());
         schema_ids.insert(value_string(route, "response_schema")?.to_owned());
+        if http_transport {
+            schema_ids.insert(value_string(route, "http_body_schema")?.to_owned());
+        }
     }
 
     let route_sets = object
@@ -411,7 +646,7 @@ pub fn compile(
         }
     }
 
-    for step in bounded_array(object, "initialization", 1, 8)? {
+    for step in bounded_array(object, "initialization", usize::from(!http_transport), 8)? {
         let step = step
             .as_object()
             .ok_or_else(|| anyhow!("structured-session initialization step must be an object"))?;
@@ -471,7 +706,7 @@ pub fn compile(
                 "observations",
                 "ceremony_clear",
             ],
-            &[],
+            &["upstream_session_pointer"],
         )?;
         let method = value_string(item, "method")?;
         validate_identifier(method)?;
@@ -488,6 +723,13 @@ pub fn compile(
             bail!("structured-session notification flags are invalid");
         }
         validate_template(item.get("payload"), 0, &mut 0)?;
+        if let Some(pointer) = item.get("upstream_session_pointer") {
+            validate_pointer(
+                pointer
+                    .as_str()
+                    .ok_or_else(|| anyhow!("notification session pointer must be a string"))?,
+            )?;
+        }
         validate_observations(item.get("observations"), 16)?;
         schema_ids.insert(value_string(item, "schema")?.to_owned());
     }
@@ -516,6 +758,66 @@ pub fn compile(
         );
     }
     let mut server_request_methods = BTreeSet::new();
+    if let Some(invocation) = object["workload_client"]
+        .get("structured_session")
+        .filter(|value| !value.is_null())
+    {
+        let mapping: StructuredSessionInvocationMapping =
+            serde_json::from_value(invocation.clone())
+                .context("compile structured-session invocation mapping")?;
+        validate_identifier(&mapping.method)?;
+        validate_identifier(&mapping.registration_route)?;
+        validate_field_name(&mapping.registration_field)?;
+        if notification_methods.contains(&mapping.method) || ignored.contains_key(&mapping.method) {
+            bail!("structured-session invocation method collides with a notification");
+        }
+        server_request_methods.insert(mapping.method.clone());
+        let route = routes
+            .iter()
+            .find(|route| route["id"].as_str() == Some(mapping.registration_route.as_str()))
+            .ok_or_else(|| anyhow!("invocation registration route is not admitted"))?;
+        if route["session_binding"]["action"].as_str() != Some("bind_new")
+            || !route["forbidden_fields"].as_array().is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|field| field.as_str() == Some(mapping.registration_field.as_str()))
+            })
+            || route["fixed_params"]
+                .get(&mapping.registration_field)
+                .is_some()
+            || route["workspace_fields"].as_array().is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|field| field.as_str() == Some(mapping.registration_field.as_str()))
+            })
+        {
+            bail!("invocation registration must exclusively own a caller-forbidden bind-new field");
+        }
+        let pointers = [
+            &mapping.session_pointer,
+            &mapping.operation_pointer,
+            &mapping.call_pointer,
+        ];
+        let mut distinct = BTreeSet::new();
+        for pointer in pointers {
+            validate_pointer(pointer)?;
+            if !pointer.starts_with("/message/params/") || !distinct.insert(pointer) {
+                bail!("invocation correlations must be distinct request parameter pointers");
+            }
+        }
+        if mapping.required_values.is_empty() || mapping.required_values.len() > 16 {
+            bail!("invocation mapping requires bounded wire identity predicates");
+        }
+        for (pointer, value) in &mapping.required_values {
+            validate_pointer(pointer)?;
+            validate_bounded_value(value, 0, &mut 0)?;
+        }
+        for template in [&mapping.registration, &mapping.request, &mapping.response] {
+            validate_template(Some(template), 0, &mut 0)?;
+        }
+        schema_ids.insert(mapping.request_schema);
+        schema_ids.insert(mapping.response_schema);
+    }
     for item in bounded_array(object, "server_requests", 0, 32)? {
         let item = item
             .as_object()
@@ -532,8 +834,24 @@ pub fn compile(
                 "permission_delta_fields",
                 "display",
             ],
-            &["required_review_fields"],
+            &["required_review_fields", "reply_http_path"],
         )?;
+        match (http_transport, item.get("reply_http_path")) {
+            (true, Some(reply)) => validate_http_path(
+                reply.as_str().ok_or_else(|| {
+                    anyhow!("structured-session reply HTTP path must be a string")
+                })?,
+                &["request_id", "session_id"],
+                false,
+            )?,
+            (true, None) => {
+                bail!("structured-session HTTP server request lacks its reply path")
+            }
+            (false, Some(_)) => {
+                bail!("structured-session reply HTTP path requires the HTTP transport")
+            }
+            (false, None) => {}
+        }
         let method = value_string(item, "method")?;
         validate_identifier(method)?;
         if !server_request_methods.insert(method.to_owned())
@@ -606,6 +924,68 @@ pub fn compile(
             .map_err(|error| anyhow!("compile structured-session schema `{identity}`: {error}"))?;
         schema_hashes.insert(identity, lillux::sha256_hex(bytes));
     }
+    if let Some(mapping) = object["workload_client"]
+        .get("structured_session")
+        .filter(|value| !value.is_null())
+    {
+        let mapping: StructuredSessionInvocationMapping = serde_json::from_value(mapping.clone())?;
+        validate_invocation_projection(&mapping, routes, source_files)?;
+    }
+    for notification in object["notifications"].as_array().unwrap() {
+        if let Some(pointer) = notification.get("upstream_session_pointer") {
+            let schema: Value =
+                serde_json::from_slice(&source_files[notification["schema"].as_str().unwrap()])?;
+            let field = invocation_parameter_schema(&schema, pointer.as_str().unwrap())?;
+            if resolve_invocation_schema(&schema, field)?["type"] != "string" {
+                bail!("notification session correlation must select a required string schema");
+            }
+        }
+    }
+    for route in routes {
+        for method in route
+            .get("progress_notifications")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let notification = object["notifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|notification| notification["method"] == *method)
+                .ok_or_else(|| anyhow!("progress notification disappeared"))?;
+            for (name, pointer, prefix) in [
+                (
+                    &notification["schema"],
+                    &notification["observations"][0]["value"]["fields"]["turn_id"]["pointer"],
+                    "/message/params/",
+                ),
+                (
+                    &route["response_schema"],
+                    &route["observations"][0]["value"]["fields"]["turn_id"]["pointer"],
+                    "/response/result/",
+                ),
+            ] {
+                let schema: Value = serde_json::from_slice(
+                    source_files
+                        .get(
+                            name.as_str()
+                                .ok_or_else(|| anyhow!("progress schema identity is absent"))?,
+                        )
+                        .ok_or_else(|| anyhow!("progress schema source is absent"))?,
+                )?;
+                let relative = pointer
+                    .as_str()
+                    .and_then(|pointer| pointer.strip_prefix(prefix))
+                    .ok_or_else(|| anyhow!("progress correlation is outside its message"))?;
+                let field =
+                    invocation_parameter_schema(&schema, &format!("/message/params/{relative}"))?;
+                if resolve_invocation_schema(&schema, field)?["type"] != "string" {
+                    bail!("progress correlation must select a required string schema");
+                }
+            }
+        }
+    }
     let baseline_source = value_string(object, "baseline_config")?.to_owned();
     let baseline_destination = value_string(object, "baseline_destination")?.to_owned();
     let baseline = source_files
@@ -623,6 +1003,434 @@ pub fn compile(
     };
     admitted.validate()?;
     Ok(admitted)
+}
+
+/// This ingress intentionally accepts a closed structural projection, not
+/// the entire event-template language. Dynamic caller values still need wire
+/// validation; missing paths or incompatible authored mapping shapes must
+/// fail here, before launching an upstream process.
+fn validate_invocation_projection(
+    mapping: &StructuredSessionInvocationMapping,
+    routes: &[Value],
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    let schema = |name: &str| -> Result<Value> {
+        serde_json::from_slice(
+            files
+                .get(name)
+                .ok_or_else(|| anyhow!("invocation schema is absent"))?,
+        )
+        .map_err(Into::into)
+    };
+    let request = schema(&mapping.request_schema)?;
+    for pointer in [
+        &mapping.session_pointer,
+        &mapping.operation_pointer,
+        &mapping.call_pointer,
+    ] {
+        let field = invocation_parameter_schema(&request, pointer)?;
+        if field.get("type").and_then(Value::as_str) != Some("string") {
+            bail!("invocation correlation must select a required string schema");
+        }
+    }
+    for (pointer, expected) in &mapping.required_values {
+        let field = invocation_parameter_schema_optional(&request, pointer, expected.is_null())?;
+        validate_projected_value(&request, field, expected)?;
+    }
+    if mapping.request.get("op").and_then(Value::as_str) != Some("pointer")
+        || mapping
+            .request
+            .get("optional")
+            .is_some_and(|value| value != &Value::Bool(false))
+    {
+        bail!("invocation input must select one required request parameter");
+    }
+    let input = invocation_parameter_schema(
+        &request,
+        mapping
+            .request
+            .get("pointer")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("invocation input pointer is absent"))?,
+    )?;
+    // Vendor arguments may be deliberately untyped JSON. A statically typed
+    // scalar/array cannot possibly decode as our execute-request object.
+    let input = resolve_invocation_schema(&request, input)?;
+    if input == &Value::Bool(false)
+        || input.get("type").is_some_and(|kind| {
+            kind != "object"
+                && !kind
+                    .as_array()
+                    .is_some_and(|types| types.iter().any(|kind| kind == "object"))
+        })
+    {
+        bail!("invocation input schema cannot describe an execute-request object");
+    }
+    let route = routes
+        .iter()
+        .find(|route| route["id"].as_str() == Some(&mapping.registration_route))
+        .ok_or_else(|| anyhow!("registration route disappeared"))?;
+    let registration_schema = schema(
+        route["request_schema"]
+            .as_str()
+            .ok_or_else(|| anyhow!("registration route has no schema"))?,
+    )?;
+    let field = registration_schema
+        .get("properties")
+        .and_then(|properties| properties.get(&mapping.registration_field))
+        .ok_or_else(|| anyhow!("registration field is absent from its signed route schema"))?;
+    let registration = invocation_template_shape(&mapping.registration, true, false)?;
+    validate_projected_value(&registration_schema, field, &registration)
+        .context("registration projection")?;
+    validate_dynamic_projection(
+        &registration_schema,
+        field,
+        &mapping.registration,
+        &registration,
+        0,
+    )?;
+    let response_schema = schema(&mapping.response_schema)?;
+    for success in [false, true] {
+        let response = invocation_template_shape(&mapping.response, false, success)?;
+        validate_projected_value(&response_schema, &response_schema, &response)
+            .context("response projection")?;
+        validate_dynamic_projection(
+            &response_schema,
+            &response_schema,
+            &mapping.response,
+            &response,
+            0,
+        )?;
+    }
+    Ok(())
+}
+
+fn invocation_parameter_schema<'a>(schema: &'a Value, pointer: &str) -> Result<&'a Value> {
+    invocation_parameter_schema_optional(schema, pointer, false)
+}
+
+fn invocation_parameter_schema_optional<'a>(
+    schema: &'a Value,
+    pointer: &str,
+    allow_absent: bool,
+) -> Result<&'a Value> {
+    let path = pointer
+        .strip_prefix("/message/params/")
+        .ok_or_else(|| anyhow!("invocation pointer is outside request parameters"))?;
+    let mut selected = schema;
+    for part in path.split('/') {
+        for _ in 0..32 {
+            let Some(reference) = selected.get("$ref").and_then(Value::as_str) else {
+                break;
+            };
+            selected = schema
+                .pointer(
+                    reference
+                        .strip_prefix('#')
+                        .ok_or_else(|| anyhow!("nonlocal invocation schema"))?,
+                )
+                .ok_or_else(|| anyhow!("invocation schema reference is absent"))?;
+        }
+        let name = part.replace("~1", "/").replace("~0", "~");
+        if !allow_absent
+            && !selected
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(|value| value.as_str() == Some(&name)))
+        {
+            bail!("invocation pointer must select a required schema field");
+        }
+        selected = selected
+            .get("properties")
+            .and_then(|fields| fields.get(&name))
+            .ok_or_else(|| anyhow!("invocation pointer names an absent schema field"))?;
+    }
+    Ok(selected)
+}
+
+fn resolve_invocation_schema<'a>(root: &'a Value, mut selected: &'a Value) -> Result<&'a Value> {
+    for _ in 0..32 {
+        let Some(reference) = selected.get("$ref").and_then(Value::as_str) else {
+            return Ok(selected);
+        };
+        selected = root
+            .pointer(
+                reference
+                    .strip_prefix('#')
+                    .ok_or_else(|| anyhow!("nonlocal invocation schema"))?,
+            )
+            .ok_or_else(|| anyhow!("invocation schema reference is absent"))?;
+    }
+    bail!("invocation schema reference depth exceeded")
+}
+
+fn validate_progress_observation(observation: &Value, correlation_prefix: &str) -> Result<()> {
+    let fields = observation
+        .pointer("/value/fields")
+        .and_then(Value::as_object)
+        .filter(|fields| fields.len() == 4)
+        .ok_or_else(|| anyhow!("progress must project one closed lifecycle start"))?;
+    if observation["when"]
+        .as_array()
+        .is_none_or(|predicates| !predicates.is_empty())
+        || observation["value"]["op"] != "object"
+    {
+        bail!("progress lifecycle start must be unconditional");
+    }
+    for (name, value) in [
+        ("kind", "state"),
+        ("expected", "idle"),
+        ("next", "turn_running"),
+    ] {
+        if fields.get(name) != Some(&serde_json::json!({"op":"literal","value":value})) {
+            bail!("progress lifecycle edge is not the supported start transition");
+        }
+    }
+    let turn = fields
+        .get("turn_id")
+        .ok_or_else(|| anyhow!("progress has no turn correlation"))?;
+    if turn["op"] != "pointer"
+        || turn["optional"].as_bool() == Some(true)
+        || turn["pointer"]
+            .as_str()
+            .is_none_or(|pointer| !pointer.starts_with(correlation_prefix))
+        || turn["max_string_bytes"]
+            .as_u64()
+            .is_none_or(|limit| limit == 0 || limit > 256)
+    {
+        bail!("progress turn correlation is not bounded and required");
+    }
+    Ok(())
+}
+
+fn validate_projected_value(root: &Value, selected: &Value, value: &Value) -> Result<()> {
+    let schema = serde_json::json!({"definitions":root.get("definitions").cloned().unwrap_or(serde_json::json!({})),
+        "$defs":root.get("$defs").cloned().unwrap_or(serde_json::json!({})),"allOf":[selected]});
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|error| anyhow!("compile invocation projection: {error}"))?;
+    if !validator.is_valid(value) {
+        bail!("authored invocation projection contradicts its signed schema");
+    }
+    Ok(())
+}
+
+fn invocation_template_shape(template: &Value, registration: bool, success: bool) -> Result<Value> {
+    match template["op"].as_str() {
+        Some("literal") => Ok(template["value"].clone()),
+        Some("object") => template["fields"]
+            .as_object()
+            .ok_or_else(|| anyhow!("invalid invocation object"))?
+            .iter()
+            .map(|(name, child)| {
+                Ok((
+                    name.clone(),
+                    invocation_template_shape(child, registration, success)?,
+                ))
+            })
+            .collect::<Result<serde_json::Map<_, _>>>()
+            .map(Value::Object),
+        Some("array") => template["values"]
+            .as_array()
+            .ok_or_else(|| anyhow!("invalid invocation array"))?
+            .iter()
+            .map(|child| invocation_template_shape(child, registration, success))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        Some("json_string")
+            if template["pointer"].as_str()
+                == Some(if registration {
+                    "/workload/executions"
+                } else {
+                    "/outcome/result"
+                }) =>
+        {
+            if !registration
+                && template["max_bytes"]
+                    .as_u64()
+                    .is_none_or(|limit| limit < 256)
+            {
+                bail!("invocation result budget cannot carry its bounded failure outcome");
+            }
+            Ok(Value::String("[]".to_owned()))
+        }
+        Some("pointer")
+            if !registration && template["pointer"].as_str() == Some("/outcome/success") =>
+        {
+            Ok(Value::Bool(success))
+        }
+        _ => {
+            bail!("invocation mapping exceeds the closed registration/result projection vocabulary")
+        }
+    }
+}
+
+/// A sample validates fixed fields, not arbitrary future result strings.
+/// Prove the dynamic leaves against a deliberately closed structural subset
+/// of JSON Schema. Unsupported cross-field constraints fail admission rather
+/// than becoming a runtime surprise after a child has already executed.
+fn validate_dynamic_projection(
+    root: &Value,
+    schema: &Value,
+    template: &Value,
+    witness: &Value,
+    depth: usize,
+) -> Result<()> {
+    if depth > 32 {
+        bail!("dynamic invocation projection exceeds depth bound");
+    }
+    if template["op"] == "literal" || template["op"] == "pointer" {
+        return Ok(());
+    }
+    let schema = resolve_invocation_schema(root, schema)?;
+    if schema == &Value::Bool(true) || schema.as_object().is_some_and(|object| object.is_empty()) {
+        return Ok(());
+    }
+    for union in ["anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(union).and_then(Value::as_array) {
+            // Union siblings could constrain the dynamic value independently.
+            if schema
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|key| ![union, "title", "description"].contains(&key.as_str()))
+            {
+                bail!("dynamic projection union has unsupported sibling constraints");
+            }
+            let matching = branches
+                .iter()
+                .enumerate()
+                .filter(|(_, branch)| validate_projected_value(root, branch, witness).is_ok())
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                bail!("dynamic invocation projection lacks one structural union branch");
+            }
+            let (selected_index, selected) = matching[0];
+            if union == "oneOf" {
+                for (index, branch) in branches.iter().enumerate() {
+                    if index != selected_index
+                        && !static_projection_refutes(root, branch, template)?
+                    {
+                        bail!("dynamic invocation union branches are not statically disjoint");
+                    }
+                }
+            }
+            return validate_dynamic_projection(root, selected, template, witness, depth + 1);
+        }
+    }
+    let object = schema
+        .as_object()
+        .ok_or_else(|| anyhow!("dynamic invocation schema is not structural"))?;
+    let allowed: &[&str] = match template["op"].as_str() {
+        Some("json_string") => &[
+            "type",
+            "title",
+            "description",
+            "default",
+            "$comment",
+            "maxLength",
+        ],
+        Some("object") => &[
+            "type",
+            "title",
+            "description",
+            "default",
+            "$schema",
+            "definitions",
+            "$defs",
+            "properties",
+            "required",
+            "additionalProperties",
+            "minProperties",
+            "maxProperties",
+        ],
+        Some("array") => &[
+            "type",
+            "title",
+            "description",
+            "default",
+            "items",
+            "minItems",
+            "maxItems",
+        ],
+        _ => bail!("unsupported dynamic invocation template"),
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        bail!(
+            "dynamic invocation schema contains unsupported value constraints: {:?}",
+            object
+                .keys()
+                .filter(|key| !allowed.contains(&key.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+    match template["op"].as_str() {
+        Some("json_string") => {
+            if template["pointer"] == "/outcome/result"
+                && template["max_bytes"]
+                    .as_u64()
+                    .is_none_or(|limit| limit < 256)
+            {
+                bail!("invocation result budget cannot carry its bounded failure outcome");
+            }
+            if schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|limit| limit < template["max_bytes"].as_u64().unwrap_or(u64::MAX))
+            {
+                bail!("dynamic invocation string exceeds target schema capacity");
+            }
+        }
+        Some("object") => {
+            for (name, child) in template["fields"].as_object().unwrap() {
+                let selected = schema
+                    .get("properties")
+                    .and_then(|fields| fields.get(name))
+                    .or_else(|| schema.get("additionalProperties"))
+                    .unwrap_or(&Value::Bool(true));
+                validate_dynamic_projection(root, selected, child, &witness[name], depth + 1)?;
+            }
+        }
+        Some("array") => {
+            let selected = schema.get("items").unwrap_or(&Value::Bool(true));
+            for (index, child) in template["values"].as_array().unwrap().iter().enumerate() {
+                validate_dynamic_projection(root, selected, child, &witness[index], depth + 1)?;
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn static_projection_refutes(root: &Value, schema: &Value, template: &Value) -> Result<bool> {
+    let schema = resolve_invocation_schema(root, schema)?;
+    if template["op"] == "literal" {
+        return Ok(validate_projected_value(root, schema, &template["value"]).is_err());
+    }
+    let structural_type = match template["op"].as_str() {
+        Some("object") => "object",
+        Some("array") => "array",
+        _ => return Ok(false),
+    };
+    if schema
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != structural_type)
+    {
+        return Ok(true);
+    }
+    if let Some(fields) = template.get("fields").and_then(Value::as_object) {
+        for (name, child) in fields {
+            if child["op"] == "literal"
+                && let Some(selected) = schema
+                    .get("properties")
+                    .and_then(|properties| properties.get(name))
+                && validate_projected_value(root, selected, &child["value"]).is_err()
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn value_string<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Result<&'a str> {
@@ -679,6 +1487,165 @@ fn validate_pointer(value: &str) -> Result<()> {
         bail!("structured-session JSON pointer is invalid");
     }
     Ok(())
+}
+
+/// Route HTTP addressing exists only under the HTTP transport, where it is
+/// mandatory. A stdio profile must not carry HTTP addressing, and an HTTP
+/// profile without complete addressing is not dispatchable.
+fn validate_route_transport_addressing(
+    route: &serde_json::Map<String, Value>,
+    http_transport: bool,
+    binding_action: Option<&str>,
+) -> Result<()> {
+    match (
+        http_transport,
+        route.get("http_method"),
+        route.get("http_path"),
+        route.get("http_body_schema"),
+        route.get("http_path_parameters"),
+    ) {
+        (true, Some(method), Some(path), Some(body_schema), Some(parameters)) => {
+            let method = method
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session route HTTP method must be a string"))?;
+            if !matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+                bail!("structured-session route HTTP method is not admitted");
+            }
+            let path = path
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session route HTTP path must be a string"))?;
+            // Syntax is checked here; exact placeholder ownership is checked
+            // against `http_path_parameters` immediately below.
+            validate_http_path(path, &["session_id"], true)?;
+            validate_relative_path(
+                body_schema.as_str().ok_or_else(|| {
+                    anyhow!("structured-session HTTP body schema must be a string")
+                })?,
+            )?;
+            let parameters = parameters.as_object().ok_or_else(|| {
+                anyhow!("structured-session HTTP path parameters must be an object")
+            })?;
+            if parameters.len() > 16 {
+                bail!("structured-session HTTP path parameter count exceeds its bound");
+            }
+            let placeholders = http_path_placeholders(path)?;
+            if placeholders.len() != parameters.len()
+                || placeholders
+                    .iter()
+                    .any(|name| !parameters.contains_key(name))
+            {
+                bail!(
+                    "structured-session HTTP path parameters do not exactly cover its placeholders"
+                );
+            }
+            for (name, projection) in parameters {
+                validate_field_name(name)?;
+                let projection = projection.as_object().ok_or_else(|| {
+                    anyhow!("structured-session HTTP path projection must be an object")
+                })?;
+                require_keys(projection, &["source"], &["field"])?;
+                match value_string(projection, "source")? {
+                    "bound_session" => {
+                        if name != "session_id"
+                            || projection
+                                .get("field")
+                                .is_some_and(|value| !value.is_null())
+                            || !matches!(binding_action, Some("require") | Some("bind_expected"))
+                        {
+                            bail!("structured-session bound-session path projection is invalid");
+                        }
+                    }
+                    "input" => {
+                        let field = value_string(projection, "field")?;
+                        validate_field_name(field)?;
+                        for policy in ["forbidden_fields", "forbidden_non_null_fields"] {
+                            if route
+                                .get(policy)
+                                .and_then(Value::as_array)
+                                .is_some_and(|values| values.iter().any(|value| value == field))
+                            {
+                                bail!(
+                                    "structured-session HTTP input path field `{field}` is not suppliable by its route"
+                                );
+                            }
+                        }
+                    }
+                    _ => bail!("structured-session HTTP path projection source is not admitted"),
+                }
+            }
+        }
+        (true, _, _, _, _) => {
+            bail!("structured-session HTTP route lacks its complete request projection")
+        }
+        (false, None, None, None, None) => {}
+        (false, _, _, _, _) => {
+            bail!("structured-session route HTTP addressing requires the HTTP transport");
+        }
+    }
+    Ok(())
+}
+
+/// An HTTP path template is bounded, absolute, carries no query or fragment,
+/// and its only parameterization is the named closed placeholder set. Route
+/// paths may additionally name payload fields, which must be suppliable
+/// through the route's own admitted parameter vocabulary.
+fn validate_http_path(value: &str, placeholders: &[&str], allow_fields: bool) -> Result<()> {
+    if value.len() > 512
+        || !value.starts_with('/')
+        || value.chars().any(char::is_control)
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains("//")
+    {
+        bail!("structured-session HTTP path template is invalid");
+    }
+    let mut remainder = value;
+    while let Some(start) = remainder.find('{') {
+        let end = remainder[start..]
+            .find('}')
+            .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unterminated"))?;
+        let name = &remainder[start + 1..start + end];
+        let admitted_field = allow_fields && validate_field_name(name).is_ok();
+        if !placeholders.contains(&name) && !admitted_field {
+            bail!("structured-session HTTP path placeholder is not admitted");
+        }
+        remainder = &remainder[start + end + 1..];
+        if remainder.starts_with('{') {
+            bail!("structured-session HTTP path placeholders are not separated");
+        }
+    }
+    if remainder.contains('}') {
+        bail!("structured-session HTTP path has a stray closing placeholder");
+    }
+    for segment in value.split('/') {
+        if segment.contains('{')
+            && !segment
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        {
+            bail!("structured-session HTTP path placeholder segment is not canonical");
+        }
+    }
+    Ok(())
+}
+
+fn http_path_placeholders(value: &str) -> Result<BTreeSet<String>> {
+    let mut placeholders = BTreeSet::new();
+    let mut remainder = value;
+    while let Some(start) = remainder.find('{') {
+        let end = remainder[start..]
+            .find('}')
+            .ok_or_else(|| anyhow!("structured-session HTTP path placeholder is unterminated"))?;
+        let name = &remainder[start + 1..start + end];
+        validate_field_name(name)?;
+        if !placeholders.insert(name.to_owned()) {
+            bail!("structured-session HTTP path placeholder is duplicated");
+        }
+        remainder = &remainder[start + end + 1..];
+    }
+    Ok(placeholders)
 }
 
 fn validate_string_array(
@@ -855,6 +1822,16 @@ fn validate_template(value: Option<&Value>, depth: usize, nodes: &mut usize) -> 
             require_keys(object, &["op", "pointer"], &[])?;
             validate_pointer(value_string(object, "pointer")?)?;
         }
+        "json_string" => {
+            require_keys(object, &["op", "pointer", "max_bytes"], &[])?;
+            validate_pointer(value_string(object, "pointer")?)?;
+            if object["max_bytes"]
+                .as_u64()
+                .is_none_or(|limit| limit == 0 || limit > 1024 * 1024)
+            {
+                bail!("structured-session JSON string byte bound is invalid");
+            }
+        }
         _ => bail!("structured-session value template operation is not admitted"),
     }
     Ok(())
@@ -880,6 +1857,14 @@ fn validate_file_name(value: &str) -> Result<()> {
         bail!("structured-session file identity must be one relative name");
     }
     Ok(())
+}
+
+fn validate_workload_executable_member(value: &str) -> Result<()> {
+    if value.len() > 4096 {
+        bail!("structured-session workload executable exceeds its path bound");
+    }
+    ryeos_state::objects::validate_canonical_project_relative_path(value)
+        .context("structured-session workload executable is not a canonical relative member")
 }
 
 fn validate_relative_path(value: &str) -> Result<()> {
@@ -928,11 +1913,15 @@ mod tests {
 
     fn fixture_profile(route_id: &str, method: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({
-            "schema_version":1,
+            "schema_version":STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"stdio_jsonrpc",
+            "http_sse":null,
             "workload_realization_id":"fixture-runtime",
             "workload_executable":"fixture-worker",
+            "required_process_environment":[],
             "workload_args":[],
             "workload_home_env":"FIXTURE_HOME",
+            "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"runtime.conf",
             "portable_state":null,
@@ -982,6 +1971,187 @@ mod tests {
         ])
     }
 
+    fn configure_http_profile(profile: &mut Value) {
+        profile["transport"] = json!("http_sse");
+        profile["http_sse"] = json!({
+            "username_env":"FIXTURE_HTTP_USER",
+            "password_env":"FIXTURE_HTTP_PASSWORD",
+            "listener_stdout_prefix":"fixture listening on http://127.0.0.1:",
+            "readiness_path":"/health",
+            "readiness_schema":"schema/response.json",
+            "event_path":"/event",
+            "event_type_pointer":"/type",
+            "event_properties_pointer":"/properties",
+            "ignored_notification_projection":"properties"
+        });
+        profile["initialization"] = json!([]);
+        profile["routes"][0]["http_method"] = json!("POST");
+        profile["routes"][0]["http_path"] = json!("/session");
+        profile["routes"][0]["http_body_schema"] = json!("schema/request.json");
+        profile["routes"][0]["http_path_parameters"] = json!({});
+    }
+
+    #[test]
+    fn authored_profiles_compile_from_the_exact_local_source_set() {
+        let root = crate::test_support::workspace_root()
+            .join("bundles/codex/.ai/workers/codex/lib/hosted");
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        for name in ["authoring.profile.json", "structured-session.profile.json"] {
+            compile(&files[name], &files).unwrap();
+        }
+        // Early lifecycle authority must be correlated before the daemon ACK
+        // can permit a child; final-response corroboration is too late.
+        let profile: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();
+        for pointer in [
+            Value::Null,
+            json!("/message/params/absent"),
+            json!("/message/params/turn"),
+        ] {
+            let mut invalid = profile.clone();
+            let notification = invalid["notifications"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|rule| rule["method"] == "turn/started")
+                .unwrap();
+            notification["upstream_session_pointer"] = pointer;
+            assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &files).is_err());
+        }
+    }
+
+    #[test]
+    fn opencode_http_profile_compiles_from_the_exact_local_source_set() {
+        let root = crate::test_support::workspace_root()
+            .join("bundles/opencode/.ai/workers/opencode/lib/hosted");
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        let profile = compile(&files["structured-session.profile.json"], &files)
+            .expect("the authored opencode profile must compile from its local source set");
+        assert_eq!(
+            profile.contract.get("transport").and_then(Value::as_str),
+            Some("http_sse")
+        );
+    }
+
+    #[test]
+    fn invocation_mapping_refuses_missing_paths_and_incompatible_shapes_at_admission() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
+        profile["routes"][0]["session_binding"] =
+            json!({"action":"bind_new","request_field":null,"response_pointer":"/result/id"});
+        profile["routes"][0]["forbidden_fields"] = json!(["tools"]);
+        let mapping = json!({
+            "registration_route":"session.start","registration_field":"tools",
+            "registration":{"op":"array","values":[{"op":"object","fields":{
+                "description":{"op":"json_string","pointer":"/workload/executions","max_bytes":49152}
+            }}]},
+            "method":"operation/execute","request_schema":"schema/invoke.json","response_schema":"schema/invoked.json",
+            "session_pointer":"/message/params/session","operation_pointer":"/message/params/turn","call_pointer":"/message/params/call",
+            "required_values":{"/message/params/name":"execute"},
+            "request":{"op":"pointer","pointer":"/message/params/arguments"},
+            "response":{"op":"object","fields":{"success":{"op":"pointer","pointer":"/outcome/success"}}}
+        });
+        profile["workload_client"] = json!({"cli_endpoint_env":null,"structured_session":mapping});
+        let mut files = schemas();
+        files.insert("schema/request.json".to_owned(), serde_json::to_vec(&json!({"type":"object","properties":{
+            "tools":{"type":"array","items":{"type":"object","required":["description"],"properties":{"description":{"type":"string"}}}}
+        }})).unwrap());
+        files.insert("schema/invoke.json".to_owned(), serde_json::to_vec(&json!({"type":"object",
+            "required":["session","turn","call","name","arguments"],"properties":{
+                "session":{"type":"string"},"turn":{"type":"string"},"call":{"type":"string"},"name":{"type":"string"},"arguments":true
+            }})).unwrap());
+        files.insert(
+            "schema/invoked.json".to_owned(),
+            serde_json::to_vec(&json!({"type":"object","required":["success"],
+            "properties":{"success":{"type":"boolean"}},"additionalProperties":false}))
+            .unwrap(),
+        );
+        compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        for (pointer, value) in [
+            (
+                "/workload_client/structured_session/request/pointer",
+                json!("/message/params/absent"),
+            ),
+            (
+                "/workload_client/structured_session/request/pointer",
+                json!("/message/params/turn"),
+            ),
+            (
+                "/workload_client/structured_session/session_pointer",
+                json!("/message/params/absent"),
+            ),
+            (
+                "/workload_client/structured_session/response/fields/success/pointer",
+                json!("/outcome/unknown"),
+            ),
+            (
+                "/workload_client/structured_session/registration",
+                json!({"op":"literal","value":{}}),
+            ),
+            ("/routes/0/forbidden_fields", json!([])),
+        ] {
+            let mut invalid = profile.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                compile(&serde_json::to_vec(&invalid).unwrap(), &files).is_err(),
+                "{pointer}"
+            );
+        }
+        for constraint in [json!({"const":"[]"}), json!({"maxLength":2})] {
+            let mut invalid_files = files.clone();
+            let mut request: Value =
+                serde_json::from_slice(&invalid_files["schema/request.json"]).unwrap();
+            request["properties"]["tools"]["items"]["properties"]["description"]
+                .as_object_mut()
+                .unwrap()
+                .extend(constraint.as_object().unwrap().clone());
+            invalid_files.insert(
+                "schema/request.json".to_owned(),
+                serde_json::to_vec(&request).unwrap(),
+            );
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &invalid_files).is_err());
+        }
+    }
+
     #[test]
     fn two_unrelated_profiles_compile_without_provider_code() {
         let first = compile(
@@ -994,8 +2164,35 @@ mod tests {
         assert_eq!(first.schema_hashes, second.schema_hashes);
         assert_eq!(
             first.contract.get("schema_version").and_then(Value::as_u64),
-            Some(1)
+            Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
         );
+    }
+
+    #[test]
+    fn workload_executable_accepts_only_canonical_relative_members() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        profile["workload_executable"] = json!("bin/fixture-worker");
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("a nested canonical tree member must be admitted");
+
+        for invalid in [
+            "",
+            "/bin/fixture-worker",
+            "../fixture-worker",
+            "bin/../fixture-worker",
+            "bin//fixture-worker",
+            "bin/./fixture-worker",
+            "bin\\fixture-worker",
+            "bin/fixture-worker/",
+            "bin/\u{0}fixture-worker",
+        ] {
+            profile["workload_executable"] = json!(invalid);
+            assert!(
+                compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err(),
+                "non-canonical workload executable was admitted: {invalid:?}"
+            );
+        }
     }
 
     #[test]
@@ -1109,5 +2306,162 @@ mod tests {
                 .to_string()
                 .contains("notification count exceeds its aggregate bound")
         );
+    }
+
+    #[test]
+    fn transport_is_required_and_closed() {
+        let profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("the current dialect must declare the stdio transport");
+
+        let mut missing = profile.clone();
+        missing.as_object_mut().unwrap().remove("transport");
+        assert!(compile(&serde_json::to_vec(&missing).unwrap(), &schemas()).is_err());
+
+        let mut retired = profile.clone();
+        retired["schema_version"] = json!(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION - 1);
+        assert!(compile(&serde_json::to_vec(&retired).unwrap(), &schemas()).is_err());
+
+        for invalid in ["", "stdio", "auto", "HTTP_SSE", "unix_socket"] {
+            let mut closed = profile.clone();
+            closed["transport"] = json!(invalid);
+            assert!(
+                compile(&serde_json::to_vec(&closed).unwrap(), &schemas()).is_err(),
+                "un admitted transport was accepted: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_addressing_is_gated_by_the_declared_transport() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
+        profile["routes"][0]["http_method"] = json!("POST");
+        profile["routes"][0]["http_path"] = json!("/session");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        let mut http = profile.clone();
+        configure_http_profile(&mut http);
+        compile(&serde_json::to_vec(&http).unwrap(), &schemas())
+            .expect("complete HTTP addressing must be admitted");
+
+        let mut missing_credentials = http.clone();
+        missing_credentials["http_sse"] = Value::Null;
+        assert!(
+            compile(
+                &serde_json::to_vec(&missing_credentials).unwrap(),
+                &schemas()
+            )
+            .is_err()
+        );
+
+        let mut stdio_credentials = http.clone();
+        stdio_credentials["transport"] = json!("stdio_jsonrpc");
+        assert!(compile(&serde_json::to_vec(&stdio_credentials).unwrap(), &schemas()).is_err());
+
+        let mut colliding = http.clone();
+        colliding["http_sse"]["password_env"] = json!("FIXTURE_HOME");
+        assert!(compile(&serde_json::to_vec(&colliding).unwrap(), &schemas()).is_err());
+
+        let mut handshake = http.clone();
+        handshake["initialization"] = json!([{
+            "method":"initialize","effect_class":"pure_read","params":{},
+            "response_schema":"schema/response.json","notification":null
+        }]);
+        assert!(compile(&serde_json::to_vec(&handshake).unwrap(), &schemas()).is_err());
+
+        let mut missing_path = http.clone();
+        missing_path["routes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("http_path");
+        assert!(compile(&serde_json::to_vec(&missing_path).unwrap(), &schemas()).is_err());
+
+        let mut bad_method = http.clone();
+        bad_method["routes"][0]["http_method"] = json!("TRACE");
+        assert!(compile(&serde_json::to_vec(&bad_method).unwrap(), &schemas()).is_err());
+
+        for bad_path in [
+            "session",
+            "/session?query=1",
+            "/session#fragment",
+            "/session/{turn}",
+            "/session/{session_id}{session_id}",
+            "/session/}",
+            "/session//message",
+        ] {
+            let mut invalid = http.clone();
+            invalid["routes"][0]["http_path"] = json!(bad_path);
+            assert!(
+                compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err(),
+                "invalid HTTP path was admitted: {bad_path}"
+            );
+        }
+
+        let mut bound = http.clone();
+        bound["routes"][0]["http_path"] = json!("/session/{session_id}/message");
+        assert!(compile(&serde_json::to_vec(&bound).unwrap(), &schemas()).is_err());
+
+        bound["routes"][0]["session_binding"] =
+            json!({"action":"require","request_field":"sessionID","response_pointer":null});
+        bound["routes"][0]["http_path_parameters"] =
+            json!({"session_id":{"source":"bound_session"}});
+        compile(&serde_json::to_vec(&bound).unwrap(), &schemas())
+            .expect("a bound session placeholder must be admitted");
+
+        let mut fielded = http.clone();
+        fielded["routes"][0]["http_path"] = json!("/auth/{provider}");
+        fielded["routes"][0]["http_path_parameters"] =
+            json!({"provider":{"source":"input","field":"provider"}});
+        compile(&serde_json::to_vec(&fielded).unwrap(), &schemas())
+            .expect("a payload field must be substitutable into its route path");
+
+        let mut forbidden = fielded.clone();
+        forbidden["routes"][0]["forbidden_fields"] = json!(["provider"]);
+        assert!(compile(&serde_json::to_vec(&forbidden).unwrap(), &schemas()).is_err());
+    }
+
+    #[test]
+    fn http_server_requests_require_an_admitted_reply_path() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("session.start", "session/start")).unwrap();
+        configure_http_profile(&mut profile);
+        profile["server_requests"] = json!([{
+            "method":"permission.asked",
+            "schema":"schema/request.json",
+            "operation_class":"command_execution",
+            "correlation":{
+                "upstream_session_pointer":"/message/params/sessionID",
+                "operation_pointer":"/message/params/permissionID"
+            },
+            "responses":{
+                "accept":{"op":"literal","value":{"response":"once"}},
+                "cancel":{"op":"literal","value":{"response":"deny"}},
+                "decline":{"op":"literal","value":{"response":"deny"}},
+                "expire":{"op":"literal","value":{"response":"deny"}}
+            },
+            "deny_only":true,
+            "permission_delta_fields":[],
+            "display":{"op":"object","fields":{}}
+        }]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        profile["server_requests"][0]["reply_http_path"] =
+            json!("/session/{permission}/permissions");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        profile["server_requests"][0]["reply_http_path"] = json!("/permissions/{request_id}");
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("a complete HTTP server request must be admitted");
+
+        profile["server_requests"][0]["reply_http_path"] =
+            json!("/session/{session_id}/permissions/{request_id}");
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("a session-scoped reply path must be admitted");
+
+        let mut stdio = profile.clone();
+        stdio["transport"] = json!("stdio_jsonrpc");
+        assert!(compile(&serde_json::to_vec(&stdio).unwrap(), &schemas()).is_err());
     }
 }

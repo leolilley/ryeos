@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-03T11:56:15Z:71d087ced1d9406a6ab36981cc83710088ecaa531c7ac38872f2c0a6da68cfce:OiJz8wfVy2RRSqzoAEgiKtGzP4wx/USG+DCyF/AZTYmX6whnrTETgvrY6xaGZfrVoMtwqiB+yhZuxt7oOXe9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T08:45:07Z:0101369f86e3d60f0b08664dcf47a13eb375d997921524c6fc8df8663553357a:rew37x0t31xv08356jDsTomdDp7H6sN7y/WCX3UubTbtfDEPWgBsZ3dOKWl1crce3xuds23j12qC9DvNI3NvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
-version: "1.4.1"
+version: "1.4.3"
 description: >
   Operator initialization contract implemented by ryeos-node: keys,
   trust, bundle discovery, bundle planning, install, and post-init checks.
@@ -62,7 +62,9 @@ and absence fails rather than manufacturing an implicit default.
     `<system>/.ai/node/policies/`, signed by the node key. With an existing
     generation, an omitted selection preserves it and an explicit selection
     must be identical unless explicit replacement is selected. Init authors no
-    implicit isolation, ingest-ignore, or other policy fallback. Materialize
+    implicit isolation, ingest-ignore, or other policy fallback. The
+    `ingest_ignore` member carries its complete canonical pattern set; RyeOS
+    adds only its separately documented structural snapshot floor. Materialize
     only the read-only sync view derived from the admitted generation.
 16. Write the signed init-completion fence only after the intended bundle
     registration inventory and policy generation have completed. The prior
@@ -143,3 +145,19 @@ current authority. Use the explicit stopped-node
 `ryeos node reset policy-generation --node-profile <name> --confirm` cutover
 against the trusted packaged source. There is no implicit migration or
 fallback.
+
+The `ingest_ignore` schema-1 to schema-2 change is one such clean cut. Schema 1
+only carried `additional_patterns`; schema 2 carries the complete canonical
+`patterns` policy. During a package-source installation of this cut, use:
+
+```bash
+sudo scripts/pkg/install-local-direct.sh \
+  --populate --all \
+  --trust-source-publishers \
+  --reset-node-policy-generation
+```
+
+The installer maps the installed bundle set to its exact signed node profile
+and invokes the same explicit replacement boundary. It preserves node,
+operator, and vault identities and all non-policy state. Do not use the reset
+flag on a fresh node or a node whose generation is already current.

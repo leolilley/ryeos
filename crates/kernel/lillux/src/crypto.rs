@@ -1,6 +1,7 @@
 //! Crypto re-exports. All crates use these instead of importing ed25519_dalek directly.
 
 use anyhow::Context;
+use rand::RngCore as _;
 
 pub use ed25519_dalek::pkcs8::{
     DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey,
@@ -11,6 +12,18 @@ pub use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 /// selection stays inside Lillux rather than leaking OS mechanics to callers.
 pub fn generate_signing_key() -> SigningKey {
     SigningKey::generate(&mut rand::rngs::OsRng)
+}
+
+/// Fill a fixed-size value from the platform CSPRNG.
+///
+/// Callers consume typed random material without selecting an operating-
+/// system entropy source or importing a platform RNG directly. This is for
+/// unguessable nonces and local endpoint names; protocols remain responsible
+/// for domain-separating or hashing the returned bytes before publication.
+pub fn generate_random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes
 }
 
 /// Generate and create one private signing-key file without following links

@@ -585,6 +585,7 @@ mod tests {
             verified: true,
             authorized_key_class: None,
             authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
             metadata,
         };
         let body = serde_json::json!({"action": "opened"});

@@ -37,11 +37,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 fn unique_project_dir(label: &str) -> PathBuf {
@@ -132,6 +128,7 @@ fn plan_ctx(project_dir: &Path) -> PlanContext {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     }
 }
@@ -155,6 +152,7 @@ fn build_and_extract_cancellation(
             &serde_json::Value::Null,
             &ctx.execution_hints,
             None,
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         )
         .map_err(|e| e.to_string())?;
 

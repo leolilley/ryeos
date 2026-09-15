@@ -1,7 +1,6 @@
-<!-- ryeos:signed:2026-08-27T04:21:33Z:e833de52830050871feec08a7b150e83a409e74f6cbce5269215686a7a80809f:znxT+fwDdLA44xKbfpW0FmnjwJcct1/CHQ6lTX/u9trvPQKQD8FNh9bm5bOlBxSe96V74wgQE7TdMzyx2+hZAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence, certification]
-version: "0.3.0"
+version: "0.4.0"
 status: scheduled
 description: >
   Deferred measurement, certification, retention, and export work over the
@@ -134,6 +133,25 @@ offline profile includes the exact project, model, tokenizer/template,
 tinygrad/runtime, provider record, traces required by the declared proof, and
 their transitive closure; it excludes remote provider credentials and hosted
 coding-worker state.
+
+### Evidence claim boundaries
+
+An export must distinguish content integrity, signer attribution, retained
+branch relationships, supplied inputs and observed outputs. A signed receipt
+or self-declared timestamp does not establish external truth, wall-clock age,
+complete disclosure or causal reliance on a supplied memory.
+
+Controlled memory experiments must distinguish fresh inference from serving
+an existing provider record. A valid replay demonstrates retrieval of a prior
+outcome, not a new act of inference or a measured learning benefit.
+
+Independent witnessing is a separately scoped option when a consumer needs
+evidence that a commitment existed before a challenge. It is not required for
+ordinary replay or a local controlled experiment. Any such design must state
+witness assumptions and disclosure risks; do not publish raw private evidence
+or guessable fact hashes as an incidental certification step.
+
+See [governed adaptation and memory evidence](governed-adaptation-and-memory-evidence.md).
 
 ### 5. Sealed local qualification
 

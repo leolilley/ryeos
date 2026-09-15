@@ -555,6 +555,7 @@ pub async fn run(
                 .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             child_thread_kind.to_string(),
             BTreeMap::new(),
+            Vec::new(),
             None,
             None,
         )
@@ -809,22 +810,26 @@ pub async fn run(
             timeout: AUGMENTATION_RUNTIME_TIMEOUT_SECS as f64,
             limits: None,
             inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
-        let live_access = provenance
-            .isolation_live_access_authority()
-            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
         let applied = state
             .isolation
             .apply_awaiting_attachment_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
+                    // Pre-birth augmentation consumes the already projected
+                    // immutable input payload, not a mutable execution view.
+                    // Its prospective parent has no admitted process/workspace
+                    // owner yet. Never create or borrow a writable overlay here.
+                    immutable_project: None,
+                    workspace_view: None,
                     project_path,
-                    project_authority: provenance.isolation_project_authority(),
+                    project_authority: ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
                     filesystem_authority_ceiling:
                         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                 network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
-                    live_access: live_access.as_ref(),
+                    live_access: None,
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     checkpoint_authority: None,
@@ -835,7 +840,8 @@ pub async fn run(
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
-                    target_channel: None,
+                    writable_runtime_view_mounts: &[],
+                    target_channels: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },
@@ -2374,7 +2380,7 @@ fn extract_rendered_meta(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::sync::{Arc, mpsc};
@@ -2382,7 +2388,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
-    fn lifecycle_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
+    pub(crate) fn lifecycle_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
         let temp = tempfile::tempdir().expect("test tempdir");
         let runtime_state_dir = temp.path().join(".ai/state");
         let runtime_db_path = temp.path().join("runtime.sqlite3");
@@ -2499,7 +2505,12 @@ mod tests {
             ),
             scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
             scheduler_reload_tx: None,
-            ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+            ignore_matcher: Arc::new(
+                ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
+                    patterns: Vec::new(),
+                })
+                .unwrap(),
+            ),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(
@@ -2510,7 +2521,9 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn augmentation_child_record(thread_id: &str) -> ryeos_app::state_store::NewThreadRecord {
+    pub(crate) fn augmentation_child_record(
+        thread_id: &str,
+    ) -> ryeos_app::state_store::NewThreadRecord {
         ryeos_app::state_store::NewThreadRecord {
             thread_id: thread_id.to_string(),
             chain_root_id: thread_id.to_string(),
@@ -2540,6 +2553,92 @@ mod tests {
                 },
             }),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bound_runtime_children_fixture() -> (tempfile::TempDir, ryeos_app::state::AppState)
+    {
+        use ryeos_app::runtime_db::{RuntimeWorkspaceBinding, WorkspaceBinding, WorkspaceState};
+        let (temp, state) = lifecycle_test_state();
+        let store = &state.state_store;
+        let parent = "T-runtime-parent";
+        store
+            .create_thread_for_test(&augmentation_child_record(parent))
+            .unwrap();
+        let owner = store
+            .claim_thread_launch_active(parent, "claim-parent", "daemon:runtime-test")
+            .unwrap()
+            .unwrap();
+        let binding = RuntimeWorkspaceBinding {
+            workspace_id: "workspace-runtime-parent".to_owned(),
+            view_identity: "exact-runtime-parent-view".to_owned(),
+            borrower_launch_owner: owner.owner,
+        };
+        // Inert journal fixture: no mount, OS process, or real workspace is created.
+        store
+            .reserve_execution_workspace(
+                &binding.workspace_id,
+                &"a".repeat(64),
+                "/runtime-test-workspace",
+            )
+            .unwrap();
+        store
+            .transition_execution_workspace(
+                &binding.workspace_id,
+                &[WorkspaceState::Reserved],
+                WorkspaceState::Constructing,
+                None,
+            )
+            .unwrap();
+        store
+            .claim_execution_workspace_construction(
+                &binding.workspace_id,
+                parent,
+                &owner.claimed_by,
+            )
+            .unwrap();
+        store
+            .bind_execution_workspace(WorkspaceBinding {
+                workspace_id: &binding.workspace_id,
+                thread_id: parent,
+                launch_owner: Some(&owner.claimed_by),
+                backend_id: Some("native"),
+                backend_version: Some("fixture"),
+                pinned_root_identities: Some("fixture-roots"),
+                mount_identity: Some(&binding.view_identity),
+                workspace_output_partition_identity: None,
+                base_output_capture_hash: None,
+            })
+            .unwrap();
+        store.bind_thread_workspace(parent, &binding).unwrap();
+        store
+            .transition_execution_workspace(
+                &binding.workspace_id,
+                &[WorkspaceState::Ready],
+                WorkspaceState::Active,
+                None,
+            )
+            .unwrap();
+        for child in ["T-runtime-child", "T-runtime-sibling"] {
+            store
+                .create_thread_for_test(&augmentation_child_record(child))
+                .unwrap();
+            let claim = store
+                .claim_thread_launch_active(child, &format!("claim-{child}"), "daemon:runtime-test")
+                .unwrap()
+                .unwrap();
+            store.record_child_link(parent, child, "dispatch").unwrap();
+            store
+                .bind_thread_workspace(
+                    child,
+                    &RuntimeWorkspaceBinding {
+                        borrower_launch_owner: claim.owner,
+                        ..binding.clone()
+                    },
+                )
+                .unwrap();
+        }
+        (temp, state)
     }
 
     #[test]
@@ -2636,6 +2735,7 @@ mod tests {
                         timeout: 30.0,
                         limits: None,
                         inherited_fds: Vec::new(),
+                        inherited_fd_mappings: Vec::new(),
                         supervised_status: None,
                     };
                     let result = match lillux::spawn_awaiting_attachment(request) {

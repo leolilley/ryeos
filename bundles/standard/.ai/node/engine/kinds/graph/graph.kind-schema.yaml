@@ -1,5 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:23Z:9fd2f6f2fe461a94734ba682814c56f24b31bd29779d38adb7b5676c44402d63:omdNZZHs4+ZK3GCaxGnMFZ+Pn8veNQRcuyF/i6aQvAU4o6Ath2NSQ6gKNT809j3aweVzebpOBOHV6XiaSahuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T08:44:45Z:1e1b591c0cc46bad26a757416d1fe79f60d64c200374216a69235de1c6cdefb8:CH3RaIZz8/B86MdhyvDTwF7izFDyoX5MBjG7Obdi8Kwkki0NMKBo+e5MtP6NHGaxFzuN4dUVlIGvnH8vaF+DBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
 version: "1.0.0"
 location:
   directory: graphs
@@ -8,6 +11,11 @@ resolution:
 effective_trust:
   include_references: false
 execution:
+  # Kind-owned location of the graph author's durable-effect ceiling. The
+  # generic dispatcher projects this signed field exactly as it does for
+  # Tools; absence (or `live`) remains ineligible for durable dispatch.
+  effect_class_ceiling:
+    path: [effects]
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("graph")` to find the default
   # runtime serving this kind (today: `runtime:graph-runtime`).
@@ -64,7 +72,12 @@ execution:
   external_content:
     realization_derived: effective_external_realizations
     allowed_roots: [project_files]
+    # Explicit Graph-owned inputs may be shared by its descendants. This does
+    # not pre-admit environments belonging to possible future child actions.
+    allowed_mount_roots: [project, execution_runtime]
     max_declarations: 4
+    large_content:
+      max_total_bytes: 68719476736
   effective_validator:
     handler: handler:ryeos/core/graph-effective-validator
     config: {}
@@ -88,6 +101,11 @@ composer_config:
     - name: description
       strategy: replace_root_last
       expect_value_type: string
+    # Durable-effect eligibility is vouched by the selected root itself; it
+    # is never inherited from an ancestor Graph.
+    - name: effects
+      strategy: root_verbatim
+      expect_value_type: string
     # Shallow root-last mapping merge. Each config key is inherited or
     # replaced atomically; node maps and hook lists are never deep-merged.
     - name: config
@@ -102,6 +120,15 @@ composer_config:
     - name: external_content
       strategy: replace_root_last
       expect_value_type: array
+    - name: external_product_slots
+      strategy: replace_root_last
+      expect_value_type: array
+    # Product declarations belong to the signed producer root. Descendants
+    # must restate the complete relationship intentionally rather than inherit
+    # a recipe selected by an ancestor.
+    - name: product_recipe
+      strategy: root_verbatim
+      expect_value_type: string
   policy_facts:
     - name: effective_caps
       path: [requires, capabilities, declared]
@@ -125,6 +152,9 @@ composed_value_contract:
     description:
       type: single
       prim: string
+    effects:
+      type: single
+      prim: string
     # Unified capability requirements narrowed across every direct ancestor
     # edge and finally bounded by the signed manifest at launch.
     requires:
@@ -133,6 +163,12 @@ composed_value_contract:
     external_content:
       type: single
       prim: array
+    external_product_slots:
+      type: single
+      prim: array
+    product_recipe:
+      type: single
+      prim: string
 metadata:
   rules:
     name:

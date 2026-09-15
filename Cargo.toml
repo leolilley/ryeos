@@ -31,12 +31,13 @@ members = [
     "crates/tools/core-tools",
     "crates/tools/session-exec",
     "crates/tools/structured-session",
+    "crates/tools/workload-client",
+    "crates/tools/lillux-isolation-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
 ]
-exclude = ["bundles/sandbox-linux-bubblewrap/adapter"]
 resolver = "2"
 
 [workspace.package]
@@ -85,6 +86,7 @@ ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
 ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }
 ryeos-structured-session = { path = "crates/tools/structured-session" }
+ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }
@@ -126,6 +128,7 @@ rmp-serde = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+serde_stacker = "0.1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2"

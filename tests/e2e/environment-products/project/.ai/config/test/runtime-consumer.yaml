@@ -1,0 +1,28 @@
+category: test
+schema: ryeos.worker_environment.v6
+external_product_slots:
+  - id: distribution
+    relationship_ref: config:test/two-products
+    relationship: distribution_to_consumer
+    kind: tree
+    mount_root: project
+    mount: fixture-distribution
+  - id: runtime
+    relationship_ref: config:test/two-products
+    relationship: runtime_to_consumer
+    kind: tree
+    mount_root: execution_runtime
+    mount: runtime
+worker_ref: worker:fixture/hosted
+external_content: []
+configuration:
+  executable_search:
+    - realization_id: runtime
+      relative_directory: bin
+  process_environment: {}
+credential_requirement:
+  workload_family: fixture
+  required_state: active
+  subject_projection_contract: fixture.account.v1
+portable_state_contract: ryeos.worker_session.restore.v1
+workload_client: null

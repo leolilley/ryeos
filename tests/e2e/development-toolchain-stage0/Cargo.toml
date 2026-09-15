@@ -1,0 +1,4 @@
+# Standalone dependency-free fixture, not a RyeOS workspace member.
+[workspace]
+members = ["app", "macro"]
+resolver = "2"

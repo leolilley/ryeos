@@ -325,6 +325,10 @@ fn build_top_level_help(
         crate::tty::Row::key_value("stop", "Gracefully stop the local node runtime"),
         crate::tty::Row::key_value("node status", "Show local node lifecycle status"),
         crate::tty::Row::key_value(
+            "node host setup",
+            "Provision one administrator-owned local hosted-worker service",
+        ),
+        crate::tty::Row::key_value(
             "node doctor",
             "Offline checklist answering \"why won't it start\"",
         ),
@@ -733,8 +737,8 @@ fn build_installed_command_help(
         let mut section = crate::tty::Section::named("parameters");
         if let Some(input_flag) = &binding.input_flag {
             section.rows.push(crate::tty::Row::key_value(
-                format!("--{input_flag} <file>"),
-                "Read JSON parameters from a file (or - for stdin)",
+                format!("--{input_flag} <file|json|->"),
+                "Read JSON/YAML parameters from a file or stdin, or an inline JSON object/array",
             ));
         }
         section.rows.push(crate::tty::Row::key_value(
@@ -796,33 +800,39 @@ fn build_installed_command_help(
 
 fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>) -> String {
     let mut parts = Vec::new();
+    let mut form_fields = std::collections::BTreeSet::new();
     if !command.command.forms.is_empty() {
+        let mut form_shapes = Vec::new();
         for form in &command.command.forms {
             let shape = form
                 .slots
                 .iter()
                 .map(|slot| {
                     let field = slot.field.replace('_', "-");
-                    let required = !command.command.defaults.contains_key(&slot.field)
-                        && !command.command.defaults.contains_key(&field);
-                    if required {
-                        format!("<{field}>")
-                    } else {
+                    form_fields.insert(field.clone());
+                    if command_form_slot_is_optional(&command.command, &slot.field) {
                         format!("[<{field}>]")
+                    } else {
+                        format!("<{field}>")
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
             if !shape.is_empty() {
-                parts.push(shape);
+                form_shapes.push(shape);
             }
+        }
+        if form_shapes.len() == 1 {
+            parts.extend(form_shapes);
+        } else if !form_shapes.is_empty() {
+            parts.push(format!("({})", form_shapes.join(" | ")));
         }
     }
 
     if let Some(item) = item {
         for (field, ty) in &item.schema {
             let required = !ty.ends_with('?');
-            if field == "project" || parts.iter().any(|p| p.contains(&field.replace('_', "-"))) {
+            if field == "project" || form_fields.contains(&field.replace('_', "-")) {
                 continue;
             }
             let flag = format!(
@@ -843,6 +853,27 @@ fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>
     } else {
         format!(" {}", parts.join(" "))
     }
+}
+
+pub(crate) fn command_form_slot_is_optional(
+    command: &ryeos_runtime::CommandDef,
+    slot_field: &str,
+) -> bool {
+    let normalized = slot_field.replace('_', "-");
+    let defaulted =
+        command.defaults.contains_key(slot_field) || command.defaults.contains_key(&normalized);
+    // A separate form that omits this field is the unambiguous spelling which
+    // consumes its default. Within a form that explicitly includes the field,
+    // keep the slot required; rendering it optional would describe an argv
+    // shape the form matcher does not actually accept.
+    let omitted_by_alternative = command.forms.len() > 1
+        && command.forms.iter().any(|candidate| {
+            candidate
+                .slots
+                .iter()
+                .all(|slot| slot.field.replace('_', "-") != normalized)
+        });
+    defaulted && !omitted_by_alternative
 }
 
 fn installed_usage_line(
@@ -883,7 +914,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "init" => (
             "ryeos init",
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
-            "ryeos init [--non-interactive | --json] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
+            "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
         ),
         "setup" => (
             "ryeos setup",
@@ -894,6 +925,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos node status",
             "Show local node lifecycle status",
             "ryeos node status [--json] [--app-root <DIR>]",
+        ),
+        "node host setup" => (
+            "ryeos node host setup",
+            "Provision one administrator-owned local hosted-worker service",
+            "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
         ),
         "node doctor" => (
             "ryeos node doctor",
@@ -989,6 +1025,13 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ("--app-root <DIR>", "Application root"),
         ],
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "node host setup" => &[
+            (
+                "--confirm",
+                "Confirm provisioning the administrator-owned host association",
+            ),
+            ("--app-root <DIR>", "Existing initialized application root"),
+        ],
         "execute" => &[
             (
                 "--async",
@@ -1063,7 +1106,9 @@ mod tests {
                     default: ryeos_runtime::CommandProjectDefault::None,
                     no_project_flag: false,
                     request_project_path: false,
+                    pin_at_admission: false,
                     bind_parameter: None,
+                    bind_no_project_parameter: None,
                 }),
                 dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
                     execute: "tool:remote/doctor".into(),
@@ -1094,6 +1139,22 @@ mod tests {
         assert!(item.is_offline_dispatch());
         assert_eq!(item.schema.get("project").unwrap(), "string?");
         assert_eq!(usage_tail(&command, Some(&item)), " <remote>");
+    }
+
+    #[test]
+    fn host_setup_help_is_available_without_installed_descriptors() {
+        let document = build_lifecycle_command_help(&[
+            "node".to_owned(),
+            "host".to_owned(),
+            "setup".to_owned(),
+        ]);
+        assert_eq!(document.title.as_deref(), Some("ryeos node host setup"));
+        assert!(document.sections.iter().any(|section| {
+            section
+                .rows
+                .iter()
+                .any(|row| row.key.as_deref() == Some("--confirm"))
+        }));
     }
 
     #[test]
@@ -1208,6 +1269,62 @@ mod tests {
         assert_eq!(
             installed_usage_line(&command, None),
             "ryeos web [<surface>]"
+        );
+    }
+
+    #[test]
+    fn installed_help_renders_positional_forms_as_alternatives() {
+        let mut command = LoadedCommandDescriptor {
+            command: ryeos_runtime::CommandDef {
+                name: "remote-worker-run".into(),
+                tokens: vec!["remote".into(), "worker".into(), "run".into()],
+                description: "Run a remote worker".into(),
+                aliases: vec![],
+                help: None,
+                arguments: vec![],
+                forms: vec![
+                    ryeos_runtime::CommandArgumentForm {
+                        slots: vec![
+                            ryeos_runtime::CommandArgumentSlot {
+                                field: "remote".into(),
+                                matcher: ryeos_runtime::CommandArgumentKind::String,
+                            },
+                            ryeos_runtime::CommandArgumentSlot {
+                                field: "workflow_ref".into(),
+                                matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                            },
+                        ],
+                    },
+                    ryeos_runtime::CommandArgumentForm {
+                        slots: vec![ryeos_runtime::CommandArgumentSlot {
+                            field: "workflow_ref".into(),
+                            matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                        }],
+                    },
+                ],
+                sensitive_fields: Vec::new(),
+                defaults: Default::default(),
+                parameter_binding: None,
+                control_flags: Vec::new(),
+                project: None,
+                dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
+                    execute: "service:remote-worker-workflows/start".into(),
+                    availability: ryeos_runtime::CommandAvailability::Daemon,
+                },
+                source_file: PathBuf::from("/tmp/remote-worker-run.yaml"),
+                provenance: ryeos_runtime::CommandProvenance::default(),
+            },
+            tokens: vec!["remote".into(), "worker".into(), "run".into()],
+            description: "Run a remote worker".into(),
+        };
+        command
+            .command
+            .defaults
+            .insert("remote".into(), serde_json::Value::String("default".into()));
+
+        assert_eq!(
+            installed_usage_line(&command, None),
+            "ryeos remote worker run (<remote> <workflow-ref> | <workflow-ref>)"
         );
     }
 }

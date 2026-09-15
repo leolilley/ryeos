@@ -79,10 +79,11 @@ pub async fn handle(
         .is_some()
     {
         Some(
-            ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+            ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
                 &state.state_store,
                 &req.thread_id,
             )
+            .await
             .map_err(|error| HandlerError::Conflict(error.to_string()))?,
         )
     } else {

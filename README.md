@@ -13,11 +13,11 @@ Work in RyeOS — a tool run, a multi-step workflow, a scheduled job — is
 data: signed, content-addressed, durable. Durability here means the explicit
 [filesystem and recovery contract](.ai/knowledge/ryeos/development/filesystem-durability.md),
 not cross-filesystem transactions or identical guarantees on every platform.
-Because it is data, it can prove
-what it is, who authorized it, and what it actually did. And because it is
-data, it can move: to another machine, across a restart, into the future.
-A run whose process dies resumes from its own record. Work pushed to
-another node carries its trust with it instead of borrowing the machine's.
+Its retained records identify admitted content, authority and reported
+consequences. Compatible, authorised execution can continue from supported
+recovery boundaries rather than depending on one process staying alive.
+Work sent to another node carries evidence for that node's trust and admission
+decisions; signatures alone do not prove external truth or permit continuation.
 
 That is the whole idea. Everything in this repository is that one property
 at a different layer:
@@ -27,21 +27,27 @@ at a different layer:
   additionally pins verified entry bytes through execution.
 - **Threads** — every execution has an identity and a durable event log.
   The log _is_ the run: tail it live, replay it, resume it, cancel it.
-- **Keys** — the only actors. An operator, a node, an agent: each is a
-  signing key, and anything that acts, acts by signing. Every piece of
-  work traces back to the key that stands behind it, and trust is always
-  a decision about a key, never about a machine.
+- **Identity and authority** — keys identify signers; grants define authority;
+  executions retain attributable work. Operator, node, publisher and vault
+  roles remain distinct. A model's prompted identity is not a signing identity
+  or a grant of permission.
 - **Remotes** — push work to another node with signed requests and scoped
   grants. Trust travels as data, never as ambient machine access.
 - **Content-addressed state** — history is the source of truth; databases
   and even running processes are rebuildable projections of it.
 
-None of this is AI-specific — remove every LLM runtime and the property
-stands. But an execution substrate that doesn't care what the executor is
-turns out to be exactly what LLM work needs: directives make an LLM call
-into a signed, durable, resumable execution like any other, and an agent
-is simply a signing key with a body of signed work — not a process, not a
-session.
+None of this is AI-specific — remove every LLM runtime and the purpose stands.
+A **directive authors executable intent for a model**, not necessarily an
+enduring assistant persona. Its definition is composed and verified; an
+invocation becomes an admitted execution with its own authority and history.
+The model performs the model-driven work rather than becoming the owner of
+the project or the judge of its own acceptance.
+
+Build around the work: tools perform operations, directives exercise judgment,
+and graphs coordinate explicit transitions. Projects define objectives,
+evidence and acceptance. Assistant experiences can use those mechanisms, but
+an "agent" is not a prerequisite abstraction for designing a RyeOS system.
+See [Why RyeOS](bundles/standard/.ai/knowledge/ryeos/core/why-ryeos.md).
 
 ## Mental model
 
@@ -62,9 +68,9 @@ session.
 
 The node, `ryeosd`, is where data becomes act: it holds keys, checks
 signatures, executes at the frontier, and owns durable state. It is
-deliberately the least special part of the system — any node with the right
-trust can be the site of an execution, because everything that matters is in
-the data.
+a host for admitted work, not its permanent identity. Moving work requires
+compatible runtimes, available content, target authorisation and any necessary
+custody transfer; retained data does not eliminate those requirements.
 
 RyeOS is built around a few primitives:
 

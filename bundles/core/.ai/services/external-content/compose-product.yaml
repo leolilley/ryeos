@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-08T03:28:13Z:ec142a8f5a0f91c551e6f63880221e523c5e22a18b103ea26fe00dda9d0c76f9:8CYxXeMMrpwva8Cho9MZDKTPCNjMVMxkntAQ5LT0J7max5IS7xAPUFLyf+iMpZJ7aAmhLwLCuPNx2JdrFYjPAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.compose-product
+required_caps: ["ryeos.execute.service.external-content/compose-product"]
+schema:
+  consumer_ref: string
+  project_context: object?
+  selections: array
+  maximum_bytes: integer
+description: Bind a complete bounded product selection to one exact signed consumer using an optional pinned project context

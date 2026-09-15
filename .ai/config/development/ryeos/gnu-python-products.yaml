@@ -1,0 +1,105 @@
+# ryeos:signed:2026-09-08T15:36:50Z:3a4bd19f67979fd15441b245246690fa8769739379d6bd0ee3cf713df2649489:8z/WLXieqlZBWYzmc+ob5BM6M/oFNyVIFJtoyahWiOMsK95/Scj0hEHAtVQ5GeutZYQ4E1lO447IhzaDOTWZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained GNU CPython runtime, notices and canonical ELF inventory
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: distribution
+      path: products/gnu-python-distribution
+      storage: large_content
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+  products:
+    - name: distribution
+      source: {kind: workspace_output, root: distribution}
+      path: products/gnu-python-distribution
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    - name: runtime
+      source: {kind: workspace_output, root: distribution}
+      # The product is mounted at /ryeos/realizations/python-gnu. It must
+      # retain the python/ member expected by its fixed runtime root.
+      path: products/gnu-python-distribution
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    - name: elf_inventory
+      source: {kind: workspace_output, root: distribution}
+      path: products/gnu-python-distribution/elf-inventory.json
+      shape: file
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1
+        maximum_depth: 1
+        maximum_file_bytes: 4194304
+        maximum_total_bytes: 4194304
+    - name: notices
+      source: {kind: workspace_output, root: distribution}
+      path: products/gnu-python-distribution/notices
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 256
+        maximum_depth: 8
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: runtime_to_qualification_verifier
+      producer:
+        canonical_ref: graph:ryeos/development/gnu-python-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/environments/qualification/gnu-python
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 10000
+          maximum_depth: 64
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: runtime_to_qualified_runtime
+      producer:
+        canonical_ref: graph:ryeos/development/gnu-python-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: config:development/ryeos/gnu-python-qualified-runtime
+        declaration_id: runtime
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 10000
+          maximum_depth: 64
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: config:ryeos/environments/qualification/gnu-python
+        required_claims: [gnu_python_extension_startup_providers_v1, gnu_python_zlib_1_3_2]

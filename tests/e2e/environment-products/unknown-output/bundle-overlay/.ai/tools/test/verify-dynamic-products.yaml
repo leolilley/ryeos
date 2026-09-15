@@ -1,0 +1,32 @@
+category: test
+name: verify-dynamic-products
+version: "1.0.0"
+description: Verify two selected files with the exact packaged fixture executable
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content: []
+external_product_slots:
+  - id: auxiliary
+    relationship_ref: config:test/dynamic-products
+    relationship: auxiliary_to_verifier
+    kind: file
+    mount_root: project
+    mount: qualification/auxiliary
+  - id: subject
+    relationship_ref: config:test/dynamic-products
+    relationship: subject_to_verifier
+    kind: file
+    mount_root: project
+    mount: qualification/subject
+config:
+  command: bin:fixture-dynamic-product-verifier
+  args:
+    - "${project_path}"
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

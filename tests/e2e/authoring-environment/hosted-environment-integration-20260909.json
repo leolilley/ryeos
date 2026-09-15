@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-09",
+  "status": "packages_built_installed_qualification_open",
+  "scope": "hosted_invocation_environment_source_integration",
+  "inputs": {
+    "hosted_checkpoint": "c914c51df2a1fbf3ba119eae8e698dc78f6d8999",
+    "environment_checkpoint": "55e1ffcb0022dbbd88cfe6712b09ee3ecdc66c6b"
+  },
+  "clean_cut": {
+    "worker_environment": 6,
+    "isolation_adapter": 10,
+    "runtime_database": 33,
+    "launch_metadata": 35
+  },
+  "package_build": {
+    "source_revision": "3b0ea050f14063637f18c4fa162050fbb4e5394c",
+    "embedded_revision": "3b0ea050f140",
+    "bundle_set": "full",
+    "target": "x86_64-unknown-linux-gnu",
+    "cargo_offline": true,
+    "jobs": 2,
+    "elapsed": "34m38s",
+    "outcome": "publication_succeeded",
+    "sha256": {
+      "ryeosd": "7fa953ea32b8b1c92b746d9ff29899793f5fd178e0992b40029d59a332c1867a",
+      "ryeos": "a0f974c27918d76ea0d0fef4f9f0b3d35016b36e2be8f1fa4af832a9e907e0f1",
+      "ryeos-structured-session-bridge": "d0b1306616f7337bda303207d8d9c47ef582ea434a64978efd03b51a652d5c45",
+      "ryeos-lillux-isolation-adapter": "c1109d9f063314a5211940765f6ff748a42f6db46c692a2a51f9e30ac2314ce9"
+    },
+    "nonfatal_warning": "Graph ExpressionScope::with_dispatch is now used only by a test; production uses with_post_action_dispatch."
+  },
+  "checks_passed": [
+    "combined daemon/executor/structured-session/core-tools/CLI/isolation-adapter all-target cargo check",
+    "157 focused authored Python contract and fixture tests",
+    "native-authoring fixture source checker",
+    "direct and managed precontact settlement production-helper tests",
+    "wrong-owner and uncertain-contact membership retention tests",
+    "18 workspace-binding StateStore/runtime database regressions",
+    "item-spawn typed boundary testimony regression",
+    "persistent-session spawn cleanup testimony regression",
+    "Lillux process-and-scope release cleanup truth-table regression",
+    "full matched release package compilation and bundle publication",
+    "cargo fmt --all -- --check",
+    "git diff --check"
+  ],
+  "reviews": {
+    "ownership_and_clean_cut": "no remaining concrete blocker in the reviewed integration slice",
+    "process_and_workspace_safety": "no remaining concrete blocker after compile-only refusal and recovery-stop settlement corrections",
+    "authored_contracts": "current producer assertions separated from unchanged historical artifact evidence"
+  },
+  "evidence_limits": [
+    "Settlement fixtures use actual journal and lifecycle owners, but create no native process or mounted workspace.",
+    "The invalid environment error exercises the production settlement helper, not a complete worker launch.",
+    "Release cleanup truth-table coverage does not replace installed native scope qualification.",
+    "Historical authoring artifact hashes and v15/v16 failed-task candidates remain unchanged.",
+    "No combined package installation, node restart, model turn, candidate publication or remote deployment occurred during these checks."
+  ],
+  "remaining_gates": [
+    "privileged installation of the selected matched payloads",
+    "installed worker edit and restricted child-operation acceptance through both invocation ingress paths",
+    "exact completion fence and frozen candidate",
+    "independent negative and positive candidate evaluation",
+    "restart/reattachment and source-fenced remote result return",
+    "full RyeOS repository development qualification and real remote deployment"
+  ]
+}

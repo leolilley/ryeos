@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS threads (
     admitted_launch_capsule_hash TEXT,
     base_project_snapshot_hash TEXT,
     result_project_snapshot_hash TEXT,
+    result_workspace_output_capture_hash TEXT,
     captured_history_policy_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -535,6 +536,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "result_project_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result_workspace_output_capture_hash",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,

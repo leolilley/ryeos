@@ -1,12 +1,42 @@
-# ryeos:signed:2026-08-11T02:28:07Z:f7559032f323a8d5d138dea65eede3bdef54c555a405ec11c9306b062b1137d5:VVYluv2iRcNWPt/bY8PwMN1G9xsshJDORXLM1i2cOXGwyWv9aAPu7qT8dCvfztEbcF9dw3mP2WmIFIYntsagCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T11:09:28Z:f54521e9680c2bfcaed8b9232589e96352a05823c900ed0de303f70fc101fd3b:OCdwoFasf3Acw+5mmTID+aEntU5hXJfOq4N8kqKhTqvsZUf8Ck9qCK6s8F/C7c4pJoqmDzm5MS7QQFx93TZWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, bind]
-description: Bind a staged external-content manifest to one trusted consumer
+description: Bind a staged external-content manifest to one exact consumer authority
+arguments:
+  - name: product_selections
+    kind: json
+    positional: 7
+    required: false
+    arity: optional
+    description: Complete typed product-selection list for the exact consumer
+  - name: product_owner_principal
+    kind: string
+    positional: 8
+    required: false
+    arity: optional
+    description: Exact currently admitted operator principal owning every selected product
 forms:
   - slots:
       - field: staging_id
       - field: request_digest
       - field: manifest_hash
       - field: consumer_ref
+      - field: consumer_kind
+      - field: project_snapshot_hash
+  - slots:
+      - field: staging_id
+      - field: request_digest
+      - field: manifest_hash
+      - field: consumer_ref
+      - field: consumer_kind
+project:
+  resolution: optional
+  bind_parameter: project_path
+  no_project_flag: true
+help:
+  usage: ryeos external-content bind <staging-id> <request-digest> <manifest-hash> <consumer-ref> <consumer-kind> [project-snapshot-hash] [--product-selections <json>] [--product-owner-principal <fp:hash>] --project <project-root>
+  examples:
+    - ryeos --project /absolute/project external-content bind <stage> <request> <manifest> tool:project/build pinned_project <snapshot>
+    - ryeos --no-project external-content bind <stage> <request> <manifest> worker:provider/hosted installed_bundle
 dispatch:
   kind: execute_ref
   execute: service:external-content/bind

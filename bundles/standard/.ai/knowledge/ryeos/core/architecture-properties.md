@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:28Z:3876a0d8d5ecb50f5008baa8b32c3a4c0a6d2412b9406859197203f53837fb1d:xGA8DxZiOr4X/a4SIFX/tVcNHyG/bilerGorlaQD7ZhW3ziWngUxccGJEC3P/0uOen254FbkX0hYxRNVA7LwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-05T00:45:27Z:12539c35871f1e2d105be3da7dc659a96e95006a1d90121fa22bd241b5ccf592:K1OSXj919Y2cRw8eJRkxtpbZaqdUs9TNIrpfeGWyZtJAWaTvhkkz0DEDjKWLxjADTjY7eQfhNHiNaKgDnarKCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -164,7 +164,7 @@ Every daemon-owned target is born unable to execute. RyeOS first captures and
 persists its exact process identity, rechecks stop and shutdown authority, and
 only then releases it. Direct execution uses Lillux's native hold; an enforced
 isolation backend holds its actual target. Durable ownership therefore does not
-depend on Bubblewrap or any other isolation provider.
+depend on a particular isolation provider.
 
 → [Attachment Before Execution](execution/attachment-before-execution.md)
 

@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-08T10:36:33Z:530459c6af8fee77ec0a82086a6c55438751d3ed30841c2ceafc544a36497cb3:AYOKllbU2VPO9RxwiDLZtGjvlhNnbTjhDIlxjghCeXut/NO7H2y28mlYnn71Qy/uCHdKg3qhXNhyeAQ/vI2ZDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Reuse or run the exact retained authoring input preparation
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.ryeos/development/authoring-prepared-inputs-production
+      - ryeos.execute.config.development/ryeos/authoring-prepared-input-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/prepare
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:ryeos/development/authoring-prepared-inputs-production
+        ref_bindings: {}
+        params: {}
+      assign:
+        accepted_products: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.accepted_products}"

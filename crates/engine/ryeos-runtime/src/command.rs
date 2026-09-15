@@ -335,6 +335,10 @@ pub enum ControlFlagBinding {
     /// Takes a `name=canonical-ref` value and inserts it into the request's
     /// complete secondary execution identity map.
     RefBinding,
+    /// Takes one closed JSON object and routes it to the invocation-time
+    /// product selector control field. Semantic validation remains at the
+    /// execution admission boundary.
+    ProductSelections,
 }
 
 impl ControlFlagBinding {
@@ -342,7 +346,11 @@ impl ControlFlagBinding {
     pub fn takes_value(self) -> bool {
         matches!(
             self,
-            Self::CallMethod | Self::CallArgs | Self::StateRoot | Self::RefBinding
+            Self::CallMethod
+                | Self::CallArgs
+                | Self::StateRoot
+                | Self::RefBinding
+                | Self::ProductSelections
         )
     }
 }
@@ -358,8 +366,18 @@ pub struct CommandProjectPolicy {
     pub no_project_flag: bool,
     #[serde(default)]
     pub request_project_path: bool,
+    /// Capture the selected live project as an immutable generation at the
+    /// daemon admission boundary. This is command-owned execution policy, not
+    /// an item parameter or an argv-only control.
+    #[serde(default)]
+    pub pin_at_admission: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_parameter: Option<String>,
+    /// Project the explicit projectless selector into this service parameter.
+    /// Accepting a CLI selector is separate from forwarding it: many consumers
+    /// need no boolean, while execution-envelope projectlessness has its own owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_no_project_parameter: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -452,6 +470,8 @@ pub enum CommandRegistryError {
     },
     #[error("command '{name}' control flag '--{flag}' sets ref_binding_name for a non-ref binding")]
     MisplacedControlRefBinding { name: String, flag: String },
+    #[error("command '{name}' has an invalid projectless parameter binding '{field}'")]
+    InvalidProjectlessBinding { name: String, field: String },
     #[error("no command matches tokens {tokens:?}")]
     NoMatch { tokens: Vec<String> },
 }
@@ -542,6 +562,18 @@ fn validate_command(
     policy: &CommandRegistrationPolicy,
 ) -> Result<(), CommandRegistryError> {
     validate_tokens(&record.name, &record.tokens)?;
+    if let Some(project) = &record.project
+        && let Some(field) = &project.bind_no_project_parameter
+        && (!project.no_project_flag
+            || !valid_ref_binding_name(field)
+            || project.bind_parameter.as_ref() == Some(field)
+            || field == "project")
+    {
+        return Err(CommandRegistryError::InvalidProjectlessBinding {
+            name: record.name.clone(),
+            field: field.clone(),
+        });
+    }
     if let CommandDispatch::ExecuteRef { execute, .. } = &record.dispatch {
         ryeos_engine::canonical_ref::CanonicalRef::parse(execute).map_err(|e| {
             CommandRegistryError::InvalidExecuteRef {
@@ -772,6 +804,34 @@ mod tests {
             ],
             system_source_caps: vec![],
         }
+    }
+
+    #[test]
+    fn projectless_binding_requires_an_unambiguous_declared_selector() {
+        let mut record = command("demo", &["demo"]);
+        record.project = Some(CommandProjectPolicy {
+            resolution: CommandProjectResolution::Optional,
+            default: CommandProjectDefault::None,
+            no_project_flag: true,
+            request_project_path: false,
+            pin_at_admission: false,
+            bind_parameter: Some("project_path".into()),
+            bind_no_project_parameter: Some("no_project".into()),
+        });
+        CommandRegistry::from_records(&[record.clone()], &policy()).unwrap();
+        for field in ["", "project", "project_path", "nested.field", "bad-name"] {
+            let mut invalid = record.clone();
+            invalid.project.as_mut().unwrap().bind_no_project_parameter = Some(field.into());
+            assert!(matches!(
+                CommandRegistry::from_records(&[invalid], &policy()),
+                Err(CommandRegistryError::InvalidProjectlessBinding { .. })
+            ));
+        }
+        record.project.as_mut().unwrap().no_project_flag = false;
+        assert!(matches!(
+            CommandRegistry::from_records(&[record], &policy()),
+            Err(CommandRegistryError::InvalidProjectlessBinding { .. })
+        ));
     }
 
     #[test]

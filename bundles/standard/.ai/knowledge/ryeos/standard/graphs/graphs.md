@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-19T09:42:33Z:07be3ebf7a07eb65e96494e5bcb8343f9c225cfbc7004288763e56b5e0b3b3aa:zwcvwZAb0cbxRui58w2g9ntxnE8jvqubk3ugZJlMHOiy0D9l4xqDWptlECTbFNA2Vspaasezj/5F3iuojsysDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:38:33Z:644ba65775169e1dff73ea8e7bcef3752f6ef9d10ac5a5031934acbcce6dda60:36rPMEoCQfheOLPzqvbt8f6BsBtMuXuulY21LKKLbVBE/Lkkl/VlhiNbtzN2s2I38tUwV0xYTuhQ4CtiUR1hDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
-version: "1.1.0"
+version: "1.1.1"
 description: >
   How state graphs work — YAML DAG definitions, node types,
   conditional edges, foreach, hooks, and state persistence.
@@ -252,10 +252,14 @@ terminal thread id for every aligned child chain, including a failed child;
 it does not alter the child's return value. Under `continue`, both ordered
 collections commit atomically; an explicit redirect or failure discards both.
 An empty input contributes `[]` to every declared collection. Actions, params,
-and facets render per item, including `${run.graph_run_id}`. The parent's
-effective capabilities and hard limits bound every child. The complete rendered
-launch cohort is also held to one rye-expr/1 JSON result budget; exceeding it
-fails the node before suspension or daemon handoff. See
+and facets render per item, including `${run.graph_run_id}`. The action may use
+the ordinary typed `product_selections` field. Those selections belong only to
+the rendered child, are included in the bounded cohort and durable child-spec
+identity, and are admitted again at child materialization. They are never
+inherited from the Graph root or resolved as a latest target binding. The
+parent's effective capabilities and hard limits bound every child. The complete
+rendered launch cohort is also held to one rye-expr/1 JSON result budget;
+exceeding it fails the node before suspension or daemon handoff. See
 `graphs/follow.md` for capability wildcard examples, cancellation/resume
 behavior, and a complete authoring example.
 

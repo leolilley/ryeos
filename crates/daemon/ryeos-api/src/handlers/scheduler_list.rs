@@ -88,8 +88,10 @@ pub async fn handle(
                 "overlap_policy": spec.overlap_policy,
                 "lateness_grace_secs": spec.lateness_grace_secs,
                 "signer_fingerprint": spec.signer_fingerprint,
+                "execution": spec.execution,
                 "last_scheduled_at": plan.last_scheduled_at,
-                "last_fire_at": last_fire.and_then(|f| f.fired_at),
+                "last_reserved_at": last_fire.map(|f| f.reserved_at),
+                "last_dispatched_at": last_fire.and_then(|f| f.dispatched_at),
                 "last_fire_status": last_fire.map(|f| f.status.clone()),
                 "last_fire_reason": last_fire.map(|f| f.trigger_reason.clone()),
                 "last_fire_outcome": last_fire.and_then(|f| f.outcome.clone()),
@@ -110,7 +112,7 @@ pub async fn handle(
 
     // Always report the filtering identity so an empty result is legible:
     // schedules are owned per-principal (a node-owned schedule belongs to
-    // whatever key its signed `execution.requester_fingerprint` names), and the
+    // whatever principal its signed `execution.authority` names), and the
     // list is scoped to the caller. Without this, an empty list reads as
     // "nothing scheduled" when it really means "nothing owned by you".
     let mut response = serde_json::json!({

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-05T00:45:17Z:f6505d7242c8619be1093f1014d910687beb8bd3366fc9dea1b7568d2e596833:azL6Ixgs1eZTXAPEg5v613HB/lG4hgL1ehc1Y8KNQNKTBj1+mEpLpMnBhrTnw71jqpR8g6wKqx/vNhA7CmV4Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.pull-worker-result
+required_caps: ["ryeos.execute.service.remote/pull-worker-result"]
+schema:
+  remote: string?
+  project: string
+  chain_root_id: string
+description: "Durably pull one target-attested terminal hosted-worker candidate and apply it to its exact clean-base owner workspace"

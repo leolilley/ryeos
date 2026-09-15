@@ -393,6 +393,14 @@ fn validate_protocol_descriptor(
         )?;
     }
 
+    if let Some(projector) = &desc.execution_evidence {
+        crate::execution_evidence::validate_execution_evidence_projector_declaration(projector)
+            .map_err(|detail| ProtocolError::MalformedYaml {
+                path: path.to_owned(),
+                detail,
+            })?;
+    }
+
     Ok(())
 }
 

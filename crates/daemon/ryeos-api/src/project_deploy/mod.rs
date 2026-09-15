@@ -61,6 +61,11 @@ impl PreparedProjectDeploy {
         self.schedules.rollback(ctx);
         self.finalized = true;
     }
+
+    pub fn retain_for_recovery(&mut self) {
+        self.schedules.retain_for_recovery();
+        self.finalized = true;
+    }
 }
 
 impl Drop for PreparedProjectDeploy {
@@ -88,4 +93,47 @@ pub fn prepare_commit(
         report,
         finalized: false,
     })
+}
+
+pub(crate) struct ProjectDeployRecoveryPreparation {
+    schedules: schedules::ScheduleRecoveryPreparation,
+}
+
+impl ProjectDeployRecoveryPreparation {
+    pub(crate) fn schedule_before_images(&self) -> &[schedules::ScheduleRecoveryBeforeImage] {
+        self.schedules.before_images()
+    }
+}
+
+pub(crate) async fn prepare_recovery_before_images(
+    plan: &ProjectDeployPlan,
+    ctx: &ProjectDeployContext<'_>,
+) -> Result<ProjectDeployRecoveryPreparation> {
+    Ok(ProjectDeployRecoveryPreparation {
+        schedules: schedules::prepare_recovery_before_images(&plan.schedules, ctx).await?,
+    })
+}
+
+pub(crate) fn prepare_commit_with_recovery(
+    plan: &ProjectDeployPlan,
+    ctx: &ProjectDeployContext<'_>,
+    preparation: ProjectDeployRecoveryPreparation,
+) -> Result<PreparedProjectDeploy> {
+    let schedules =
+        schedules::prepare_commit_with_recovery(&plan.schedules, ctx, preparation.schedules)?;
+    let report = ProjectDeployReport {
+        schedules: schedules.report.clone(),
+    };
+    Ok(PreparedProjectDeploy {
+        schedules,
+        report,
+        finalized: false,
+    })
+}
+
+pub(crate) async fn restore_recovery_before_images(
+    state: &AppState,
+    entries: &[schedules::ScheduleRecoveryBeforeImage],
+) -> Result<()> {
+    schedules::restore_recovery_before_images(state, entries).await
 }

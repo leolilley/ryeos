@@ -7,6 +7,7 @@ use axum::serve;
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
 
+use ryeos_api::handlers::remote_pull_worker_result::recover_durable_worker_result_pulls;
 use ryeos_api::handlers::remote_reconcile_project_head::recover_durable_project_head_reconciliations;
 use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
@@ -30,19 +31,21 @@ const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
 
 struct LifecycleExitGuard {
     state_dir: std::path::PathBuf,
+    started_at: String,
     recorded: bool,
 }
 
 impl LifecycleExitGuard {
-    fn new(state_dir: std::path::PathBuf) -> Self {
+    fn new(state_dir: std::path::PathBuf, started_at: String) -> Self {
         Self {
             state_dir,
+            started_at,
             recorded: false,
         }
     }
 
-    fn record(&mut self, reason: &str) {
-        lifecycle_marker::record_exit(&self.state_dir, reason);
+    fn record(&mut self, reason: &str, error: Option<&str>) {
+        lifecycle_marker::record_exit(&self.state_dir, reason, &self.started_at, error);
         self.recorded = true;
     }
 }
@@ -50,7 +53,12 @@ impl LifecycleExitGuard {
 impl Drop for LifecycleExitGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            lifecycle_marker::record_exit(&self.state_dir, "startup_failed");
+            lifecycle_marker::record_exit(
+                &self.state_dir,
+                "startup_failed",
+                &self.started_at,
+                None,
+            );
         }
     }
 }
@@ -234,15 +242,167 @@ fn prospective_node_config_validator(
     )
 }
 
+const INSTALL_TRANSACTION_FD_ENV: &str = "RYEOS_INSTALL_TRANSACTION_FD";
+const INSTALL_PREPARED_ENV: &str = "RYEOS_INSTALL_PREPARED";
+
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if let Some(config::DaemonCommand::InitPolicyPreflight {
+        app_root,
+        schema_cut,
+    }) = &cli.command
+    {
+        ryeos_node::preflight_existing_policy_generation(app_root, *schema_cut)?;
+        return Ok(());
+    }
+    if let Some(config::DaemonCommand::HostProvision {
+        app_root,
+        controller_account_json,
+    }) = &cli.command
+    {
+        lillux::require_administrator()?;
+        let account: lillux::ControllerAccount = serde_json::from_str(controller_account_json)
+            .context("parse explicit host controller account")?;
+        let desired = ryeos_node::supervision::provision_host_service(app_root, account)?;
+        println!(
+            "host service provisioned {}; use ryeos start/stop for ordinary lifecycle",
+            match desired {
+                ryeos_node::supervision::DesiredState::Up => "up",
+                ryeos_node::supervision::DesiredState::Down => "down",
+            }
+        );
+        return Ok(());
+    }
+    if let Some(config::DaemonCommand::HostInstall {
+        package_root,
+        action,
+    }) = &cli.command
+    {
+        return match action {
+            config::HostInstallAction::Acquire {
+                installer,
+                installer_digest,
+                prepared,
+                args,
+            } => match lillux::exec_install_transaction(
+                package_root,
+                std::path::Path::new("/usr/bin/bash"),
+                installer,
+                installer_digest,
+                args,
+                &[(
+                    std::ffi::OsString::from(INSTALL_PREPARED_ENV),
+                    std::ffi::OsString::from(if *prepared { "1" } else { "0" }),
+                )],
+                INSTALL_TRANSACTION_FD_ENV,
+            ) {
+                Ok(never) => match never {},
+                Err(error) => Err(error),
+            },
+            config::HostInstallAction::Validate { transaction_fd } => {
+                lillux::validate_install_transaction(package_root, *transaction_fd)
+            }
+        };
+    }
+    if let Some(config::DaemonCommand::HostUpgrade {
+        app_root,
+        expected_daemon_path,
+        expected_daemon_sha256,
+        inspect,
+        action,
+    }) = &cli.command
+    {
+        let service = ryeos_node::supervision::InstalledService::discover_app_root(app_root)?;
+        if let Some(service) = &service {
+            service.require_package_daemon_path(expected_daemon_path)?;
+        }
+        if *inspect {
+            println!(
+                "{}",
+                if service.is_some() {
+                    "supervised"
+                } else {
+                    "direct"
+                }
+            );
+            return Ok(());
+        }
+        let service = service.context("host upgrade requires a configured service")?;
+        let digest = expected_daemon_sha256
+            .as_deref()
+            .context("host upgrade requires an image digest")?;
+        let action = action.context("host upgrade action is absent")?;
+        if !matches!(action, config::HostUpgradeAction::Observe) {
+            lillux::require_administrator()?;
+        }
+        match action {
+            config::HostUpgradeAction::Begin => {
+                let intent = service.begin_upgrade(digest)?;
+                println!(
+                    "{}",
+                    match intent.desired {
+                        ryeos_node::supervision::DesiredState::Up => "up",
+                        ryeos_node::supervision::DesiredState::Down => "down",
+                    }
+                );
+            }
+            config::HostUpgradeAction::ReplacementSafe => {
+                service.require_upgrade_replacement_safe(digest)?
+            }
+            config::HostUpgradeAction::RestoreReady => {
+                service.mark_upgrade_restore_ready(digest)?;
+            }
+            config::HostUpgradeAction::Finish => {
+                service.finish_upgrade(digest)?;
+            }
+            config::HostUpgradeAction::Observe => {
+                service.binding.runtime.account.require_current_process()?;
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(service.observe_upgrade(digest))?;
+            }
+        }
+        return Ok(());
+    }
+    if let Some(config::DaemonCommand::HostService { app_root }) = &cli.command {
+        // Must precede async threads, configuration loading, tracing and every
+        // node-state write. Lillux drops privileges before executing ryeosd.
+        lillux::require_administrator()?;
+        return match ryeos_node::supervision::exec_host_service(app_root) {
+            Ok(never) => match never {},
+            Err(error) => Err(error),
+        };
+    }
+    if let Some(config::DaemonCommand::HostRuntime { binding }) = &cli.command {
+        // As with native host-service entry, consume the administrator-owned
+        // launch document before async runtime creation, tracing, config loads
+        // or node-state writes. The child receives only its exact descriptor.
+        let executable = std::env::current_exe().context("locate host-runtime daemon image")?;
+        return match ryeos_node::host_runtime::exec_external_controller(binding, &executable) {
+            Ok(never) => match never {},
+            Err(error) => Err(error),
+        };
+    }
+    let external_host_runtime =
+        ryeos_node::host_runtime::ExternalHostRuntime::take_from_environment()
+            .context("consume inherited external host-runtime authority")?;
     ryeos_app::provider_object_contracts::install()
         .context("install application object contracts")?;
+    // Recovery and launch reconstruction deserialize the complete retained
+    // authority envelope on a runtime worker. Unoptimized builds can exceed
+    // Tokio's 2 MiB default while doing that work (the real-process test
+    // harness has historically compensated with RUST_MIN_STACK). Make the
+    // daemon's actual runtime contract explicit so direct debug and local
+    // qualification installs have the same safe floor as the harness.
+    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(DAEMON_WORKER_STACK_BYTES)
         .enable_all()
         .build()
         .context("build daemon async runtime")?;
     let mut process_state_lock = None;
-    let result = runtime.block_on(run(&mut process_state_lock));
+    let result = runtime.block_on(run(cli, &mut process_state_lock, external_host_runtime));
 
     // Tokio cannot cancel work already admitted to spawn_blocking. Never let
     // abandoned request work keep a lifecycle-complete daemon alive holding
@@ -285,12 +445,15 @@ fn build_handoff_phase_gate(
     ))))
 }
 
-async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<()> {
+async fn run(
+    cli: Cli,
+    process_state_lock: &mut Option<state_lock::StateLock>,
+    external_host_runtime: Option<ryeos_node::host_runtime::ExternalHostRuntime>,
+) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
     let process_started = Instant::now();
     let process_started_at = lillux::time::iso8601_now();
-    let cli = Cli::parse();
 
     #[cfg(feature = "handoff-test-support")]
     let handoff_phase_gate = build_handoff_phase_gate(&cli)?;
@@ -317,24 +480,59 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
         return Ok(());
     }
 
-    let mut config = Config::load(&cli.to_sources())?;
+    let config_sources = cli.to_sources();
+    let selected_app_root = Config::selected_app_root(&config_sources)?;
+    // This runs as the node account. Host association is not permission to
+    // interpret user-owned node configuration while privileged, nor a reason
+    // to require administrator-owned ancestors above an ordinary app root.
+    let host_service =
+        ryeos_node::supervision::InstalledService::discover_app_root(&selected_app_root)?;
+    if host_service.is_some() && external_host_runtime.is_some() {
+        anyhow::bail!("native and external host-runtime authorities are both present");
+    }
+    if let Some(service) = &host_service {
+        // Refuse a misconfigured root/wrong-account daemon before init checks,
+        // state-lock creation, tracing or lifecycle metadata writes.
+        service.binding.runtime.account.require_current_process()?;
+    }
+    if let Some(runtime) = &external_host_runtime {
+        runtime.binding().account.require_current_process()?;
+        runtime.binding().validate(&selected_app_root)?;
+    }
     ryeosd::init_shutdown_channel();
 
     // Verify operator-owned node initialization before any local repairs
     // or runtime-state writes. `ryeos init` is authoritative for bundle
     // registrations and operator identity/trust artifacts.
-    ryeos_node::require_initialized(&config.app_root)?;
+    ryeos_node::require_initialized(&selected_app_root)?;
 
     // Handle subcommands BEFORE acquiring the daemon state lock or
     // initializing tracing. Subcommands (e.g. `run-service`) manage
     // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
+            config::DaemonCommand::HostProvision { .. } => {
+                unreachable!("handled before node startup")
+            }
+            config::DaemonCommand::InitPolicyPreflight { .. }
+            | config::DaemonCommand::HostInstall { .. } => {
+                unreachable!("handled before node startup")
+            }
+            config::DaemonCommand::HostUpgrade { .. } => {
+                unreachable!("handled before node startup")
+            }
+            config::DaemonCommand::HostService { .. } => {
+                unreachable!("handled before runtime startup")
+            }
+            config::DaemonCommand::HostRuntime { .. } => {
+                unreachable!("handled before runtime startup")
+            }
             config::DaemonCommand::BuildInfo { .. } => unreachable!("handled before config load"),
             config::DaemonCommand::RunService {
                 service_ref,
                 params,
             } => {
+                let config = Config::load(&config_sources)?;
                 return run_service_standalone(&config, service_ref, params.as_deref()).await;
             }
         }
@@ -345,7 +543,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     // standalone service) from racing in and removing the first
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
-    let state_lock_path = state_lock::default_lock_path(&config.app_root);
+    let state_lock_path = state_lock::default_lock_path(&selected_app_root);
     let state_lock = state_lock::StateLock::acquire_with_timeout(
         &state_lock_path,
         Duration::from_secs(5),
@@ -353,7 +551,40 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     .context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
+    state_lock.ensure_protects_app_root(&selected_app_root)?;
     *process_state_lock = Some(state_lock);
+
+    // Mark the attempt before complete config decoding. The explicit app root
+    // is already fenced by StateLock, so a malformed bootstrap document now
+    // becomes bounded node-owned failure testimony instead of an invisible
+    // supervisor restart loop.
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(selected_app_root.clone()).state();
+    lifecycle_marker::report_previous_exit(&state_dir);
+    lifecycle_marker::check_disk_space(&state_dir);
+    let lifecycle_started_at = lifecycle_marker::record_running(&state_dir);
+    let mut lifecycle_exit = LifecycleExitGuard::new(state_dir, lifecycle_started_at);
+
+    let mut config = match Config::load(&config_sources) {
+        Ok(config) => config,
+        Err(error) => {
+            let detail = format!("load node bootstrap configuration: {error:#}");
+            lifecycle_exit.record("startup_failed", Some(&detail));
+            return Err(error).context("load node bootstrap configuration");
+        }
+    };
+    if config.app_root != selected_app_root {
+        let detail = format!(
+            "decoded node bootstrap app root {} differs from locked app root {}",
+            config.app_root.display(),
+            selected_app_root.display()
+        );
+        lifecycle_exit.record("startup_failed", Some(&detail));
+        anyhow::bail!(detail);
+    }
+    process_state_lock
+        .as_ref()
+        .context("daemon state lock is absent")?
+        .ensure_protects_app_root(&config.app_root)?;
 
     // Recheck the signed whole-init fence after acquiring the same lock as
     // initialization. The pre-lock check provides early guidance; this check
@@ -366,14 +597,6 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
         &config.app_root,
     ));
 
-    // Surface how the previous run ended (clean, or an inferred crash from a
-    // stale `running` marker), warn on low disk, then mark this run as running.
-    let state_dir = config.runtime_state_dir();
-    lifecycle_marker::report_previous_exit(&state_dir);
-    lifecycle_marker::check_disk_space(&state_dir);
-    lifecycle_marker::record_running(&state_dir);
-    let mut lifecycle_exit = LifecycleExitGuard::new(state_dir.clone());
-
     // Repair only daemon-local artifacts. Missing operator artifacts
     // (user signing key, trust docs) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
@@ -385,23 +608,35 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
     tracing::info!("State lock acquired");
 
-    process::remove_stale_socket(&config.uds_path)?;
-    ensure_runtime_paths(&config)?;
-    let daemon_json_path = config.app_root.join("daemon.json");
-    let _ = std::fs::remove_file(&daemon_json_path);
+    let early_startup = async {
+        process::remove_stale_socket(&config.uds_path)?;
+        ensure_runtime_paths(&config)?;
+        let daemon_json_path = config.app_root.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json_path);
 
-    // Bind and start both stable outer transports before any projection work.
-    // These listeners expose only lifecycle/liveness until the callback-capable
-    // application is release-published by the startup coordinator.
-    let tcp_listener = TcpListener::bind(config.bind)
-        .await
-        .with_context(|| format!("failed to bind {}", config.bind))?;
-    let actual_bind = tcp_listener
-        .local_addr()
-        .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
+        // Bind both stable outer transports before projection work. Catch this
+        // whole pre-control phase so supervised callers receive the actual
+        // terminal failure rather than observing an endless restart spinner.
+        let tcp_listener = TcpListener::bind(config.bind)
+            .await
+            .with_context(|| format!("failed to bind {}", config.bind))?;
+        let actual_bind = tcp_listener
+            .local_addr()
+            .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
+        let uds_listener = UnixListener::bind(&config.uds_path)
+            .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
+        Ok::<_, anyhow::Error>((tcp_listener, uds_listener, daemon_json_path, actual_bind))
+    }
+    .await;
+    let (tcp_listener, uds_listener, daemon_json_path, actual_bind) = match early_startup {
+        Ok(value) => value,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            lifecycle_exit.record("startup_failed", Some(&detail));
+            return Err(error);
+        }
+    };
     config.bind = actual_bind;
-    let uds_listener = UnixListener::bind(&config.uds_path)
-        .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
     let _discovery_cleanup =
         startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
 
@@ -478,6 +713,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Resolve every interrupted bundle tree/registration transaction before
             // the bootstrap loader consumes installed bundle registrations.
             let identity = NodeIdentity::load(&config.node_signing_key_path)?;
+            process_state_lock
+                .as_ref()
+                .context("daemon state lock is absent")?
+                .ensure_protects_app_root(&config.app_root)?;
+            if let Some(service) = &host_service {
+                service.verify_loaded_node_identity(&identity)?;
+            }
+            if let Some(runtime) = &external_host_runtime {
+                runtime.binding().verify_loaded_node_identity(&identity)?;
+            }
             ryeos_api::auth::validate_authorized_key_directory(
                 &config.authorized_keys_dir,
                 &identity,
@@ -505,8 +750,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             }
 
             // ── Two-phase node-config bootstrap ──
+            let host_runtime = external_host_runtime
+                .as_ref()
+                .map(|runtime| runtime.binding())
+                .or_else(|| {
+                    host_service
+                        .as_ref()
+                        .map(|service| &service.binding.runtime)
+                });
             let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
-                bootstrap::load_node_config_two_phase(&config)?;
+                bootstrap::load_node_config_two_phase_with_host_runtime(&config, host_runtime)?;
 
             // Build the service registry early — self-check needs it.
             let services = Arc::new(build_service_registry()?);
@@ -536,6 +789,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                         current_site_id: "site:local".into(),
                         origin_site_id: "site:local".into(),
                         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+                        scheduled_fire: None,
                         validate_only: true,
                     };
 
@@ -965,6 +1219,18 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     "settled sync-job attempts interrupted by the previous daemon process"
                 );
             }
+            let recovered_project_applies =
+                ryeos_api::handlers::project_apply_snapshot::recover_durable_project_snapshot_applies(
+                    &app_state,
+                )
+                .await
+                .context("recover interrupted project snapshot applies")?;
+            if recovered_project_applies != 0 {
+                tracing::warn!(
+                    recovered_project_applies,
+                    "recovered project snapshot applies before enabling dispatch"
+                );
+            }
             let admission_store = app_state.state_store.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
@@ -1058,12 +1324,12 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     "reconciled durable launch planning admissions"
                 );
             }
-            let active_reconcile = reconcile::reconcile_active_threads(&app_state).await?;
             ryeos_api::handlers::dedicated_sessions::reconcile_candidate_publications(Arc::new(
                 app_state.clone(),
             ))
             .await
             .context("reconcile hosted candidate publications")?;
+            let active_reconcile = reconcile::reconcile_active_threads(&app_state).await?;
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);
             })?;
@@ -1408,7 +1674,11 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     } else {
         "runtime_error"
     };
-    lifecycle_exit.record(exit_reason);
+    let exit_detail = daemon_result
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    lifecycle_exit.record(exit_reason, exit_detail.as_deref());
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
         Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
@@ -1744,7 +2014,9 @@ fn prepare_follow_recovery_actions(
 /// `created|running` set. The startup execution gate keeps every detached
 /// recovery task inert here, so each row must be terminal, attached to a
 /// verified RyeOS process, protected by a launch claim, or owned by a durable
-/// follow/launch-window/remote-adoption state machine.
+/// follow/launch-window/remote-adoption state machine. The same check runs in
+/// live reconciliation: the existing daemon-handler registry is also an exact
+/// live owner there, never a substitute for durable recovery after restart.
 fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<String>) -> Result<()> {
     for thread_id in targets {
         let thread = state
@@ -1810,6 +2082,10 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
         };
         if status.is_terminal()
             || live_owned_process
+            // Reuse the owner checked by reconcile_in_process_handler. A
+            // reservation alone is not liveness, and this volatile registry
+            // is empty for predecessor handlers after daemon restart.
+            || state.state_store.is_in_process_handler_active(thread_id)?
             || state.state_store.get_launch_claim(thread_id)?.is_some()
             || thread.runtime.recovery_wait.is_some()
             || durable_follow_owner
@@ -1820,8 +2096,21 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
         {
             continue;
         }
+        // A retained workspace journal is a durable quarantine owner, not
+        // permission to resume or clean up. Recheck its exact retained state;
+        // neither an in-memory blocked set nor a NULL PID grants this status.
+        if state
+            .state_store
+            .has_retained_workspace_quarantine(thread_id)?
+        {
+            tracing::warn!(
+                thread_id,
+                "recovery target remains workspace-quarantined; execution and cleanup stay fenced"
+            );
+            continue;
+        }
         anyhow::bail!(
-            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/wait/follow/handoff/window ownership"
+            "recovery target {thread_id} reached readiness without terminal state, a verified live process, an active daemon handler, or durable claim/wait/follow/handoff/window ownership"
         );
     }
     Ok(())
@@ -1944,6 +2233,12 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             "initial remote project-head reconciliation failed; durable jobs remain retryable"
         );
     }
+    if let Err(error) = recover_durable_worker_result_pulls(&state).await {
+        tracing::error!(
+            error = %error,
+            "initial hosted worker-result pull recovery failed; durable jobs remain retryable"
+        );
+    }
     match state.threads.reconcile_remote_follow_terminal_deliveries() {
         Ok(reconciled) if reconciled != 0 => tracing::info!(
             reconciled,
@@ -2038,6 +2333,15 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         tracing::info!(
             recovered_project_heads,
             "periodic recovery completed remote project-head reconciliations"
+        );
+    }
+    let recovered_worker_results = recover_durable_worker_result_pulls(state)
+        .await
+        .context("periodic hosted worker-result pull recovery")?;
+    if recovered_worker_results != 0 {
+        tracing::info!(
+            recovered_worker_results,
+            "periodic recovery completed hosted worker-result pulls"
         );
     }
     let recovered_source_handoffs =
@@ -2269,6 +2573,33 @@ async fn supervise_background_tasks(
     }
 }
 
+/// Called only after the shutdown process owner proves exact group death.
+/// The waiting task may have relinquished its launch owner during shutdown;
+/// both existing settlement paths compare the same attachment and binding.
+/// If descendants or another owner still retain contact, preserve the identity
+/// for cold recovery instead of detaching it independently of membership.
+fn settle_shutdown_process(
+    state: &AppState,
+    thread_id: &str,
+    identity: &process::ExecutionProcessIdentity,
+) -> Result<bool> {
+    if let Some(binding) = state.state_store.thread_workspace_binding(thread_id)? {
+        if state
+            .state_store
+            .settle_reaped_thread_workspace_owned(thread_id, &binding, identity)?
+        {
+            return Ok(true);
+        }
+        state
+            .state_store
+            .settle_dead_thread_workspace_if_matches(thread_id, &binding, identity)
+    } else {
+        state
+            .state_store
+            .clear_thread_process_if_matches(thread_id, identity)
+    }
+}
+
 async fn drain_running_threads(state: &AppState) -> bool {
     // Serialize shutdown against every future UDS/internal attachment. An
     // attach that committed first appears below; one that arrives later is
@@ -2394,15 +2725,22 @@ async fn drain_running_threads(state: &AppState) -> bool {
             );
             continue;
         }
-        let detached = match state
-            .state_store
-            .clear_thread_process_if_matches(&thread_id, &identity)
-        {
+        let detached = match settle_shutdown_process(state, &thread_id, &identity) {
             Ok(true) => true,
             Ok(false) => match state.state_store.get_thread(&thread_id) {
-                Ok(Some(current)) if current.runtime.process_identity.is_none() => true,
+                Ok(Some(current)) if current.runtime.process_identity.is_none() => {
+                    // A concurrent clear is settlement only when it also
+                    // released membership. Old NULL-PID borrowers stay fenced.
+                    matches!(
+                        state.state_store.thread_workspace_binding(&thread_id),
+                        Ok(None)
+                    )
+                }
                 Ok(Some(_)) => {
-                    tracing::warn!(thread_id, "shutdown identity changed before clear");
+                    tracing::warn!(
+                        thread_id,
+                        "shutdown retains exact process authority for unsettled workspace recovery or a changed attachment"
+                    );
                     false
                 }
                 Ok(None) => true,
@@ -2889,22 +3227,32 @@ fn ensure_runtime_paths(config: &Config) -> Result<()> {
             .with_context(|| format!("failed to create db parent {}", parent.display()))?;
     }
     if let Some(parent) = config.uds_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create uds parent {}", parent.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
-                || {
-                    format!(
-                        "failed to set runtime dir permissions on {}",
-                        parent.display()
-                    )
-                },
-            )?;
-        }
+        // Init/repair creates the private default `.ai/state/daemon` root.
+        // An explicit socket path may intentionally name another existing
+        // namespace, but it never authorizes ryeosd to create or chmod that
+        // arbitrary parent (notably `/tmp`). The socket inode itself is made
+        // owner-only immediately after binding.
+        lillux::PinnedDirectory::open(parent)?
+            .with_context(|| format!("configured uds parent is absent: {}", parent.display()))?
+            .ensure_path_binding()
+            .with_context(|| format!("configured uds parent changed: {}", parent.display()))?;
     }
     Ok(())
+}
+
+/// Establish ingress authority from the configured operator key loaded by
+/// stopped-node bootstrap. A principal string alone is not authentication;
+/// keep this proof here, never infer it in the generic service executor.
+fn standalone_operator_handler_context(
+    operator: &NodeIdentity,
+) -> ryeos_app::handler_context::HandlerContext {
+    ryeos_app::handler_context::HandlerContext::new_with_authority(
+        operator.principal_id(),
+        vec![], // Existing standalone filesystem authority does not mint live scopes.
+        true,
+        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        None,
+    )
 }
 
 /// Run a service in standalone mode (daemon is not running).
@@ -2925,9 +3273,10 @@ async fn run_service_standalone(
     // any expensive bootstrap work. Otherwise standalone mode would
     // perform identity/engine/node-config loads while a competing
     // daemon held the lock, only to fail late.
-    let _state_lock =
+    let standalone_state_lock = Arc::new(
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
-            .context("failed to acquire state lock — is the daemon running?")?;
+            .context("failed to acquire state lock — is the daemon running?")?,
+    );
     bootstrap::verify_initialized(config)?;
 
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
@@ -2958,6 +3307,7 @@ async fn run_service_standalone(
     let standalone_operator = NodeIdentity::load(&config.operator_signing_key_path)
         .context("load configured local operator identity for standalone service")?;
     let standalone_principal = standalone_operator.principal_id();
+    let standalone_handler_context = standalone_operator_handler_context(&standalone_operator);
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
@@ -2971,10 +3321,23 @@ async fn run_service_standalone(
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
     let service_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(service_ref)
         .with_context(|| format!("invalid standalone service ref {service_ref}"))?;
+    // Preserve registry admission when dispatching the already verified item
+    // below. Discover this from the signed kind contract, never a kind name.
+    anyhow::ensure!(
+        engine
+            .kinds
+            .kinds_for_in_process_registry(
+                ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+            )
+            .any(|(kind, _)| kind == service_canonical.kind),
+        "kind `{}` is not admitted to the Services in-process registry",
+        service_canonical.kind,
+    );
     let service_resolved = engine
         .resolve(&standalone_plan_ctx, &service_canonical)
         .with_context(|| format!("resolve standalone service {service_ref}"))?;
@@ -3109,6 +3472,10 @@ async fn run_service_standalone(
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
         extensions: {
             let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+            // This is the stopped-node invocation's actual exclusion guard,
+            // retained through service completion. Never install the running
+            // daemon's lifecycle lock as standalone authority in extensions.
+            extensions.insert(Arc::clone(&standalone_state_lock));
             extensions.insert(standalone_ui_state);
             extensions.insert(standalone_node_config_validator);
             Arc::new(extensions)
@@ -3156,7 +3523,8 @@ async fn run_service_standalone(
         requested_call: None,
     };
 
-    let result = service_executor::execute_service(
+    let result = service_executor::execute_service_verified(
+        service_verified,
         service_ref,
         params,
         ExecutionMode::Standalone,
@@ -3168,6 +3536,9 @@ async fn run_service_standalone(
             usage_subject: None,
             usage_subject_asserted_by: None,
         },
+        None,
+        None,
+        Some(standalone_handler_context),
     )
     .await?;
 
@@ -3195,6 +3566,25 @@ mod shutdown_mapping_tests {
     use ryeos_app::process::{ShutdownAction, resolve_shutdown_action};
     use ryeos_engine::contracts::CancellationMode;
     use std::time::Duration;
+
+    #[test]
+    fn standalone_ingress_carries_only_the_loaded_local_operator_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let operator =
+            ryeos_app::identity::NodeIdentity::create(&root.path().join("operator.pem")).unwrap();
+        let context = super::standalone_operator_handler_context(&operator);
+        assert!(context.verified);
+        assert_eq!(context.fingerprint, operator.principal_id());
+        assert!(context.scopes.is_empty());
+        assert_eq!(
+            context.authorized_key_class,
+            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient)
+        );
+        assert!(context.authenticated_origin_site_id.is_none());
+        context
+            .validate_execution_authority(&operator.principal_id(), &[], "site:local", "site:local")
+            .unwrap();
+    }
 
     #[test]
     fn composed_service_registry_has_unique_refs_and_endpoints() {

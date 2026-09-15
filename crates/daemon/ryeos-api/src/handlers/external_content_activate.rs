@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::{Read, Seek as _, SeekFrom};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -13,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::handler_context::HandlerContext;
 use crate::registry::ServiceDescriptor;
+use lillux::time::Duration;
 use ryeos_app::managed_external_content::{
     ManagedActivationSource, ManagedMemberDisposition, ResolvedManagedExternalContentActivation,
 };
@@ -630,12 +630,16 @@ fn validate_completed_activation_with_authority(
         bail!("completed managed activation receipt has a different component set");
     }
     for component in &activation.components {
+        let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+            activation.document.consumer_ref.clone(),
+            activation.publisher_fingerprint.clone(),
+        )?;
         let binding = ryeos_app::operator_external_content::require_active_binding_from_store(
             authority.state_store,
             &cas,
             &component.expected_manifest_hash,
-            &activation.document.consumer_ref,
-            &activation.publisher_fingerprint,
+            &consumer,
+            &authority.node_fingerprint,
         )
         .with_context(|| {
             format!(
@@ -792,6 +796,12 @@ async fn run_attempt(
                 request_digest: imported.import.request_digest,
                 manifest_hash: imported.import.manifest_hash,
                 consumer_ref: activation.document.consumer_ref.clone(),
+                consumer_kind:
+                    ryeos_app::operator_external_content::BindConsumerKind::InstalledBundle,
+                project_snapshot_hash: None,
+                project_path: None,
+                product_selections: None,
+                product_owner_principal: None,
             },
         )
         .await?;
@@ -2765,9 +2775,14 @@ mod tests {
         let binding = ryeos_state::objects::ExternalContentBinding::active(
             manifest_hash,
             ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
-            activation.document.consumer_ref.clone(),
-            activation.publisher_fingerprint.clone(),
+            ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+                activation.document.consumer_ref.clone(),
+                activation.publisher_fingerprint.clone(),
+            )
+            .unwrap(),
+            identity.fingerprint().to_owned(),
             operator_fingerprint.clone(),
+            "f".repeat(64),
         )
         .unwrap();
         let binding_hash = cas.put_object(&binding.to_value().unwrap()).unwrap().hash;
@@ -2776,7 +2791,7 @@ mod tests {
             .with_state_db(|db| {
                 db.advance_generic_head_ref(
                     ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
-                    &binding.binding_id,
+                    &binding.binding_subject_id,
                     &binding_hash,
                     None,
                     &head_signer,

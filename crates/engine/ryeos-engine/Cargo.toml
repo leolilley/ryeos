@@ -41,5 +41,6 @@ test-support = []
 latency-profiling = []
 
 [dev-dependencies]
+ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

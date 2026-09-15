@@ -59,6 +59,50 @@ pub struct StaleDiagnostics {
     pub message: String,
 }
 
+fn failed_marker_status(
+    app_root: &std::path::Path,
+    bind: Option<String>,
+    uds_path: Option<PathBuf>,
+    marker: crate::lifecycle_marker::LifecycleMarker,
+) -> Option<LifecycleStatus> {
+    let crate::lifecycle_marker::LifecycleMarker::Exited {
+        reason,
+        pid,
+        started_at,
+        exited_at,
+        error,
+    } = marker
+    else {
+        return None;
+    };
+    if reason != "startup_failed" {
+        return None;
+    }
+    let detail = error.unwrap_or_else(|| "daemon exited before lifecycle control".to_owned());
+    Some(LifecycleStatus::Failed {
+        metadata: DaemonMetadata {
+            pid: Some(pid),
+            bind,
+            uds_path,
+            started_at: Some(started_at.clone()),
+            version: None,
+            revision: None,
+            build_date: None,
+            app_root: app_root.to_path_buf(),
+        },
+        startup: StartupSnapshot::failed_before_control(started_at, exited_at, detail),
+    })
+}
+
+/// Recover only retained terminal startup testimony when full bootstrap
+/// configuration cannot be decoded. No endpoint is inferred from defaults or
+/// stale discovery metadata, so this cannot authorize launch or signalling.
+pub fn retained_startup_failure(app_root: &std::path::Path) -> Option<LifecycleStatus> {
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    crate::lifecycle_marker::read(&state_dir)
+        .and_then(|marker| failed_marker_status(app_root, None, None, marker))
+}
+
 /// Read-only lifecycle status probe.
 ///
 /// Order of operations (no writes, no repairs):
@@ -204,8 +248,9 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
     // fallback; Unresponsive below carries the fail-closed remediation.
     if unusable_control_paths.is_empty() {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
+        let marker = crate::lifecycle_marker::read(&state_dir);
         if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at }) =
-            crate::lifecycle_marker::read(&state_dir)
+            marker.clone()
             && crate::lifecycle_marker::process_alive_as_ryeosd(pid)
         {
             let marker_age = crate::lifecycle_marker::age(&state_dir).unwrap_or_default();
@@ -238,6 +283,16 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 startup,
                 control_available: false,
             });
+        }
+        if let Some(failed) = marker.and_then(|marker| {
+            failed_marker_status(
+                &config.app_root,
+                Some(config.bind.to_string()),
+                Some(config.uds_path.clone()),
+                marker,
+            )
+        }) {
+            return Ok(failed);
         }
     }
 
@@ -320,6 +375,58 @@ mod tests {
 
     fn test_env(root: &std::path::Path) -> LocalLifecycleEnv {
         LocalLifecycleEnv::from_config(test_config(root))
+    }
+
+    #[test]
+    fn pre_control_failure_marker_retains_attempt_and_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let status = failed_marker_status(
+            &config.app_root,
+            Some(config.bind.to_string()),
+            Some(config.uds_path.clone()),
+            crate::lifecycle_marker::LifecycleMarker::Exited {
+                reason: "startup_failed".to_owned(),
+                pid: 42,
+                started_at: "2026-09-10T01:02:03Z".to_owned(),
+                exited_at: "2026-09-10T01:02:04Z".to_owned(),
+                error: Some("failed to bind 127.0.0.1:7400".to_owned()),
+            },
+        )
+        .expect("startup failure marker must classify");
+        let LifecycleStatus::Failed { metadata, startup } = status else {
+            panic!("expected failed lifecycle status")
+        };
+        assert_eq!(metadata.pid, Some(42));
+        assert_eq!(startup.started_at, "2026-09-10T01:02:03Z");
+        assert_eq!(startup.failed_at.as_deref(), Some("2026-09-10T01:02:04Z"));
+        assert_eq!(
+            startup.error.as_deref(),
+            Some("failed to bind 127.0.0.1:7400")
+        );
+    }
+
+    #[test]
+    fn malformed_config_diagnostics_do_not_invent_endpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = ryeos_engine::roots::RuntimeRoot::new(tmp.path().to_path_buf()).state();
+        std::fs::create_dir_all(&state).unwrap();
+        let started_at = crate::lifecycle_marker::record_running(&state);
+        crate::lifecycle_marker::record_exit(
+            &state,
+            "startup_failed",
+            &started_at,
+            Some("load node bootstrap configuration: invalid field"),
+        );
+
+        let status = retained_startup_failure(tmp.path()).expect("retained failure");
+        let LifecycleStatus::Failed { metadata, startup } = status else {
+            panic!("expected failed lifecycle status")
+        };
+        assert_eq!(metadata.app_root, tmp.path());
+        assert!(metadata.bind.is_none());
+        assert!(metadata.uds_path.is_none());
+        assert!(startup.error.as_deref().unwrap().contains("invalid field"));
     }
 
     fn mark_initialized(app_root: &std::path::Path) {

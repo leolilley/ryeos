@@ -44,8 +44,9 @@ pub struct FireRecord {
     pub fire_id: String,
     pub schedule_id: String,
     pub scheduled_at: i64,
+    pub reserved_at: i64,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub fired_at: Option<i64>,
+    pub dispatched_at: Option<i64>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub completed_at: Option<i64>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -55,6 +56,11 @@ pub struct FireRecord {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub outcome: Option<String>,
     pub signer_fingerprint: String,
+    pub schedule_spec_hash: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub project_authority: Option<crate::objects::ExecutionProjectAuthority>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub admitted_capsule_hash: Option<String>,
 }
 
 impl FireRecord {
@@ -71,11 +77,8 @@ impl FireRecord {
                 expected_fire_id
             );
         }
-        let fired_at = self
-            .fired_at
-            .context("scheduler fire fired_at must be present")?;
-        if fired_at < self.scheduled_at {
-            anyhow::bail!("scheduler fire fired_at precedes scheduled_at");
+        if self.reserved_at < self.scheduled_at {
+            anyhow::bail!("scheduler fire reserved_at precedes scheduled_at");
         }
         require_non_empty(&self.trigger_reason, "scheduler fire trigger_reason")?;
         if !lillux::cas::valid_hash(&self.signer_fingerprint)
@@ -85,6 +88,28 @@ impl FireRecord {
                 .any(|byte| byte.is_ascii_uppercase())
         {
             anyhow::bail!("scheduler fire signer_fingerprint must be lowercase SHA-256 hex");
+        }
+        for (label, value) in [
+            ("schedule_spec_hash", self.schedule_spec_hash.as_str()),
+            (
+                "admitted_capsule_hash",
+                self.admitted_capsule_hash.as_deref().unwrap_or(""),
+            ),
+        ] {
+            if !value.is_empty()
+                && (!lillux::cas::valid_hash(value)
+                    || value.bytes().any(|byte| byte.is_ascii_uppercase()))
+            {
+                anyhow::bail!("scheduler fire {label} must be lowercase SHA-256 hex");
+            }
+        }
+        if let Some(authority) = &self.project_authority {
+            authority.validate()?;
+        }
+        if let Some(dispatched_at) = self.dispatched_at
+            && dispatched_at < self.reserved_at
+        {
+            anyhow::bail!("scheduler fire dispatched_at precedes reserved_at");
         }
         if let Some(thread_id) = &self.thread_id {
             let hash = lillux::cas::sha256_hex(self.fire_id.as_bytes());
@@ -104,6 +129,20 @@ impl FireRecord {
             }
         }
         match self.status.as_str() {
+            "reserved" => {
+                if self.dispatched_at.is_some()
+                    || self.completed_at.is_some()
+                    || self.outcome.is_some()
+                    || self.admitted_capsule_hash.is_some()
+                {
+                    anyhow::bail!(
+                        "reserved scheduler fire must not carry dispatch or terminal settlement"
+                    );
+                }
+                if self.thread_id.is_none() {
+                    anyhow::bail!("reserved scheduler fire must retain deterministic thread_id");
+                }
+            }
             "dispatched" => {
                 if self.completed_at.is_some() || self.outcome.is_some() {
                     anyhow::bail!(
@@ -115,13 +154,23 @@ impl FireRecord {
                         "dispatched scheduler fire must have its deterministic thread_id"
                     );
                 }
+                if self.dispatched_at.is_none()
+                    || self.project_authority.is_none()
+                    || self.admitted_capsule_hash.is_none()
+                {
+                    anyhow::bail!(
+                        "dispatched scheduler fire requires bound project authority, capsule, and timestamp"
+                    );
+                }
             }
             "completed" | "failed" | "cancelled" | "skipped" => {
                 let completed_at = self
                     .completed_at
                     .context("terminal scheduler fire must have completed_at")?;
-                if completed_at < fired_at {
-                    anyhow::bail!("scheduler fire completed_at precedes fired_at");
+                if completed_at < self.dispatched_at.unwrap_or(self.reserved_at) {
+                    anyhow::bail!(
+                        "scheduler fire completed_at precedes its latest admission boundary"
+                    );
                 }
                 require_non_empty(
                     self.outcome
@@ -131,6 +180,29 @@ impl FireRecord {
                 )?;
                 if self.status == "skipped" && self.thread_id.is_some() {
                     anyhow::bail!("skipped scheduler fire must not have a thread_id");
+                }
+                if self.status == "skipped"
+                    && (self.dispatched_at.is_some()
+                        || self.project_authority.is_some()
+                        || self.admitted_capsule_hash.is_some())
+                {
+                    anyhow::bail!("skipped scheduler fire cannot carry launch authority");
+                }
+                if matches!(self.status.as_str(), "completed" | "cancelled")
+                    && (self.dispatched_at.is_none()
+                        || self.project_authority.is_none()
+                        || self.admitted_capsule_hash.is_none())
+                {
+                    anyhow::bail!(
+                        "completed or cancelled scheduler fire requires admitted launch authority"
+                    );
+                }
+                if self.admitted_capsule_hash.is_some()
+                    && (self.dispatched_at.is_none() || self.project_authority.is_none())
+                {
+                    anyhow::bail!(
+                        "scheduler fire capsule cannot exist without dispatched bound authority"
+                    );
                 }
                 if self.status != "skipped" && self.thread_id.is_none() {
                     anyhow::bail!("non-skipped terminal scheduler fire must retain thread_id");
@@ -167,26 +239,71 @@ impl FireRecord {
         if self.fire_id != previous.fire_id
             || self.schedule_id != previous.schedule_id
             || self.scheduled_at != previous.scheduled_at
+            || self.reserved_at != previous.reserved_at
             || self.trigger_reason != previous.trigger_reason
             || self.signer_fingerprint != previous.signer_fingerprint
+            || self.schedule_spec_hash != previous.schedule_spec_hash
+            || self.thread_id != previous.thread_id
         {
             anyhow::bail!("scheduler fire transition changes immutable identity or authority");
         }
         if self == previous {
             return Ok(());
         }
-        if previous.status != "dispatched" {
-            anyhow::bail!(
+        match previous.status.as_str() {
+            "reserved" => match self.status.as_str() {
+                "reserved" => {
+                    if previous.project_authority.is_some()
+                        || self.project_authority.is_none()
+                        || self.dispatched_at.is_some()
+                        || self.admitted_capsule_hash.is_some()
+                    {
+                        anyhow::bail!(
+                            "reserved scheduler fire may only bind project authority once"
+                        );
+                    }
+                }
+                "dispatched" => {
+                    if self.project_authority.is_none()
+                        || self.dispatched_at.is_none()
+                        || self.admitted_capsule_hash.is_none()
+                    {
+                        anyhow::bail!("scheduler dispatch transition lacks admitted authority");
+                    }
+                    if previous.project_authority.is_some()
+                        && self.project_authority != previous.project_authority
+                    {
+                        anyhow::bail!("scheduler dispatch changed bound project authority");
+                    }
+                }
+                "failed" => {
+                    if previous.project_authority.is_some()
+                        && self.project_authority != previous.project_authority
+                    {
+                        anyhow::bail!("scheduler failure changed bound project authority");
+                    }
+                }
+                status => {
+                    anyhow::bail!("reserved scheduler fire cannot transition directly to {status}")
+                }
+            },
+            "dispatched" => {
+                if !matches!(self.status.as_str(), "completed" | "failed" | "cancelled")
+                    || self.dispatched_at != previous.dispatched_at
+                    || self.project_authority != previous.project_authority
+                    || self.admitted_capsule_hash != previous.admitted_capsule_hash
+                {
+                    anyhow::bail!(
+                        "dispatched scheduler fire transition changes admitted authority or is nonterminal"
+                    );
+                }
+            }
+            status => anyhow::bail!(
                 "terminal scheduler fire {} cannot transition from {} to {}",
                 self.fire_id,
-                previous.status,
+                status,
                 self.status
-            );
-        }
-        if self.fired_at != previous.fired_at || self.thread_id != previous.thread_id {
-            anyhow::bail!(
-                "scheduler fire transition changes immutable dispatch timestamp or thread identity"
-            );
+            ),
         }
         Ok(())
     }
@@ -197,11 +314,16 @@ impl FireRecord {
     }
 
     fn latest_timestamp(&self) -> i64 {
-        [self.completed_at, self.fired_at, Some(self.scheduled_at)]
-            .into_iter()
-            .flatten()
-            .max()
-            .unwrap_or(0)
+        [
+            self.completed_at,
+            self.dispatched_at,
+            Some(self.reserved_at),
+            Some(self.scheduled_at),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
     }
 }
 
@@ -597,19 +719,26 @@ mod tests {
 
     #[test]
     fn fire_record_requires_every_nullable_wire_key() {
-        let complete = serde_json::json!({
-            "fire_id": "sched@1",
-            "schedule_id": "sched",
-            "scheduled_at": 1,
-            "fired_at": 1,
-            "completed_at": null,
-            "thread_id": "T-a",
-            "status": "dispatched",
-            "trigger_reason": "normal",
-            "outcome": null,
-            "signer_fingerprint": "11".repeat(32),
-        });
-        for key in ["fired_at", "completed_at", "thread_id", "outcome"] {
+        let complete: serde_json::Value = serde_json::from_str(&fire_snapshot_line(
+            "sched@1",
+            "sched",
+            1,
+            None,
+            "dispatched",
+        ))
+        .unwrap();
+        serde_json::from_value::<FireRecord>(complete.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        for key in [
+            "dispatched_at",
+            "completed_at",
+            "thread_id",
+            "outcome",
+            "project_authority",
+            "admitted_capsule_hash",
+        ] {
             let mut missing = complete.clone();
             missing.as_object_mut().unwrap().remove(key);
             assert!(
@@ -639,7 +768,8 @@ mod tests {
             fire_id: fire_id.to_owned(),
             schedule_id: schedule_id.to_owned(),
             scheduled_at,
-            fired_at: Some(scheduled_at),
+            reserved_at: scheduled_at,
+            dispatched_at: (status != "skipped").then_some(scheduled_at),
             completed_at,
             thread_id: (status != "skipped").then_some(thread_id),
             status: status.to_owned(),
@@ -652,6 +782,14 @@ mod tests {
                 _ => Some("thread_failed".to_owned()),
             },
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: (status != "skipped").then(|| {
+                crate::objects::ExecutionProjectAuthority::projectless(
+                    crate::objects::EnvironmentAuthority::None,
+                )
+                .unwrap()
+            }),
+            admitted_capsule_hash: (status != "skipped").then(|| "33".repeat(32)),
         }
         .canonical_json_line()
         .unwrap()

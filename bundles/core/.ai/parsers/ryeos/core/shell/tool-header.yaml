@@ -1,0 +1,18 @@
+# ryeos:signed:2026-09-13T08:45:08Z:e630ffd356daa428f128526eb7c81ff246d59b1f26ae3d5c72659321a8ddb37e:/Jx/laDqB9xK7CCMYyDH7dhOqeDlfuwGwKj5CGj0BLhTxHmPi5acZIpy0MM4ihCtdqgMRLJXUCJtPv6dVznPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: "ryeos/core/shell"
+description: "Shell comment-YAML tool metadata parser"
+handler: "handler:ryeos/core/yaml-header-document"
+parser_api_version: 1
+parser_config:
+  require_header: true
+  forms:
+    - kind: comment_marker
+      marker: ryeos-tool
+      comment_prefix: "#"
+      allow_after_shebang: true
+cache:
+  mode: content_addressed
+output_schema:
+  root_type: mapping
+  required: {}

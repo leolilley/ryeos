@@ -294,6 +294,25 @@ impl PinnedProjectMaterialization {
         self.root.ensure_path_binding()
     }
 
+    /// Export the retained inode for an immutable execution mount, after
+    /// rechecking its complete content. Root identity alone is insufficient:
+    /// this proof can also originate from retained mutable workspace recovery.
+    pub fn verified_mount_descriptor(
+        &self,
+    ) -> anyhow::Result<lillux::InheritedDescriptorAuthority> {
+        self.ensure_path_binding()?;
+        self.try_clone_root()?.inherited_descriptor_authority()
+    }
+
+    /// Clone the exact retained root descriptor after checking its path
+    /// binding. This proves root identity only, not mutable file contents;
+    /// callers restoring an owned output partition must first establish the
+    /// ordinary full source proof with `ensure_path_binding`.
+    pub fn try_clone_root(&self) -> anyhow::Result<lillux::PinnedDirectory> {
+        self.root.ensure_path_binding()?;
+        self.root.try_clone()
+    }
+
     pub fn owns_path(&self, path: &Path) -> anyhow::Result<bool> {
         if self.path() != path {
             return Ok(false);
@@ -427,6 +446,11 @@ fn observe_materialized_tree(
     root: &lillux::PinnedDirectory,
     expected: &BTreeMap<String, ProjectFile>,
 ) -> anyhow::Result<Arc<BTreeMap<String, ProjectFile>>> {
+    tracing::debug!(
+        expected_files = expected.len(),
+        materialization_stage = "tree-observation",
+        "project materialization verification stage"
+    );
     let mut observed = BTreeMap::new();
     let mut descriptor_bytes = 0_u64;
     root.visit_regular_files_bounded(
@@ -436,6 +460,14 @@ fn observe_materialized_tree(
         ),
         |_relative, _directory| Ok(false),
         |relative, mut file| {
+            if observed.len() % 256 == 0 {
+                tracing::debug!(
+                    observed_files = observed.len(),
+                    expected_files = expected.len(),
+                    materialization_stage = "tree-observation-progress",
+                    "project materialization verification stage"
+                );
+            }
             if observed.len() >= crate::project_sync::MAX_PROJECT_TREE_FILES {
                 anyhow::bail!(
                     "materialized project exceeds {} regular files",
@@ -508,6 +540,12 @@ fn observe_materialized_tree(
             Ok(())
         },
     )?;
+    tracing::debug!(
+        observed_files = observed.len(),
+        expected_files = expected.len(),
+        materialization_stage = "tree-observed",
+        "project materialization verification stage"
+    );
     Ok(Arc::new(observed))
 }
 
@@ -626,7 +664,10 @@ mod tests {
         let tree_hash = cas.store_object(&tree.to_value()).unwrap();
         let policy = ProjectSnapshotPolicy::from_matcher(
             crate::project_sync::ProjectSyncScope::FullProject,
-            &crate::ignore::matcher_from_builtins(),
+            &crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            })
+            .unwrap(),
         )
         .unwrap();
         let policy_hash = cas.store_object(&policy.to_value()).unwrap();
@@ -863,6 +904,19 @@ mod tests {
         let (root, materialization) = fixture();
         std::fs::write(root.join(".ai/tools/shadow.yaml"), b"name: shadow\n").unwrap();
         assert!(materialization.ensure_path_binding().is_err());
+    }
+
+    #[test]
+    fn cloned_root_retains_the_proven_inode_and_refuses_path_replacement() {
+        let (root, materialization) = fixture();
+        materialization.ensure_path_binding().unwrap();
+        let cloned = materialization.try_clone_root().unwrap();
+        assert!(cloned.is_same_directory(&materialization.root).unwrap());
+        let moved = root.with_extension("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(materialization.try_clone_root().is_err());
+        assert!(cloned.ensure_path_binding().is_err());
     }
 
     #[test]

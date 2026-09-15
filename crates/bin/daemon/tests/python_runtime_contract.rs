@@ -44,11 +44,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 fn build_engine_against_bundle() -> Engine {
@@ -140,6 +136,7 @@ fn run_tool_with_hints(
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: hints,
+        scheduled_fire: None,
         validate_only: false,
     };
 
@@ -155,6 +152,7 @@ fn run_tool_with_hints(
             &params,
             &plan_ctx.execution_hints,
             None,
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         )
         .expect("build_plan walks to subprocess terminal");
 
@@ -164,10 +162,12 @@ fn run_tool_with_hints(
             .expect("load disabled isolation fixture"),
     );
     let engine_ctx = EngineContext {
-        isolation_target_channel: None,
+        isolation_target_channels: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_immutable_project: None,
+        isolation_workspace_view: None,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_network_authority_ceiling:
@@ -189,6 +189,7 @@ fn run_tool_with_hints(
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_writable_runtime_view_mounts: Vec::new(),
         isolation_workspace: None,
         subprocess_limits: None,
         inherited_fds: Vec::new(),

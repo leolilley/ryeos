@@ -48,7 +48,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
                 "timezone": spec.timezone,
                 "enabled": spec.enabled,
                 "signer_fingerprint": spec.signer_fingerprint,
-                "last_fire_at": last_fire.and_then(|f| f.fired_at),
+                "last_fire_at": last_fire.and_then(|f| f.dispatched_at),
                 "last_fire_status": last_fire.map(|f| f.status.clone()),
                 "total_fires": total_fires,
             })

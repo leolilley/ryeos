@@ -265,16 +265,31 @@ fn build_descriptor_for_ref(
     profile.finish_parse(parse_started);
 
     let projection_started = profile.start_phase();
+    let descriptor =
+        descriptor_from_parsed_item(ref_, target_schema, &parsed, &resolution.winner_path);
+    profile.finish_projection(projection_started);
+    Ok(descriptor)
+}
+
+/// Pure inventory projection for an already verified/composed item. Finite
+/// workload presentations must use their launch-admitted source here, not
+/// reread a mutable candidate or enumerate the daemon's entire inventory.
+pub fn descriptor_from_parsed_item(
+    ref_: &CanonicalRef,
+    target_schema: &KindSchema,
+    parsed: &Value,
+    source_path: &std::path::Path,
+) -> ItemDescriptor {
     let metadata = apply_extraction_rules(
-        &parsed,
+        parsed,
         &target_schema.extraction_rules,
-        &resolution.winner_path,
+        source_path,
         &target_schema.directory,
     );
 
     let description = metadata.description.clone();
 
-    let schema = pick_schema(&parsed, &target_schema.inventory_schema_keys);
+    let schema = pick_schema(parsed, &target_schema.inventory_schema_keys);
 
     // `extra` carries every metadata field that doesn't have a typed
     // slot on `ItemDescriptor`. We deliberately drop the fields we
@@ -307,15 +322,13 @@ fn build_descriptor_for_ref(
     let name = flatten_bare_id(&ref_.bare_id);
     let item_id = format!("{}:{}", ref_.kind, ref_.bare_id);
 
-    let descriptor = ItemDescriptor {
+    ItemDescriptor {
         name,
         item_id,
         description,
         schema,
         extra,
-    };
-    profile.finish_projection(projection_started);
-    Ok(descriptor)
+    }
 }
 
 /// Zero-sized and inlined away in ordinary release builds. Keeping the

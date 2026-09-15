@@ -46,11 +46,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 fn synth_project_with_hello() -> PathBuf {
@@ -228,6 +224,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
 
@@ -256,6 +253,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
             &serde_json::Value::Null,
             &plan_ctx.execution_hints,
             None,
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -276,10 +274,12 @@ fn daemon_executes_python_hello_world_end_to_end() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
-        isolation_target_channel: None,
+        isolation_target_channels: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_immutable_project: None,
+        isolation_workspace_view: None,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_network_authority_ceiling:
@@ -301,6 +301,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_writable_runtime_view_mounts: Vec::new(),
         isolation_workspace: None,
         subprocess_limits: None,
         inherited_fds: Vec::new(),
@@ -365,6 +366,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
 
@@ -388,6 +390,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             &serde_json::Value::Null,
             &plan_ctx.execution_hints,
             None,
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -410,10 +413,12 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
-        isolation_target_channel: None,
+        isolation_target_channels: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_immutable_project: None,
+        isolation_workspace_view: None,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_network_authority_ceiling:
@@ -435,6 +440,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_writable_runtime_view_mounts: Vec::new(),
         isolation_workspace: None,
         subprocess_limits: None,
         inherited_fds: Vec::new(),
@@ -489,6 +495,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
 
@@ -512,6 +519,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             &serde_json::Value::Null,
             &plan_ctx.execution_hints,
             None,
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -534,10 +542,12 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
-        isolation_target_channel: None,
+        isolation_target_channels: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_immutable_project: None,
+        isolation_workspace_view: None,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_network_authority_ceiling:
@@ -559,6 +569,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_writable_runtime_view_mounts: Vec::new(),
         isolation_workspace: None,
         subprocess_limits: None,
         inherited_fds: Vec::new(),
@@ -623,6 +634,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     };
     let item = CanonicalRef::parse("tool:hello/hello").expect("canonical ref parses");
@@ -637,6 +649,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
                 &serde_json::Value::Null,
                 &plan_ctx.execution_hints,
                 None,
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             )
             .expect("build_plan");
     });

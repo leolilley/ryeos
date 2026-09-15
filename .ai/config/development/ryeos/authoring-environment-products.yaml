@@ -1,0 +1,100 @@
+# ryeos:signed:2026-09-08T10:36:33Z:c62c626128da4e569b189b2422ff2715e325c526cda8ad274b3c428ee215b2e8:9r1qWB6ig1DlvEaD6Iad1IIL06LP4pxGzEkEkU2ZysP/JZZGCmNVqCELdqtjqMJAigMUnsESOlg/hog/XccLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained products from the independently verified authoring environment
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: distribution
+      path: products/authoring-environment
+      storage: large_content
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    - name: verification
+      path: products/authoring-verification
+      storage: large_content
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+  products:
+    - name: distribution
+      source: {kind: workspace_output, root: distribution}
+      path: products/authoring-environment
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    - name: runtime
+      source: {kind: workspace_output, root: distribution}
+      path: products/authoring-environment/environment
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    - name: shell
+      source: {kind: workspace_output, root: distribution}
+      path: products/authoring-environment/environment/bin/zsh
+      shape: file
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1
+        maximum_depth: 1
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 134217728
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: runtime_to_native_authoring_qualification
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-environment-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/environments/qualification/native-authoring/verify
+        declaration_id: authoring-runtime
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: runtime_to_authoring_worker
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-environment-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: config:development/ryeos/worker-environment
+        declaration_id: authoring-tools
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: config:ryeos/environments/qualification/native-authoring
+        required_claims: [authoring_runtime_closed]

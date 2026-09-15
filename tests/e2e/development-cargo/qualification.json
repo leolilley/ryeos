@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "date": "2026-09-07",
+  "purpose": "Observed installed CLI qualification; this summary is not admission or publication authority",
+  "driver": "configured target-local operator, not a hosted worker",
+  "node_fingerprint": "0db14ae10fa3e060d175a9ebdd975f4041b0a3a271c99078436a4a4b0e533f60",
+  "platform_manifest": "98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316",
+  "vendor_manifest": "8dac785a06faad238b3210c79ba3ca7bee37dc211fe0e95acf80dff6500a75ac",
+  "execution_contract": {
+    "filesystem_authority": "captured_execution",
+    "network_authority": "isolated",
+    "workspace_access": "immutable_current_generation",
+    "include_operator_vault": false,
+    "cargo_resolution": ["locked", "frozen", "offline"],
+    "jobs": 2,
+    "timeout_seconds": 300,
+    "source_head_advanced_by_execution": false
+  },
+  "source_capture": {
+    "revision": "4cff0c74a5b04e11f16b4512ade5a4528a67f754",
+    "snapshot": "d6abea6fd0de513b79ea5f5c59ffde7974557b32cecd36b38b914ff9c0f92882",
+    "tree": "601705a12170f74ac421a39904d073163d309b098a3e7dc7211e8ca0ae4806ff",
+    "effective_policy_hash": "f0077e5a06856cf789985c5114dfa43ea5176b04b446d8d91cfd4641a3cb0467",
+    "files": 2434,
+    "crate_files": 1063,
+    "public_development_signing_fixture_retained": true,
+    "unexpected_generated_or_local_paths": 0,
+    "checks": [
+      {
+        "operation": "cargo-check",
+        "package": "ryeos-isolation-protocol",
+        "tool_version": "1.0.0",
+        "thread_id": "T-59316bbc-0f68-8b9b-55d6-45875d30a0c5",
+        "capsule_hash": "2e52b734471de0ea0d50136b33eb1de8f97055328de911936d51bee587d8f00e",
+        "outcome_code": "exit:0"
+      },
+      {
+        "operation": "cargo-build",
+        "package": "ryeos-isolation-protocol",
+        "tool_version": "1.0.0",
+        "thread_id": "T-e8a032d4-da39-f800-8ca9-6ca36045df5f",
+        "capsule_hash": "354ffd93cbb5e55e781c9604fba5f16886c22b67a59ecdf13dce24f3d97f2ddf",
+        "outcome_code": "exit:0"
+      },
+      {
+        "operation": "cargo-test",
+        "package": "ryeos-isolation-protocol",
+        "tool_version": "1.0.0",
+        "test": "tests::target_channel_may_already_occupy_its_exact_target_descriptor",
+        "tests_passed": 1,
+        "thread_id": "T-c71ec58f-ef48-420b-a276-8b76391ba073",
+        "capsule_hash": "4746401d390cab2fae833db0aa638d1e35e920015f1b3b1da240b42c9ad28e61",
+        "outcome_code": "exit:0"
+      }
+    ]
+  },
+  "broken_source_control": {
+    "snapshot": "6f1790328f112a07f2598a21b4eb9ee835a32cfcbf4ba75391a16a025ecbf929",
+    "changed_files": ["crates/engine/ryeos-isolation-protocol/src/lib.rs"],
+    "change": "The selected test requires unwrap_err() on a valid plan instead of unwrap()",
+    "operation": "cargo-test",
+    "tool_version": "1.0.0",
+    "test": "tests::target_channel_may_already_occupy_its_exact_target_descriptor",
+    "thread_id": "T-3ad3424b-249f-8aef-9fc9-aa5452d3e54d",
+    "capsule_hash": "54ba40e965831da964fc4bcd134f7ee0dff67f36b40d067be571d8032e08c7a8",
+    "tests_failed": 1,
+    "outcome_code": "exit:101",
+    "intended_failure_observed": true
+  },
+  "link_correction": {
+    "revision": "5fb934ae6b57a8d61426231553e9d7e521b72747",
+    "snapshot": "8ffbc8b8311be6f20119915659b4f7454369fdd6533ba62ae20f718d9016fd8d",
+    "change": "Explicitly link the already admitted platform/lib/libc_nonshared.a; no artifact or node-policy change",
+    "original_failure_thread": "T-b9971e04-e52f-9660-8835-a4d11181da1a",
+    "original_failure_capsule": "d319e80490838617edd81c48efc51ad5bc78b88261292df88b34e39d0a23ba6c",
+    "original_failure": "Unresolved pthread_atfork while linking Lillux's test binary",
+    "tool_version": "1.0.1",
+    "checks": [
+      {
+        "operation": "cargo-check",
+        "package": "lillux",
+        "thread_id": "T-bd0f6cc7-6e27-2890-ccbe-968416048b85",
+        "capsule_hash": "4bde84372e2ff71a947379079d6bc26df830d61ed0341dbc7716ed562243727e",
+        "outcome_code": "exit:0"
+      },
+      {
+        "operation": "cargo-build",
+        "package": "lillux",
+        "thread_id": "T-eed80980-c564-bc2d-6f2f-5a25491aa8cb",
+        "capsule_hash": "6400e15f958b5cae243b2d8b8f6b32375493e8ebb88035259e9bc90173893528",
+        "outcome_code": "exit:0"
+      },
+      {
+        "operation": "cargo-test",
+        "package": "lillux",
+        "test": "crypto::tests::hmac_sha256_hex_matches_rfc_4231_test_case_2",
+        "tests_passed": 1,
+        "thread_id": "T-04c62f84-b73a-fc29-9e0c-5e23aaaedd51",
+        "capsule_hash": "1be777c1412715ace31383bb4dfeb867ca43ba2e6b862c6c30e4b39928fe4f84",
+        "outcome_code": "exit:0"
+      },
+      {
+        "operation": "cargo-test",
+        "package": "ryeos-isolation-protocol",
+        "test": "tests::target_channel_may_already_occupy_its_exact_target_descriptor",
+        "tests_passed": 1,
+        "thread_id": "T-7259d4ad-565b-b8cd-6061-47501b482e73",
+        "capsule_hash": "ac4b0cf3cb3bcb79f33d68b2bae57ec09bc39301afc63c905bac1418b6b9ec4a",
+        "outcome_code": "exit:0"
+      }
+    ]
+  },
+  "completed_result_restart_retention": {
+    "restart_kind": "normal stop/start of the disposable target; no reset",
+    "passed": true,
+    "threads": [
+      "T-04c62f84-b73a-fc29-9e0c-5e23aaaedd51",
+      "T-3ad3424b-249f-8aef-9fc9-aa5452d3e54d"
+    ],
+    "exact_results_capsules_and_snapshots_preserved": true,
+    "clean_source_head_preserved": true,
+    "historical_credential_fence_preserved": true,
+    "qualifies_worker_reattach": false
+  },
+  "not_qualified_by_this_record": [
+    "Hosted model turn or workload-client child invocation",
+    "Worker-to-child mutable workspace sharing",
+    "Worker restart or credential cleanup recovery",
+    "Independent candidate qualification, publication or remote pull/apply",
+    "Broader workspace packages or full test suite",
+    "Stage-1 reproduction or the strengthened publisher-image probe",
+    "Released remote development image"
+  ]
+}

@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-13T03:32:01Z:9145f9f63ab533923570dd7e624768b4f693f461e28c77e4024cacf34c86bc8f:s4e7rfkRAixxPR5OlqWb9nIhRRl+Hg/VIJ8eWdalRky4Y0e4azjfP69VLa/h9v3gDI7T/H2pYiCnv+/EhR3kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [remote, worker, status]
+description: "Read local source orchestration state and its allowed next action; this never contacts the target or advances recovery"
+forms:
+  - slots:
+      - field: source_work_id
+dispatch:
+  kind: execute_ref
+  execute: service:remote-worker-workflows/query
+  availability: daemon

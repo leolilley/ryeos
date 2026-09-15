@@ -1,0 +1,54 @@
+# ryeos:signed:2026-09-11T10:53:16Z:6abf6bba89e401a550133a05512f349b675d6fed413338dae8184bc22e5737b1:XxacCZQNQrtb6VImkvTJrgWWCJARUGlliGyjds7D7jQbKlOvaLHR3fw9GvAaj8SSGowKZu/0EnX5DUJhBLt3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/development
+name: cargo-vendor
+version: "1.0.2"
+description: Produce locked vendored sources using admitted Cargo and exact public registry inputs
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: immutable_current_generation
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content:
+  - id: platform
+    kind: tree
+    mode: pinned
+    digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
+    mount_root: execution_runtime
+    mount: platform
+env_config:
+  env:
+    PATH: ""
+  env_paths:
+    PATH:
+      prepend: []
+      append: []
+config:
+  command: realization:platform/rust/bin/cargo
+  # Cargo's public local-registry contract, not its private cache format.
+  # Exact archives/index records are immutable inputs. Cargo owns unpacking;
+  # retained result import and consumer binding remain separate RyeOS actions.
+  args:
+    - --config
+    - 'source.crates-io.replace-with="ryeos-locked-inputs"'
+    - --config
+    - 'source.ryeos-locked-inputs.local-registry="/ryeos/realizations/registry-inputs"'
+    - vendor
+    - --manifest-path
+    - Cargo.toml
+    - --locked
+    - --frozen
+    - --offline
+    - --respect-source-config
+    - --versioned-dirs
+    - products/cargo-vendor
+  timeout_secs: 300
+  env:
+    CARGO_HOME: /tmp/cargo
+    CARGO_TARGET_DIR: /tmp/target
+    RUSTC: /ryeos/realizations/platform/rust/bin/rustc
+    RUSTDOC: /ryeos/realizations/platform/rust/bin/rustdoc
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

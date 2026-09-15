@@ -38,10 +38,10 @@ pub async fn handle(
     // Same operator carve-out as scheduler_pause: node-owned schedules are
     // controllable by any verified local operator; everyone else controls
     // only their own.
-    if spec.requester_fingerprint == state.identity.fingerprint() {
+    if spec.execution.principal_id() == state.identity.principal_id() {
         ctx.require_verified()?;
     } else {
-        ctx.require_owner(Some(&spec.requester_fingerprint))?;
+        ctx.require_owner(Some(spec.execution.principal_id()))?;
     }
 
     if spec.enabled {

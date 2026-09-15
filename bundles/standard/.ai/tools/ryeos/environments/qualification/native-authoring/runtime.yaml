@@ -1,0 +1,68 @@
+# ryeos:signed:2026-09-08T08:44:58Z:b73432c5a2ec6325cb4feb96b37f44952ae444fd72f5c619b11667656a6d48ac:n8hux2OQnJwSkoRaAG+cNV+slkAgy8uRxSEru69Nz9tG24qztxyd8ezr/dAi5z8HLu9O+y7C8F+UP3Oi8BwOCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification/native-authoring
+name: runtime
+version: "1.0.0"
+description: Exact standalone Python for native authoring runtime qualification
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory, namespace_root, namespace_lib]
+  materialization: read_only
+env_config:
+  # PATH authority belongs to the existing typed path composer, not config.env.
+  # Every child uses an exact admitted absolute executable; inherit no search path.
+  env:
+    PATH: ""
+  env_paths:
+    PATH:
+      prepend: []
+      append: []
+config:
+  command: realization:producer-python/lib/ld-musl-x86_64.so.1
+  args:
+    - --library-path
+    - /ryeos/realizations/producer-python/lib
+    - /ryeos/realizations/producer-python/python/bin/python3.14
+    - -P
+    - -S
+    - -B
+    - -X
+    - utf8
+    - -u
+    - -c
+    - literal: |
+        import hashlib, json, os, sys
+        from pathlib import Path
+        # The exact executable discovers its own admitted standard library.
+        # Do not override protected PYTHONHOME/PYTHONPATH or inherit host paths.
+        if Path(sys.prefix) != Path("/ryeos/realizations/producer-python/python"):
+            raise SystemExit("producer Python prefix escaped the admitted runtime")
+        sealed = sys.argv[1]
+        handoff = json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP", "null"))
+        if not isinstance(handoff, dict) or handoff.get("version") != 1:
+            raise SystemExit("missing sealed production source authority")
+        entry = handoff.get("entries", {}).get(sealed)
+        if not isinstance(entry, dict):
+            raise SystemExit("missing sealed production entry")
+        source = Path(sealed).read_bytes()
+        if hashlib.sha256(source).hexdigest() != entry["content_hash"]:
+            raise SystemExit("production source digest mismatch")
+        logical = Path(entry["logical_path"])
+        sys.path.insert(0, str(logical.parent / "lib"))
+        sys.argv = [str(logical), "--project-path", sys.argv[2]]
+        exec(compile(source, str(logical), "exec"), dict(
+            __name__="__main__", __file__=str(logical), __package__=None,
+            __cached__=None, __spec__=None))
+    - "${tool_path}"
+    - "${project_path}"
+  env:
+    PYTHONHASHSEED: "0"
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONNOUSERSITE: "1"
+    PYTHONSAFEPATH: "1"
+  input_data: "${params_json}"
+  timeout_secs: 300

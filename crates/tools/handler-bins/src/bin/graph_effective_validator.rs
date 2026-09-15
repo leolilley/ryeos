@@ -10,8 +10,8 @@ fn main() {
         | HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)
         | HandlerRequest::LaunchPrepare(_)
-        | HandlerRequest::ValidateLaunchPreparerConfig(_) => {
-            graph_effective_validator::wrong_request()
-        }
+        | HandlerRequest::ValidateLaunchPreparerConfig(_)
+        | HandlerRequest::ExecutionEvidenceDescribe(_)
+        | HandlerRequest::ExecutionEvidenceProject(_) => graph_effective_validator::wrong_request(),
     }));
 }

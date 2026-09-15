@@ -237,7 +237,7 @@ fn admit_prospective_remove(
         policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?,
         policy_snapshot.generation_digest(),
     )
-    .context("prospective removal would fail node engine boot")?;
+    .context("prospective removal failed node definition admission")?;
     Ok(())
 }
 

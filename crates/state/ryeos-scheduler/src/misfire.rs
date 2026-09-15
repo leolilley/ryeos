@@ -281,13 +281,17 @@ async fn record_skip<Ctx: SchedulerContext>(
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
-        fired_at: Some(now),
+        reserved_at: now,
+        dispatched_at: None,
         completed_at: Some(now),
         thread_id: None,
         status: "skipped".to_string(),
         trigger_reason: reason.to_string(),
         outcome: Some(reason.to_string()),
         signer_fingerprint: spec.signer_fingerprint.clone(),
+        schedule_spec_hash: spec.spec_hash.clone(),
+        project_authority: None,
+        admitted_capsule_hash: None,
     };
 
     let app_root = ctx.app_root().to_path_buf();
@@ -326,8 +330,16 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 0,
-            requester_fingerprint: "fp:test".to_string(),
-            capabilities: vec!["ryeos.execute.*".to_string()],
+            execution: crate::types::ScheduleExecution {
+                authority: crate::types::ScheduleExecutionAuthority::Node {
+                    principal_id: format!("fp:{}", "33".repeat(32)),
+                    effective_origin_site_id: "site:test".to_string(),
+                },
+                capabilities: vec!["ryeos.execute.*".to_string()],
+                policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                    ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ),
+            },
         }
     }
 
@@ -346,12 +358,21 @@ mod tests {
             fire_id,
             schedule_id: schedule_id.to_string(),
             scheduled_at,
-            fired_at: Some(scheduled_at),
+            reserved_at: scheduled_at,
+            dispatched_at: Some(scheduled_at),
             completed_at: Some(scheduled_at + 1),
             status: "completed".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: Some("success".to_string()),
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: Some(
+                ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )
+                .unwrap(),
+            ),
+            admitted_capsule_hash: Some("44".repeat(32)),
         }
     }
 

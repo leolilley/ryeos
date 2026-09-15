@@ -1,0 +1,10 @@
+    #[test]
+    fn strict_json_decodes_escaped_keys_before_duplicate_detection() {
+        let duplicate = r#"{"a":1,"\u0061":2}"#;
+        let error = from_json_str_strict::<Value>(duplicate).unwrap_err();
+        assert!(error.to_string().contains("duplicate JSON object key"));
+
+        let distinct = r#"{"a":1,"\u03b1":2}"#;
+        let decoded = from_json_str_strict::<Value>(distinct).unwrap();
+        assert_eq!(decoded, serde_json::json!({"a": 1, "α": 2}));
+    }

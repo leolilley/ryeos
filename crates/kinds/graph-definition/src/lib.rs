@@ -154,6 +154,11 @@ pub struct GraphFile {
     pub description: Option<String>,
     #[serde(default)]
     pub extends: Option<String>,
+    /// Author-vouched ceiling for using this Graph itself as a durable-effect
+    /// subject. Node-level effect classes remain independent dispatch
+    /// requests and can never elevate this signed root ceiling.
+    #[serde(default, skip_serializing_if = "EffectClass::is_live")]
+    pub effects: EffectClass,
     pub config: GraphConfig,
     #[serde(default)]
     pub requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
@@ -163,6 +168,16 @@ pub struct GraphFile {
     /// interpreting it.
     #[serde(default)]
     pub external_content: Option<Value>,
+    /// Optional external product-slot declaration. Selection and realization
+    /// are engine-owned; the strict Graph decoder names the field so it does
+    /// not reinterpret or discard the signed declaration.
+    #[serde(default)]
+    pub external_product_slots: Option<Value>,
+    /// Optional exact Config ref whose named retained products this graph
+    /// declares. Launch admission resolves and validates the binding before
+    /// the graph process starts; the walker does not interpret this field.
+    #[serde(default)]
+    pub product_recipe: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,6 +596,16 @@ fn compile_effect_authorizations(
 }
 
 pub fn validate_graph_file(file: &GraphFile) -> Result<()> {
+    if let Some(recipe) = &file.product_recipe {
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(recipe)
+            .map_err(|error| anyhow!("invalid graph product_recipe: {error}"))?;
+        if canonical.kind != "config"
+            || canonical.suffix.is_some()
+            || canonical.to_string() != *recipe
+        {
+            bail!("graph product_recipe must be an exact unsuffixed Config ref");
+        }
+    }
     if file.version.trim().is_empty() {
         bail!("graph version must be non-empty");
     }
@@ -969,6 +994,82 @@ mod tests {
         assert_eq!(summary.summary.node_count, 2);
         assert_eq!(summary.summary.edge_count, 1);
         assert!(summary.summary.authored_hook_ids.is_empty());
+    }
+
+    #[test]
+    fn product_recipe_is_an_exact_config_ref_or_absent() {
+        let mut graph = composed_graph();
+        graph["product_recipe"] = serde_json::json!("config:test/two-products");
+        validate_view(&view(graph.clone(), Vec::new())).unwrap();
+
+        for invalid in [
+            "tool:test/build",
+            "config:test/build@t:2026",
+            " config:test/build",
+        ] {
+            graph["product_recipe"] = serde_json::json!(invalid);
+            assert!(validate_view(&view(graph.clone(), Vec::new())).is_err());
+        }
+    }
+
+    #[test]
+    fn graph_root_effect_ceiling_is_closed_and_defaults_live() {
+        let file: GraphFile = serde_json::from_value(composed_graph()).unwrap();
+        assert_eq!(file.effects, EffectClass::Live);
+
+        let mut graph = composed_graph();
+        graph["effects"] = serde_json::json!("recorded");
+        let file: GraphFile = serde_json::from_value(graph).unwrap();
+        assert_eq!(file.effects, EffectClass::Recorded);
+
+        let mut graph = composed_graph();
+        graph["effects"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<GraphFile>(graph).is_err());
+    }
+
+    #[test]
+    fn product_qualification_fixtures_compile_through_the_graph_owner() {
+        for (item_ref, source) in [
+            (
+                "graph:test/dynamic-qualification-workflow",
+                include_str!(
+                    "../../../../tests/e2e/environment-products/unknown-output/project/.ai/graphs/test/dynamic-qualification-workflow.yaml"
+                ),
+            ),
+            (
+                "graph:test/verify-dynamic-products",
+                include_str!(
+                    "../../../../tests/e2e/environment-products/unknown-output/bundle-overlay/.ai/graphs/test/verify-dynamic-products.yaml"
+                ),
+            ),
+        ] {
+            let composed: Value = serde_yaml::from_str(source).unwrap();
+            let caps = composed["requires"]["capabilities"]["declared"].clone();
+            let mut prepared_view = view(composed, Vec::new());
+            prepared_view
+                .policy_facts
+                .insert("effective_caps".into(), caps);
+            // This proves parsing/expression compilation, not signed admission
+            // or live qualification under a node's current trust and policy.
+            prepare_effective_graph(item_ref, &prepared_view, &[])
+                .unwrap_or_else(|error| panic!("{item_ref}: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn external_product_slots_are_preserved_as_engine_owned_input() {
+        let slots = serde_json::json!([{
+            "id": "runtime",
+            "relationship_ref": "config:test/relationship",
+            "relationship": "allowed",
+            "kind": "tree",
+            "mount_root": "execution_runtime",
+            "mount": "runtime"
+        }]);
+        let mut graph = composed_graph();
+        graph["external_product_slots"] = slots.clone();
+        let file: GraphFile = serde_json::from_value(graph).unwrap();
+        assert_eq!(file.external_product_slots, Some(slots));
     }
 
     #[test]

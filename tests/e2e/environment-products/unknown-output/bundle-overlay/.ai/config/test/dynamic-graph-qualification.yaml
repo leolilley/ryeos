@@ -1,0 +1,9 @@
+category: test
+version: "1.0.0"
+description: Qualify a selected Graph whose ordinary probe inherits normalized inputs
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: graph:test/verify-dynamic-products
+  subject_declaration_id: subject
+  allowed_claims: [bounded_payload_pair]
+  verifier_parameters: {}

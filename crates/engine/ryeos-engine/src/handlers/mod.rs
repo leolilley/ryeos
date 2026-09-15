@@ -5,7 +5,9 @@ pub mod registry;
 pub(crate) mod subprocess;
 
 pub use descriptor::{HandlerDescriptor, HandlerServes};
-pub use registry::{HandlerError, HandlerRegistry, VerifiedHandler};
+pub use registry::{
+    HandlerError, HandlerRegistry, VerifiedExecutionEvidenceProjectorIdentity, VerifiedHandler,
+};
 
 /// Protocol ABI version this engine speaks for handler binaries.
 /// Distinct from SUPPORTED_RUNTIME_ABI_VERSION.

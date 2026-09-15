@@ -6,7 +6,7 @@
 //! Mirrors `runtime_registry::RuntimeYaml` shape but with a
 //! distinct ABI namespace (SUPPORTED_HANDLER_ABI_VERSION) and a
 //! distinct `serves` value-set (parser | composer | launch_preparer |
-//! effective_validator).
+//! effective_validator | execution_evidence_projector).
 
 use serde::{Deserialize, Serialize};
 
@@ -43,4 +43,5 @@ pub enum HandlerServes {
     Composer,
     LaunchPreparer,
     EffectiveValidator,
+    ExecutionEvidenceProjector,
 }

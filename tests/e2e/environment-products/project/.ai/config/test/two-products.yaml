@@ -1,0 +1,90 @@
+category: test
+version: "2.0.0"
+description: Lossless workspace-output products with an independent consumer allowance
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: distribution_root
+      path: products/distribution
+      storage: large_content
+      bounds:
+        maximum_entries: 32
+        maximum_depth: 6
+        maximum_file_bytes: 16384
+        maximum_total_bytes: 32768
+    - name: scratch_root
+      path: products/build-scratch
+      storage: large_content
+      bounds:
+        maximum_entries: 16
+        maximum_depth: 4
+        maximum_file_bytes: 4096
+        maximum_total_bytes: 8192
+  products:
+    - name: distribution
+      source: {kind: workspace_output, root: distribution_root}
+      path: products/distribution
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 32
+        maximum_depth: 6
+        maximum_file_bytes: 16384
+        maximum_total_bytes: 32768
+      expected_manifest_hash: 1e3ec95d5f220c500598907f7647dd0a08dddf731fdf93da5be1bbc07b36f7b3
+    - name: runtime
+      source: {kind: workspace_output, root: distribution_root}
+      path: products/distribution/runtime
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 16
+        maximum_depth: 4
+        maximum_file_bytes: 16384
+        maximum_total_bytes: 16384
+      expected_manifest_hash: 94c66e97825a25091abe924ae3de4715d26469332aa59f31cfb39854bdb59881
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: distribution_to_consumer
+      producer:
+        canonical_ref: graph:test/two-products
+        recipe_binding: product_recipe
+        product_name: distribution
+        parameters: {}
+      consumer:
+        canonical_ref: config:test/runtime-consumer
+        declaration_id: distribution
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 32
+          maximum_depth: 6
+          maximum_file_bytes: 16384
+          maximum_total_bytes: 32768
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: runtime_to_consumer
+      producer:
+        canonical_ref: graph:test/two-products
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: config:test/runtime-consumer
+        declaration_id: runtime
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 16
+          maximum_depth: 4
+          maximum_file_bytes: 16384
+          maximum_total_bytes: 16384
+      qualification:
+        policy_ref: config:test/runtime-qualification
+        required_claims: [runtime_program_executed]

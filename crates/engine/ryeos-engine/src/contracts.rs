@@ -14,6 +14,7 @@ use crate::canonical_ref::CanonicalRef;
 
 mod execution_plan;
 mod runtime_decorations;
+pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
     PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
@@ -2556,7 +2557,16 @@ mod kind_contract_regressions {
                 ("category", ft_string()),
                 ("name", ft_string()),
                 ("kind", ft_string_enum(&["handler"])),
-                ("serves", ft_string_enum(&["parser", "composer"])),
+                (
+                    "serves",
+                    ft_string_enum(&[
+                        "parser",
+                        "composer",
+                        "launch_preparer",
+                        "effective_validator",
+                        "execution_evidence_projector",
+                    ]),
+                ),
                 ("binary_ref", ft_string()),
                 ("abi_version", ft_string()),
             ],
@@ -2581,6 +2591,20 @@ mod kind_contract_regressions {
         });
         let report = validate(&handler_shape(), &value);
         assert!(report.is_ok(), "valid handler should pass: {report}");
+    }
+
+    #[test]
+    fn handler_execution_evidence_projector_descriptor_passes() {
+        let value = serde_json::json!({
+            "category": "ryeos/core",
+            "name": "execution-evidence",
+            "kind": "handler",
+            "serves": "execution_evidence_projector",
+            "binary_ref": "bin/x86_64-unknown-linux-gnu/execution-evidence",
+            "abi_version": "v3"
+        });
+        let report = validate(&handler_shape(), &value);
+        assert!(report.is_ok(), "projector handler should pass: {report}");
     }
 
     #[test]

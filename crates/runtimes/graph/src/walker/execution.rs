@@ -264,8 +264,21 @@ impl Walker {
                 }
             };
             return StepOutcome::FollowSuspend(FollowSuspendOutcome {
-                item_id: dispatched_item_id,
+                item_id: dispatched_item_id.clone(),
                 ref_bindings,
+                product_selections: match dispatch::product_selections_from_action(&rendered_action)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                            item_id: Some(dispatched_item_id),
+                            error: format!("follow action has invalid product selections: {error}"),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: elapsed,
+                            cost: None,
+                        });
+                    }
+                },
                 params: rendered_action
                     .get("params")
                     .cloned()
@@ -376,6 +389,8 @@ impl Walker {
                             publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
                             record_hash: None,
                             replayed_from: None,
+                            result_projection:
+                                ryeos_runtime::callback_contract::DispatchResultProjection::DispatchedSubject,
                         },
                     );
                     Ok(dispatch::ActionOutcome::Success(success))
@@ -547,7 +562,7 @@ impl Walker {
                         ),
                     )
                     .with_result(&val)
-                    .with_dispatch_option(dispatch.as_ref())
+                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref())
                     .render_json(assign)
                     {
                         Ok(value) => Some(value),
@@ -581,7 +596,7 @@ impl Walker {
                         ),
                     )
                     .with_result(&val)
-                    .with_dispatch_option(dispatch.as_ref())
+                    .with_post_action_dispatch(dispatch.as_ref(), child_thread_id.as_deref())
                     .render_json(template)
                     {
                         Ok(Value::Array(observations)) => observations,
@@ -632,7 +647,7 @@ impl Walker {
                         effects: ExpressionFailureEffects::action(dispatch_observation),
                     });
                 }
-                let next = match edges::evaluate_next_with_result(
+                let next = match edges::evaluate_next_with_action_result(
                     compiled,
                     &candidate_state,
                     inputs,
@@ -645,6 +660,7 @@ impl Walker {
                         &self.graph.effective_definition_digest,
                     ),
                     dispatch.as_ref(),
+                    child_thread_id.as_deref(),
                 ) {
                     Ok(next) => next,
                     Err(error) => {
@@ -1082,6 +1098,20 @@ impl Walker {
                     cost: None,
                 });
             }
+            let product_selections = match dispatch::product_selections_from_action(&action) {
+                Ok(value) => value,
+                Err(error) => {
+                    return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                        item_id: Some(item_ref),
+                        error: format!(
+                            "follow fanout item {index} has invalid product selections: {error}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                    });
+                }
+            };
             let ref_bindings = match action.get("ref_bindings") {
                 Some(value) => {
                     match serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
@@ -1129,6 +1159,11 @@ impl Walker {
                 serde_json::to_value(&ref_bindings)
                     .expect("validated ref bindings must serialize as JSON"),
             );
+            child_fields.insert(
+                "product_selections".to_string(),
+                serde_json::to_value(&product_selections)
+                    .expect("validated product selections must serialize as JSON"),
+            );
             child_fields.insert("parameters".to_string(), parameters);
             if let Some(facets) = facets {
                 child_fields.insert("facets".to_string(), facets);
@@ -1159,9 +1194,16 @@ impl Walker {
                 .remove("parameters")
                 .expect("bounded follow child carries parameters");
             let facets = child_fields.remove("facets");
+            let product_selections = serde_json::from_value(
+                child_fields
+                    .remove("product_selections")
+                    .expect("bounded follow child carries product selections"),
+            )
+            .expect("validated product selections retain their typed JSON shape");
             children.push(ryeos_runtime::callback::FollowChildSpec {
                 item_ref,
                 ref_bindings,
+                product_selections,
                 parameters,
                 facets,
             });

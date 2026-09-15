@@ -13,10 +13,16 @@
 //! The resolution cache is deliberately different: it retains no project
 //! materialization guard, and rebinds hits to the current admitted checkout.
 //!
-//! The directory is removed recursively when the **last** `Arc` holder
-//! drops. The internal `Mutex<Option<PathBuf>>` allows `disarm()` to
-//! transfer ownership to a long-running detached owner without dropping
-//! the dir. Disarm is rare; the common path is just Drop.
+//! Ordinary temporary directories are removed when the last holder drops.
+//! Shared cache generations instead release their cache leases; eviction owns
+//! their removal. Journal-owned workspaces are deliberately preserved on Drop
+//! and require the explicit owner-fenced lifecycle to remove them. An Arc's
+//! lifetime is not proof that every independently launched workspace borrower
+//! has stopped. Keep that proof in the existing launch/workspace authorities,
+//! not in a reference-count check or a guard reconstructed from a path.
+//!
+//! The internal path slot allows `disarm()` to transfer ordinary cleanup
+//! ownership without removing the directory.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,8 +34,27 @@ struct PinnedRemoval {
     root: lillux::PinnedDirectory,
 }
 
-/// RAII guard for a materialised temp directory. Removes the directory
-/// recursively when the LAST `Arc<TempDirGuard>` drops.
+struct OwnedWorkspaceView {
+    workspace_id: String,
+    view_identity: String,
+    authority: ryeos_engine::isolation::CreatedWorkspaceView,
+}
+
+/// This is the original materialization's local descriptor slot, not a process
+/// tracker. The runtime journal separately fences every borrower. In particular,
+/// `Uncreated` after a failed transfer or restart is NOT physical-close proof.
+enum WorkspaceViewSlot {
+    Uncreated,
+    Available(OwnedWorkspaceView),
+    Draining(OwnedWorkspaceView),
+    Closed {
+        workspace_id: String,
+        view_identity: String,
+    },
+}
+
+/// Materialization lifeline with explicit temporary, cache, and journal-owned
+/// workspace cleanup modes. Only ordinary temporary guards remove on Drop.
 pub struct TempDirGuard {
     inner: Mutex<Option<PathBuf>>,
     effective_path: PathBuf,
@@ -38,6 +63,11 @@ pub struct TempDirGuard {
     remove_on_drop: AtomicBool,
     owns_removal: bool,
     pinned_removal: Option<PinnedRemoval>,
+    workspace_view: Mutex<Option<WorkspaceViewSlot>>,
+    /// A projectless controller may create one separately confined workspace.
+    /// Retain its ORIGINAL guard here; neither path lookup nor a pool registry
+    /// may recreate this local physical-close authority.
+    owned_workspace_lifeline: Mutex<Option<Arc<TempDirGuard>>>,
 }
 
 impl TempDirGuard {
@@ -50,6 +80,8 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: None,
+            workspace_view: Mutex::new(None),
+            owned_workspace_lifeline: Mutex::new(None),
         }
     }
 
@@ -71,6 +103,8 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(false),
             owns_removal: true,
             pinned_removal: None,
+            workspace_view: Mutex::new(Some(WorkspaceViewSlot::Uncreated)),
+            owned_workspace_lifeline: Mutex::new(None),
         })
     }
 
@@ -86,6 +120,8 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(false),
             owns_removal: false,
             pinned_removal: None,
+            workspace_view: Mutex::new(None),
+            owned_workspace_lifeline: Mutex::new(None),
         }
     }
 
@@ -103,12 +139,187 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: Some(PinnedRemoval { parent, name, root }),
+            workspace_view: Mutex::new(None),
+            owned_workspace_lifeline: Mutex::new(None),
         }
+    }
+
+    /// Borrow the original descriptor of an owned scratch root. This never
+    /// reopens its diagnostic path or grants access to borrowed generations.
+    pub fn owned_scratch_root(&self) -> anyhow::Result<&lillux::PinnedDirectory> {
+        self.pinned_removal
+            .as_ref()
+            .map(|owned| &owned.root)
+            .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch descriptor"))
+    }
+
+    /// Install the accepted Create result before publishing Ready. A later
+    /// journal-bind failure must keep this very slot for explicit closure.
+    pub fn install_workspace_view(
+        &self,
+        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+        authority: ryeos_engine::isolation::CreatedWorkspaceView,
+    ) -> anyhow::Result<()> {
+        if evidence.operation != ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create {
+            anyhow::bail!("only Create may install a workspace view");
+        }
+        let path = self
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("workspace is disarmed"))?;
+        if path.file_name().and_then(|name| name.to_str()) != Some(&evidence.workspace_id) {
+            anyhow::bail!("created view belongs to another workspace");
+        }
+        let view_identity = evidence
+            .mount_identity
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("created workspace has no view identity"))?;
+        let mut slot = self.workspace_view.lock().unwrap();
+        if !matches!(*slot, Some(WorkspaceViewSlot::Uncreated)) {
+            anyhow::bail!("workspace view slot is not awaiting its original Create result");
+        }
+        *slot = Some(WorkspaceViewSlot::Available(OwnedWorkspaceView {
+            workspace_id: evidence.workspace_id.clone(),
+            view_identity: view_identity.clone(),
+            authority,
+        }));
+        Ok(())
+    }
+
+    /// Return the exact operational coordinate for durable borrower admission.
+    /// Ordinary materializations have no workspace membership. Construction,
+    /// draining and closed slots cannot issue new borrow authority.
+    pub fn workspace_view_identity(&self) -> anyhow::Result<Option<(String, String)>> {
+        let slot = self.workspace_view.lock().unwrap();
+        match slot.as_ref() {
+            None => Ok(None),
+            Some(WorkspaceViewSlot::Available(view)) => Ok(Some((
+                view.workspace_id.clone(),
+                view.view_identity.clone(),
+            ))),
+            Some(_) => anyhow::bail!("workspace view is not accepting borrowers"),
+        }
+    }
+
+    /// Call only after exact durable borrower admission. The journal must
+    /// continue counting that reservation until all launch/held-process aliases
+    /// settle; taking this clone is not an independent admission path.
+    pub fn borrow_workspace_view(
+        &self,
+        workspace_id: &str,
+        view_identity: &str,
+    ) -> anyhow::Result<Option<lillux::InheritedDescriptorAuthority>> {
+        let slot = self.workspace_view.lock().unwrap();
+        let Some(WorkspaceViewSlot::Available(view)) = slot.as_ref() else {
+            anyhow::bail!("workspace view is not accepting borrowers");
+        };
+        if view.workspace_id != workspace_id || view.view_identity != view_identity {
+            anyhow::bail!("workspace borrow coordinate changed");
+        }
+        Ok(match &view.authority {
+            ryeos_engine::isolation::CreatedWorkspaceView::Disabled => None,
+            ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(authority) => {
+                Some(authority.clone())
+            }
+        })
+    }
+
+    /// After the caller fences admission and proves all exact borrowers dead,
+    /// physically close the original registered descriptor. Alias/timeout
+    /// refusal leaves the owner in a non-borrowable draining slot for retry.
+    /// An Arc count, a fresh guard or an empty slot cannot substitute for this.
+    pub fn close_workspace_view(
+        &self,
+        workspace_id: &str,
+        view_identity: &str,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        let mut slot = self.workspace_view.lock().unwrap();
+        match slot.as_ref() {
+            Some(WorkspaceViewSlot::Closed {
+                workspace_id: id,
+                view_identity: view,
+            }) if id == workspace_id && view == view_identity => return Ok(()),
+            Some(WorkspaceViewSlot::Available(view) | WorkspaceViewSlot::Draining(view))
+                if view.workspace_id == workspace_id && view.view_identity == view_identity => {}
+            _ => anyhow::bail!("original workspace view closure authority is unavailable"),
+        }
+        let Some(WorkspaceViewSlot::Available(mut view) | WorkspaceViewSlot::Draining(mut view)) =
+            slot.take()
+        else {
+            unreachable!("matching retained workspace view checked above")
+        };
+        if let ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(authority) = view.authority
+        {
+            if let Err((authority, error)) = authority.try_close_last_owner(deadline) {
+                view.authority =
+                    ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(authority);
+                *slot = Some(WorkspaceViewSlot::Draining(view));
+                return Err(error.into());
+            }
+        }
+        *slot = Some(WorkspaceViewSlot::Closed {
+            workspace_id: view.workspace_id,
+            view_identity: view.view_identity,
+        });
+        Ok(())
     }
 
     /// Retain an exact-generation cache lease for the lifetime of this guard.
     pub fn retain_lease(&self, lease: std::fs::File) {
         self.leases.lock().unwrap().push(lease);
+    }
+
+    /// Association only: isolation still pins and verifies this named child
+    /// against the node's runtime workspace authority.
+    pub fn owns_workspace_project_path(&self, candidate: &std::path::Path) -> bool {
+        self.path().is_some_and(|root| {
+            candidate.parent() == Some(root.as_path())
+                && candidate.file_name().and_then(|name| name.to_str())
+                    == Some(ryeos_engine::execution_workspace::PROJECT_DIR)
+                && self.workspace_view.lock().unwrap().is_some()
+        })
+    }
+
+    pub fn retain_owned_workspace_lifeline(
+        &self,
+        workspace: Arc<TempDirGuard>,
+    ) -> anyhow::Result<()> {
+        if self.pinned_removal.is_none()
+            || self.workspace_view.lock().unwrap().is_some()
+            || std::ptr::eq(self, workspace.as_ref())
+            || workspace.workspace_view.lock().unwrap().is_none()
+            || workspace.owned_workspace_lifeline.lock().unwrap().is_some()
+        {
+            anyhow::bail!("only a pinned scratch owner may retain one original workspace lifeline");
+        }
+        let root = self
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("scratch owner is disarmed"))?;
+        let child_root = workspace
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("workspace is disarmed"))?;
+        if root == child_root || child_root.parent() != root.parent() {
+            anyhow::bail!(
+                "workspace must be a separate sibling, outside the controller's writable root"
+            );
+        }
+        let mut slot = self.owned_workspace_lifeline.lock().unwrap();
+        if let Some(current) = slot.as_ref() {
+            if !Arc::ptr_eq(current, &workspace) {
+                anyhow::bail!("controller already retains another original workspace");
+            }
+        } else {
+            *slot = Some(workspace);
+        }
+        Ok(())
+    }
+
+    /// Exact existing owner, never a new guard synthesized from a journal path.
+    pub fn owned_workspace_lifeline(self: &Arc<Self>) -> anyhow::Result<Option<Arc<Self>>> {
+        if self.workspace_view.lock().unwrap().is_some() {
+            return Ok(Some(self.clone()));
+        }
+        Ok(self.owned_workspace_lifeline.lock().unwrap().clone())
     }
 
     /// A durable journal now owns recovery. From this point, Drop preserves
@@ -145,6 +356,15 @@ impl TempDirGuard {
     pub fn remove_now(&self) -> anyhow::Result<()> {
         if !self.owns_removal {
             anyhow::bail!("borrowed cache/workspace guard does not own directory removal");
+        }
+        if self
+            .workspace_view
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|slot| !matches!(slot, WorkspaceViewSlot::Closed { .. }))
+        {
+            anyhow::bail!("workspace removal requires original view physical-close proof");
         }
         let mut path_slot = self.inner.lock().unwrap();
         let Some(path) = path_slot.as_ref() else {
@@ -309,8 +529,10 @@ pub fn admitted_input_workspace_thread_ids(
 
 /// Create one durable runtime-workspace root through the same pinned
 /// `.ai/state/cache/executions` authority consumed by the isolation runtime.
-/// The caller must either bind the workspace journal and disarm the returned
-/// guard, or let the guard roll the unbound directory back.
+/// The caller retains this original view slot through its execution owner and
+/// pool borrowers. Before durable reservation it rolls back; after reservation
+/// preserve it for explicit cleanup. Never disarm it merely because Create
+/// returned successfully.
 pub fn create_runtime_workspace(
     runtime_cache_root: &std::path::Path,
     workspace_name: &str,
@@ -328,7 +550,10 @@ pub fn create_runtime_workspace(
     let project = workspace
         .path()
         .join(ryeos_engine::execution_workspace::PROJECT_DIR);
-    let guard = Arc::new(TempDirGuard::new_pinned(execution_root, name, workspace));
+    let mut guard = TempDirGuard::new_pinned(execution_root, name, workspace);
+    guard.effective_path = project.clone();
+    guard.workspace_view = Mutex::new(Some(WorkspaceViewSlot::Uncreated));
+    let guard = Arc::new(guard);
     Ok((project, guard))
 }
 
@@ -389,11 +614,242 @@ mod tests {
         drop(guard);
         assert!(root.is_dir());
 
-        TempDirGuard::new_workspace(root.clone(), project)
+        // A newly opened path guard is not the original retained view owner.
+        // The test's disposable fixture cleans this refused history on drop.
+        let reopened = TempDirGuard::new_workspace(root.clone(), project).unwrap();
+        assert!(reopened.remove_now().is_err());
+        assert!(root.exists());
+    }
+
+    fn created_view_evidence(
+        workspace_id: &str,
+    ) -> ryeos_engine::isolation::WorkspaceLifecycleEvidence {
+        ryeos_engine::isolation::WorkspaceLifecycleEvidence {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+            workspace_id: workspace_id.to_owned(),
+            launch_owner: "{\"attempt\":1}".to_owned(),
+            backend_id: "test-backend".to_owned(),
+            backend_version: "1".to_owned(),
+            pinned_root_identities: std::collections::BTreeMap::from([
+                ("project".to_owned(), "test-project".to_owned()),
+                ("backend_state".to_owned(), "test-state".to_owned()),
+            ]),
+            mount_identity: Some("a".repeat(64)),
+            mutations: Vec::new(),
+            destroyed: false,
+        }
+    }
+
+    // This tests opaque descriptor ownership, not an Overlayfs claim. Actual
+    // backend/template validation remains in Lillux's isolated kernel probes.
+    fn test_view_authority(path: &std::path::Path) -> lillux::InheritedDescriptorAuthority {
+        lillux::PinnedDirectory::open(path)
             .unwrap()
-            .remove_now()
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap()
+    }
+
+    fn close_deadline() -> lillux::time::MonotonicDeadline {
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1))
+    }
+
+    #[test]
+    fn workspace_install_and_borrow_require_the_original_exact_coordinate() {
+        let cache = tempfile::tempdir().unwrap();
+        let (project, guard) = create_runtime_workspace(cache.path(), "view-one").unwrap();
+        let evidence = created_view_evidence("view-one");
+        let wrong = created_view_evidence("other-workspace");
+        assert!(
+            guard
+                .install_workspace_view(
+                    &wrong,
+                    ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(test_view_authority(
+                        &project
+                    ))
+                )
+                .is_err()
+        );
+        assert!(guard.workspace_view_identity().is_err());
+        guard
+            .install_workspace_view(
+                &evidence,
+                ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(test_view_authority(
+                    &project,
+                )),
+            )
             .unwrap();
-        assert!(!root.exists());
+        assert_eq!(
+            guard.workspace_view_identity().unwrap(),
+            Some(("view-one".into(), "a".repeat(64)))
+        );
+        assert!(
+            guard
+                .borrow_workspace_view("other-workspace", &"a".repeat(64))
+                .is_err()
+        );
+        assert!(
+            guard
+                .borrow_workspace_view("view-one", &"b".repeat(64))
+                .is_err()
+        );
+        assert!(
+            guard
+                .install_workspace_view(
+                    &evidence,
+                    ryeos_engine::isolation::CreatedWorkspaceView::Disabled
+                )
+                .is_err()
+        );
+        assert!(
+            guard
+                .close_workspace_view("view-one", &"b".repeat(64), close_deadline())
+                .is_err()
+        );
+        // A wrong coordinate does not drain or replace the legitimate slot.
+        assert!(guard.workspace_view_identity().is_ok());
+        guard
+            .close_workspace_view("view-one", &"a".repeat(64), close_deadline())
+            .unwrap();
+        guard.remove_now().unwrap();
+    }
+
+    #[test]
+    fn workspace_alias_refusal_drains_admission_and_last_owner_retry_closes() {
+        let cache = tempfile::tempdir().unwrap();
+        let (project, guard) = create_runtime_workspace(cache.path(), "view-alias").unwrap();
+        guard
+            .install_workspace_view(
+                &created_view_evidence("view-alias"),
+                ryeos_engine::isolation::CreatedWorkspaceView::Descriptor(test_view_authority(
+                    &project,
+                )),
+            )
+            .unwrap();
+        let borrower = guard
+            .borrow_workspace_view("view-alias", &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert!(
+            guard
+                .close_workspace_view("view-alias", &"a".repeat(64), close_deadline())
+                .is_err()
+        );
+        assert!(guard.workspace_view_identity().is_err());
+        assert!(
+            guard
+                .borrow_workspace_view("view-alias", &"a".repeat(64))
+                .is_err()
+        );
+        assert!(guard.remove_now().is_err());
+        assert!(project.is_dir());
+        drop(borrower);
+        guard
+            .close_workspace_view("view-alias", &"a".repeat(64), close_deadline())
+            .unwrap();
+        // Exact close replay is idempotent; closed slots never reopen borrowing.
+        guard
+            .close_workspace_view("view-alias", &"a".repeat(64), close_deadline())
+            .unwrap();
+        assert!(
+            guard
+                .borrow_workspace_view("view-alias", &"a".repeat(64))
+                .is_err()
+        );
+        guard.remove_now().unwrap();
+        assert!(!project.exists());
+    }
+
+    #[test]
+    fn uncreated_or_reopened_workspace_cannot_supply_close_or_removal_proof() {
+        let cache = tempfile::tempdir().unwrap();
+        let (project, original) = create_runtime_workspace(cache.path(), "view-uncreated").unwrap();
+        original.preserve_for_explicit_cleanup();
+        assert!(
+            original
+                .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
+                .is_err()
+        );
+        assert!(original.remove_now().is_err());
+        let root = original.path().unwrap();
+        let reopened = TempDirGuard::new_workspace(root, project.clone()).unwrap();
+        assert!(
+            reopened
+                .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
+                .is_err()
+        );
+        assert!(
+            reopened
+                .borrow_workspace_view("view-uncreated", &"a".repeat(64))
+                .is_err()
+        );
+        assert!(reopened.remove_now().is_err());
+        assert!(project.is_dir());
+    }
+
+    #[test]
+    fn projectless_controller_retains_the_original_separate_workspace_owner() {
+        let cache = tempfile::tempdir().unwrap();
+        let (controller_path, controller) =
+            create_projectless_workspace(cache.path(), "controller").unwrap();
+        let (project, workspace) = create_runtime_workspace(cache.path(), "worker-view").unwrap();
+        assert!(controller.owned_workspace_lifeline().unwrap().is_none());
+        assert!(Arc::ptr_eq(
+            &workspace,
+            &workspace.owned_workspace_lifeline().unwrap().unwrap()
+        ));
+        assert!(!project.starts_with(&controller_path));
+        controller
+            .retain_owned_workspace_lifeline(workspace.clone())
+            .unwrap();
+        controller
+            .retain_owned_workspace_lifeline(workspace.clone())
+            .unwrap();
+        let weak = Arc::downgrade(&workspace);
+        drop(workspace);
+        let retained = controller.owned_workspace_lifeline().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&retained, &weak.upgrade().unwrap()));
+        assert!(retained.owns_effective_path(&project));
+        drop(retained);
+        drop(controller);
+        assert!(weak.upgrade().is_none());
+        assert!(!controller_path.exists());
+        assert!(!project.exists());
+    }
+
+    #[test]
+    fn dependent_workspace_refuses_self_nested_and_second_owners() {
+        let cache = tempfile::tempdir().unwrap();
+        let (controller_path, controller) =
+            create_projectless_workspace(cache.path(), "controller").unwrap();
+        assert!(
+            controller
+                .retain_owned_workspace_lifeline(controller.clone())
+                .is_err()
+        );
+        let (_, nested) = create_runtime_workspace(&controller_path, "nested").unwrap();
+        assert!(
+            controller
+                .retain_owned_workspace_lifeline(nested.clone())
+                .is_err()
+        );
+        assert!(controller.owned_workspace_lifeline().unwrap().is_none());
+        let (_, first) = create_runtime_workspace(cache.path(), "first").unwrap();
+        let (_, second) = create_runtime_workspace(cache.path(), "second").unwrap();
+        controller
+            .retain_owned_workspace_lifeline(first.clone())
+            .unwrap();
+        assert!(
+            controller
+                .retain_owned_workspace_lifeline(second.clone())
+                .is_err()
+        );
+        assert!(first.retain_owned_workspace_lifeline(second).is_err());
+        assert!(Arc::ptr_eq(
+            &first,
+            &controller.owned_workspace_lifeline().unwrap().unwrap()
+        ));
+        drop(nested);
     }
 
     #[test]

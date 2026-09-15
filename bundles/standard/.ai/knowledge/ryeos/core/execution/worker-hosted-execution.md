@@ -1,18 +1,98 @@
-<!-- ryeos:signed:2026-09-04T06:00:33Z:34d43e0e79639b37438999e9ea50251e21a9f29ba87ecdbb2b08e685d4cec79b:ms+ps3sDXhDK66XB4lW2fECpg8+YzCTx08GCRqRYBRAuX+J+yCVOyL1ItxFpuh6KquxIeIaUl2wcyJWJwYIvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:38:33Z:dfd6b69ea21fe0c4d6eea798d301d11f3a3a2ad06a7a55f41ed51eddccd4d881:3Fgl4X1Ws0+lQD9PSvIE57CxKNCgfnWwrfsKmrWolu3VhYJEYENfLLmG52OeDwRCkgvwtDDPAHYYMue7ahjJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.6.0"
+version: "1.8.2"
 ```
 
 # Worker-Hosted Execution
 
+Worker-environment v6 explicitly includes `external_product_slots`, empty for
+literal-only environments. A pending product slot names a signed relationship
+Config and realization shape, not a digest or executable grant. The pure launch
+preparer checks combined literal/slot search and environment references; the
+local operator's product selection must be verified and ordinarily bound before
+the prepared Config dependency can be realized. Dynamic slots are project-only;
+installed bundle environments continue to use literal pins.
+
+The v6 contract combines product slots with explicitly selected CLI and/or
+structured-session invocation bindings. The two earlier v5 branch shapes are
+not accepted as this combined contract. Source integration and separate prior
+acceptance runs do not qualify a newly built combined generation.
+
+A Graph follow action may carry the ordinary typed `product_selections` field
+for its child. Single and cohort follow seal that exact canonical batch into
+each child's ordinary root admission and durable follow specification. The
+follow parent never inherits or adopts it, and follow does not introduce a
+latest-binding resolver or another product authority.
+
 Worker-hosted execution runs one long-lived subordinate workload for one
 ordinary RyeOS root execution. It is generic execution substrate, not an
 engine kind, agent identity, or local-inference implementation.
+
+A persistent execution dependency is not a separate thread root. Its direct
+plan consumes the dependency's existing finalized effective program: the
+complete composed subject supplies the registered kind's filesystem/network
+projections, while retained root bytes supply parsing. It must not require or
+fabricate a second root admission, borrow the enclosing runtime's composition,
+or silently use node defaults because that dependency has no root thread.
+Subject identity, enclosing restrictions and retained protocol narrowing remain
+mandatory before the plan is sealed; recovery consumes that sealed plan.
+
+Session admission reserves the exact pending worker ID and boot epoch before
+process contact, including after recovery. Boot-local workload-client admission
+must match that reserved tuple and credential generation; empty worker fields
+are not an admissible pre-start state. This reservation fences cleanup but is
+not liveness evidence: the separate held-process attachment still owns that
+transition. Do not clear the pending identity to make client setup pass.
+
+Held-launch failures carry cleanup authority separately from diagnostics.
+Lillux retains the exact supervisor until its process group is quiescent and
+the child is reaped; only an unconsumed attachment boundary can produce the
+typed `AbortedProcess` testimony on a spawn failure. Engine dispatch preserves
+that testimony, and the session owner consumes it through its existing
+failed-start settlement. Refusal text, PID absence, and attempted kill/wait
+are never cleanup proof. Missing proof keeps the credential/workspace fence.
+This in-memory proof cannot retroactively settle a historical attempt which
+lost its launcher identity; replay must retain that uncertainty.
+
+Adopting a control channel at standard-input coordinate zero may leave that
+coordinate vacant. The bridge's fresh workload pipes must still survive exec;
+Lillux applies the same child-only stdio preservation used by its subprocess
+runner. No ambient standard stream or dummy host file is substituted. Startup
+diagnostics distinguish request/notification phases and may include the exact
+child's OS exit status, but never upstream private stderr. Those diagnostics
+remain separate from the daemon's cleanup testimony.
+
+Bound source has separate daemon and workload coordinates. Daemon baseline
+preparation reads the already-pinned, verified source generation under its
+existing materialization lease. The execution entry path is only a target
+namespace coordinate; its mount may not exist in the daemon namespace at all.
+Baseline paths use the captured manifest root, matching profile compilation.
+The enforced read-only overlay retains that exact file descriptor, not a
+reopened workload path or a substituted live bundle file.
+
+The daemon is the sole compatibility-seed preparation owner. The bridge
+verifies the bounded, no-follow file against the admitted baseline before
+starting the workload; it does not rewrite it after isolation has mounted it
+read-only. Missing or divergent bytes refuse launch in every isolation mode.
+The source mount's file mode is not a replacement for mount or immutable-argv
+authority. Do not add a bridge-side seed repair or mount-error fallback.
+
+Captured execution excludes ambient node-policy filesystem mounts, not the
+session's explicit private-state grant. Both ordinary and held dispatch retain
+that exact launch root. Isolation independently pins it as a strict child of
+node state, rejects the node-state root itself and outside paths, and bounds
+any read-only baseline overlay to that exact private root. No caller-selected
+path, sibling profile, bundle root, trust directory, or daemon socket follows
+from this grant. The same credential-generation and worker cleanup fences
+continue to control which private home the daemon may supply.
+Plan emission retains both admitted realization mounts and state-overlay
+mounts with their ordered layers; validating an overlay without emitting it
+does not enforce read-only protection. Verified code is emitted separately.
 
 This is installed RyeOS runtime knowledge shipped by the standard bundle. It
 describes the authority visible to operators and authored integrations; it is
@@ -40,6 +120,13 @@ replacement receives `MAX(boot_epoch)+1`. Dead/reaped or
 dead/unproved rows remain as exact cleanup evidence. The dedicated-session,
 credential-lock, and workspace ownership compare-and-swap transaction admits
 at most one current worker; recovery cannot erase or reuse a prior epoch.
+
+Public route commands select only public-audience routes in the root's frozen
+route set. Unknown, unselected, or recovery-only routes are rejected before
+command reservation and worker contact. Daemon-owned reattachment uses its
+separate runtime surface. Exact settled command replay remains a read of its
+original testimony, even after terminalization; it does not re-admit or resend
+the request. Payload semantics remain governed by the admitted protocol.
 
 Every profile and worker-execution entry point admits only an exact
 node-admitted operator principal: either the node's configured local operator
@@ -167,7 +254,7 @@ A project worker execution selects its signed portable environment through the
 runtime-declared `environment` ref binding. The selector is not an ordinary
 parameter and cannot be smuggled through the worker input envelope. The generic
 launch preparer accepts only a trusted bundle/project `config` with the closed
-`ryeos.worker_environment.v3` schema, derives the exact worker dependency from
+`ryeos.worker_environment.v6` schema, derives the exact worker dependency from
 it, and retains the engine-resolved path-free binding record in the outer
 admitted program. The environment may additionally declare locator-free pinned
 external content and an ordered executable-search list over those exact tree
@@ -177,7 +264,18 @@ rooted search directories and never inherits an ambient host `PATH`. Changing
 the config bytes at the same canonical ref therefore changes
 `exact_program_hash`.
 
-The v3 configuration may also declare `process_environment`. This is not an
+Portable content is not necessarily bundle-owned. A project environment's
+consumer binding is keyed by the exact definition generation already admitted
+by the outer launch, including a COW subject's current operational generation.
+Static preview and launch use that same authority; neither a live path nor the
+latest project HEAD can substitute for it. On another site, project content is
+resolved under that admitted definition generation and compared with its
+retained portable program before target-local binding admission. Installed
+execution and content dependencies remain projectless: selecting them from a
+project must not give their code a project overlay. Same-site recovery keeps
+the captured realizations rather than re-resolving mutable names.
+
+The v6 configuration may also declare `process_environment`. This is not an
 extension of content authority and is not a project/vault environment overlay.
 The kind-owned preparer emits a generic path-free environment contribution as
 a sibling of execution and content dependencies. Every contribution names its
@@ -192,10 +290,10 @@ non-tree realizations, and paths whose retained manifest type differs from the
 declared file/directory type.
 
 The persistent-session capsule retains only the validated path-free process
-environment, capped at 32 entries and 4096 serialized bytes so the sealed relay
-uses the existing bounded runtime-environment path without a second transport.
-Placement resolves it against that capsule's pinned realization set and the
-node-owned `.ai/cache/ryeos-runtime` view. The session protocol must explicitly
+environment, capped at 32 entries and 4096 serialized bytes. Placement prepares
+a bounded delivery envelope on the existing protected environment channel;
+the envelope is not authored configuration or additional content authority.
+The session protocol must explicitly
 allow the sealed `RYEOS_SESSION_PROCESS_ENVIRONMENT` relay through its existing
 `runtime_env_allowlist`; otherwise admission fails. The receiving bridge clears
 its inherited environment and deliberately installs only these resolved values
@@ -204,6 +302,141 @@ alongside its fixed minimal environment. Existing
 policy remain the final enforcement path. No host environment, absolute
 authored path, credential home, project ignore entry, or kind-specific engine
 branch becomes environment authority.
+
+With enforced isolation, execution-runtime paths are usable by ordinary child
+processes without preserving private descriptors. Lillux first proves the
+exact pinned object and read-only namespace ancestors; the initial executable
+still uses its held descriptor. The native backend seals only its synthetic
+root, not separately admitted writable mounts. A readonly leaf below a writable
+ancestor is insufficient and is refused.
+
+For each `runtime_view_directory`, placement prepares the exact directory under
+the borrowed workspace's `.ai/cache/ryeos-runtime` capture floor and mounts it
+at `/ryeos/runtime-views/<ENV_NAME>`. The leaf's contents are writable; its name
+cannot be replaced. The compiler refuses overlaps and the bridge proves that
+the prepared source and target mount are the same directory. Missing or changed
+sources refuse launch instead of triggering bridge-side repair. This supports
+ordinary descendant cache use while keeping caches out of retained candidates.
+Disabled-isolation delivery remains descriptor-bound; it does not claim the
+immutable namespace guarantees of the mounted lane. Delivery mode is explicitly
+prepared, never inferred from whether a mount happens to exist.
+
+Persistent-session capsule v10 fences this prepared delivery contract. Earlier
+retained bridges consume a different environment format and are refused rather
+than translated during recovery.
+
+The required-nullable v6 `workload_client` member is independent of process
+environment and external-content authority. `null` disables it. A non-null
+request selects explicit CLI, structured-session, or both ingress bindings plus
+a finite, sorted set of child item refs, ref-binding values, call forms,
+effect classes, signed workspace-access assertions, in-flight count,
+invocation count and lifetime. The signed
+worker-execution configuration separately supplies a delegation ceiling, and
+the node execution policy may disable or further bound the feature. Admission
+intersects the original verified caller scopes, root delegation ceiling,
+project request, current node ceiling and each child kind's mechanically
+derived exact execution capability. No item, provider, compiler, project or
+workload name is engine vocabulary.
+
+RyeOS does not expose an operator key, callback bearer, thread-auth bearer,
+daemon address or ordinary CLI transport to the workload. The daemon retains
+those existing authorities in memory and creates one boot-bound protected
+target channel. Its secret-free boot frame contains the protocol, grant
+digest, selected ingress, byte/concurrency/lifetime bounds and a finite public
+operation presentation. The existing verified resolution and inventory owners
+derive that presentation from the original admitted source, never candidate
+edits. The placement's immutable `hosted_session.workload_client_admitted`
+fact binds its profile, request and presentation digests before contact;
+reattachment must reproduce the same recipe. It does not grant execution.
+
+That public presentation uses the workload client's actual request grammar.
+In particular, a default call is presented as a null/omitted `call`, and a
+named call as `{method}` with its argument schema described separately. The
+tagged enums retained in the private admission ceiling are authority
+representation, not invocation examples, and must never be exposed as though
+the workload could submit them. The daemon compares a deterministic public
+authority projection with the retained ceiling before releasing the boot.
+
+CLI binding requires an exact client member in a declared pinned tree.
+Inside an enforced private-tmp and fresh
+PID-namespace sandbox, the trusted bridge publishes one random owner-private
+local endpoint. Lillux accepts only a non-init peer visible in that PID
+namespace, while the client proves the connected server is namespace PID 1;
+pathname replacement therefore cannot impersonate the retained broker. A
+restricted client realization staged as `ryeos` supports only
+`ryeos execute`; it has no app-root discovery, HTTP/daemon fallback, signing,
+remote, lifecycle, installation or publication surface.
+
+Structured-session binding instead uses the signed profile's closed
+registration/request/result mapping over its existing application connection.
+It requires no client executable, listener, endpoint environment or unused
+realization. Selected interfaces share one grant, slot pool and daemon channel;
+there is no automatic retry through another interface. A protocol callback
+does not make an ordinary shell command a RyeOS execution.
+
+The trusted bridge assigns ingress provenance. Protocol session/operation/call
+identity is distinct from reply RPC identity and caller-controlled CLI IDs.
+The existing `RuntimeActionIntent` retains that source and exactly one child;
+a new call must match the current hosted turn. Same-call changed behavior is
+refused. An old call under a new boot grant is fenced to the original action
+and reports unknown rather than executing again. Child failure, unknown outcome,
+and unavailable retained result remain distinct from task success. No ingress
+may turn digest-only/unavailable results into permission to rerun.
+
+Structured-session wire version 2 adds request-correlated progress
+acknowledgements. A signed route can select one unconditional turn-start
+notification from its existing profile. That notification's signed upstream
+session pointer must select a required string in its schema and match the
+already-bound session before any progress is admitted. The bridge sends it as
+a Delta on the exact active command; it does not infer authority from a tool
+call's turn ID. Under the original command lease, the daemon atomically records
+`hosted_worker_command_progress` and `hosted_session.turn_started`, applies the
+projection, then sends an ObservationAck with the exact request ID and canonical
+progress digest. The bridge withholds both invocation dispatch and causally
+later pushed batches until that acknowledgement; timeout or mismatch fails
+closed. Ordinary uncorrelated observation acknowledgements retain their own
+sequence/digest identity.
+
+The final command batch must corroborate the same early boot, command sequence,
+request digest and turn. It retains the start for historical lookup but does
+not append or apply it twice. Recovery validates the original progress batch
+and start source; an already completed turn is never resurrected by a delayed
+final response. New child ingress is refused immediately once the existing
+root gate is terminalizing, while earlier accepted work retains its causal
+settlement lane. These are existing command/observation and runtime-action
+owners, not a second invocation ledger.
+
+The application event loop continues servicing controls and server messages
+while a child is outstanding. Child settlement/thaw remains daemon-owned, so a
+frozen bridge is not needed to release its own workspace borrower. Lillux bounds
+channel I/O with absolute deadlines and supplies shutdown wakeup mechanics.
+
+A nested workload permission profile may reopen only the fixed private broker
+directory `/tmp/.ryeos-wc` as read-only beneath broader tmp-directory denies.
+The random endpoint, bidirectional PID proof and daemon admission still bind
+the usable surface to the exact outer worker boot. Whether the nested sandbox
+can connect under that exact read-only rule is an installed acceptance gate;
+failure must not be repaired by widening `/tmp` or moving the endpoint into a
+project/runtime-view tree.
+
+The endpoint locator is not a callback/thread-auth bearer or daemon address,
+but possession lets a direct descendant inside the outer worker sandbox ask
+to exercise the exact bounded boot grant. Every such request remains subject
+to the daemon's complete live revalidation. RyeOS-dispatched child tools use
+their own admitted clean environment and inherit neither that endpoint nor any
+outer worker credential. This distinction must not be weakened into a claim
+that arbitrary direct shell descendants cannot observe their parent's
+environment.
+
+The bridge only frames and multiplexes requests. The daemon validates the
+exact live chain, placement, worker instance, boot epoch/identity, root and
+session capsules, project authority, node-policy generation and retained grant
+on every invocation, then enters the existing `runtime.dispatch_action`
+handler. Existing callback storage, thread auth, `RuntimeActionIntent`, child
+links, borrowed-child provenance, child launcher, effect handling and recovery
+remain the only execution owners. Implementations must extend those owners;
+they must not add a workload-client API, signing principal, token store,
+operation ledger, child registry or launcher.
 
 The outer program projection classifies every sealed invocation field. It
 retains executable semantics, trust, exact source content, composed resolution,
@@ -398,6 +631,10 @@ The historical command-observation read additionally requires the exact
 `placement_thread_id` because command sequence is placement-local and may recur
 after handoff. It verifies that placement's retained command and turn facts
 without redirecting the query to the current chain head.
+`ryeos remote worker pull-result [remote] <chain_root_id>` is the distinct
+source-side command for returning a frozen retained project candidate; it
+requires a configured full-project binding and never accepts caller-supplied
+base or candidate hashes.
 Historical catch-up uses chain replay and live attachment uses the existing
 cursor-based chain event stream. Attach and detach are client behavior: opening
 or closing that stream creates no session row and mutates no worker authority.
@@ -464,6 +701,32 @@ derived from one complete authoritative replay plus every subsequent replayed
 tail. Its Bloom filter proves absence only; an evicted or possible hit falls
 back to complete root replay. It never consults a mutable projection as
 testimony, and restart merely pays the one-time replay cost again.
+
+`limits.aggregate` is the shared execution-tree budget, not another worker
+controller. Its current closed dimensions are one durable absolute duration
+deadline, total logical worker executions, and bounded hosted-turn contacts.
+They follow the daemon-minted accounting scope through descendants. Worker
+recovery reuses its placement claim; an exact command replay reuses its command
+claim; only root-proved uncontacted attempts release a contact. Possible or
+unknown contact remains consumed. Finite hosted-contact limits are rejected
+for interactive sessions because their open command stream has no equivalent
+pre-contact meter.
+
+This operational frontier is currently node-bound. A signed remote launch may
+admit the whole beat directly on its target node, but cross-site migration of
+an already-running worker is refused when its aggregate budget is finite or
+consumed. The existing handoff transfer conserves financial allowance; it does
+not yet partition distributed operational counters, and the target must never
+restart them from its local account birth.
+
+Other limits retain their narrower truthful authority. Token and USD limits
+are enforceable only where a runtime/provider supplies those authoritative
+observations; a subscription-backed hosted worker supplies neither and must not
+claim them. Event, attachment, process, and per-command byte/cardinality caps
+remain per admitted execution or worker. Combined with the aggregate logical
+worker ceiling they provide a mechanically bounded whole-tree maximum, without
+duplicating those ledgers as aggregate counters. Domain work units such as
+simulator steps remain the responsibility of the signed workload contract.
 
 ## Lifecycle and evidence
 
@@ -532,6 +795,80 @@ existing root-operation lock RyeOS revalidates the exact capsule, command,
 request, turn, completion fact, and that turn's originating worker epoch. A
 recovered worker may have a new boot epoch, but termination is refused when the
 placement's owner-route command frontier has advanced.
+
+Approval-required is equally fact-bound. Status and wait expose an exact
+pending-approval fence only when the current placement, capsule, worker epoch,
+turn, approval ID, request digest, unresolved approval row, and immutable
+`hosted_session.approval_requested` root fact all agree. A bounded controller
+may terminate as `approval_required` only with that fence. Terminal validation
+rechecks the same fact both before worker shutdown and after cleanup has changed
+the unresolved row to its stale-epoch state. A transient
+`awaiting_approval` label, an expired request, or a request with a reserved or
+possibly delivered decision cannot authorize that outcome.
+
+A signed worker-execution profile may select `bounded_turn` instead of the
+ordinary owner-directed `session` mode. That controller issues only its two
+profile-fixed session-start and turn-start routes, observes the exact turn
+command coordinate, and requests completed termination only with its durable
+completion fence. Each step uses a typed, deterministic attempt key. Only an
+exact daemon-verified `failed_uncontacted` settlement may advance to the next
+bounded attempt; a contacted or outcome-unknown command is never redriven.
+Fresh execution therefore normally uses command sequences one and two, while
+restart recovery reports the actual sequences and boot epochs rather than
+assuming that reattachment did not advance the ledger. Approval requests,
+budget expiry, and ambiguous recovery fail closed.
+
+These restrictions are daemon admission rules for both owner commands and
+runtime callbacks, not only controller conventions. A new route must match the
+sealed goal and signed attempt ceiling. Reservation and contact both require
+an approval-free idle boundary with no unresolved observation projection;
+observation ingestion serializes with the contact commit. Absolute worker and
+aggregate deadlines also bound queued writes. Exact settled replay remains
+readable after expiry without contacting the worker.
+
+The bounded profile requires a pinned private CoW workspace, retain-result
+capture, and `retained_for_review` candidate disposition. Its compact
+terminal session projection is rebuilt from the command/root facts, workspace,
+completion fence, and admitted launch capsule. It exposes every bounded attempt
+coordinate, exact contact classification, base and candidate identities, and
+the original completion boot epoch. Spend is reported as unavailable/null when
+the launch has no authoritative financial ledger; subscription-backed or
+external account metadata is never fabricated as RyeOS cost. Existing session
+profiles remain owner-directed and retain their live-filesystem/projectless
+operation where admitted.
+
+## Candidate evaluation and integration
+
+Canonical closure and admitted-base ancestry are necessary diagnostics, but
+they never make a candidate publish-ready. Publication authority begins only
+with an accepted result from an independent evaluator whose complete signed
+definition closure was resolved from the exact immutable base generation. The
+evaluator executes against the exact frozen candidate in a read-only or
+CoW-discard view. Its separate root capsule seals both generations, the source
+candidate/root/owner, parameters, external-content authority, and execution
+limits; its terminal chain retains the exact result and contact evidence.
+
+A bounded `retained_for_review` worker cannot publish its own candidate. After
+the first accepted evaluation of candidate C, an owner may launch one separate
+integration root. RyeOS resolves the signed authoring wrapper from base B and
+runs it inside a private retained CoW view of C. `runtime.author_item` keeps the
+signing key in the daemon and writes only that capsule-sealed workspace, under
+the wrapper's signed item-authoring namespace. It does not write the live
+project tree or advance HEAD. The completed integration root captures result
+generation D and proves D descends C.
+
+D must then pass a fresh independent evaluator run, again resolved from B.
+Only the resulting C-evaluation, integration-root, and D-evaluation testimony
+together authorize the serialized project transition. `publish` re-verifies
+those immutable coordinates and advances the principal-scoped project HEAD by
+one compare-and-swap from B to D. A stale HEAD fails closed. The terminal worker
+root remains immutable evidence throughout; evaluator and integration work use
+their own roots and ordinary restart-recoverable launch capsules.
+
+This candidate lane is additive. Ordinary admitted `live_direct` execution and
+daemon-mediated live-project item authoring remain available under their
+existing explicit write authority; RyeOS never silently treats a live-tree
+write as a CAS generation or HEAD publication.
 
 Approval consent covers one exact action inside the admitted ceiling. It never
 expands authority. The outbox reserves the decision, writes its root
@@ -630,24 +967,37 @@ boundary later consumed by publication. Capture-live pinning remains a valid
 private execution source, but its newly captured parentless snapshot is not an
 existing `HEAD` and therefore is not the publication source for this workflow.
 Workspace IDs and candidate rows are projections. Completion never publishes.
+Exact event attachments are available at their admitted `evidence/...` paths
+relative to the worker workspace, including when node isolation is disabled.
+These are execution inputs: native fold-back excludes their process-visible
+bytes and preserves any original project files underneath the input paths.
+They cannot silently become authored candidate content. An enforced isolation
+backend supplies read-only mounts; disabled isolation supplies exact private
+copies on the trusted node and does not claim kernel-enforced immutability.
 After the worker and managed controller have stopped, RyeOS freezes the exact
 workspace generation, closes the private workspace, appends
-`hosted_candidate.captured` to the still-live root, and only then exposes the
+`hosted_candidate.captured` to the worker root, and only then exposes the
 candidate projection. One root-operation lease covers close, fact, and bind.
 That fact binds the candidate, admitted base/capsule, workspace, and credential
-generation. The already-closed snapshot remains available in CAS for
-validation and publication; validation, publish/discard, and only then root
-terminalization follow on the same chain.
+generation. The bounded worker root can then terminalize as
+`retained_for_review`; it remains immutable evidence. Owner-authorized
+validation, evaluation, qualification, integration, publish, and discard use
+separate recorded service or execution roots that name the source root exactly.
 `validate-candidate-closure-and-base` proves canonical closure and admitted-base
-ancestry only; project tests remain ordinary executions.
+ancestry only; project tests remain ordinary evaluator executions and only
+accepted immutable evaluator testimony can make a candidate publish-ready.
 
 Publication additionally requires `ryeos.write.project.live`, the exact
 principal key/project hash and expected base retained in root authority at
-admission, owner authorization, and HEAD CAS. An owner-authorized root
-reservation precedes HEAD contact; startup recovery requires that reservation
-and appends a separately linked filesystem-verified result. After possible
-contact, `HEAD == base` proves no publication and is the only retryable state;
-`HEAD == candidate` proves success. A missing or different HEAD is
+admission, owner authorization, and HEAD CAS. An owner-authorized publication
+root appends the exact reservation before HEAD contact. Startup recovery
+re-verifies that reservation. An exact rooted terminal result preserves the
+classification made at contact even after later HEAD movement. If recovery
+finds only the reservation, it keeps that same publication root appendable,
+classifies the signed authoritative HEAD and history, and appends the recovered
+terminal result before settling the controller projection: `HEAD == base`
+proves no publication and is the only retryable state; `HEAD == candidate`
+proves success. A missing or different HEAD is
 irreducibly ambiguous, receives authoritative `publication_unknown` testimony,
 and terminalizes without retry. Root
 terminalization waits while
@@ -656,8 +1006,30 @@ fences every hosted root-chain mutation; terminalization closes admission and
 waits on its condition variable rather than polling SQLite. Pinned CoW worker
 executions admit a retained-result authority (including the exact explicit
 current-HEAD destination where applicable); projectless executions admit
-exactly `any`. Discard/automatic-advance launch authority is not accepted by
-this release.
+exactly `any`. Candidate evaluators use read-only or CoW-discard authority.
+The one candidate-integration root uses retain-current-HEAD only to preserve D
+for independent evaluation; it never advances HEAD itself. Only the later
+owner-authorized publication root may perform the exact B-to-D HEAD CAS.
+
+An owner may instead return a terminal retained candidate to a configured
+source site with `service:worker-executions/candidate-result` and
+`service:remote/pull-worker-result`. The target read service accepts only the
+origin-bound configured owner and reconstructs current chain/placement, the
+exact reserved command and turn-completion fence, separately bound launch and
+persistent-session capsules, admitted project/base, and captured candidate.
+Its v2 attestation describes a `frozen`/`retained` candidate, with fresh
+closure/base evidence and its exact digest. This is not evaluator qualification
+or publication authority. An interactive worker root stays running awaiting
+disposition; a bounded worker root must already be authoritatively completed
+with its exact candidate and terminal-outcome testimony. Returning it never
+reopens that root or releases its finite-budget accounting. The source retains
+the exact attestation and route in
+an ordinary durable sync job, fetches the content-addressed closure, and
+applies it through the existing clean-base atomic remote-result path. Exact
+result-tree recognition closes retry after an apply/settlement crash. Pulling
+does not advance either project HEAD and leaves the actual target disposition
+unchanged (`retained` or `retained_for_review`); publication or discard remains
+a separate explicit owner action.
 
 For a runtime that declares native resume, a proved-dead launch owner does not
 discard an unpublished CoW workspace. Startup retains the exact workspace
@@ -668,6 +1040,14 @@ not re-admitted as engine configuration. A crash during transfer is retryable
 because owner replacement and stale process-attachment removal are one
 transaction.
 
+A terminal, detached placement with no unsettled worker boot may retain an
+older session-capsule epoch as opaque history. Command-outbox startup replay
+leaves those old facts and unknown outcomes unchanged rather than interpreting
+them as the current protocol or preventing unrelated current sessions from
+starting. This is not a compatibility decoder: old commands cannot acquire
+current replay, completion-fence or resume authority. Malformed/current or
+future capsules and unresolved active/cleanup authority still fail closed.
+
 If restart occurs after candidate capture, startup first closes any interrupted
 freezing workspace, repairs the missing root-fact-before-projection boundary,
 and runs only the generic in-process disposition controller. It does not
@@ -675,6 +1055,40 @@ restart or reattach the external worker to already-frozen mutable bytes. The
 controller waits on pushed projection changes, reconstructs the canonical
 generic session result after owner disposition, and commits the terminal root
 event; candidate exposure is permitted only after workspace closure.
+
+Shutdown settles a runtime process identity and its exact workspace membership
+together, after proving group death. Process-only detachment is refused while
+membership remains; unsettled descendants retain the parent's exact identity
+for recovery. A missing identity cannot prove that an earlier borrower never
+contacted the workspace.
+
+An ownerless root with retained borrower membership or an uncommitted freezing
+journal remains workspace-quarantined. Readiness recognizes that existing
+durable authority without resuming the root or releasing its workspace or
+credential fences. This is not successful execution recovery: unrelated node
+work may proceed, but cleanup still requires exact settlement proof. An older
+record that lost that proof is not repaired by interpreting NULL as process
+death, and history is not implicitly reset.
+
+## Child-execution observation
+
+A hosted operator proves the tool operations a worker invoked through one
+exact settled command observation. After the immutable command, turn-start,
+and turn-completion facts prove that command's upstream session and turn, the
+projection selects only runtime action intents whose typed structured-session
+provenance matches both coordinates. Distinct call IDs identify the individual
+calls. A later turn on the same placement, another upstream session, CLI
+ingress, and non-workload runtime children are excluded.
+
+For every matching workload-client dispatch the daemon retains one runtime
+action intent binding the ingress provenance to exactly one daemon-minted child
+execution; the command observation joins that retained dispatch to its child's
+authoritative terminal snapshot and replayable result. The projection reads
+existing state only: it never re-executes a child, never widens thread-children
+listing authority, and fails closed when the child thread, independent child
+root, or requested owner contradicts the retained dispatch and placement.
+Worker prose about child outcomes is orientation; the projected dispatch,
+capsule, terminal, and result facts are the acceptance evidence.
 
 ## Explicit non-claims
 

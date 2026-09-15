@@ -1,0 +1,11 @@
+category: test
+version: "1.0.0"
+description: Independently qualified Graph-probed data consumer, not a worker environment
+external_content: []
+external_product_slots:
+  - id: subject
+    relationship_ref: config:test/dynamic-products
+    relationship: subject_to_graph_consumer
+    kind: file
+    mount_root: project
+    mount: qualified/subject

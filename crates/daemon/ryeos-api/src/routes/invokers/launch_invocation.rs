@@ -59,6 +59,26 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "launch invoker: invalid ref_bindings in input: {error}"
             ))
         })?;
+        let product_selections = serde_json::from_value::<
+            ryeos_state::external_content::products::composition::ProductSelectionInputs,
+        >(
+            ctx.input
+                .get("product_selections")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+        .map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "launch invoker: invalid product_selections in input: {error}"
+            ))
+        })?;
+        let product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(product_selections)
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        if !product_selections.is_empty() && ctx.principal.is_none() {
+            return Err(RouteDispatchError::BadRequest(
+                "product selectors require a configured local caller authority".to_string(),
+            ));
+        }
 
         let parameters = ctx
             .input
@@ -131,6 +151,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             &launch_provenance,
             &parameters,
             &ref_bindings,
+            &product_selections,
             &principal_id,
             &principal_scopes,
             &execution_origin_site_id,
@@ -160,6 +181,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             preflight.root_dispatch_evidence,
             effective_project.as_path(),
             ref_bindings,
+            product_selections,
             resolved_authority.lifecycle,
             ctx.principal
                 .as_ref()

@@ -34,6 +34,7 @@ pub fn to_lillux_request(spec: &SubprocessSpec) -> anyhow::Result<lillux::Subpro
         timeout: spec.timeout.as_secs_f64(),
         limits: None,
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     })
 }

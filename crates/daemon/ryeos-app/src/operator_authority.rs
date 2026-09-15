@@ -177,6 +177,64 @@ pub fn admitted_operator_authority_digest(
     Ok(grant.source_file_hash)
 }
 
+/// Resolve the exact current grant for an explicitly named product owner.
+///
+/// A target-local operator may review and bind a literal to a consumer whose
+/// selected products belong to another admitted operator. This constructor
+/// keeps those roles separate: it proves the named owner is still admitted
+/// and supplies only that grant's identity and capability ceiling for product
+/// selection. It does not authorize the owner to perform the local bind.
+pub fn admitted_operator_authority_for_principal(
+    state: &AppState,
+    operator_principal: &str,
+) -> anyhow::Result<AdmittedOperatorAuthority> {
+    let operator_fingerprint = operator_principal
+        .strip_prefix("fp:")
+        .ok_or_else(|| anyhow::anyhow!("product owner principal is not canonical"))?;
+    if !lillux::valid_hash(operator_fingerprint)
+        || operator_fingerprint
+            .bytes()
+            .any(|byte| byte.is_ascii_uppercase())
+    {
+        bail!("product owner principal is not canonical");
+    }
+    let grant = crate::identity::load_verified_authorized_key(
+        operator_fingerprint,
+        &state.config.authorized_keys_dir,
+        &state.identity,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("product owner operator grant was revoked"))?;
+    let origin_site_id = match grant.principal_class {
+        AuthorizedKeyPrincipalClass::LocalClient => {
+            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+                .context("load configured local operator identity")?;
+            if local_operator.fingerprint() != operator_fingerprint {
+                bail!("product owner local_client is not the configured operator");
+            }
+            state.threads.site_id().to_owned()
+        }
+        AuthorizedKeyPrincipalClass::RemoteOperator => grant
+            .configured_origin_site_id
+            .clone()
+            .context("product owner remote_operator grant has no configured origin site")?,
+        AuthorizedKeyPrincipalClass::RemoteNode => {
+            bail!("product owner grant cannot be remote_node")
+        }
+    };
+    let mut scopes = grant.scopes;
+    scopes.sort();
+    scopes.dedup();
+    let authority = AdmittedOperatorAuthority {
+        owner_principal: operator_principal.to_owned(),
+        origin_site_id,
+        principal_class: grant.principal_class,
+        grant_digest: grant.source_file_hash,
+        scopes,
+    };
+    authority.validate()?;
+    Ok(authority)
+}
+
 /// Revalidate the admitted owner of an already-created root before a private
 /// worker is attached. The immutable root origin must still agree with the
 /// current node-signed operator grant; a principal string alone is never

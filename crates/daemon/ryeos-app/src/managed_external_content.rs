@@ -22,7 +22,8 @@ pub const MANAGED_ACTIVATION_SCHEMA: &str = "ryeos.external_content_activation.v
 pub const MANAGED_ACTIVATION_ARCHIVE_FORMAT: &str = "tar_gzip";
 const MAX_PORTABLE_ARCHIVES: usize = 8;
 const MAX_PORTABLE_MEMBERS: usize = 1024;
-const MAX_PORTABLE_ARCHIVE_ENTRIES: usize = ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES + 1;
+const MAX_PORTABLE_ARCHIVE_ENTRIES: usize =
+    ryeos_state::objects::MAX_EXTERNAL_REALIZATION_ENTRIES + 1;
 const MAX_MAPPED_ACTIVATION_STAGING_ENTRIES: usize = MAX_PORTABLE_MEMBERS
     * (ryeos_state::external_content::MAX_CAPTURE_DEPTH + 1)
     + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS;
@@ -501,7 +502,15 @@ fn validate_mapped_component<'a>(
                 bail!("activation tree component repeats a target path");
             }
             insert_tree_namespace(target, &mut tree_entries);
-            if tree_entries.len() > ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES {
+            let maximum_entries = match component.storage {
+                ManagedComponentStorage::Content => {
+                    ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES
+                }
+                ManagedComponentStorage::LargeContent => {
+                    ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_ENTRIES
+                }
+            };
+            if tree_entries.len() > maximum_entries {
                 bail!("activation tree component exceeds the portable entry bound");
             }
         }
@@ -883,6 +892,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shipped_standard_producer_python_activation_matches_native_authoring_consumer() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("ryeos-app lives below the repository root");
+        let activation_path = repository
+            .join("bundles/standard/.ai/config/development/ryeos/producer-python-activation.yaml");
+        let activation_value: Value =
+            serde_yaml::from_str(&lillux::signature::strip_signature_lines(
+                &std::fs::read_to_string(&activation_path).expect("read shipped activation"),
+            ))
+            .expect("parse shipped activation");
+        let activation = ManagedExternalContentActivation::from_value(&activation_value)
+            .expect("shipped activation must satisfy the portable contract");
+
+        assert_eq!(
+            activation.consumer_ref,
+            "tool:ryeos/environments/qualification/native-authoring/verify"
+        );
+        assert_eq!(activation.components.len(), 1);
+        let component = &activation.components[0];
+        assert_eq!(component.id, "producer-python");
+        assert_eq!(
+            component.whole_archive_tree().map(|(_, prefix, _)| prefix),
+            Some("ryeos-local-inference-qwen3-0.6b-runtime-v1")
+        );
+
+        let consumer_path = repository.join(
+            "bundles/standard/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py",
+        );
+        let consumer = std::fs::read_to_string(consumer_path).expect("read shipped consumer");
+        assert!(consumer.contains("#     - id: producer-python\n"));
+        assert!(consumer.contains(
+            "#       digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf\n"
+        ));
+    }
+
+    #[test]
     fn shipped_local_inference_activation_is_admitted_by_full_profiles() {
         let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -910,7 +957,7 @@ mod tests {
             let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
                 serde_json::from_value(worker["external_content"].clone()).unwrap();
 
-            for node_profile in ["full", "full-sandbox"] {
+            for node_profile in ["full"] {
                 let profile_path = repository
                     .join("bundles/.ai/node/init/profiles")
                     .join(format!("{node_profile}.yaml"));
@@ -1014,6 +1061,7 @@ mod tests {
             digest: Some("c".repeat(64)),
             exclude: Vec::new(),
             metadata_hint: None,
+            mount_root: ryeos_engine::external_content::ExternalContentMountRoot::Project,
             mount: "bin/runtime".to_owned(),
         }]
     }

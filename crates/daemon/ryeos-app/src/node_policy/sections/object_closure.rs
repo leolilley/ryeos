@@ -1,4 +1,4 @@
-//! Node-owned admission limits for remote CAS closure transfer.
+//! Node-owned admission limits for CAS closure verification and remote transfer.
 //!
 //! Object schemas and the wire protocol retain their absolute safety bounds.
 //! This policy selects how much of that capacity this node is willing to
@@ -58,6 +58,24 @@ pub struct AdmittedObjectTransferLimits {
 }
 
 impl NodeObjectClosurePolicy {
+    /// Local closure verification uses the same signed resource policy as
+    /// transfer admission. Generic control-plane defaults are not sufficient
+    /// for an operator-admitted large realization, and are not node policy.
+    pub fn closure_limits(
+        &self,
+    ) -> anyhow::Result<ryeos_state::object_closure::ObjectClosureLimits> {
+        let admitted = self.admit(RequestedObjectTransferLimits::default())?;
+        Ok(ryeos_state::object_closure::ObjectClosureLimits {
+            max_objects: admitted.max_objects,
+            max_blobs: admitted.max_blobs,
+            max_object_bytes: admitted.max_object_bytes,
+            max_total_object_bytes: admitted.max_total_object_bytes,
+            max_blob_bytes: admitted.max_blob_bytes,
+            max_total_blob_bytes: admitted.max_total_blob_bytes,
+            max_links_per_object: admitted.max_links_per_object,
+        })
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != 1 {
             bail!("node object-closure policy schema is not current");
@@ -335,6 +353,27 @@ mod tests {
             max_response_bytes: 256 * 1024 * 1024,
             max_links_per_object: 100_000,
         }
+    }
+
+    #[test]
+    fn local_verification_projects_the_exact_validated_node_budget() {
+        let policy = valid_policy();
+        let limits = policy.closure_limits().unwrap();
+        assert_eq!(
+            limits,
+            ryeos_state::object_closure::ObjectClosureLimits {
+                max_objects: policy.max_objects,
+                max_blobs: policy.max_blobs,
+                max_object_bytes: policy.max_object_bytes,
+                max_total_object_bytes: policy.max_total_object_bytes,
+                max_blob_bytes: policy.max_blob_bytes,
+                max_total_blob_bytes: policy.max_total_blob_bytes,
+                max_links_per_object: policy.max_links_per_object,
+            }
+        );
+        let mut invalid = policy;
+        invalid.max_blobs = 0;
+        assert!(invalid.closure_limits().is_err());
     }
 
     #[test]

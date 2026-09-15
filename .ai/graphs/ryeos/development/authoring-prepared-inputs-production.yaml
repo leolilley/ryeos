@@ -1,0 +1,37 @@
+# ryeos:signed:2026-09-08T10:36:33Z:472637149d24e9aa118964d8f4acd7837f951b2674a3d2c821b07a27b78834d9:NXLvPNQKHJWoEAgRglJt9TPdPcW5s3xhklA/uz1cCu1p/kJgfBY88lB9cPamm8HixyRJS+sA+usv/lxZ4ZvfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Prepare the exact authoring inputs as one retained named product
+effects: recorded
+product_recipe: config:development/ryeos/authoring-prepared-input-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/authoring-prepared-input-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/prepare
+config:
+  start: prepare
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    prepare:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/authoring-environment-production/prepare
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        preparation: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.preparation}"

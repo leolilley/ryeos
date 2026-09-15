@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T12:38:43Z:4144523d8b88376364cc66272bfcc31806b6891ffa29315d85d0d6ed3c36962e:euKHSVuCa6KZs3ipiCOeS3XrYUKVL87gjHEra6rAvQ/5DrJFPuF+hATmxd4SVWKTvwcIKGn4r34pd/YeyMjOBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T20:28:16Z:c37a22836be9cca6011ce0a5f075e10c8099358e0265ce737393d833da4998d3:5p6EW4vCEdz5guev5TTFjEIH7Dpk1B9hTY91+LGue8qKBE88I8LPjeqgFydUnPKgTZoNH/8LuJKeev5yvozlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.7.5"
+version: "3.7.6"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -161,6 +161,21 @@ grant. The offline tool holds the same exclusive state lock as the daemon
 throughout publication and refuses if the daemon is live. When an incumbent
 grant is deliberately reclassified, `--allow-semantic-conversion` is required
 and `--merge-scopes` is forbidden.
+
+Admission initially grants only the declared admission scopes. When that same
+source node also transports object closures or project heads, the target-local
+operator extends its existing `remote_node` grant in place:
+
+```bash
+RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
+  --public-key "<source_node_raw_ed25519_base64>" \
+  --remote-node-origin-site-id "site:<source>" \
+  --merge-scopes \
+  --scopes "<comma-separated exact peer scopes>"
+```
+
+Do not use `--origin-site-id` for this key: that flag describes the separate
+forwarded `remote_operator` principal.
 
    Common remote-side scopes:
 
@@ -339,14 +354,17 @@ authorize the new node key.
 ## Remote Ignore Cache
 
 `ryeos remote configure` caches the remote node's ingest-ignore rules
-in the local remotes config. Subsequent push/execute operations use
-these cached rules to capture the pushed project snapshot policy and tree.
+in the local remotes config. Subsequent push/execute operations union those
+cached target exclusions with the source node's current signed exclusions to
+capture the pushed project snapshot policy and tree. The destination still
+validates actual paths against its current policy before accepting a HEAD.
 
 If the remote changes its ignore rules, re-run `ryeos remote configure`.
 
-If no cached rules are available, the push handler fetches them inline
-and persists them. If the inline fetch fails, the push is **aborted** —
-the handler does not silently fall back to local ignore rules.
+If no cached rules are available, the push handler fetches them inline for the
+operation without manufacturing or persisting partial remote configuration. If
+the inline fetch fails, the push is **aborted** — the handler does not silently
+fall back to either an empty or source-only policy.
 
 ## HTTPS Requirement
 

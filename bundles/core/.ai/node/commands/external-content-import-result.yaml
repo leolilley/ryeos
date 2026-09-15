@@ -1,0 +1,30 @@
+# ryeos:signed:2026-09-06T00:22:17Z:3f1ac04aeaaa2de7c2f19c67a919e066a49b041393f3a45e1b5056217f2f8909:EmrH2wK5IjtOeHv+GhAKQL5DJzRDTecwvNxsu67Ew8jk9IhzZc7/pwd8R6UJJfHAtx9K1gk+dZbTTRXrlz7HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, import-result]
+description: Import exact retained execution output without reopening its workspace
+defaults:
+  source: retained_result
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: thread_id
+      - field: result_project_snapshot_hash
+      - field: path
+      - field: shape
+      - field: storage
+      - field: maximum_bytes
+  - slots:
+      - field: chain_root_id
+      - field: thread_id
+      - field: result_project_snapshot_hash
+      - field: path
+      - field: shape
+      - field: storage
+      - field: maximum_bytes
+      - field: expected_file_sha256
+help:
+  usage: ryeos external-content import-result <chain-root> <thread> <result-snapshot> <path> <file|tree> <content|large_content> <maximum-bytes> [expected-file-sha256]
+  examples:
+    - ryeos external-content import-result T-root T-root <result-snapshot> dist/runtime tree content 16777216
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/import

@@ -97,22 +97,24 @@ jobs:
         run: python3 bundles/local-inference/test_contract.py
 
       - name: Check canonical naming
-        run: ./scripts/lint-naming.sh
+        # Pre-install CI calls the same canonical source as the signed Tool.
+        # This is source validation, not evidence of RyeOS runtime admission.
+        run: python3 .ai/tools/ryeos/development/repository-validation/naming.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
       - name: Check CLI presentation boundaries
-        run: ./scripts/lint-cli-presentation.sh
+        run: python3 .ai/tools/ryeos/development/repository-validation/cli-presentation.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
       - name: Check shell terminal presentation
         run: ./scripts/pkg/test-ryeos-terminal.sh
 
       - name: Check configured-remote qualification contract
-        run: ./scripts/dev/test-qualify-configured-remote.sh
+        run: ./tests/e2e/configured-remote/test_qualification.sh
 
       - name: Check removed compatibility vocabulary
-        run: ./scripts/lint-no-content-wrap.sh
+        run: python3 .ai/tools/ryeos/development/repository-validation/no-content-wrap.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
       - name: Check workspace dependency direction
-        run: ./scripts/lint-dependency-layers.py
+        run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
       - name: Check browser key adapter
         working-directory: crates/clients/web
@@ -375,7 +377,7 @@ jobs:
           # publisher. Trust that exact document explicitly; release artifacts
           # use the hardcoded official publisher and need no override.
           RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
-        run: ./scripts/smoke-installed-resume.sh
+        run: ./tests/e2e/installed-resume/smoke.sh
 
   rust-2024-audit:
     name: Rust 2024 compatibility audit

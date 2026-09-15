@@ -3,6 +3,7 @@
 //! `Config` (the resolved data struct) lives in `ryeos-app::config`.
 //! This module owns the clap-based `Cli` and converts it into a
 //! `ConfigSources` for `Config::load`.
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -19,7 +20,7 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Override the app rootectory (default: XDG data dir / ryeos)
+    /// Override the app root (default: XDG data dir / ryeos)
     #[arg(long)]
     pub app_root: Option<PathBuf>,
 
@@ -63,6 +64,69 @@ impl Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum DaemonCommand {
+    /// Read-only package preflight for an existing signed node-policy
+    /// generation. This is hidden because ordinary operators use `ryeos
+    /// node doctor` or the explicit policy-generation reset command.
+    #[command(hide = true)]
+    InitPolicyPreflight {
+        #[arg(long)]
+        app_root: PathBuf,
+        /// Verify only the complete node-signed predecessor occupant when an
+        /// explicit clean schema cut has already been selected.
+        #[arg(long)]
+        schema_cut: bool,
+    },
+    /// Root-only one-time native host setup. The caller supplies explicit host
+    /// selections; no user-writable node policy is consulted here.
+    #[command(hide = true)]
+    HostProvision {
+        #[arg(long)]
+        app_root: PathBuf,
+        #[arg(long)]
+        controller_account_json: String,
+    },
+    /// Root-only installer transaction bridge. It owns the shared package
+    /// namespace lock; it is neither node configuration nor worker authority.
+    #[command(hide = true)]
+    HostInstall {
+        /// Exact administrator-owned package namespace to protect.
+        #[arg(long)]
+        package_root: PathBuf,
+        #[command(subcommand)]
+        action: HostInstallAction,
+    },
+    /// External installer bridge to shared host-upgrade authority.
+    #[command(hide = true)]
+    HostUpgrade {
+        #[arg(long)]
+        app_root: PathBuf,
+        /// Exact package-owned daemon path that this installer replaces.
+        /// A differently pinned service belongs to another host installation
+        /// authority and must be refused before the node is stopped.
+        #[arg(long)]
+        expected_daemon_path: PathBuf,
+        #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
+        expected_daemon_sha256: Option<String>,
+        #[arg(long, conflicts_with = "action")]
+        inspect: bool,
+        #[arg(value_enum, required_unless_present = "inspect")]
+        action: Option<HostUpgradeAction>,
+    },
+    /// Administrator-installed service entry; never loads node config as root.
+    #[command(hide = true)]
+    HostService {
+        /// Exact app root selected by the administrator-owned service.
+        #[arg(long)]
+        app_root: PathBuf,
+    },
+    /// Administrator-selected external-supervisor entry. The binding pathname
+    /// is consumed only by the privileged bootstrap; the daemon receives an
+    /// exact inherited descriptor after Lillux drops credentials.
+    #[command(hide = true)]
+    HostRuntime {
+        #[arg(long)]
+        binding: PathBuf,
+    },
     /// Print build provenance and exit without loading daemon state.
     BuildInfo {
         /// Print only the baked git revision.
@@ -87,4 +151,156 @@ pub enum DaemonCommand {
         #[arg(long)]
         params: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum HostUpgradeAction {
+    Begin,
+    ReplacementSafe,
+    RestoreReady,
+    Finish,
+    Observe,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum HostInstallAction {
+    /// Create/prove the package root, retain its exclusive lock and exec the
+    /// already-authorized installer. The inherited descriptor is the proof;
+    /// the environment only transports its coordinate.
+    Acquire {
+        #[arg(long)]
+        installer: PathBuf,
+        #[arg(long)]
+        installer_digest: String,
+        #[arg(long)]
+        prepared: bool,
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Validate the inherited transaction lock after installer exec.
+    Validate {
+        #[arg(long)]
+        transaction_fd: u32,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_upgrade_requires_package_path_and_exact_action_digest_except_for_inspection() {
+        let base = ["ryeosd", "host-upgrade", "--app-root", "/home/example/node"];
+        assert!(Cli::try_parse_from(base).is_err());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--expected-daemon-path",
+                "/usr/bin/ryeosd",
+                "--inspect",
+            ]))
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(base.into_iter().chain(["begin"])).is_err());
+        let digest = "a".repeat(64);
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--expected-daemon-path",
+                "/usr/bin/ryeosd",
+                "--expected-daemon-sha256",
+                &digest,
+                "begin",
+            ]))
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--inspect", "begin",])).is_err());
+    }
+
+    #[test]
+    fn host_service_entry_requires_an_explicit_node_without_loading_its_config() {
+        assert!(Cli::try_parse_from(["ryeosd", "host-service"]).is_err());
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "host-service",
+            "--app-root",
+            "/home/example/.local/share/ryeos",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(DaemonCommand::HostService { app_root })
+            if app_root == PathBuf::from("/home/example/.local/share/ryeos"))
+        );
+    }
+
+    #[test]
+    fn external_host_runtime_requires_an_explicit_protected_binding() {
+        assert!(Cli::try_parse_from(["ryeosd", "host-runtime"]).is_err());
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "host-runtime",
+            "--binding",
+            "/run/ryeos/host-runtime.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::HostRuntime { binding })
+                if binding == PathBuf::from("/run/ryeos/host-runtime.json")
+        ));
+    }
+
+    #[test]
+    fn host_install_requires_a_subcommand_and_preserves_the_original_argument_vector() {
+        assert!(
+            Cli::try_parse_from([
+                "ryeosd",
+                "host-install",
+                "--package-root",
+                "/usr/share/ryeos",
+            ])
+            .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "host-install",
+            "--package-root",
+            "/usr/share/ryeos",
+            "acquire",
+            "--installer",
+            "/checkout/scripts/pkg/install-local-direct.sh",
+            "--installer-digest",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--prepared",
+            "--",
+            "--populate",
+            "--all",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::HostInstall {
+                package_root,
+                action: HostInstallAction::Acquire { prepared: true, args, .. },
+            }) if package_root == PathBuf::from("/usr/share/ryeos")
+                && args == vec![OsString::from("--populate"), OsString::from("--all")]
+        ));
+    }
+
+    #[test]
+    fn init_policy_preflight_preserves_explicit_schema_cut_selection() {
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "init-policy-preflight",
+            "--app-root",
+            "/home/example/.local/share/ryeos",
+            "--schema-cut",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::InitPolicyPreflight {
+                app_root,
+                schema_cut: true,
+            }) if app_root == PathBuf::from("/home/example/.local/share/ryeos")
+        ));
+    }
 }

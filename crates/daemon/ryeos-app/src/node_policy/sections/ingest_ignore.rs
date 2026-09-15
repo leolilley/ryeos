@@ -1,8 +1,10 @@
-//! Node-owned additions to the non-bypassable ingest-ignore floor.
+//! Complete node-owned project ingest-ignore policy.
 //!
-//! Policy authors may only add exclusions. The built-in floor remains an
-//! engine/state invariant and is compiled into the effective matcher here; it
-//! is never copied into operator-authored policy or made removable.
+//! Conventional project exclusions are signed node data, not engine defaults.
+//! RyeOS-owned identity, state, cache, and transaction paths are protected by
+//! the separate non-bypassable project snapshot floor.
+
+use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use serde::Deserialize;
@@ -12,24 +14,22 @@ use crate::ignore::{IgnoreConfig, IgnoreMatcher};
 use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection, TypedNodePolicy};
 
 pub const SECTION_NAME: &str = "ingest_ignore";
-pub const POLICY_SCHEMA: u32 = 1;
-pub const MAX_OPERATOR_PATTERNS: usize = 256;
+pub const POLICY_SCHEMA: u32 = 2;
+pub const MAX_PATTERNS: usize = 256;
 pub const MAX_PATTERN_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IngestIgnorePolicyDocument {
     schema: u32,
-    additional_patterns: Vec<String>,
+    patterns: Vec<String>,
 }
 
-/// Compiled node policy. `additional_patterns` is canonical policy identity;
-/// `effective_config` and `matcher` include the immutable built-in floor.
+/// Exact matcher compiled from one signed policy generation.
 #[derive(Debug, Clone)]
 pub struct CompiledIngestIgnorePolicy {
     pub schema: u32,
-    pub additional_patterns: Vec<String>,
-    pub effective_config: IgnoreConfig,
+    pub patterns: Vec<String>,
     pub matcher: IgnoreMatcher,
 }
 
@@ -61,58 +61,31 @@ fn compile_policy(
     if document.schema != POLICY_SCHEMA {
         bail!("ingest-ignore node policy schema is not current");
     }
-    if document.additional_patterns.len() > MAX_OPERATOR_PATTERNS {
-        bail!("ingest-ignore node policy exceeds {MAX_OPERATOR_PATTERNS} operator patterns");
+    if document.patterns.len() > MAX_PATTERNS {
+        bail!("ingest-ignore node policy exceeds {MAX_PATTERNS} patterns");
     }
-    for pattern in &document.additional_patterns {
+    for pattern in &document.patterns {
         if pattern.is_empty()
             || pattern.len() > MAX_PATTERN_BYTES
             || pattern.trim() != pattern
             || pattern.chars().any(char::is_control)
         {
-            bail!("ingest-ignore operator pattern is not bounded canonical text");
+            bail!("ingest-ignore pattern is not bounded canonical text");
         }
     }
 
-    let additions_matcher = IgnoreMatcher::from_config(&IgnoreConfig {
-        patterns: document.additional_patterns.clone(),
+    let matcher = IgnoreMatcher::from_config(&IgnoreConfig {
+        patterns: document.patterns.clone(),
     })
-    .context("compile ingest-ignore operator additions")?;
-    let canonical_additions = additions_matcher.canonical_patterns().to_vec();
-    if canonical_additions != document.additional_patterns {
-        bail!("ingest-ignore operator patterns must be canonical, sorted, and unique");
+    .context("compile ingest-ignore node policy")?;
+    let patterns = matcher.canonical_patterns().to_vec();
+    if patterns != document.patterns {
+        bail!("ingest-ignore patterns must be canonical, sorted, and unique");
     }
-
-    let builtins = crate::ignore::matcher_from_builtins()
-        .canonical_patterns()
-        .to_vec();
-    let builtin_set = builtins
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    if let Some(duplicate) = canonical_additions
-        .iter()
-        .find(|pattern| builtin_set.contains(pattern.as_str()))
-    {
-        bail!(
-            "ingest-ignore operator pattern `{duplicate}` duplicates the immutable built-in floor"
-        );
-    }
-
-    let mut effective_patterns = builtins;
-    effective_patterns.extend(canonical_additions.iter().cloned());
-    effective_patterns.sort();
-    effective_patterns.dedup();
-    let effective_config = IgnoreConfig {
-        patterns: effective_patterns,
-    };
-    let matcher = IgnoreMatcher::from_config(&effective_config)
-        .context("compile effective ingest-ignore node policy")?;
 
     Ok(CompiledIngestIgnorePolicy {
         schema: document.schema,
-        additional_patterns: canonical_additions,
-        effective_config,
+        patterns,
         matcher,
     })
 }
@@ -145,86 +118,75 @@ mod tests {
         assert_eq!(section.name(), SECTION_NAME);
         assert!(
             section
-                .parse(&context(), &json!({"schema": 1, "additional_patterns": []}))
+                .parse(&context(), &json!({"schema": 2, "patterns": []}))
                 .is_ok()
         );
     }
 
     #[test]
-    fn compiles_builtin_floor_and_canonical_operator_additions() {
+    fn compiles_exact_canonical_policy() {
         let record = parse(json!({
-            "schema": 1,
-            "additional_patterns": ["*.trace", "/generated/private/"]
+            "schema": 2,
+            "patterns": ["*.trace", ".git/", "/generated/private/"]
         }))
         .unwrap();
 
         assert_eq!(
-            record.additional_patterns,
-            vec!["*.trace".to_owned(), "/generated/private/".to_owned()]
+            record.patterns,
+            vec![
+                "*.trace".to_owned(),
+                ".git/".to_owned(),
+                "/generated/private/".to_owned()
+            ]
         );
         assert!(record.matcher.is_ignored(".git/config"));
         assert!(record.matcher.is_ignored("run.trace"));
         assert!(record.matcher.is_ignored("generated/private/output.bin"));
         assert!(!record.matcher.is_ignored("src/main.rs"));
-        assert_eq!(
-            record.effective_config.patterns.as_slice(),
-            record.matcher.canonical_patterns()
-        );
     }
 
     #[test]
-    fn explicit_empty_policy_compiles_exact_builtin_floor() {
-        let record = parse(json!({"schema": 1, "additional_patterns": []})).unwrap();
-        assert!(record.additional_patterns.is_empty());
-        assert_eq!(
-            record.matcher.canonical_patterns(),
-            crate::ignore::matcher_from_builtins().canonical_patterns()
-        );
+    fn empty_policy_has_no_implicit_conventional_exclusions() {
+        let record = parse(json!({"schema": 2, "patterns": []})).unwrap();
+        assert!(record.patterns.is_empty());
+        assert!(record.matcher.canonical_patterns().is_empty());
+        assert!(!record.matcher.is_ignored(".git/config"));
     }
 
     #[test]
-    fn rejects_unknown_shape_and_schema() {
-        assert!(parse(json!({"schema": 1})).is_err());
+    fn rejects_predecessor_and_unknown_shapes() {
+        assert!(parse(json!({"schema": 2})).is_err());
         assert!(
             parse(json!({
-                "schema": 1,
-                "additional_patterns": [],
-                "patterns": []
+                "schema": 2,
+                "patterns": [],
+                "additional_patterns": []
             }))
             .is_err()
         );
-        assert!(parse(json!({"schema": 2, "additional_patterns": []})).is_err());
+        assert!(parse(json!({"schema": 1, "additional_patterns": []})).is_err());
     }
 
     #[test]
     fn rejects_noncanonical_duplicates_and_invalid_patterns() {
         assert!(
             parse(json!({
-                "schema": 1,
-                "additional_patterns": ["z-output/", "a-output/"]
+                "schema": 2,
+                "patterns": ["z-output/", "a-output/"]
             }))
             .is_err()
         );
         assert!(
             parse(json!({
-                "schema": 1,
-                "additional_patterns": [".git/"]
-            }))
-            .unwrap_err()
-            .to_string()
-            .contains("built-in floor")
-        );
-        assert!(
-            parse(json!({
-                "schema": 1,
-                "additional_patterns": ["[invalid"]
+                "schema": 2,
+                "patterns": ["[invalid"]
             }))
             .is_err()
         );
         assert!(
             parse(json!({
-                "schema": 1,
-                "additional_patterns": ["duplicate/", "duplicate/"]
+                "schema": 2,
+                "patterns": ["duplicate/", "duplicate/"]
             }))
             .is_err()
         );
@@ -232,13 +194,12 @@ mod tests {
 
     #[test]
     fn rejects_unbounded_pattern_count_and_size() {
-        let too_many = (0..=MAX_OPERATOR_PATTERNS)
+        let too_many = (0..=MAX_PATTERNS)
             .map(|index| format!("generated-{index}/"))
             .collect::<Vec<_>>();
-        assert!(parse(json!({"schema": 1, "additional_patterns": too_many})).is_err());
+        assert!(parse(json!({"schema": 2, "patterns": too_many})).is_err());
 
         let too_long = "x".repeat(MAX_PATTERN_BYTES + 1);
-        assert!(parse(json!({"schema": 1, "additional_patterns": [too_long]})).is_err());
+        assert!(parse(json!({"schema": 2, "patterns": [too_long]})).is_err());
     }
 }
-use std::sync::Arc;

@@ -78,7 +78,8 @@ impl AuthorityClient {
                 "source": "executed",
                 "effect_class": "live",
                 "action_digest": "ab".repeat(32),
-                "publication": "not_applicable"
+                "publication": "not_applicable",
+                "result_projection": {"kind": "dispatched_subject"}
             }
         })
     }
@@ -105,7 +106,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         Ok(Self::live_dispatch_response(result))
     }
 
-    async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+    async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
 

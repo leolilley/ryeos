@@ -53,6 +53,9 @@ pub(crate) struct LaunchRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
     pub(crate) item_ref: String,
     pub(crate) ref_bindings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     /// Project root path for resolution.
     #[serde(default)]
     pub(crate) project_path: Option<String>,
@@ -256,6 +259,19 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         drop(ref_binding_validation_timer);
         if let Err(error) = ref_binding_validation {
             return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
+        }
+        req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        if req
+            .target_site_id
+            .as_deref()
+            .is_some_and(|target| target != ctx.state.threads.site_id())
+            && !req.product_selections.is_empty()
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "product selectors are not supported for remote execution in the first composition lane"
+                    .to_string(),
+            ));
         }
         if req.validate_only {
             return Err(RouteDispatchError::BadRequest(
@@ -498,6 +514,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 provenance: resolved_contract.provenance.clone(),
                 parameters: req.parameters.clone(),
                 ref_bindings: req.ref_bindings.clone(),
+                product_selections: req.product_selections.clone(),
                 principal_id: principal_id.clone(),
                 principal_scopes: principal_scopes.clone(),
                 origin_site_id: execution_origin_site_id.clone(),
@@ -533,6 +550,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             preflight.root_dispatch_evidence,
             &project_ctx.effective_path,
             req.ref_bindings,
+            req.product_selections,
             resolved_contract.lifecycle_authority,
             ctx.principal
                 .as_ref()
@@ -966,6 +984,7 @@ mod tests {
         assert_eq!(req.project_path.as_deref(), Some("/tmp/project"));
         assert!(req.launch_mode.is_empty());
         assert_eq!(req.target_site_id, None);
+        assert!(req.product_selections.is_empty());
         assert!(!req.validate_only);
         assert!(req.call.is_none());
     }
@@ -975,6 +994,7 @@ mod tests {
         let json = serde_json::json!({
             "item_ref": "tool:x/y",
             "ref_bindings": {"guard": "tool:guard/check"},
+            "product_selections": [],
             "project_path": "/home/me/project",
             "parameters": {"key": "val"},
             "execution_policy": local_live_policy(),
@@ -1000,6 +1020,7 @@ mod tests {
         let json = serde_json::json!({
             "item_ref": "directive:x",
             "ref_bindings": {},
+            "product_selections": [],
             "project_path": "/tmp/p",
             "parameters": {},
             "execution_policy": local_live_policy(),
@@ -1018,10 +1039,32 @@ mod tests {
     }
 
     #[test]
+    fn launch_request_rejects_open_product_selector_values() {
+        let result = serde_json::from_value::<LaunchRequest>(serde_json::json!({
+            "item_ref": "directive:x",
+            "ref_bindings": {},
+            "product_selections": [{
+                "target": {"kind": "content_dependency", "binding": "environment"},
+                "selection": {
+                    "declaration_id": "runtime",
+                    "witness_hash": "a".repeat(64),
+                    "qualification_hash": null,
+                    "caller_recipe": "config:not/allowed"
+                }
+            }],
+            "project_path": "/tmp/p",
+            "parameters": {},
+            "execution_policy": local_live_policy()
+        }));
+        assert!(result.unwrap_err().to_string().contains("caller_recipe"));
+    }
+
+    #[test]
     fn launch_request_routing_fields_are_derived_after_deserialization() {
         let json = serde_json::json!({
             "item_ref": "directive:x",
             "ref_bindings": {},
+            "product_selections": [],
             "project_path": "/tmp/p",
             "parameters": {},
             "execution_policy": local_live_policy()

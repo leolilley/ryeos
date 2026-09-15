@@ -1,0 +1,32 @@
+version: "1.0.0"
+category: test
+description: Capture input-dependent products without an expected output digest
+effects: recorded
+product_recipe: config:test/dynamic-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.test/dynamic-products
+      - ryeos.execute.tool.test/produce-dynamic
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/produce-dynamic
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: {produced: true}

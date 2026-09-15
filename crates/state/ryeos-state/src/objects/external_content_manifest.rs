@@ -22,9 +22,14 @@ pub const EXTERNAL_REALIZATIONS_DERIVED_KEY: &str = "effective_external_realizat
 /// The single manifest path a file-shaped realization stores its content
 /// under. Wire-level: both manifest kinds spell file shape the same way.
 pub const FILE_REALIZATION_ENTRY_PATH: &str = "content";
-/// Matches the generic closure link ceiling: a manifest that cannot be
-/// traversed is unusable however well it hashes.
+/// Ordinary CAS-content tier. Its byte/entry ceilings are deliberately smaller
+/// than the large-content tier and must not constrain the tier-blind wire.
 pub const MAX_EXTERNAL_CONTENT_ENTRIES: usize = 10_000;
+/// Meaning-blind per-launch entry ceiling across both storage tiers. Admission
+/// still applies the selected manifest tier and the node's narrower policy.
+/// This fits the existing remote closure link ceiling; large manifests retain
+/// their independent serialized-byte ceiling as well.
+pub const MAX_EXTERNAL_REALIZATION_ENTRIES: usize = 65_536;
 pub const MAX_EXTERNAL_CONTENT_MANIFEST_BYTES: usize = 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
@@ -244,7 +249,46 @@ pub struct ExternalContentRealization {
     pub manifest_hash: String,
     pub entry_count: usize,
     pub total_bytes: u64,
+    pub mount_root: ExternalContentMountRoot,
     pub mount: String,
+}
+
+/// Closed logical namespace for immutable execution content. Source locators
+/// and target mount roots are independent authorities; no absolute host path
+/// is admitted by this declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalContentMountRoot {
+    Project,
+    ExecutionRuntime,
+}
+
+pub const EXECUTION_RUNTIME_REALIZATIONS_ROOT: &str = "/ryeos/realizations";
+
+impl ExternalContentMountRoot {
+    /// Resolve the existing logical mount namespace inside the admitted process.
+    /// This selects a location, not permission to expose or populate that location.
+    pub fn root(self, project_root: Option<&std::path::Path>) -> anyhow::Result<&std::path::Path> {
+        let root = match self {
+            Self::Project => project_root.ok_or_else(|| {
+                anyhow::anyhow!("project realization requires an admitted project root")
+            })?,
+            Self::ExecutionRuntime => std::path::Path::new(EXECUTION_RUNTIME_REALIZATIONS_ROOT),
+        };
+        if !root.is_absolute() {
+            anyhow::bail!("realization mount root must be absolute");
+        }
+        Ok(root)
+    }
+
+    pub fn destination(
+        self,
+        project_root: Option<&std::path::Path>,
+        mount: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        super::validate_canonical_project_relative_path(mount)?;
+        Ok(self.root(project_root)?.join(mount))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,9 +339,9 @@ impl ExternalContentRealizationSet {
                 "external realization manifest_hash",
                 &entry.manifest_hash,
             )?;
-            if entry.entry_count > MAX_EXTERNAL_CONTENT_ENTRIES {
+            if entry.entry_count > MAX_EXTERNAL_REALIZATION_ENTRIES {
                 anyhow::bail!(
-                    "external realization `{}` exceeds {MAX_EXTERNAL_CONTENT_ENTRIES} entries",
+                    "external realization `{}` exceeds {MAX_EXTERNAL_REALIZATION_ENTRIES} entries",
                     entry.id
                 );
             }
@@ -313,7 +357,7 @@ impl ExternalContentRealizationSet {
             byte_total = byte_total
                 .checked_add(entry.total_bytes)
                 .ok_or_else(|| anyhow::anyhow!("external realization byte count overflow"))?;
-            if entry_total > MAX_EXTERNAL_CONTENT_ENTRIES
+            if entry_total > MAX_EXTERNAL_REALIZATION_ENTRIES
                 || byte_total > MAX_REALIZATION_CLAIMED_BYTES
             {
                 anyhow::bail!("external realization set exceeds the per-launch aggregate bound");
@@ -324,7 +368,7 @@ impl ExternalContentRealizationSet {
                 anyhow::bail!("external realization set is not strictly ordered by id");
             }
             previous_id = Some(&entry.id);
-            if !mounts.insert(entry.mount.as_str()) {
+            if !mounts.insert((entry.mount_root, entry.mount.as_str())) {
                 anyhow::bail!(
                     "external realization mount `{}` appears more than once",
                     entry.mount
@@ -335,8 +379,10 @@ impl ExternalContentRealizationSet {
         let mounts = mounts.into_iter().collect::<Vec<_>>();
         for (index, left) in mounts.iter().enumerate() {
             for right in mounts.iter().skip(index + 1) {
-                if path_contains(left, right) || path_contains(right, left) {
-                    anyhow::bail!("external realization mounts `{left}` and `{right}` overlap");
+                if left.0 == right.0
+                    && (path_contains(left.1, right.1) || path_contains(right.1, left.1))
+                {
+                    anyhow::bail!("external realization mounts `{left:?}` and `{right:?}` overlap");
                 }
             }
         }
@@ -780,8 +826,85 @@ mod tests {
             manifest_hash: "a".repeat(64),
             entry_count: 1,
             total_bytes: 10,
+            mount_root: ExternalContentMountRoot::Project,
             mount: mount.to_string(),
         }
+    }
+
+    #[test]
+    fn mount_roots_are_mandatory_and_define_distinct_namespaces() {
+        let project = realization("project", "platform");
+        let mut runtime = realization("runtime", "platform");
+        runtime.mount_root = ExternalContentMountRoot::ExecutionRuntime;
+        let set = ExternalContentRealizationSet::new(vec![project, runtime]).unwrap();
+        let mut value = set.to_value().unwrap();
+        value[0].as_object_mut().unwrap().remove("mount_root");
+        assert!(ExternalContentRealizationSet::from_value(&value).is_err());
+
+        let project_root = std::path::Path::new("/project");
+        assert_eq!(
+            ExternalContentMountRoot::Project
+                .root(Some(project_root))
+                .unwrap(),
+            project_root
+        );
+        assert_eq!(
+            ExternalContentMountRoot::ExecutionRuntime
+                .root(Some(project_root))
+                .unwrap(),
+            std::path::Path::new(EXECUTION_RUNTIME_REALIZATIONS_ROOT)
+        );
+        assert!(ExternalContentMountRoot::Project.root(None).is_err());
+        assert!(
+            ExternalContentMountRoot::Project
+                .root(Some(std::path::Path::new("relative")))
+                .is_err()
+        );
+        assert_eq!(
+            ExternalContentMountRoot::Project
+                .destination(Some(project_root), "platform")
+                .unwrap(),
+            project_root.join("platform")
+        );
+        assert_eq!(
+            ExternalContentMountRoot::ExecutionRuntime
+                .destination(None, "platform")
+                .unwrap(),
+            std::path::Path::new(EXECUTION_RUNTIME_REALIZATIONS_ROOT).join("platform")
+        );
+        assert!(
+            ExternalContentMountRoot::Project
+                .destination(None, "platform")
+                .is_err()
+        );
+        for invalid in ["", "/lib", "../lib", "a/../lib", "a//lib", "a/", "."] {
+            assert!(
+                ExternalContentMountRoot::ExecutionRuntime
+                    .destination(None, invalid)
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+        let mut nested = realization("nested", "platform/lib");
+        nested.mount_root = ExternalContentMountRoot::ExecutionRuntime;
+        let mut overlapping = set.iter().cloned().collect::<Vec<_>>();
+        overlapping.push(nested);
+        assert!(ExternalContentRealizationSet::new(overlapping).is_err());
+    }
+
+    #[test]
+    fn realization_entry_budget_is_tier_neutral_and_aggregate_bounded() {
+        let mut large = realization("large", "large");
+        large.entry_count = MAX_EXTERNAL_CONTENT_ENTRIES + 1;
+        ExternalContentRealizationSet::new(vec![large.clone()]).unwrap();
+        large.entry_count = MAX_EXTERNAL_REALIZATION_ENTRIES;
+        ExternalContentRealizationSet::new(vec![large.clone()]).unwrap();
+        assert!(
+            ExternalContentRealizationSet::new(vec![large.clone(), realization("other", "other")])
+                .is_err()
+        );
+        large.entry_count += 1;
+        assert!(ExternalContentRealizationSet::new(vec![large]).is_err());
     }
 
     #[test]

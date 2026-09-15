@@ -1269,6 +1269,58 @@ fn retained_resolution_external_realization_manifest_hashes(
         .map_err(|error| format!("invalid content-dependency external realization set: {error}"))
 }
 
+/// Owning proofs from the one typed engine-reserved product-selection slot.
+/// Product/qualification testimony's historical hashes are deliberately not
+/// scanned: only the named attestation objects below are admitted dependencies.
+fn retained_resolution_product_proof_hashes(resolution: &Value) -> Result<Vec<String>, String> {
+    use crate::external_content::products::composition::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY;
+    let Some(derived) = resolution
+        .get("composed")
+        .and_then(|composed| composed.get("derived"))
+    else {
+        return Ok(Vec::new());
+    };
+    let derived = derived
+        .as_object()
+        .ok_or_else(|| "retained resolution derived must be an object".to_owned())?;
+    let Some(value) = derived.get(EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY) else {
+        return Ok(Vec::new());
+    };
+    retained_product_selection_proof_hashes(value)
+}
+
+fn retained_product_selection_proof_hashes(value: &Value) -> Result<Vec<String>, String> {
+    use crate::external_content::products::composition::{
+        MAX_RESOLVED_PRODUCT_SELECTIONS_BYTES, ResolvedExternalProductSelections,
+    };
+    if lillux::canonical_json(value)
+        .map_err(|error| error.to_string())?
+        .len()
+        > MAX_RESOLVED_PRODUCT_SELECTIONS_BYTES
+    {
+        return Err("invalid retained product selections: bounded contract exceeded".to_owned());
+    }
+    let selections: ResolvedExternalProductSelections = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid retained product selections: {error}"))?;
+    selections
+        .validate()
+        .map_err(|error| format!("invalid retained product selections: {error}"))?;
+    let mut hashes = BTreeSet::new();
+    for (_, selection) in selections.iter() {
+        hashes.insert(selection.witness_hash.clone());
+        if let crate::external_content::products::transfer::ProductWitnessSource::Received {
+            acceptance_hash,
+        } = &selection.witness_source
+        {
+            hashes.insert(acceptance_hash.clone());
+        }
+        if let Some(qualification) = &selection.qualification {
+            hashes.insert(qualification.attestation_hash.clone());
+        }
+    }
+    Ok(hashes.into_iter().collect())
+}
+
 fn push_required_hash(value: &Value, field: &str, out: &mut Vec<String>) -> Result<(), String> {
     let hash = value
         .get(field)
@@ -1735,6 +1787,71 @@ mod tests {
     }
 
     #[test]
+    fn qualification_attestation_owns_its_exact_product_witness_only() {
+        use crate::external_content::products::qualification::{
+            PRODUCT_QUALIFICATION_ATTESTATION_POLICY, PRODUCT_QUALIFICATION_CLAIM,
+        };
+
+        let resolution = product_selection_resolution();
+        let evidence = resolution["composed"]["derived"]
+            ["effective_external_product_selections"]["runtime"]["qualification"]["evidence"]
+            .clone();
+        let subject = evidence["result"]["subject_manifest_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let attestation = json!({
+            "kind": "attestation",
+            "schema": 1,
+            "subject_hash": subject,
+            "claim": PRODUCT_QUALIFICATION_CLAIM,
+            "policy": PRODUCT_QUALIFICATION_ATTESTATION_POLICY,
+            "issuer": format!("fp:{}", h("11")),
+            "issued_at": "2026-09-08T00:00:00Z",
+            "expires_at": null,
+            "evidence": evidence,
+            "signature": "test"
+        });
+        let edges = typed_object_edges(&attestation).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("33") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        for historical in [h("61"), h("67"), h("55")] {
+            assert!(!edges.iter().any(|edge| edge.hash == historical));
+        }
+
+        let mut generic = attestation;
+        generic["claim"] = json!("other_claim");
+        let generic_edges = typed_object_edges(&generic).unwrap();
+        assert_eq!(generic_edges.len(), 1);
+    }
+
+    #[test]
+    fn qualification_attestation_owns_every_selected_witness_and_prior_proof() {
+        let evidence = crate::external_content::products::qualification::tests::dynamic_evidence_with_auxiliary_proof();
+        let attestation = evidence
+            .sign_attestation(
+                &crate::signer::TestSigner::new(),
+                "2026-09-08T00:00:00Z".into(),
+                None,
+            )
+            .unwrap();
+        let edges = typed_object_edges(&attestation.to_value()).unwrap();
+        for retained in [evidence.product_witness_hash.clone(), h("6"), h("8")] {
+            assert!(edges.iter().any(|edge| {
+                edge.hash == retained && edge.expected == ExpectedObject::Kind("attestation")
+            }));
+        }
+        for historical in [
+            evidence.verifier.admitted_launch_capsule_hash,
+            evidence.verifier.terminal_snapshot_hash,
+            evidence.policy_source.raw_content_digest,
+        ] {
+            assert!(!edges.iter().any(|edge| edge.hash == historical));
+        }
+    }
+
+    #[test]
     fn traversal_stops_when_max_objects_exceeded() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
@@ -1892,6 +2009,7 @@ mod tests {
                                 "manifest_hash": manifest_hash,
                                 "entry_count": 1,
                                 "total_bytes": 5,
+                                "mount_root": "project",
                                 "mount": "vendor/sim"
                             }]
                         }
@@ -1915,6 +2033,145 @@ mod tests {
             typed_object_edges(&malformed)
                 .unwrap_err()
                 .contains("invalid external realization set")
+        );
+    }
+
+    fn product_selection_resolution() -> Value {
+        use crate::external_content::products::composition::{
+            RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA, ResolvedExternalProductSelections,
+        };
+        use crate::external_content::products::qualification::{
+            PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+            PRODUCT_QUALIFICATION_RESULT_SCHEMA,
+        };
+        let parameters_digest = crate::objects::canonical_value_digest(&json!({})).unwrap();
+        let coordinate = json!({"owner_principal": format!("fp:{}", h("11")),
+            "chain_root_id":"T-producer", "thread_id":"T-producer-terminal",
+            "recipe_binding":"product_recipe", "product_name":"runtime"});
+        let result = json!({"schema": PRODUCT_QUALIFICATION_RESULT_SCHEMA,
+            "subject_manifest_hash":h("22"), "claims":["probe"], "probe_evidence":{}});
+        let result_digest = crate::objects::canonical_value_digest(&result).unwrap();
+        let qualification = json!({"attestation_hash":h("44"), "evidence": {
+            "schema": PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA,
+            "product_witness_hash":h("33"), "product_coordinate":coordinate,
+            "witness_source":{"kind":"local_capture"},
+            "policy_source": {
+                "canonical_ref":"config:test/qualification", "raw_content_digest":h("55"),
+                "effective_definition_digest":h("56"), "publisher_fingerprint":h("57"),
+                "policy":{"schema":PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+                    "verifier_ref":"tool:test/probe", "subject_declaration_id":"runtime",
+                    "allowed_claims":["probe"], "verifier_parameters":{}}
+            },
+            "verifier": {
+                "chain_root_id":"T-verifier", "thread_id":"T-verifier-terminal",
+                "admitted_launch_capsule_hash":h("61"), "canonical_ref":"tool:test/probe",
+                "effective_definition_digest":h("62"), "exact_program_hash":h("63"),
+                "admitted_parameters_digest":parameters_digest, "launch_authority_digest":h("64"),
+                "execution_realization_hash":h("65"), "substrate_identity_hash":h("66"),
+                "subject_declaration_id":"runtime", "subject_manifest_hash":h("22"),
+                "terminal_snapshot_hash":h("67"), "result_digest":result_digest
+            }, "verifier_root_selections":null, "result":result
+        }});
+        let selections = json!({"runtime": {
+            "schema":RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA, "declaration_id":"runtime",
+            "relationship_name":"runtime_to_consumer", "relationship_ref":"config:test/recipe",
+            "relationship_raw_content_digest":h("71"), "relationship": {
+                "name":"runtime_to_consumer", "producer": {
+                    "canonical_ref":"graph:test/build", "recipe_binding":"product_recipe",
+                    "product_name":"runtime", "parameters":{}
+                }, "consumer":{"canonical_ref":"config:test/environment", "declaration_id":"runtime"},
+                "required_product":{"shape":"tree", "storage":"content", "bounds":{
+                    "maximum_entries":8, "maximum_depth":4, "maximum_file_bytes":1024,
+                    "maximum_total_bytes":4096
+                }}, "qualification":{"policy_ref":"config:test/qualification", "required_claims":["probe"]}
+            }, "witness_hash":h("33"), "witness_coordinate":coordinate,
+            "witness_source":{"kind":"local_capture"},
+            "qualification":qualification, "producer": {
+                "canonical_ref":"graph:test/build", "effective_definition_digest":h("72"),
+                "exact_program_hash":h("73"), "producer_project_snapshot_hash":h("74"),
+                "launch_authority_digest":h("75"), "admitted_parameters_digest":parameters_digest
+            }, "owner_principal":format!("fp:{}", h("11")), "consumer_source":{
+                "kind":"pinned_project", "consumer_ref":"config:test/environment",
+                "publisher_fingerprint":h("76"), "project_snapshot_hash":h("77"),
+                "source_closure":null
+            },
+            "pre_selection_effective_definition_digest":h("78"), "manifest_hash":h("22"),
+            "manifest_kind":"external_content_manifest", "declaration": {
+                "id":"runtime", "kind":"tree", "manifest_hash":h("22"),
+                "mount_root":"execution_runtime", "mount":"runtime"
+            }
+        }});
+        let parsed: ResolvedExternalProductSelections =
+            serde_json::from_value(selections.clone()).unwrap();
+        parsed.validate().unwrap();
+        json!({"composed":{"derived":{"effective_external_product_selections":selections}}})
+    }
+
+    #[test]
+    fn capsule_product_selection_edges_own_only_exact_published_proofs_in_all_lanes() {
+        let mut resolution = product_selection_resolution();
+        let source = json!({"kind":"received", "acceptance_hash":h("88")});
+        resolution["composed"]["derived"]["effective_external_product_selections"]["runtime"]["witness_source"] =
+            source.clone();
+        resolution["composed"]["derived"]["effective_external_product_selections"]["runtime"]["qualification"]
+            ["evidence"]["witness_source"] = source;
+        let semantic = crate::external_content::products::composition::project_resolution_product_selections_for_identity(&resolution).unwrap();
+        let outer = json!({
+            "kind":"admitted_launch_capsule", "execution_realization_hash":h("99"),
+            "project_authority":{"kind":"live_project"},
+            "execution_closure":{"driver":"direct_item_executor", "command":{"authority":"runtime_path"}},
+            "exact_program":{"resolution_output":semantic},
+            "sealed_invocation":{"resolution_output":resolution}
+        });
+        let mut dependency = outer.clone();
+        dependency["exact_program"]["resolution_output"] = json!({});
+        dependency["sealed_invocation"]["resolution_output"] = json!({});
+        dependency["execution_closure"]["prepared_runtime_launch"] = json!({
+            "content_dependencies":{"environment":{"resolution":resolution}}
+        });
+        let persistent = json!({
+            "kind":"persistent_session_capsule", "execution_realization_hash":h("99"),
+            "execution_closure":{"command":{"authority":"runtime_path"}},
+            "exact_program":{"resolution_output":semantic},
+            "retained_product_selections":resolution["composed"]["derived"]["effective_external_product_selections"]
+        });
+        for capsule in [&outer, &dependency, &persistent] {
+            let edges = typed_object_edges(capsule).unwrap();
+            for proof in [h("33"), h("44"), h("88")] {
+                assert!(edges.iter().any(|edge| edge.hash == proof
+                    && edge.expected == ExpectedObject::Kind("attestation")));
+            }
+            for historical in [h("61"), h("67"), h("74"), h("55")] {
+                assert!(!edges.iter().any(|edge| edge.hash == historical));
+            }
+        }
+    }
+
+    #[test]
+    fn product_proof_edges_fail_closed_on_malformed_reserved_slots_without_scanning_other_data() {
+        let valid = product_selection_resolution();
+        for mutation in [
+            Value::Null,
+            json!([]),
+            json!({"runtime":{"witness_hash":h("33")}}),
+        ] {
+            let mut malformed = valid.clone();
+            malformed["composed"]["derived"]["effective_external_product_selections"] = mutation;
+            assert!(
+                retained_resolution_product_proof_hashes(&malformed)
+                    .unwrap_err()
+                    .contains("invalid retained product selections")
+            );
+        }
+        let mut missing_proof = valid.clone();
+        missing_proof["composed"]["derived"]["effective_external_product_selections"]["runtime"]
+            ["qualification"] = Value::Null;
+        assert!(retained_resolution_product_proof_hashes(&missing_proof).is_err());
+        let unrelated = json!({"composed":{"derived":{"custom":{"witness_hash":h("33"), "attestation_hash":h("44")}}}});
+        assert!(
+            retained_resolution_product_proof_hashes(&unrelated)
+                .unwrap()
+                .is_empty()
         );
     }
 

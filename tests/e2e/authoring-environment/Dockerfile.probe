@@ -1,0 +1,6 @@
+# Only the verified environment and fixture. This supplemental empty-root
+# artifact test is not a RyeOS namespace or hosted-worker acceptance run.
+FROM scratch
+COPY environment/ /ryeos/realizations/authoring-tools/
+COPY probe.sh /probe.sh
+ENTRYPOINT ["/ryeos/realizations/authoring-tools/bin/zsh", "-f", "/probe.sh"]

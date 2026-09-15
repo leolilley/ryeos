@@ -35,8 +35,7 @@ CREATE TABLE IF NOT EXISTS schedule_specs (
     signer_fingerprint   TEXT NOT NULL,
     spec_hash            TEXT NOT NULL,
     registered_at        INTEGER NOT NULL,
-    requester_fingerprint TEXT NOT NULL,
-    capabilities          TEXT NOT NULL,
+    execution             TEXT NOT NULL,
     lateness_grace_secs   INTEGER NOT NULL
 );
 
@@ -44,13 +43,17 @@ CREATE TABLE IF NOT EXISTS schedule_fires (
     fire_id            TEXT PRIMARY KEY,
     schedule_id        TEXT NOT NULL,
     scheduled_at       INTEGER NOT NULL,
-    fired_at           INTEGER,
+    reserved_at        INTEGER NOT NULL,
+    dispatched_at      INTEGER,
     completed_at       INTEGER,
     thread_id          TEXT,
     status             TEXT NOT NULL,
     trigger_reason     TEXT NOT NULL,
     outcome            TEXT,
-    signer_fingerprint TEXT NOT NULL
+    signer_fingerprint TEXT NOT NULL,
+    schedule_spec_hash TEXT NOT NULL,
+    project_authority  TEXT,
+    admitted_capsule_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS schedule_cursors (
@@ -189,13 +192,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "requester_fingerprint",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "capabilities",
+                        name: "execution",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -230,7 +227,13 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "fired_at",
+                        name: "reserved_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "dispatched_at",
                         col_type: "INTEGER",
                         pk: false,
                         not_null: false,
@@ -270,6 +273,24 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "schedule_spec_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_authority",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "admitted_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -423,6 +444,17 @@ fn validate_scheduler_sidecar_types(path: &Path) -> Result<()> {
 }
 
 fn assert_recognized_stale_scheduler_projection(conn: &Connection, path: &Path) -> Result<()> {
+    let unsupported: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('view', 'trigger')",
+        [],
+        |row| row.get(0),
+    )?;
+    if unsupported != 0 {
+        anyhow::bail!(
+            "refusing to replace scheduler database with views or triggers at {}",
+            path.display()
+        );
+    }
     let mut table_statement = conn.prepare(
         "SELECT name FROM sqlite_master
          WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -526,7 +558,68 @@ impl SchedulerFireHistoryDiscardReport {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SchedulerFireHistoryAccounting {
+    Exact {
+        counts: SchedulerFireHistoryDiscardReport,
+    },
+    UnavailableIncompatibleSchema,
+}
+
+impl SchedulerFireHistoryAccounting {
+    pub fn total_rows(&self) -> Option<usize> {
+        match self {
+            Self::Exact { counts } => Some(counts.total_rows()),
+            Self::UnavailableIncompatibleSchema => None,
+        }
+    }
+}
+
 impl SchedulerDb {
+    /// Inspect a disposable copy for explicit offline history retirement.
+    /// Reuse the owning store's stale-projection recognition, but never rebuild
+    /// the copy or decode predecessor rows to manufacture an empty count.
+    /// Unlike retention reads, retirement does not require a complete fire
+    /// projection: all fire history has been selected for discard.
+    pub fn inspect_history_reset(path: &Path) -> Result<SchedulerFireHistoryAccounting> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            anyhow::bail!("scheduler inspection requires a regular non-symlink file");
+        }
+        validate_scheduler_sidecar_types(path)?;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            anyhow::bail!(
+                "scheduler database integrity check failed for {}: {integrity}",
+                path.display()
+            );
+        }
+        let spec = scheduler_schema_spec();
+        let app_id: i32 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+        if app_id != spec.application_id {
+            anyhow::bail!(
+                "scheduler database application_id is {app_id}, expected {}; foreign database at {}",
+                spec.application_id,
+                path.display()
+            );
+        }
+        let exact = sqlite_schema::assert_owned(&conn, &spec, path)
+            .and_then(|_| sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path));
+        if exact.is_err() {
+            assert_recognized_stale_scheduler_projection(&conn, path)?;
+            return Ok(SchedulerFireHistoryAccounting::UnavailableIncompatibleSchema);
+        }
+        let db = Self {
+            inner: std::sync::Mutex::new(conn),
+            outbox_drain: std::sync::Mutex::new(()),
+        };
+        Ok(SchedulerFireHistoryAccounting::Exact {
+            counts: db.discard_fire_history(true)?,
+        })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         // `:memory:` is SQLite's process-local database identity, not a
         // filesystem pathname. Keep the fresh-projection semantics of
@@ -812,7 +905,7 @@ impl SchedulerDb {
             "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
-                    requester_fingerprint, capabilities, lateness_grace_secs
+                    execution, lateness_grace_secs
              FROM schedule_specs WHERE schedule_id = ?1",
         )?;
         stmt.query_row(params![schedule_id], row_to_spec)
@@ -826,7 +919,7 @@ impl SchedulerDb {
             "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
-                    requester_fingerprint, capabilities, lateness_grace_secs
+                    execution, lateness_grace_secs
              FROM schedule_specs WHERE enabled = 1",
         )?;
         let rows = stmt.query_map([], row_to_spec)?;
@@ -845,7 +938,7 @@ impl SchedulerDb {
         let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
-                          requester_fingerprint, capabilities, lateness_grace_secs";
+                          execution, lateness_grace_secs";
         let sql = match (enabled_only, schedule_type) {
             (true, Some(_)) => {
                 format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?")
@@ -866,10 +959,10 @@ impl SchedulerDb {
         Ok(rows)
     }
 
-    /// List specs with optional requester filtering.
+    /// List specs with optional acting-principal filtering.
     ///
     /// When `filter_requester` is `Some(fp)`, only schedules with
-    /// `requester_fingerprint = fp` are returned. `None` returns all
+    /// `execution.authority.principal_id() = fp` are returned. `None` returns all
     /// schedules (internal callers that intentionally request an unfiltered view).
     pub fn list_specs_filtered(
         &self,
@@ -880,7 +973,7 @@ impl SchedulerDb {
         let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
-                          requester_fingerprint, capabilities, lateness_grace_secs";
+                          execution, lateness_grace_secs";
 
         // Build WHERE clause dynamically based on filters.
         let mut conditions: Vec<String> = Vec::new();
@@ -893,11 +986,6 @@ impl SchedulerDb {
             conditions.push("schedule_type = ?".to_string());
             param_values.push(st.to_string());
         }
-        if let Some(fp) = filter_requester {
-            conditions.push("requester_fingerprint = ?".to_string());
-            param_values.push(fp.to_string());
-        }
-
         let where_clause = if conditions.is_empty() {
             String::new()
         } else {
@@ -912,9 +1000,12 @@ impl SchedulerDb {
             .iter()
             .map(|v| v as &dyn rusqlite::ToSql)
             .collect();
-        let rows: Vec<ScheduleSpecRecord> = stmt
+        let mut rows: Vec<ScheduleSpecRecord> = stmt
             .query_map(params.as_slice(), row_to_spec)?
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(fingerprint) = filter_requester {
+            rows.retain(|record| record.execution.authority.principal_id() == fingerprint);
+        }
         Ok(rows)
     }
 
@@ -1140,26 +1231,37 @@ impl SchedulerDb {
     /// (fire was claimed), false if it already existed.
     pub(crate) fn claim_fire(&self, rec: &FireRecord) -> Result<bool> {
         validate_fire_record(rec)?;
+        let project_authority = rec
+            .project_authority
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         require_current_fire_projection_conn(&tx)?;
         let changed = tx
             .execute(
                 "INSERT OR IGNORE INTO schedule_fires
-                (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                 status, trigger_reason, outcome, signer_fingerprint)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                (fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                 completed_at, thread_id, status, trigger_reason, outcome,
+                 signer_fingerprint, schedule_spec_hash, project_authority,
+                 admitted_capsule_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 params![
                     rec.fire_id,
                     rec.schedule_id,
                     rec.scheduled_at,
-                    rec.fired_at,
+                    rec.reserved_at,
+                    rec.dispatched_at,
                     rec.completed_at,
                     rec.thread_id,
                     rec.status,
                     rec.trigger_reason,
                     rec.outcome,
                     rec.signer_fingerprint,
+                    rec.schedule_spec_hash,
+                    project_authority,
+                    rec.admitted_capsule_hash,
                 ],
             )
             .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
@@ -1178,7 +1280,7 @@ impl SchedulerDb {
     /// Reclaim a fire that was persisted but never got a running thread.
     /// The caller has already proved the deterministic thread is absent. Fire
     /// dispatch identity is immutable, so reclaim is an eligibility check; it
-    /// never rewrites fired_at, thread_id, trigger reason, or the journal.
+    /// never rewrites reservation identity, thread id, trigger reason, or the journal.
     pub(crate) fn reclaim_fire(&self, fire_id: &str) -> Result<bool> {
         let conn = self.lock()?;
         require_current_fire_projection_conn(&conn)?;
@@ -1186,7 +1288,7 @@ impl SchedulerDb {
             return Ok(false);
         };
         record.validate()?;
-        Ok(record.status == "dispatched")
+        Ok(matches!(record.status.as_str(), "reserved" | "dispatched"))
     }
 
     /// Number of committed fire snapshots not yet synced into JSONL.
@@ -1293,8 +1395,10 @@ impl SchedulerDb {
     pub fn get_fire(&self, fire_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
              FROM schedule_fires WHERE fire_id = ?1",
         )?;
         stmt.query_row(params![fire_id], row_to_fire)
@@ -1317,8 +1421,10 @@ impl SchedulerDb {
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
         let sql = format!(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
              FROM schedule_fires
              WHERE schedule_id IN ({})
                AND fire_id = (
@@ -1348,8 +1454,10 @@ impl SchedulerDb {
     pub fn get_last_fire(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
              FROM schedule_fires
              WHERE schedule_id = ?1
              ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
@@ -1362,9 +1470,11 @@ impl SchedulerDb {
     pub fn get_inflight_fires(&self) -> Result<Vec<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
-             FROM schedule_fires WHERE status = 'dispatched'",
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
+             FROM schedule_fires WHERE status IN ('reserved', 'dispatched')",
         )?;
         let rows = stmt.query_map([], row_to_fire)?;
         let mut out = Vec::new();
@@ -1374,13 +1484,49 @@ impl SchedulerDb {
         Ok(out)
     }
 
+    /// Immutable generations referenced only by scheduler policy or by a
+    /// pre-launch fire binding. These are operational GC roots until the
+    /// schedule is disabled or the fire acquires ordinary thread authority.
+    pub fn operational_snapshot_roots(&self) -> Result<Vec<String>> {
+        let mut roots = std::collections::BTreeSet::new();
+        for spec in self.load_enabled_specs()? {
+            if let ryeos_engine::execution_contract::ProjectExecutionPolicy::Pinned {
+                source: ryeos_engine::execution_contract::PinnedSource::Snapshot { hash },
+                ..
+            } = spec.execution.policy.project
+            {
+                if !lillux::valid_hash(&hash) {
+                    anyhow::bail!(
+                        "enabled schedule {} carries a noncanonical snapshot root",
+                        spec.schedule_id
+                    );
+                }
+                roots.insert(hash);
+            }
+        }
+        for fire in self.get_inflight_fires()? {
+            if let Some(ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                base_snapshot_hash,
+                snapshot_hash,
+                ..
+            }) = fire.project_authority
+            {
+                roots.insert(base_snapshot_hash);
+                roots.insert(snapshot_hash);
+            }
+        }
+        Ok(roots.into_iter().collect())
+    }
+
     pub fn get_inflight_for_schedule(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
              FROM schedule_fires
-             WHERE schedule_id = ?1 AND status = 'dispatched'
+             WHERE schedule_id = ?1 AND status IN ('reserved', 'dispatched')
              ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
         )?;
         stmt.query_row(params![schedule_id], row_to_fire)
@@ -1391,10 +1537,12 @@ impl SchedulerDb {
     pub fn find_fire_by_thread(&self, thread_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
              FROM schedule_fires
-             WHERE thread_id = ?1 AND status = 'dispatched'",
+             WHERE thread_id = ?1 AND status IN ('reserved', 'dispatched')",
         )?;
         stmt.query_row(params![thread_id], row_to_fire)
             .optional()
@@ -1407,10 +1555,12 @@ impl SchedulerDb {
         let cutoff = lillux::time::timestamp_millis() - (threshold_secs * 1000);
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                    status, trigger_reason, outcome, signer_fingerprint
+            "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                    completed_at, thread_id, status, trigger_reason, outcome,
+                    signer_fingerprint, schedule_spec_hash, project_authority,
+                    admitted_capsule_hash
              FROM schedule_fires
-             WHERE status = 'dispatched' AND fired_at IS NOT NULL AND fired_at < ?1",
+             WHERE status = 'dispatched' AND dispatched_at IS NOT NULL AND dispatched_at < ?1",
         )?;
         let rows = stmt.query_map(params![cutoff], row_to_fire)?;
         let mut out = Vec::new();
@@ -1594,15 +1744,19 @@ impl SchedulerDb {
 
         let sql = match status_filter {
             Some(_) => {
-                "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                               status, trigger_reason, outcome, signer_fingerprint
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                               completed_at, thread_id, status, trigger_reason, outcome,
+                               signer_fingerprint, schedule_spec_hash, project_authority,
+                               admitted_capsule_hash
                         FROM schedule_fires
                         WHERE schedule_id = ?1 AND status = ?2
                         ORDER BY scheduled_at DESC, fire_id DESC LIMIT ?3"
             }
             None => {
-                "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                            status, trigger_reason, outcome, signer_fingerprint
+                "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                            completed_at, thread_id, status, trigger_reason, outcome,
+                            signer_fingerprint, schedule_spec_hash, project_authority,
+                            admitted_capsule_hash
                      FROM schedule_fires
                      WHERE schedule_id = ?1
                      ORDER BY scheduled_at DESC, fire_id DESC LIMIT ?2"
@@ -1625,15 +1779,15 @@ impl SchedulerDb {
 // ── Row mappers ─────────────────────────────────────────────────────
 
 fn upsert_spec_conn(conn: &Connection, rec: &ScheduleSpecRecord) -> Result<()> {
-    let capabilities_json = serde_json::to_string(&rec.capabilities)?;
+    let execution_json = serde_json::to_string(&rec.execution)?;
     let ref_bindings_json = serde_json::to_string(&rec.ref_bindings)?;
     conn.execute(
         "INSERT INTO schedule_specs
             (schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
              timezone, misfire_policy, overlap_policy, enabled,
              project_root, signer_fingerprint, spec_hash, registered_at,
-             requester_fingerprint, capabilities, lateness_grace_secs)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+             execution, lateness_grace_secs)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
          ON CONFLICT(schedule_id) DO UPDATE SET
             item_ref=excluded.item_ref, ref_bindings=excluded.ref_bindings,
             params=excluded.params,
@@ -1642,8 +1796,7 @@ fn upsert_spec_conn(conn: &Connection, rec: &ScheduleSpecRecord) -> Result<()> {
             overlap_policy=excluded.overlap_policy, enabled=excluded.enabled,
             project_root=excluded.project_root, signer_fingerprint=excluded.signer_fingerprint,
             spec_hash=excluded.spec_hash, registered_at=excluded.registered_at,
-            requester_fingerprint=excluded.requester_fingerprint,
-            capabilities=excluded.capabilities,
+            execution=excluded.execution,
             lateness_grace_secs=excluded.lateness_grace_secs",
         params![
             rec.schedule_id,
@@ -1660,8 +1813,7 @@ fn upsert_spec_conn(conn: &Connection, rec: &ScheduleSpecRecord) -> Result<()> {
             rec.signer_fingerprint,
             rec.spec_hash,
             rec.registered_at,
-            rec.requester_fingerprint,
-            capabilities_json,
+            execution_json,
             rec.lateness_grace_secs,
         ],
     )?;
@@ -1669,32 +1821,47 @@ fn upsert_spec_conn(conn: &Connection, rec: &ScheduleSpecRecord) -> Result<()> {
 }
 
 fn upsert_fire_conn(conn: &Connection, rec: &FireRecord) -> Result<()> {
+    let project_authority = rec
+        .project_authority
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     conn.execute(
         "INSERT INTO schedule_fires
-            (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-             status, trigger_reason, outcome, signer_fingerprint)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+            (fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+             completed_at, thread_id, status, trigger_reason, outcome,
+             signer_fingerprint, schedule_spec_hash, project_authority,
+             admitted_capsule_hash)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
          ON CONFLICT(fire_id) DO UPDATE SET
             schedule_id=excluded.schedule_id,
             scheduled_at=excluded.scheduled_at,
-            fired_at=excluded.fired_at,
+            reserved_at=excluded.reserved_at,
+            dispatched_at=excluded.dispatched_at,
             completed_at=excluded.completed_at,
             thread_id=excluded.thread_id,
             status=excluded.status,
             trigger_reason=excluded.trigger_reason,
             outcome=excluded.outcome,
-            signer_fingerprint=excluded.signer_fingerprint",
+            signer_fingerprint=excluded.signer_fingerprint,
+            schedule_spec_hash=excluded.schedule_spec_hash,
+            project_authority=excluded.project_authority,
+            admitted_capsule_hash=excluded.admitted_capsule_hash",
         params![
             rec.fire_id,
             rec.schedule_id,
             rec.scheduled_at,
-            rec.fired_at,
+            rec.reserved_at,
+            rec.dispatched_at,
             rec.completed_at,
             rec.thread_id,
             rec.status,
             rec.trigger_reason,
             rec.outcome,
             rec.signer_fingerprint,
+            rec.schedule_spec_hash,
+            project_authority,
+            rec.admitted_capsule_hash,
         ],
     )?;
     Ok(())
@@ -1811,8 +1978,8 @@ fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::
     let ref_bindings = serde_json::from_str(&ref_bindings_json).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
-    let capabilities_json: String = row.get("capabilities")?;
-    let capabilities: Vec<String> = serde_json::from_str(&capabilities_json).map_err(|e| {
+    let execution_json: String = row.get("execution")?;
+    let execution = serde_json::from_str(&execution_json).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
     Ok(ScheduleSpecRecord {
@@ -1830,24 +1997,39 @@ fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::
         signer_fingerprint: row.get("signer_fingerprint")?,
         spec_hash: row.get("spec_hash")?,
         registered_at: row.get("registered_at")?,
-        requester_fingerprint: row.get("requester_fingerprint")?,
-        capabilities,
+        execution,
         lateness_grace_secs: row.get("lateness_grace_secs")?,
     })
 }
 
 fn row_to_fire(row: &rusqlite::Row<'_>) -> Result<FireRecord, rusqlite::Error> {
+    let project_authority_json: Option<String> = row.get("project_authority")?;
+    let project_authority = project_authority_json
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
     Ok(FireRecord {
         fire_id: row.get("fire_id")?,
         schedule_id: row.get("schedule_id")?,
         scheduled_at: row.get("scheduled_at")?,
-        fired_at: row.get("fired_at")?,
+        reserved_at: row.get("reserved_at")?,
+        dispatched_at: row.get("dispatched_at")?,
         completed_at: row.get("completed_at")?,
         thread_id: row.get("thread_id")?,
         status: row.get("status")?,
         trigger_reason: row.get("trigger_reason")?,
         outcome: row.get("outcome")?,
         signer_fingerprint: row.get("signer_fingerprint")?,
+        schedule_spec_hash: row.get("schedule_spec_hash")?,
+        project_authority,
+        admitted_capsule_hash: row.get("admitted_capsule_hash")?,
     })
 }
 
@@ -1864,8 +2046,10 @@ fn row_to_cursor(row: &rusqlite::Row<'_>) -> Result<ScheduleCursorRecord, rusqli
 
 fn get_fire_conn(conn: &Connection, fire_id: &str) -> Result<Option<FireRecord>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                status, trigger_reason, outcome, signer_fingerprint
+        "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                completed_at, thread_id, status, trigger_reason, outcome,
+                signer_fingerprint, schedule_spec_hash, project_authority,
+                admitted_capsule_hash
          FROM schedule_fires WHERE fire_id = ?1",
     )?;
     stmt.query_row(params![fire_id], row_to_fire)
@@ -1878,7 +2062,7 @@ fn get_spec_conn(conn: &Connection, schedule_id: &str) -> Result<Option<Schedule
         "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                 timezone, misfire_policy, overlap_policy, enabled,
                 project_root, signer_fingerprint, spec_hash, registered_at,
-                requester_fingerprint, capabilities, lateness_grace_secs
+                execution, lateness_grace_secs
          FROM schedule_specs WHERE schedule_id = ?1",
     )?;
     stmt.query_row(params![schedule_id], row_to_spec)
@@ -1888,8 +2072,10 @@ fn get_spec_conn(conn: &Connection, schedule_id: &str) -> Result<Option<Schedule
 
 fn get_last_fire_conn(conn: &Connection, schedule_id: &str) -> Result<Option<FireRecord>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-                status, trigger_reason, outcome, signer_fingerprint
+        "SELECT fire_id, schedule_id, scheduled_at, reserved_at, dispatched_at,
+                completed_at, thread_id, status, trigger_reason, outcome,
+                signer_fingerprint, schedule_spec_hash, project_authority,
+                admitted_capsule_hash
          FROM schedule_fires
          WHERE schedule_id = ?1
          ORDER BY scheduled_at DESC, fire_id DESC LIMIT 1",
@@ -1951,6 +2137,78 @@ mod tests {
         let path = temp.path().join("scheduler.sqlite3");
         assert!(SchedulerDb::open_existing_current(&path).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn history_reset_inspection_accepts_incomplete_current_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler.sqlite3");
+        let db = SchedulerDb::open(&path).unwrap();
+        assert!(!db.fire_projection_is_current().unwrap());
+        drop(db);
+        assert_eq!(
+            SchedulerDb::inspect_history_reset(&path)
+                .unwrap()
+                .total_rows(),
+            Some(0)
+        );
+        assert!(
+            SchedulerDb::open_existing_current(&path).is_err(),
+            "retention must still fail closed"
+        );
+    }
+
+    #[test]
+    fn history_reset_inspection_keeps_stale_projection_opaque() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler.sqlite3");
+        drop(SchedulerDb::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE schedule_specs ADD COLUMN retired_field TEXT;")
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            SchedulerDb::inspect_history_reset(&path)
+                .unwrap()
+                .total_rows(),
+            None
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // The same owned layout remains eligible for the confirmed rebuild.
+        let rebuilt = SchedulerDb::open(&path).unwrap();
+        rebuilt.discard_fire_history(false).unwrap();
+        drop(rebuilt);
+        assert_eq!(
+            SchedulerDb::inspect_history_reset(&path)
+                .unwrap()
+                .total_rows(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn history_reset_inspection_rejects_foreign_and_unrecognized_stores() {
+        for mutation in [
+            "PRAGMA application_id=1234;",
+            "PRAGMA application_id=0;",
+            "CREATE TABLE unrelated (value TEXT);",
+            "CREATE VIEW unrelated AS SELECT * FROM schedule_specs;",
+            "CREATE TRIGGER unrelated AFTER DELETE ON schedule_specs BEGIN DELETE FROM schedule_fires; END;",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("scheduler.sqlite3");
+            drop(SchedulerDb::open(&path).unwrap());
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(mutation).unwrap();
+            drop(conn);
+            let before = std::fs::read(&path).unwrap();
+            assert!(
+                SchedulerDb::inspect_history_reset(&path).is_err(),
+                "{mutation}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
     }
 
     #[test]
@@ -2184,20 +2442,30 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 1000,
-            requester_fingerprint: "fp:test".to_string(),
-            capabilities: vec!["ryeos.execute.*".to_string()],
+            execution: crate::types::ScheduleExecution {
+                authority: crate::types::ScheduleExecutionAuthority::Node {
+                    principal_id: format!("fp:{}", "33".repeat(32)),
+                    effective_origin_site_id: "site:test".to_string(),
+                },
+                capabilities: vec!["ryeos.execute.*".to_string()],
+                policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                    ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ),
+            },
         }
     }
 
     fn make_fire(schedule_id: &str, scheduled_at: i64, status: &str) -> FireRecord {
         let fire_id = format!("{}@{}", schedule_id, scheduled_at);
         let terminal = status != "dispatched";
+        let launched = status != "skipped";
         FireRecord {
-            thread_id: (status != "skipped").then(|| crate::types::thread_id_from_fire(&fire_id)),
+            thread_id: launched.then(|| crate::types::thread_id_from_fire(&fire_id)),
             fire_id,
             schedule_id: schedule_id.to_string(),
             scheduled_at,
-            fired_at: Some(scheduled_at),
+            reserved_at: scheduled_at,
+            dispatched_at: launched.then_some(scheduled_at),
             completed_at: terminal.then_some(scheduled_at + 1),
             status: status.to_string(),
             trigger_reason: "normal".to_string(),
@@ -2208,6 +2476,16 @@ mod tests {
                 _ => "normal".to_string(),
             }),
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: launched
+                .then(|| {
+                    ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                        ryeos_state::objects::EnvironmentAuthority::None,
+                    )
+                })
+                .transpose()
+                .unwrap(),
+            admitted_capsule_hash: launched.then(|| "44".repeat(32)),
         }
     }
 
@@ -2233,23 +2511,27 @@ mod tests {
                     signer_fingerprint   TEXT NOT NULL,
                     spec_hash            TEXT NOT NULL,
                     registered_at        INTEGER NOT NULL,
-                    requester_fingerprint TEXT NOT NULL DEFAULT '',
-                    capabilities          TEXT NOT NULL DEFAULT '[]'
+                    execution             TEXT NOT NULL,
+                    lateness_grace_secs   INTEGER NOT NULL
                 );
                 CREATE TABLE schedule_fires (
                     fire_id            TEXT PRIMARY KEY,
                     schedule_id        TEXT NOT NULL,
                     scheduled_at       INTEGER NOT NULL,
-                    fired_at           INTEGER,
+                    reserved_at        INTEGER NOT NULL,
+                    dispatched_at      INTEGER,
+                    completed_at       INTEGER,
                     thread_id          TEXT,
                     status             TEXT NOT NULL,
                     trigger_reason     TEXT NOT NULL DEFAULT 'normal',
                     outcome            TEXT,
-                    signer_fingerprint TEXT NOT NULL
+                    signer_fingerprint TEXT NOT NULL,
+                    schedule_spec_hash TEXT NOT NULL,
+                    project_authority  TEXT,
+                    admitted_capsule_hash TEXT
                 );
                 CREATE INDEX idx_fires_schedule_id ON schedule_fires(schedule_id);
                 CREATE INDEX idx_fires_status ON schedule_fires(status);
-                CREATE INDEX idx_fires_schedule_scheduled ON schedule_fires(schedule_id, scheduled_at DESC);
                 "#,
             )
             .unwrap();
@@ -2259,7 +2541,7 @@ mod tests {
                 "INSERT INTO schedule_specs
                  (schedule_id, item_ref, params, schedule_type, expression, timezone,
                   misfire_policy, overlap_policy, enabled, project_root, signer_fingerprint,
-                  spec_hash, registered_at, requester_fingerprint, capabilities)
+                  spec_hash, registered_at, execution, lateness_grace_secs)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 params![
                     "old-sched",
@@ -2272,11 +2554,11 @@ mod tests {
                     "skip",
                     1,
                     Option::<String>::None,
-                    "fp:test",
+                    "11".repeat(32),
                     "hash",
                     1000,
-                    "fp:test",
-                    r#"["ryeos.execute.*"]"#,
+                    serde_json::to_string(&make_spec("old-sched").execution).unwrap(),
+                    60,
                 ],
             )
             .unwrap();
@@ -2422,7 +2704,7 @@ mod tests {
         let fire = make_fire("sched", 1000, "dispatched");
         db.upsert_fire(&fire).unwrap();
 
-        let completed_at = fire.fired_at.map(|fired_at| fired_at + 1);
+        let completed_at = fire.dispatched_at.map(|dispatched_at| dispatched_at + 1);
         let updated = FireRecord {
             status: "completed".to_string(),
             outcome: Some("success".to_string()),
@@ -2666,20 +2948,23 @@ mod tests {
     fn find_stale_dispatched_fires() {
         let db = test_db();
 
-        // Create a dispatched fire with fired_at in the past
+        // Create a dispatched fire with dispatched_at in the past.
         let mut old = make_fire("sched", 1000, "dispatched");
-        old.fired_at = Some(lillux::time::timestamp_millis() - 60_000); // 60s ago
+        old.reserved_at = lillux::time::timestamp_millis() - 60_001;
+        old.dispatched_at = Some(lillux::time::timestamp_millis() - 60_000);
         db.upsert_fire(&old).unwrap();
 
         // Create a recent dispatched fire (should not be stale)
         let mut recent = make_fire("sched", 2000, "dispatched");
-        recent.fired_at = Some(lillux::time::timestamp_millis());
+        recent.reserved_at = lillux::time::timestamp_millis();
+        recent.dispatched_at = Some(recent.reserved_at);
         db.upsert_fire(&recent).unwrap();
 
         // Create a completed fire (should not show up even if old)
         let mut done = make_fire("sched", 3000, "completed");
-        done.fired_at = Some(lillux::time::timestamp_millis() - 120_000);
-        done.completed_at = done.fired_at.map(|fired_at| fired_at + 1);
+        done.reserved_at = lillux::time::timestamp_millis() - 120_001;
+        done.dispatched_at = Some(lillux::time::timestamp_millis() - 120_000);
+        done.completed_at = done.dispatched_at.map(|dispatched_at| dispatched_at + 1);
         db.upsert_fire(&done).unwrap();
 
         let stale = db.find_stale_dispatched_fires(30).unwrap();

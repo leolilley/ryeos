@@ -1,0 +1,7 @@
+[package]
+name = "linkage-probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+macro-probe = { path = "../macro" }

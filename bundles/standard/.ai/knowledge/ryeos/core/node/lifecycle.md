@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T08:05:37Z:4c7ff2a967ff1f88a6e96903bdf7923aa30a1f4d6eccb9af67d5ab804d4ddee9:YZObAGHim/ZHGUfD2GD1I3MMwxJYyt7OEn6YeGW8Eii20UJfjW7irYFRa0bsrDH23+u2m/Jc4NLOJpAccnP1Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T09:38:49Z:c193781f9f085963b8022341400a103093d1c2edee5254058674dc878fe6646a:MOMManE0+uMjg2vz6pyTqMa3orkTT81MMWhmiDBAfvA6cxofbrUQAII90GVC956Z/IijeYvQ+KLvGo73y2SNDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
-version: "1.4.1"
+version: "1.5.0"
 description: >
   Local node lifecycle semantics owned by the ryeos-node crate: init,
   start, stop, status, liveness, daemon metadata, and CLI preflight.
@@ -12,20 +12,23 @@ description: >
 
 `crates/daemon/ryeos-node` (`ryeos-node`) is the single owner of local-node
 lifecycle and bootstrap semantics. The supported user lifecycle surface
-is exactly four verbs:
+is the ordinary four-verb surface below, plus one explicit administrator
+transition for nodes that require host supervision:
 
 ```bash
 ryeos init --node-profile full
 ryeos start
 ryeos stop
 ryeos node status
+ryeos node host setup --confirm
 ```
 
-There is no `restart`, no enable/disable command, no init-system
-integration, and no separate probe command. `ryeos node status` is the only
-lifecycle read operation. Lifecycle operations are local-node operations
-and intentionally ignore `RYEOSD_URL`; that variable only steers normal
-daemon-backed dispatch.
+There is no `restart`, no enable/disable command, and no separate probe
+command. `ryeos node status` is the only lifecycle read operation. Lifecycle
+operations are local-node operations and intentionally ignore `RYEOSD_URL`;
+that variable only steers normal daemon-backed dispatch. Native service-manager
+and process-scope mechanics belong wholly to Lillux. RyeOS retains only the
+generic protected association and lifecycle/upgrade testimony.
 
 `full` above is the native-package distribution selector. Every fresh node
 requires one explicit publisher-signed init profile whose exact bundle inventory
@@ -91,10 +94,13 @@ starters with `<system>/.ai/state/lifecycle-start.lock` using
 `flock(LOCK_EX | LOCK_NB)`. The lock is released on process exit, so a
 crashed starter cannot wedge future starts.
 
-`start` spawns `ryeosd` directly with resolved local config and waits for
-readiness via the same `status` liveness contract. If the child exits
-early, it re-probes once for concurrent-starter convergence, then
-surfaces stderr immediately instead of holding the lock to the deadline.
+For a node without a host association, `start` spawns `ryeosd` directly with
+resolved local config. For an explicitly supervised node, it publishes Up
+through its exact protected association and asks Lillux to submit that intent
+to the selected native supervisor. Missing, changed, or unhealthy supervision
+fails closed; it never falls back to a direct process. Both paths wait for
+readiness through the same `status` liveness contract. A directly launched
+child that exits early is reported immediately after one concurrency probe.
 The readiness timeout is 15 minutes so verified projection recovery can finish.
 
 When stdout and stderr are interactive terminals, the CLI consumes the typed
@@ -106,29 +112,49 @@ sequences or timing-dependent progress lines.
 ## `ryeos stop`
 
 `stop` first establishes that the local daemon is live, then connects to a
-configured UDS candidate and asks the kernel for that socket peer's
-`SO_PEERCRED` PID and `SO_PEERPIDFD`. The pidfd is the process identity;
-`daemon.json` and the PID returned by `lifecycle.status` are never signal
-authority. The numeric peer PID is used only to verify that `/proc/<pid>/comm`
-or `/proc/<pid>/exe` identifies `ryeosd`.
+configured UDS candidate and asks Lillux to authenticate and pin that exact
+local peer. `daemon.json` and the PID returned by `lifecycle.status` are never
+signal authority. Platform-specific peer credentials and process handles do
+not appear in RyeOS lifecycle code.
 
 The normal path sends `SIGTERM` through the peer pidfd. That enters the daemon's
 graceful shutdown coordinator, closes new runtime authoring, stops listeners,
 and drains attached workloads. The default wait is 10 seconds.
 
-With `--force`, expiry of that wait causes a fresh socket connection, fresh
-kernel peer credentials, and fresh peer pidfd capture before `SIGKILL`
-escalation. Stop then waits another two seconds for disappearance. It fails
-closed when no configured socket has a verifiable live `ryeosd` peer. There is
-no numeric-PID or stale-metadata fallback.
+With `--force`, expiry of that wait causes a fresh socket connection and fresh
+Lillux peer/process capture before native force termination. Stop then waits
+another two seconds for disappearance. It fails closed when no configured
+socket has a verifiable live `ryeosd` peer. There is no numeric-PID or
+stale-metadata fallback. A supervised stop publishes Down before terminating
+the exact process, preventing the native supervisor from bouncing it.
 
 Interactive shutdown uses the same presentation boundary: `RYE/OS HALT`
 animates while verified lifecycle probes still see the daemon and completes
 only after the process/state authority is gone. This does not alter the
 pidfd-based stop contract.
 
-This contract requires the Linux pidfd and `SO_PEERPIDFD` primitives in the
-supported-node baseline; see [Platform Support](../platform-support.md).
+The first qualified Lillux backend uses Linux pidfd and peer-credential
+primitives; other platforms must provide the equivalent Lillux contract before
+RyeOS claims support. See [Platform Support](../platform-support.md).
+
+## Host setup and package upgrades
+
+`ryeos node host setup --confirm` is a one-time administrator transition for an
+existing node that needs a supervised Lillux process-scope delegation. The app
+root remains account-owned and may remain under the user's normal data root.
+The administrator-owned association pins its exact app root, node identity,
+account, daemon executable, native supervisor, and scope provider. Projects,
+workers, bundles, and node policy cannot select any of those host authorities.
+
+Package installation stages and validates its prospective generation before it
+creates durable installation inhibition or stops a supervised node. The
+installer must prove that the association's pinned daemon path is the exact
+package-owned path it will replace. A service pinned to a different prefix is a
+different installation authority and is refused before lifecycle mutation; the
+installer neither copies into that prefix nor claims it upgraded the service.
+The retained journal binds the expected image digest and original Up/Down
+intent, and is removed only after the installed image proves the restored
+state. Interrupted upgrades remain inhibited and retryable.
 
 ## Lifecycle RPC timeout
 

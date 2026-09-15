@@ -1,7 +1,6 @@
-<!-- ryeos:signed:2026-08-27T04:21:32Z:f1b5235010616d1eace03abe3492a6e51ba04cec0abc6a4b66c5b84b3effacb3:3N7W76WA06LluX5dlKmsdYCZSXPhCZ1ac/7zk3Dkk16VUA8043U1uQvy8x3kEiDeR4drFDhjtXz0oa0bz0tXAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, inference, checkpoint, capsule, tinygrad, search, sealed]
-version: "0.3.0"
+version: "0.4.0"
 status: scheduled
 description: >
   Opaque content-addressed prefix, park/resume, and fork state for admitted
@@ -92,6 +91,28 @@ based selection; qualified forks add reproducible branch derivation.
 
 Rejected speculative branches use a cheaper retention lane than selected
 evidence, parked user work, or corpus-rooted traces.
+
+## Deferred policy and information-boundary qualification
+
+Retained computational state may contain sensitive context, stale assumptions
+or adversarial influence. Integrity and compatibility do not make that state
+safe to restore. A capsule is computational input, never a grant: restoration
+must use current applicable authority checks and must not revive expired
+credentials or capabilities.
+
+Before claiming safe restoration after a policy change or incident, qualify
+how the provider identifies affected state and chooses refusal, explicitly
+reduced-authority continuation, or separately admitted fresh reconstruction.
+Do not silently replace an exact resume with reconstruction. Updating a
+knowledge ref does not remove information already encoded in a capsule.
+
+The provider owns semantic dependencies and compatibility; generic storage
+owns declared closure, scope and retention. This is a qualification obligation,
+not a claim of implemented semantic unlearning or inspection of opaque tensors.
+Generation forks do not create successor principals or bypass single-writer
+custody rules.
+
+Discussion owner: [governed adaptation and memory evidence](governed-adaptation-and-memory-evidence.md).
 
 ## Atomicity and recovery
 

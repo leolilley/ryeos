@@ -1,7 +1,7 @@
+use lillux::time::{Duration, MonotonicDeadline};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -27,14 +27,339 @@ pub struct HookDispatchAuthorization {
 /// Default TTL for callback tokens when no explicit duration is requested.
 const DEFAULT_CALLBACK_TTL_SECS: u64 = 300;
 
+/// Runtime-method ceiling carried by one live callback bearer.
+///
+/// Ordinary managed runtimes retain the pre-existing complete callback
+/// protocol. A hosted workload client receives an exact finite surface. This
+/// remains part of the existing callback capability so method authority,
+/// project authority, principal authority, expiry, and revocation cannot
+/// diverge across separate bearer stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackRuntimeMethodSurface {
+    exact: Option<Vec<String>>,
+}
+
+impl CallbackRuntimeMethodSurface {
+    pub fn complete_runtime_protocol() -> Self {
+        Self { exact: None }
+    }
+
+    pub fn exact(mut methods: Vec<String>) -> Result<Self> {
+        if methods.is_empty() {
+            bail!("exact callback runtime-method surface is empty");
+        }
+        methods.sort();
+        methods.dedup();
+        for method in &methods {
+            if method.len() > 128
+                || !method.starts_with("runtime.")
+                || method
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+            {
+                bail!("callback runtime method `{method}` is not canonical");
+            }
+        }
+        Ok(Self {
+            exact: Some(methods),
+        })
+    }
+
+    pub fn authorize(&self, method: &str) -> Result<()> {
+        let Some(methods) = self.exact.as_ref() else {
+            return Ok(());
+        };
+        if methods
+            .binary_search_by(|value| value.as_str().cmp(method))
+            .is_ok()
+        {
+            return Ok(());
+        }
+        bail!("callback capability does not authorize runtime method `{method}`")
+    }
+
+    fn is_exact(&self) -> bool {
+        self.exact.is_some()
+    }
+}
+
+/// Exact target-local authority retained for one hosted-worker boot.
+///
+/// The project declaration, worker root, ingress principal, and node policy
+/// are inputs to admission, never independent live grants. This record is the
+/// resulting intersection and is attached to the existing callback
+/// capability so runtime-method, child-dispatch, expiry, and revocation
+/// authority cannot diverge across parallel stores.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedWorkloadClientGrant {
+    pub schema: u32,
+    pub protocol: String,
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub owner_principal: String,
+    pub origin_site_id: String,
+    pub worker_instance_id: String,
+    pub worker_boot_epoch: u64,
+    pub worker_boot_identity_hash: String,
+    pub root_launch_capsule_hash: String,
+    pub session_capsule_hash: String,
+    pub project_authority_digest: String,
+    pub request_digest: String,
+    pub caller_scope_digest: String,
+    pub operator_grant_digest: String,
+    pub root_delegation_digest: String,
+    pub node_policy_generation_digest: String,
+    pub ingresses: Vec<ryeos_runtime::workload_client::WorkloadClientIngress>,
+    pub executions: Vec<ryeos_runtime::workload_client::WorkloadClientExecutionCeiling>,
+    /// Exact destination-local selectors admitted for child operations at
+    /// worker boot. Keys are a complete subset of `executions`; values are
+    /// normalized ordinary root selections and are never client controls.
+    pub execution_product_selections: std::collections::BTreeMap<
+        String,
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    >,
+    pub execution_presentation: serde_json::Value,
+    pub effective_caps: Vec<String>,
+    pub max_in_flight: u16,
+    pub max_invocations_per_boot: u32,
+    pub max_lifetime_seconds: u64,
+    pub max_request_bytes: u32,
+}
+
+impl AdmittedWorkloadClientGrant {
+    pub const SCHEMA: u32 = 3;
+
+    pub fn validate(&self) -> Result<()> {
+        ryeos_runtime::workload_client::validate_execution_presentation(
+            &self.execution_presentation,
+        )?;
+        let presented = self
+            .execution_presentation
+            .as_array()
+            .expect("validated presentation array");
+        if presented.len() != self.executions.len()
+            || presented
+                .iter()
+                .zip(&self.executions)
+                .any(|(item, ceiling)| {
+                    item.get("authority")
+                        != Some(
+                            &ryeos_runtime::workload_client::execution_ceiling_presentation(
+                                ceiling,
+                            ),
+                        )
+                })
+        {
+            bail!("workload presentation contradicts its admitted execution ceiling");
+        }
+        if self.schema != Self::SCHEMA
+            || self.protocol != ryeos_runtime::workload_client::WORKLOAD_CLIENT_PROTOCOL
+            || self.chain_root_id.is_empty()
+            || self.chain_root_id.len() > 256
+            || self.placement_thread_id.is_empty()
+            || self.placement_thread_id.len() > 256
+            || self
+                .owner_principal
+                .strip_prefix("fp:")
+                .is_none_or(|fingerprint| !lillux::valid_hash(fingerprint))
+            || crate::identity::validate_canonical_site_id(&self.origin_site_id).is_err()
+            || self.worker_instance_id.is_empty()
+            || self.worker_instance_id.len() > 256
+            || self.worker_boot_epoch == 0
+            || self.max_request_bytes == 0
+            || self.max_request_bytes as usize
+                > ryeos_runtime::workload_client::MAX_WORKLOAD_CLIENT_FRAME_BYTES
+        {
+            bail!("admitted workload-client grant is outside its closed structural bounds");
+        }
+        for (label, digest) in [
+            (
+                "worker boot identity",
+                self.worker_boot_identity_hash.as_str(),
+            ),
+            (
+                "root launch capsule",
+                self.root_launch_capsule_hash.as_str(),
+            ),
+            ("session capsule", self.session_capsule_hash.as_str()),
+            ("project authority", self.project_authority_digest.as_str()),
+            ("request", self.request_digest.as_str()),
+            ("caller scope", self.caller_scope_digest.as_str()),
+            ("operator grant", self.operator_grant_digest.as_str()),
+            ("root delegation", self.root_delegation_digest.as_str()),
+            (
+                "node policy generation",
+                self.node_policy_generation_digest.as_str(),
+            ),
+        ] {
+            if !lillux::valid_hash(digest) {
+                bail!("admitted workload-client {label} digest is not canonical");
+            }
+        }
+        ryeos_runtime::workload_client::validate_workload_client_ingresses(&self.ingresses)?;
+        ryeos_runtime::workload_client::validate_execution_ceilings(&self.executions)?;
+        for (item_ref, selections) in &self.execution_product_selections {
+            if self
+                .executions
+                .binary_search_by(|entry| entry.item_ref.as_str().cmp(item_ref))
+                .is_err()
+            {
+                bail!("workload product selection names an ungranted execution");
+            }
+            ryeos_state::external_content::products::composition::validate_product_selection_inputs(
+                selections,
+            )?;
+            if selections.is_empty()
+                || selections.iter().any(|input| {
+                    !matches!(
+                        input.target,
+                        ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+                    )
+                })
+            {
+                bail!("workload product selections are not a nonempty normalized root batch");
+            }
+        }
+        ryeos_runtime::workload_client::validate_workload_client_limits(
+            self.max_in_flight,
+            self.max_invocations_per_boot,
+            self.max_lifetime_seconds,
+        )?;
+        if self.effective_caps.is_empty()
+            || self
+                .effective_caps
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self.effective_caps.iter().any(|capability| {
+                !capability.starts_with("ryeos.execute.")
+                    || ryeos_runtime::authorizer::validate_scope_pattern(capability).is_err()
+                    || capability.contains('*')
+                    || capability.contains('?')
+            })
+        {
+            bail!("admitted workload-client capabilities are not exact, sorted, and unique");
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        let value = serde_json::to_value(self)?;
+        let canonical = lillux::canonical_json(&value)?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    pub fn authorize_action(&self, action: &ryeos_runtime::callback::ActionPayload) -> Result<()> {
+        if action.thread != "inline" || action.facets.is_some() || action.launch_window.is_some() {
+            bail!("workload-client grant admits only unary inline execution");
+        }
+        let execution = self
+            .executions
+            .binary_search_by(|entry| entry.item_ref.as_str().cmp(&action.item_id))
+            .ok()
+            .and_then(|index| self.executions.get(index))
+            .ok_or_else(|| anyhow::anyhow!("workload-client item is outside the admitted grant"))?;
+        if action.product_selections != self.product_selections_for_action(&action.item_id) {
+            bail!("workload-client action contradicts its daemon-admitted product selections");
+        }
+        for (name, item_ref) in &action.ref_bindings {
+            let allowed = execution.ref_bindings.get(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workload-client ref binding `{name}` is outside the admitted grant"
+                )
+            })?;
+            if allowed.binary_search(item_ref).is_err() {
+                bail!("workload-client ref binding `{name}` value is outside the admitted grant");
+            }
+        }
+        let admitted_call = match action.call.as_ref().and_then(|call| call.method()) {
+            Some(name) => ryeos_runtime::workload_client::WorkloadClientCallCeiling::Method {
+                name: name.to_owned(),
+            },
+            None => ryeos_runtime::workload_client::WorkloadClientCallCeiling::Default,
+        };
+        if execution.calls.binary_search(&admitted_call).is_err() {
+            bail!("workload-client method is outside the admitted grant");
+        }
+        Ok(())
+    }
+
+    pub fn product_selections_for_action(
+        &self,
+        item_ref: &str,
+    ) -> ryeos_state::external_content::products::composition::ProductSelectionInputs {
+        self.execution_product_selections
+            .get(item_ref)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn authorize_effect_class(
+        &self,
+        item_ref: &str,
+        effect_class: Option<ryeos_effect_contract::EffectClass>,
+    ) -> Result<()> {
+        let execution = self
+            .executions
+            .binary_search_by(|entry| entry.item_ref.as_str().cmp(item_ref))
+            .ok()
+            .and_then(|index| self.executions.get(index))
+            .ok_or_else(|| anyhow::anyhow!("workload-client item is outside the admitted grant"))?;
+        let class = effect_class.map_or("live", ryeos_effect_contract::EffectClass::as_str);
+        if execution
+            .effect_classes
+            .binary_search_by(|value| value.as_str().cmp(class))
+            .is_err()
+        {
+            bail!("workload-client child effect class `{class}` exceeds the admitted grant");
+        }
+        Ok(())
+    }
+
+    pub fn authorize_workspace_access(
+        &self,
+        item_ref: &str,
+        access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+    ) -> Result<ryeos_engine::kind_registry::WorkspaceAccess> {
+        let execution = self
+            .executions
+            .binary_search_by(|entry| entry.item_ref.as_str().cmp(item_ref))
+            .ok()
+            .and_then(|index| self.executions.get(index))
+            .ok_or_else(|| anyhow::anyhow!("workload-client item is outside the admitted grant"))?;
+        let access = access.ok_or_else(|| {
+            anyhow::anyhow!(
+                "workload-client child has no signed shared-workspace access projection"
+            )
+        })?;
+        if access != execution.workspace_access {
+            bail!(
+                "workload-client child workspace access contradicts the admitted project request"
+            );
+        }
+        Ok(access)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CallbackCapability {
+    // This is the process-local bearer projection for every runtime-origin
+    // callback, including a boot-bound hosted-workload client. Its exact
+    // method surface lives below; future action/project/boot constraints also
+    // extend this record rather than creating a parallel workload-token store.
+    // Durable identity belongs in the launch/session capsule and worker rows,
+    // while this store retains only the live bearer needed by the attached
+    // process.
     pub token: String,
     pub invocation_id: String,
     pub thread_id: String,
     /// Exact durable launch owner allowed to use this token. Production
     /// managed launches bind it before the token is exposed to a runtime.
     pub launch_owner: Option<String>,
+    /// Exact runtime RPC surface admitted for this bearer. This is checked in
+    /// the UDS prelude before routing and again at security-sensitive handlers.
+    pub runtime_method_surface: CallbackRuntimeMethodSurface,
     /// Chain root of the minting thread. Carried so the daemon can key
     /// cross-chain wiring from a callback without re-deriving it. It is NOT an
     /// authority source by itself — callers that act on it MUST confirm it
@@ -42,7 +367,7 @@ pub struct CallbackCapability {
     /// [`CallbackCapability::assert_chain_root`].
     pub chain_root_id: String,
     pub project_path: PathBuf,
-    pub expires_at: Instant,
+    pub expires_at: MonotonicDeadline,
     /// V5.5 P2: composed effective capabilities the parent thread
     /// holds. Carried on the callback token so the daemon-side
     /// dispatcher can enforce caps at the trust boundary instead of
@@ -84,6 +409,10 @@ pub struct CallbackCapability {
     /// dispatched descendants inherit this execution budget authority; it is
     /// never accepted from runtime-supplied fields.
     pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
+    /// Optional boot-local narrowing for the generic hosted workload client.
+    /// Absence preserves the ordinary callback contract. This is bound once
+    /// before the protected child channel is exposed and can never be widened.
+    pub workload_client_grant: Option<AdmittedWorkloadClientGrant>,
 }
 
 impl CallbackCapability {
@@ -104,6 +433,11 @@ impl CallbackCapability {
 }
 
 pub struct CallbackCapabilityStore {
+    // Keep one callback-capability owner. A long-lived worker may receive a
+    // freshly minted pair for each attached boot, but its bearer still uses
+    // this same validation/revocation path. A second store would split method,
+    // project, principal, expiry, and detach authority across competing
+    // implementations.
     capabilities: Mutex<HashMap<String, CallbackCapability>>,
 }
 
@@ -161,11 +495,14 @@ impl CallbackCapabilityStore {
         hard_limits: Value,
         depth: u32,
     ) -> CallbackCapability {
-        let random_bytes: [u8; 32] = rand::random();
+        // Lillux owns OS entropy at the same boundary where it owns time and
+        // descriptor authority. Higher layers consume opaque random bytes;
+        // they must not grow a second direct platform RNG dependency.
+        let random_bytes = lillux::crypto::generate_random_bytes::<32>();
         let hex = lillux::cas::sha256_hex(&random_bytes);
         let token = format!("cbt-{hex}");
 
-        let inv_bytes: [u8; 16] = rand::random();
+        let inv_bytes = lillux::crypto::generate_random_bytes::<16>();
         let inv_hex = lillux::cas::sha256_hex(&inv_bytes);
         let invocation_id = format!("inv-{}", &inv_hex[..12]);
 
@@ -174,12 +511,13 @@ impl CallbackCapabilityStore {
             invocation_id,
             thread_id: thread_id.to_string(),
             launch_owner: None,
+            runtime_method_surface: CallbackRuntimeMethodSurface::complete_runtime_protocol(),
             // Defaults to root (chain_root == thread_id). The managed launch
             // path overrides this via `set_chain_root` with the thread's
             // authoritative chain root from state.
             chain_root_id: thread_id.to_string(),
             project_path,
-            expires_at: Instant::now() + ttl,
+            expires_at: MonotonicDeadline::after(ttl),
             effective_caps,
             provenance,
             effective_bundle_id,
@@ -191,6 +529,7 @@ impl CallbackCapabilityStore {
             hard_limits,
             depth,
             accounting_scope: None,
+            workload_client_grant: None,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -283,6 +622,50 @@ impl CallbackCapabilityStore {
         }
     }
 
+    /// Narrow a freshly minted callback bearer to one exact runtime-method
+    /// surface before it is exposed to a process. This operation never widens
+    /// an already-exact surface.
+    pub fn restrict_runtime_methods(
+        &self,
+        token: &str,
+        surface: CallbackRuntimeMethodSurface,
+    ) -> Result<bool> {
+        if !surface.is_exact() {
+            bail!("callback runtime-method restriction must be exact");
+        }
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                if cap.runtime_method_surface.is_exact() {
+                    bail!("callback runtime-method surface was already restricted");
+                }
+                cap.runtime_method_surface = surface;
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Bind one already-admitted workload-client intersection to a freshly
+    /// minted callback capability. Rebinding is forbidden even to an equal
+    /// value so no live bearer can change authority after exposure.
+    pub fn set_workload_client_grant(
+        &self,
+        token: &str,
+        grant: AdmittedWorkloadClientGrant,
+    ) -> Result<bool> {
+        grant.validate()?;
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                if cap.workload_client_grant.is_some() {
+                    bail!("callback workload-client grant was already bound");
+                }
+                cap.workload_client_grant = Some(grant);
+                true
+            }
+            None => false,
+        })
+    }
+
     pub fn validate(
         &self,
         token: &str,
@@ -294,7 +677,7 @@ impl CallbackCapabilityStore {
             .get(token)
             .ok_or_else(|| anyhow::anyhow!("invalid callback capability"))?;
 
-        if Instant::now() > cap.expires_at {
+        if cap.expires_at.has_elapsed() {
             bail!("callback capability expired");
         }
 
@@ -320,7 +703,7 @@ impl CallbackCapabilityStore {
             .get(token)
             .ok_or_else(|| anyhow::anyhow!("invalid callback capability"))?;
 
-        if Instant::now() > cap.expires_at {
+        if cap.expires_at.has_elapsed() {
             bail!("callback capability expired");
         }
 
@@ -343,7 +726,7 @@ impl CallbackCapabilityStore {
             .get(token)
             .ok_or_else(|| anyhow::anyhow!("invalid callback capability"))?;
 
-        if Instant::now() > cap.expires_at {
+        if cap.expires_at.has_elapsed() {
             bail!("callback capability expired");
         }
 
@@ -361,9 +744,8 @@ impl CallbackCapabilityStore {
 
     pub fn prune_expired(&self) -> usize {
         let mut map = self.capabilities.lock().unwrap();
-        let now = Instant::now();
         let before = map.len();
-        map.retain(|_, cap| cap.expires_at > now);
+        map.retain(|_, cap| !cap.expires_at.has_elapsed());
         before - map.len()
     }
 }
@@ -443,7 +825,7 @@ pub struct ThreadAuthState {
     /// through an authenticated handler boundary; those executions must never
     /// synthesize transport verification during a callback.
     handler_context: Option<crate::handler_context::HandlerContext>,
-    pub expires_at: Instant,
+    pub expires_at: MonotonicDeadline,
 }
 
 impl ThreadAuthState {
@@ -465,6 +847,9 @@ impl ThreadAuthState {
 }
 
 pub struct ThreadAuthStore {
+    // This is the paired ingress-principal proof for runtime callbacks. Hosted
+    // workload clients reuse it and narrow the retained handler authority;
+    // they must not invent a workload-specific principal or signing key.
     states: Mutex<HashMap<String, ThreadAuthState>>,
 }
 
@@ -499,7 +884,7 @@ impl ThreadAuthStore {
                 origin_site_id,
             )?;
         }
-        let random_bytes: [u8; 32] = rand::random();
+        let random_bytes = lillux::crypto::generate_random_bytes::<32>();
         let hex = lillux::cas::sha256_hex(&random_bytes);
         let token = format!("tat-{hex}");
 
@@ -509,7 +894,7 @@ impl ThreadAuthStore {
             acting_principal,
             caller_scopes,
             handler_context,
-            expires_at: Instant::now() + ttl,
+            expires_at: MonotonicDeadline::after(ttl),
         };
 
         self.states.lock().unwrap().insert(token, state.clone());
@@ -522,7 +907,7 @@ impl ThreadAuthStore {
             .get(token)
             .ok_or_else(|| anyhow::anyhow!("invalid thread auth token"))?;
 
-        if Instant::now() > state.expires_at {
+        if state.expires_at.has_elapsed() {
             bail!("thread auth token expired");
         }
 
@@ -544,9 +929,8 @@ impl ThreadAuthStore {
 
     pub fn prune_expired(&self) -> usize {
         let mut map = self.states.lock().unwrap();
-        let now = Instant::now();
         let before = map.len();
-        map.retain(|_, s| s.expires_at > now);
+        map.retain(|_, state| !state.expires_at.has_elapsed());
         before - map.len()
     }
 }
@@ -599,6 +983,48 @@ mod tests {
             .validate(&cap.token, "T-test123", PathBuf::from("/project").as_path())
             .unwrap();
         assert_eq!(validated.thread_id, "T-test123");
+    }
+
+    #[test]
+    fn exact_runtime_method_surface_narrows_existing_callback_bearer() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-workload",
+            PathBuf::from("/project"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/project")),
+            "0".repeat(64),
+        );
+        let surface = CallbackRuntimeMethodSurface::exact(vec![
+            ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD.to_owned(),
+        ])
+        .unwrap();
+        assert!(store.restrict_runtime_methods(&cap.token, surface).unwrap());
+
+        let narrowed = store
+            .validate_token_and_thread(&cap.token, "T-workload")
+            .unwrap();
+        narrowed
+            .runtime_method_surface
+            .authorize(ryeos_runtime::RUNTIME_DISPATCH_ACTION_METHOD)
+            .unwrap();
+        assert!(
+            narrowed
+                .runtime_method_surface
+                .authorize("runtime.vault_get")
+                .is_err()
+        );
+        assert!(
+            store
+                .restrict_runtime_methods(
+                    &cap.token,
+                    CallbackRuntimeMethodSurface::exact(vec!["runtime.vault_get".to_owned()])
+                        .unwrap(),
+                )
+                .is_err(),
+            "an exact bearer must never be widened or replaced in place"
+        );
     }
 
     #[test]
@@ -897,9 +1323,10 @@ mod tests {
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test".to_string(),
             launch_owner: None,
+            runtime_method_surface: CallbackRuntimeMethodSurface::complete_runtime_protocol(),
             chain_root_id: "T-test".to_string(),
             project_path: PathBuf::from("/project"),
-            expires_at: Instant::now() + Duration::from_secs(300),
+            expires_at: MonotonicDeadline::after(Duration::from_secs(300)),
             effective_caps: vec![],
             provenance: ExecutionProvenance::root_live_fs(
                 PathBuf::from("/project"),
@@ -918,6 +1345,7 @@ mod tests {
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,
+            workload_client_grant: None,
         };
 
         let cloned = cap.clone();
@@ -1112,6 +1540,185 @@ mod tests {
         assert_eq!(
             narrowed.authenticated_origin_site_id.as_deref(),
             Some("site:source")
+        );
+    }
+
+    fn workload_client_grant() -> AdmittedWorkloadClientGrant {
+        let mut grant = AdmittedWorkloadClientGrant {
+            schema: AdmittedWorkloadClientGrant::SCHEMA,
+            protocol: ryeos_runtime::workload_client::WORKLOAD_CLIENT_PROTOCOL.to_owned(),
+            chain_root_id: "T-root".to_owned(),
+            placement_thread_id: "T-placement".to_owned(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            origin_site_id: "site:source".to_owned(),
+            worker_instance_id: "worker-1".to_owned(),
+            worker_boot_epoch: 1,
+            worker_boot_identity_hash: "b".repeat(64),
+            root_launch_capsule_hash: "c".repeat(64),
+            session_capsule_hash: "d".repeat(64),
+            project_authority_digest: "e".repeat(64),
+            request_digest: "f".repeat(64),
+            caller_scope_digest: "1".repeat(64),
+            operator_grant_digest: "2".repeat(64),
+            root_delegation_digest: "3".repeat(64),
+            node_policy_generation_digest: "4".repeat(64),
+            ingresses: vec![ryeos_runtime::workload_client::WorkloadClientIngress::Cli],
+            execution_presentation: serde_json::Value::Null,
+            executions: vec![
+                ryeos_runtime::workload_client::WorkloadClientExecutionCeiling {
+                    item_ref: "tool:project/check".to_owned(),
+                    ref_bindings: std::collections::BTreeMap::from([(
+                        "input".to_owned(),
+                        vec!["knowledge:project/source".to_owned()],
+                    )]),
+                    calls: vec![
+                        ryeos_runtime::workload_client::WorkloadClientCallCeiling::Default,
+                        ryeos_runtime::workload_client::WorkloadClientCallCeiling::Method {
+                            name: "inspect".to_owned(),
+                        },
+                    ],
+                    effect_classes: vec!["live".to_owned(), "recorded".to_owned()],
+                    workspace_access:
+                        ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,
+                },
+            ],
+            execution_product_selections: std::collections::BTreeMap::new(),
+            effective_caps: vec!["ryeos.execute.tool.project/check".to_owned()],
+            max_in_flight: 2,
+            max_invocations_per_boot: 8,
+            max_lifetime_seconds: 300,
+            max_request_bytes: 4096,
+        };
+        grant.execution_presentation = serde_json::Value::Array(
+            grant
+                .executions
+                .iter()
+                .map(|ceiling| {
+                    serde_json::json!({
+                        "authority": ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling)
+                    })
+                })
+                .collect(),
+        );
+        grant
+    }
+
+    fn workload_client_action() -> ryeos_runtime::callback::ActionPayload {
+        ryeos_runtime::callback::ActionPayload {
+            product_selections: Vec::new(),
+            operation_id: Some("5".repeat(64)),
+            item_id: "tool:project/check".to_owned(),
+            ref_bindings: std::collections::BTreeMap::from([(
+                "input".to_owned(),
+                "knowledge:project/source".to_owned(),
+            )]),
+            params: serde_json::json!({"focused": true}),
+            thread: "inline".to_owned(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        }
+    }
+
+    #[test]
+    fn workload_client_grant_admits_only_exact_action_surface() {
+        let grant = workload_client_grant();
+        grant.validate().unwrap();
+        grant.authorize_action(&workload_client_action()).unwrap();
+
+        let mut wrong_ref = workload_client_action();
+        wrong_ref
+            .ref_bindings
+            .insert("input".to_owned(), "knowledge:project/other".to_owned());
+        assert!(grant.authorize_action(&wrong_ref).is_err());
+
+        let mut wrong_method = workload_client_action();
+        wrong_method.call = Some(ryeos_runtime::callback::MethodCall {
+            method: Some("write".to_owned()),
+            args: None,
+        });
+        assert!(grant.authorize_action(&wrong_method).is_err());
+
+        let mut detached = workload_client_action();
+        detached.thread = "detached".to_owned();
+        assert!(grant.authorize_action(&detached).is_err());
+    }
+
+    #[test]
+    fn workload_client_grant_injects_but_never_delegates_product_selection_control() {
+        use ryeos_state::external_content::products::composition::{
+            ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+        };
+        let mut grant = workload_client_grant();
+        let selection = ProductSelectionInput {
+            target: ProductSelectionTarget::Root {},
+            selection: ProductSelection {
+                declaration_id: "platform".to_owned(),
+                witness_hash: "6".repeat(64),
+                witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                qualification_hash: Some("7".repeat(64)),
+            },
+        };
+        grant
+            .execution_product_selections
+            .insert("tool:project/check".to_owned(), vec![selection.clone()]);
+        grant.validate().unwrap();
+
+        let mut injected = workload_client_action();
+        injected.product_selections = vec![selection];
+        grant.authorize_action(&injected).unwrap();
+        assert!(grant.authorize_action(&workload_client_action()).is_err());
+
+        injected.product_selections[0].selection.witness_hash = "8".repeat(64);
+        assert!(grant.authorize_action(&injected).is_err());
+    }
+
+    #[test]
+    fn workload_client_grant_rechecks_resolved_child_effect_class() {
+        let grant = workload_client_grant();
+        grant
+            .authorize_effect_class("tool:project/check", None)
+            .unwrap();
+        grant
+            .authorize_effect_class(
+                "tool:project/check",
+                Some(ryeos_effect_contract::EffectClass::Recorded),
+            )
+            .unwrap();
+        assert!(
+            grant
+                .authorize_effect_class(
+                    "tool:project/check",
+                    Some(ryeos_effect_contract::EffectClass::Sealed),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workload_client_grant_requires_the_exact_child_workspace_projection() {
+        let grant = workload_client_grant();
+        assert_eq!(
+            grant
+                .authorize_workspace_access(
+                    "tool:project/check",
+                    Some(ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration,),
+                )
+                .unwrap(),
+            ryeos_engine::kind_registry::WorkspaceAccess::ImmutableCurrentGeneration
+        );
+        assert!(
+            grant
+                .authorize_workspace_access(
+                    "tool:project/check",
+                    Some(ryeos_engine::kind_registry::WorkspaceAccess::SharedExclusive),
+                )
+                .is_err()
+        );
+        assert!(
+            grant
+                .authorize_workspace_access("tool:project/check", None)
+                .is_err()
         );
     }
 }

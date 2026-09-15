@@ -1,0 +1,26 @@
+version: "1.0.0"
+category: fixture
+description: Observe one offline fixture account through the selected runtime
+config:
+  worker_ref: worker:fixture/enrollment
+  environment_binding: null
+  required_credential_state: any
+  route_set: enrollment
+  allowed_effect_classes: [credential_read, credential_write, pure_read]
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: false
+  required_terminal_publication: any
+  max_lifetime_seconds: 300
+  recover_upstream_session: false
+  mode: {kind: session}
+  candidate_disposition: owner_decision
+  workload_client_delegation_caps: []
+limits:
+  duration_seconds: 360
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

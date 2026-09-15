@@ -1,151 +1,116 @@
-## <!-- ryeos:signed:2026-07-23T10:04:44Z:fb2c304e77e638fe73306a539e5573bee9e026d46a6dc9900187d0901f168d6f:tOwkiabO0IAi1WJEsdONgRt/NkMDa8Kgq3rRV2xfzlh723bEkoALhHl/vzevaX8+mkX2i4cHnMHhTsFV1o6FAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
-
+---
 category: ryeos/papers
 tags: [papers, forgetting, compaction, privacy, permanence, open-theory]
-version: "0.1.0"
+version: "0.2.0"
 description: >
-Working notes for paper 4, "A Semantics of Forgetting": any system whose
-truth is its history owes a theory of which parts of the past may be
-deleted without changing what the surviving record means. The open-theory
-paper that keeps the program honest.
-
+  Working questions about retention changes, preserved verification claims,
+  deletion limits and accountability in a content-addressed execution history.
 ---
 
 # Paper 4 — A Semantics of Forgetting
 
-Working notes, not a draft. The open-theory paper: the mechanisms exist in
-the implementation; the theory underneath them is unwritten, and this paper
-owes it. Owns strain point 4 from `series-map.md`. Assumes papers 1 and 2.
+Working notes, not a draft. The open-theory paper. Revised September 2026 to
+remove the assumption that hashes alone preserve every verification predicate
+or that cryptographic history requires permanent retention of all commitments.
 
 ## Thesis
 
-Short version:
+> A system that derives authority from retained history needs an explicit
+> account of what a retention change preserves, what it makes unverifiable,
+> and which operations must subsequently refuse.
 
-> A system whose source of truth is its history owes a semantics of
-> forgetting: a principled account of which parts of the past can be
-> deleted without changing what the surviving record means.
+Storage is finite and records can be sensitive. The goal is neither permanent
+surveillance nor silent loss of justification. It is honest retention under
+declared verification, privacy and continuation requirements.
 
-Expanded version:
+## The research question
 
-> Permanence collides with two facts. Finitude: history-as-truth meets
-> finite disks, hence GC and DAG compaction. Privacy: a total signed record
-> of everything an agent or operator did is also a surveillance object,
-> hence sealed envelopes. Both collisions are currently resolved by
-> mechanism without theory. Stated properly, compaction is not cleanup — it
-> is a claim that certain pasts are semantically inert, and that claim
-> needs a definition, invariants, and proofs.
+For a specified surviving closure and set of supported queries, when does
+deletion or compaction preserve the promised verification and attribution
+claims? Which claims must instead become unavailable or weaker?
 
-## The one claim
+"Meaning-preserving" is relative to those named claims, not every conceivable
+future query or interpretation. Establishing a useful formal contract remains
+research work.
 
-Meaning-preserving forgetting can be defined — deletion under which every
-surviving object still verifies and every warrant chain remains walkable —
-and content addressing makes it constructive: you can forget the bytes and
-keep the commitment, because the hash remains as an unretractable
-placeholder for the content it named.
+## Content and commitment
 
-## The core question
+A retained hash can identify bytes if they become available again. By itself,
+it cannot reveal their contents, validate their schema, establish a grant's
+scope or reproduce a result.
 
-Which parts of the past can be forgotten without changing what the present
-means? "The present" here is precise (paper 1): the frontier of a record
-whose authority derives entirely from that record. Delete the wrong past
-and the present does not merely lose detail — it loses justification.
+Dropping a body while keeping its signed commitment can preserve limited
+attribution. It may destroy the evidence needed for replay, continuation or
+substantive evaluation. Those losses must be recorded and respected.
 
-## Sub-problems
+There is no universal skeleton of hashes and signatures sufficient for every
+authority predicate. Required policy bodies, custody evidence and dependency
+closures vary by operation.
 
-### 1. Forgetting vs repudiation
+## Forgetting, correction and repudiation
 
-The entire program (paper 3 especially) depends on unretractability: an
-agent's standing is its inability to disown its record. So forgetting must
-never become a retraction channel. The saving observation is that CAS
-splits content from commitment: dropping a body while retaining its hash,
-signature, and position in the braid forgets _what was said_ while
-preserving _that it was said, by whom, under what authority_. Forget the
-bytes, keep the commitment. Deletion of content is permissible; deletion of
-the fact of commitment never is.
+Correction publishes a new judgment or current selection without rewriting
+what retained earlier records say. Withdrawal from future use is different
+from deleting source bytes, revoking authority or denying a prior commitment.
 
-### 2. Privacy and crypto-shredding
+A signed retained record resists undetected alteration relative to a trusted
+head. It does not ensure that someone retains that head forever, disclose all
+alternative branches, or prevent a signer from denying its significance.
 
-The sealed-envelope vault (AEAD data encryption, DEK-wrap to vault key,
-per-remote pinning) already implies the second mechanism: destroying a key
-renders sealed content permanently unreadable without touching the record's
-structure. Crypto-shredding is forgetting-by-unreadability — the braid
-stays intact, verification still passes, the content is gone from the
-world. The paper should treat key destruction as a first-class forgetting
-operation with its own semantics, not an operational accident.
+Retention policy can authorise deletion. The system must not continue claiming
+evidence completeness after that evidence is gone. Privacy can legitimately
+require giving up some verification or continuation capability.
 
-### 3. The accountability floor
+## Encryption and key destruction
 
-What must never be forgotten for the system to remain what it is: enough
-for every surviving object to verify, and every warrant chain (paper 3) to
-remain walkable — act to agent key to grant to grantor. Candidate
-formulation: the minimum permanent record is the **skeleton** — hashes,
-signatures, and links — while bodies are the forgettable flesh. The floor
-is not a policy choice; it is derivable from what verification and
-attribution structurally require.
+Destroying the only remaining decryption material can make retained ciphertext
+unreadable under the encryption assumptions. This requires accounting for
+backups, wrapped keys, exported keys, plaintext copies and derived artifacts.
 
-### 4. Compaction as theorem, not hygiene
+Key destruction does not remove an already disclosed copy or erase knowledge
+from a person or model. Ciphertext length, metadata and low-entropy commitments
+may still disclose information. Encryption-key rotation is not automatically
+crypto-shredding.
 
-The implementation compacts snapshot DAGs by topological sort (Kahn's
-algorithm) when pruning and rewriting history. The paper's job is the
-correctness condition that makes such rewrites legitimate: a compaction is
-**projection-safe** iff every query answerable from surviving refs answers
-identically, every surviving object verifies, and no warrant chain breaks.
-GC then stops being hygiene and becomes an inference: these objects are
-unreachable from any commitment, therefore semantically inert, therefore
-forgettable.
+## Reclamation and compaction
 
-## Candidate principle (to be sharpened)
+GC computes reachability under selected roots. Selecting the correct roots is
+an authority and lifecycle decision: active executions, staged imports,
+recoverable handoffs, retained evidence and publication may each impose roots.
 
-> Forgetting is legitimate exactly when it is invisible to verification and
-> attribution. The permanent record is the skeleton of hashes, signatures,
-> and links; content is forgettable flesh; and the two operations —
-> body-dropping and key-destruction — are the only forgetting a
-> history-as-truth system may perform.
+Compaction needs a declared equivalence condition. For the supported surviving
+queries, identify which answers must remain unchanged and which evidence is
+intentionally no longer available. Rewriting a signed object creates a new
+identity; any claimed relation to its predecessor needs appropriate evidence.
 
-Open question flagged honestly: whether ref rewriting during compaction can
-always be made attestable (a signed claim that the rewrite was
-projection-safe), so that even forgetting leaves testimony.
+A signed assertion that compaction was safe is testimony about the operation,
+not by itself a proof of query equivalence.
 
-## Evidence in the implementation
+## Demonstrations and open obligations
 
-- DAG versioning with parent hashes; GC compaction via topological sort.
-- CAS/ref split: immutable facts under mutable, signed entry points —
-  the structure that makes skeleton/flesh separable at all.
-- Sealed-envelope vault; vault key rotation not affecting sealed secrets —
-  the key-destruction mechanism's existing half.
-- The white paper's limitation "revocation is hard for immutable objects" —
-  this paper is that sentence taken seriously.
+These are qualification targets, not assertions that a universal forgetting
+mechanism has landed:
 
-## Objections and current answers
+- Remove unreachable synthetic content without breaking retained closures.
+- Refuse replay or continuation when a required retained dependency is absent.
+- Distinguish content deletion, current withdrawal and authority revocation.
+- Trace a synthetic private source through summaries, indexes, export and
+  adaptive artifacts; identify copies the node cannot recall.
+- State and test one concrete compaction-equivalence contract.
+- Verify the actual key and copy assumptions of a bounded encryption-deletion
+  experiment rather than claiming global erasure.
 
-- **"This is just GC."** GC decides reachability; this paper decides
-  meaning. The claim is that reachability-from-commitments is the correct
-  reachability relation for a system whose truth is its history — that is
-  a semantic thesis, not a memory-management one.
-- **"Regulation (right to erasure) will demand more than body-dropping."**
-  Possibly — and the paper's value is stating precisely what _cannot_ be
-  granted (deletion of commitment) without the system ceasing to be
-  accountable, so the negotiation happens with the invariant on the table.
-- **"Why a whole paper?"** Because every other paper's strength
-  (unretractability) is this paper's problem. A program that never prices
-  its permanence is advocacy, not theory. This is the paper that keeps the
-  series honest.
+## Relation to the programme
 
-## Phrases worth preserving
-
-- Forget the bytes, keep the commitment.
-- The skeleton is permanent; the flesh is forgettable.
-- Forgetting is legitimate exactly when it is invisible to verification
-  and attribution.
-- Compaction is a claim that a past is semantically inert — claims need
-  proofs.
-- Even forgetting should leave testimony.
+Durable accountability has costs. Papers about portable work and enduring
+mandates must state retention requirements rather than treating permanence as
+free. Measurement needs evidence coverage; knowledge correction needs known
+consumers; neither justifies recording every personal activity indefinitely.
 
 ## Guardrails
 
-- Never propose a mechanism that enables retraction; forgetting and
-  repudiation must remain provably distinct.
-- Stay tethered to implemented mechanisms (compaction, GC, vault) — the
-  paper theorizes what exists, it does not spec new features.
-- Keep legal framing (erasure rights) as application, not foundation; the
-  foundation is the verification/attribution invariant.
+No universal permanent-accountability floor is established here.
+Do not equate a commitment with its missing evidence or deletion with unlearning.
+State limitations without claiming legal erasure compliance.
+Changes to retention mechanisms require their existing owners and tests; this
+paper defines questions, not a new GC implementation.

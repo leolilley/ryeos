@@ -117,6 +117,18 @@ impl UdsRuntimeClient {
         }
         Ok((params, inline))
     }
+
+    fn serialize_completed_dedicated_session_termination(
+        request: DedicatedSessionCompletedTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize completed dedicated-session terminate request: {error}"
+            ))
+        })?;
+        params["reason"] = json!("completed");
+        Ok(params)
+    }
 }
 
 #[async_trait]
@@ -136,7 +148,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             // daemon's per-connection loop (parallel foreach over tools is
             // only parallel if each iteration gets its own connection).
             self.rpc
-                .request_dedicated("runtime.dispatch_action", params, None)
+                .request_dedicated(crate::RUNTIME_DISPATCH_ACTION_METHOD, params, None)
                 .await
                 .map_err(Self::map_rpc_error)
         } else {
@@ -146,7 +158,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             // everything queued behind it) forever.
             self.rpc
                 .request_with_timeout(
-                    "runtime.dispatch_action",
+                    crate::RUNTIME_DISPATCH_ACTION_METHOD,
                     params,
                     Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT),
                 )
@@ -155,8 +167,8 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         }
     }
 
-    async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "pid": pid});
+    async fn attach_process(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.attach_process", params)
@@ -210,7 +222,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         request: crate::callback::DedicatedSessionWaitRequest,
     ) -> Result<Value, CallbackError> {
-        let server_wait = std::time::Duration::from_millis(request.timeout_ms);
+        let server_wait = lillux::time::Duration::from_millis(request.timeout_ms);
         let mut params = serde_json::to_value(request).map_err(|error| {
             CallbackError::Transport(anyhow::anyhow!(
                 "serialize dedicated-session wait request: {error}"
@@ -249,6 +261,22 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn dedicated_session_command_observation(
+        &self,
+        request: DedicatedSessionCommandObservationRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session command observation request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.dedicated_session_command_observation", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn terminate_dedicated_session(
         &self,
         request: DedicatedSessionTerminateRequest,
@@ -258,6 +286,18 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
                 "serialize dedicated-session terminate request: {error}"
             ))
         })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.terminate_dedicated_session", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn terminate_completed_dedicated_session(
+        &self,
+        request: DedicatedSessionCompletedTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = Self::serialize_completed_dedicated_session_termination(request)?;
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.terminate_dedicated_session", params)
@@ -722,6 +762,39 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn attachment_wire_has_thread_authority_and_no_process_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("callback.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let frame = crate::framing::recv_frame(&mut stream).await.unwrap();
+            let request: Value = rmp_serde::from_slice(&frame).unwrap();
+            assert_eq!(request["method"], "runtime.attach_process");
+            assert_eq!(
+                request["params"],
+                json!({
+                    "thread_id":"T-runtime", "callback_token":"callback-test",
+                    "thread_auth_token":"thread-test",
+                })
+            );
+            let response = rmp_serde::to_vec_named(&json!({
+                "request_id":request["request_id"], "result":{"attached":true},
+            }))
+            .unwrap();
+            crate::framing::send_frame(&mut stream, &response)
+                .await
+                .unwrap();
+        });
+        let client = UdsRuntimeClient::new(socket, "callback-test".into(), "thread-test".into());
+        assert_eq!(
+            client.attach_process("T-runtime").await.unwrap(),
+            json!({"attached":true})
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn from_env_returns_error_without_token() {
         let result = UdsRuntimeClient::from_environment(
@@ -773,6 +846,30 @@ mod tests {
     }
 
     #[test]
+    fn completed_dedicated_session_termination_has_one_fenced_wire_shape() {
+        let fence = HostedCommandCompletionFence {
+            placement_thread_id: "T-worker".to_string(),
+            admitted_capsule_hash: "a".repeat(64),
+            worker_boot_epoch: 4,
+            command_sequence: 2,
+            request_digest: "b".repeat(64),
+            turn_id: "turn-9".to_string(),
+            completion_operation_id: "c".repeat(64),
+        };
+        let params = UdsRuntimeClient::serialize_completed_dedicated_session_termination(
+            DedicatedSessionCompletedTerminateRequest {
+                thread_id: "T-worker".to_string(),
+                completion: fence.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(params["thread_id"], "T-worker");
+        assert_eq!(params["reason"], "completed");
+        assert_eq!(params["completion"], serde_json::to_value(fence).unwrap());
+    }
+
+    #[test]
     fn dispatch_action_serializes_typed_hook_identity() {
         let identity = HookDispatchIdentity {
             occurrence: HookDispatchOccurrence::new(
@@ -797,6 +894,7 @@ mod tests {
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
             action: ActionPayload {
+                product_selections: Vec::new(),
                 operation_id: None,
                 item_id: "tool:test/audit".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
@@ -824,6 +922,7 @@ mod tests {
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
             action: ActionPayload {
+                product_selections: Vec::new(),
                 operation_id: Some("1".repeat(64)),
                 item_id: "tool:test/noop".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
@@ -848,6 +947,7 @@ mod tests {
             thread_id: "T-1".to_string(),
             action: ActionPayload {
                 operation_id,
+                product_selections: Vec::new(),
                 item_id: "tool:test/noop".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),

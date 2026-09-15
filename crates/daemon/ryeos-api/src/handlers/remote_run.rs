@@ -23,6 +23,12 @@ pub struct Request {
     /// Item to execute (canonical ref).
     pub item_ref: String,
     pub ref_bindings: BTreeMap<String, String>,
+    /// Explicit destination-local witnesses, resolved only by the selected
+    /// remote. This does not forward source-admitted product authority or
+    /// transfer witnesses, qualifications, or consumer bindings.
+    #[serde(default)]
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     /// Local project path used to resolve the configured remote binding.
     /// Omit only for an explicitly projectless execution policy.
     #[serde(default)]
@@ -49,11 +55,13 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(
-    req: Request,
+    mut req: Request,
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
+    req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error}")))?;
     let report =
         config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
             .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
@@ -164,6 +172,7 @@ pub async fn handle(
         .execute(
             &req.item_ref,
             &req.ref_bindings,
+            &req.product_selections,
             binding
                 .as_ref()
                 .map(|binding| binding.remote_project_path.as_str()),
@@ -278,6 +287,7 @@ mod tests {
     #[test]
     fn signed_service_payload_requires_policy_and_carries_launch_coordinate() {
         let request: Request = serde_json::from_value(retained_request()).unwrap();
+        assert!(request.product_selections.is_empty());
         assert_eq!(
             request.launch_id.as_deref(),
             Some("L-0123456789abcdef0123456789abcdef")
@@ -290,6 +300,58 @@ mod tests {
         let mut missing = retained_request();
         missing.as_object_mut().unwrap().remove("execution_policy");
         assert!(serde_json::from_value::<Request>(missing).is_err());
+    }
+
+    #[test]
+    fn destination_product_selectors_use_the_existing_bounded_contract() {
+        use ryeos_state::external_content::products::composition::{
+            MAX_PRODUCT_SELECTIONS, canonicalize_product_selection_inputs,
+        };
+        let selection = |id: &str| {
+            serde_json::json!({
+                "target": {"kind": "content_dependency", "binding": "environment"},
+                "selection": {
+                    "declaration_id": id,
+                    "witness_hash": "ab".repeat(32),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": null
+                }
+            })
+        };
+        let mut payload = retained_request();
+        payload["product_selections"] = serde_json::json!([selection("z"), selection("a")]);
+        let request: Request = serde_json::from_value(payload.clone()).unwrap();
+        let canonical = canonicalize_product_selection_inputs(request.product_selections).unwrap();
+        assert_eq!(canonical[0].selection.declaration_id, "a");
+
+        payload["product_selections"] = serde_json::json!([selection("a"), selection("a")]);
+        let request: Request = serde_json::from_value(payload.clone()).unwrap();
+        assert!(canonicalize_product_selection_inputs(request.product_selections).is_err());
+
+        payload["product_selections"] = serde_json::json!(
+            (0..=MAX_PRODUCT_SELECTIONS)
+                .map(|i| selection(&format!("input-{i}")))
+                .collect::<Vec<_>>()
+        );
+        let request: Request = serde_json::from_value(payload.clone()).unwrap();
+        assert!(canonicalize_product_selection_inputs(request.product_selections).is_err());
+
+        payload["product_selections"] = serde_json::json!([selection("a")]);
+        payload["product_selections"][0]["selection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("qualification_hash");
+        assert!(serde_json::from_value::<Request>(payload).is_err());
+    }
+
+    #[test]
+    fn signed_remote_run_service_exposes_destination_selectors() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/core/.ai/services/remote/run.yaml");
+        let service: serde_json::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(service["schema"]["product_selections"], "array?");
+        assert_eq!(service["result_retention"], "digest_only");
     }
 
     #[test]

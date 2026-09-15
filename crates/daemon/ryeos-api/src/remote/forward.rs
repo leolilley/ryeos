@@ -476,7 +476,18 @@ pub async fn execute_unary_forward(
         })?,
         (None, None) => {
             // --no-project mode: push user space only.
-            match push_no_project(&authority, client, req.remote_project_path).await {
+            let transfer_ignore = state
+                .ignore_matcher
+                .union(req.remote_ignore)
+                .map_err(|error| RemoteForwardError::PushFailed(format!("{error:#}")))?;
+            match push_no_project(
+                &authority,
+                client,
+                req.remote_project_path,
+                &transfer_ignore,
+            )
+            .await
+            {
                 Ok(value) => value,
                 Err(err) => {
                     let _ = finish_sync_job_attempt_and_update_job(
@@ -859,6 +870,7 @@ async fn push_no_project(
     authority: &PinnedStateAuthority,
     client: &RemoteClient,
     remote_project_path: &str,
+    remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult, RemoteForwardError> {
     use crate::remote::push::{
         collect_snapshot_upload_hashes, finish_staged_roots, upload_missing,
@@ -895,15 +907,7 @@ async fn push_no_project(
         let snapshot = ryeos_state::objects::ProjectSnapshot {
             project_tree_hash: tree_hash.clone(),
             effective_policy_hash: {
-                let matcher = ryeos_state::ignore::IgnoreMatcher::from_config(
-                    &ryeos_state::ignore::IgnoreConfig {
-                        patterns: Vec::new(),
-                    },
-                )?;
-                let policy = ryeos_state::objects::ProjectSnapshotPolicy::from_matcher(
-                    ryeos_state::project_sync::ProjectSyncScope::FullProject,
-                    &matcher,
-                )?;
+                let policy = no_project_snapshot_policy(remote_ignore)?;
                 let guard = authority.acquire_shared_guard()?;
                 staged_roots.store_object_admitted(&guard, &local_cas, &policy.to_value())?
             },
@@ -964,6 +968,15 @@ async fn push_no_project(
 
     finish_staged_roots(authority, &mut staged_roots, operation)
         .map_err(|e| RemoteForwardError::PushFailed(format!("{e:#}")))
+}
+
+fn no_project_snapshot_policy(
+    remote_ignore: &IgnoreMatcher,
+) -> anyhow::Result<ryeos_state::objects::ProjectSnapshotPolicy> {
+    ryeos_state::objects::ProjectSnapshotPolicy::from_matcher(
+        ryeos_state::project_sync::ProjectSyncScope::FullProject,
+        remote_ignore,
+    )
 }
 
 #[cfg(test)]
@@ -1084,6 +1097,25 @@ mod tests {
         assert_eq!(s.cas_objects_fetched, 5);
         assert_eq!(s.files_updated, 3);
         assert_eq!(s.files_deleted, 1);
+    }
+
+    #[test]
+    fn projectless_push_captures_the_effective_source_target_policy() {
+        let transfer_ignore = IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+            patterns: vec![
+                "target/".into(),
+                "/.ai/config/remotes/".into(),
+                ".env".into(),
+            ],
+        })
+        .unwrap();
+        let policy = no_project_snapshot_policy(&transfer_ignore).unwrap();
+
+        assert_eq!(
+            policy.node_patterns,
+            vec!["/.ai/config/remotes/", ".env", "target/"]
+        );
+        policy.validate().unwrap();
     }
 
     #[test]

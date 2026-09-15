@@ -57,7 +57,7 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
 
 fn with_empty_launch_contract(body: &str, serves: &str) -> String {
     format!(
-        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  evidence_attachments:\n    max_attachments: 0\n    max_total_bytes: 0\n    target: null\n    destination_prefix: null\n    allowed_access: []\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
     )
 }
 
@@ -117,6 +117,9 @@ launch_contract:
   ref_bindings:
     context:
       required: false
+      project_result_requirement: none
+      source:
+        kind: caller
       allowed_kinds: [directive]
       allowed_spaces: [bundle, project]
       allowed_trust: [trusted_bundle, trusted_project]
@@ -134,6 +137,12 @@ launch_contract:
     max_targets_per_dependency: 0
     max_executable_search_entries: 0
     external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
   environment_contributions:
     max_contributions: 0
     max_targets_per_contribution: 0
@@ -174,6 +183,12 @@ launch_contract:
     max_targets_per_dependency: 0
     max_executable_search_entries: 0
     external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
   environment_contributions:
     max_contributions: 0
     max_targets_per_contribution: 0
@@ -237,6 +252,50 @@ fn parse_runtime_yaml_success() {
     assert_eq!(
         yaml.description.as_deref(),
         Some("Default directive runtime")
+    );
+}
+
+#[test]
+fn ref_binding_source_is_explicit_and_closed() {
+    let missing = FULL_RUNTIME_YAML.replace("      source:\n        kind: caller\n", "");
+    assert!(parse_via_registry(&missing).is_err());
+
+    let unknown = FULL_RUNTIME_YAML.replace(
+        "      source:\n        kind: caller\n",
+        "      source:\n        kind: inferred\n",
+    );
+    assert!(parse_via_registry(&unknown).is_err());
+
+    let projected = FULL_RUNTIME_YAML.replace(
+        "      source:\n        kind: caller\n",
+        "      source:\n        kind: primary_field\n        path: [product_recipe]\n",
+    );
+    let yaml = parse_via_registry(&projected).expect("primary field source parses");
+    assert!(matches!(
+        yaml.launch_contract.ref_bindings["context"].source,
+        ryeos_engine::runtime_registry::RefBindingSource::PrimaryField { ref path }
+            if path == &["product_recipe".to_owned()]
+    ));
+}
+
+#[test]
+fn ref_binding_project_result_requirement_is_explicit_and_closed() {
+    let field = "      project_result_requirement: none\n";
+    assert!(parse_via_registry(&FULL_RUNTIME_YAML.replace(field, "")).is_err());
+    assert!(
+        parse_via_registry(
+            &FULL_RUNTIME_YAML.replace(field, "      project_result_requirement: auto\n")
+        )
+        .is_err()
+    );
+    let yaml = parse_via_registry(&FULL_RUNTIME_YAML.replace(
+        field,
+        "      project_result_requirement: retained_generation\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].project_result_requirement,
+        ryeos_engine::runtime_registry::ProjectResultRequirement::RetainedGeneration,
     );
 }
 

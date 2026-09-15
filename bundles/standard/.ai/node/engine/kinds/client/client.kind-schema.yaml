@@ -1,5 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:23Z:dbfb32f24e168c325dc0b8cb66460a372095fd8349b2c49e8a13ee974e6da92b:d5Xc4731OYrUMNr5ltYH0Wp/C/qOLI5VCef5elG5erD+/f5xcgiJ/tyC9FsDQ1hMytsM/GWrg8YIxMQIUajxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-08T03:28:23Z:45ba0bda3d14483d107a129c24770fb275596f1d1b586213434b2830f30fc155:0wZKo2K9Pi1awv7uheG60id6FPRBHOky8XoqJz/Y5plJwsWuw46HA3fJFnzBESxpKkuKQaN9L8ApO6A+bH+eAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/client"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
 version: "1.0.0"
 location:
   directory: clients

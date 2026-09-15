@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-03T11:56:15Z:7a6029762745eaa6f9678981109c15f77fea47c650543c0d7b2f3af492379749:MvmzYf2/w+3hHwrcF/1NVELdmo/ArJUkRIL6LCbqeMmiPjTo/cd8gcqDZ+14s8HqJ418/KKvnIz+Gqss6FRtAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-10T12:59:28Z:90c739d4dad387f677b7730e0f1688d6889c8db322f92e275d8fc783b2d5e4d6:wPIH8p9YtGoPWXSLaTj5k9Lr/0wbQM2stekvkSjTvnRShUy+TCi1k77rH+dF/rJLXVT8tegqIh0s1B2xsNdUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -87,10 +87,11 @@ policies:
         - ryeos.register.command.root.system
       hosted-node: []
   execution:
-    schema: 1
+    schema: 2
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
+    workload_client: null
   object_closure:
     schema: 1
     max_roots: 256
@@ -118,10 +119,18 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 1
+      version: 6
+      process_scopes:
+        mode: unconfigured
       mode: disabled
       backend: null
       filesystem:
+        proc_filesystem: empty
+        live_project:
+          mode: fixed_parents
+          limits:
+            max_entries: 2048
+            max_depth: 64
         readable:
           - "{node_public_identity}"
           - "{daemon_socket}"
@@ -133,6 +142,7 @@ policies:
           - "{checkpoint_dir}"
       network:
         mode: host
+        runtime_files: []
       environment:
         allow:
           - "*"
@@ -144,8 +154,19 @@ policies:
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
   ingest_ignore:
-    schema: 1
-    additional_patterns: []
+    schema: 2
+    patterns:
+      - "*.pyc"
+      - ".DS_Store"
+      - ".env"
+      - ".git/"
+      - ".hg/"
+      - ".svn/"
+      - ".venv/"
+      - "/.ai/config/remotes/"
+      - "__pycache__/"
+      - "node_modules/"
+      - "target/"
   external_content:
     schema: 1
     roots: {}

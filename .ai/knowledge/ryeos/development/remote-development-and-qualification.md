@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-04T06:00:33Z:593e6b434c4cfa91ec60127e1c6f9e3d09ce9baabd4cd79e3fc9b71f938b29b3:bxqouLGLISf+ix01o+jMU37ZcOTUXwBDLhwH4P75RfBn+vs30MdNx+Uw4N35wyJgMYU2BdudXFntaFU36e6gBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-13T04:58:17Z:86ba333afd9f6b73edd55e4bbb3552d1c581de42b452fc91c76633ee85fec030:S5vKkALE66x+A7nwteTa6DJ5wEuV96o9TzE3tV96o+mCWCATWPloyUTYH9IUU8Mm2y9i37PI8qacI7u08X8VCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.1.0"
+version: "1.3.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -77,11 +77,124 @@ There are two supported execution shapes:
   `remote run` for long jobs where durable target-local thread/result evidence
   is enough.
 
-The second shape does not currently provide recursive retained-project-result
-materialization back to the source. `remote pull` can fetch caller-known typed
-object/blob hashes into a new directory, but it is not a `pull-result` command.
-Do not promise automatic artifact download for accepted jobs or bypass this
-gap with an implicit shared filesystem.
+The second shape returns a validated retained project candidate through the
+generic owner-bound `remote worker pull-result` operation. The source does not
+supply snapshot hashes: the target reconstructs the current placement, exact
+settled route command and completion fence, admitted project/base, candidate
+capture, and validation from existing authoritative facts, then signs that
+testimony. The source retains it in an idempotent sync job, fetches the exact
+closure through ordinary object transport, and uses the existing atomic
+clean-base result apply. The target candidate remains retained; pulling never
+publishes or discards it. `remote pull` remains the lower-level operation for
+caller-known typed object/blob hashes and is not this authority flow.
+
+For a project-owned long worker workflow, use `remote worker run` with a signed
+project Config using `ryeos.remote_worker_workflow.v1`. The Config selects one
+signed project Graph and maps the task, credential profile, and one explicit
+canonical `target_product_selections` batch. The selectors name
+destination-local witnesses: they are not source-admitted products, transferred
+bytes, or permission to find the latest target binding. The Graph owns provider
+selection and its exact worker environment; Core contains no Codex, model, or
+project-product branch.
+
+The v1 lifecycle is explicit and finite:
+
+1. `remote worker run` pushes the pinned source generation and establishes the
+   target launch. Its intermediate result is `launch_accepted` with
+   `allowed_next_action: resume`.
+2. `remote worker resume <source_work_id>` performs one recorded recovery or
+   target-completion observation. A live target returns
+   `completion_pending` and the same `resume` action; it is not recorded as a
+   failure. RyeOS does not poll in the background.
+3. A completed target Graph must return the exact followed worker terminal as
+   `candidate_terminal_thread_id`. The source checks the Graph's effective
+   definition digest against the admitted capsule and asks the existing
+   `worker-executions/candidate-result` authority for that exact coordinate.
+4. Completion records the target-signed candidate testimony and returns
+   `allowed_next_action: pull_result`. Pull remains a separate explicit
+   `remote worker pull-result` operation.
+
+The first v1 seam accepts only a bounded worker whose terminal thread is also
+its candidate chain root. A continued or cross-site-moved child is refused
+until a signed lineage resolver exists; a terminal thread ID must never be
+silently treated as a general chain-root coordinate. `remote worker status` is
+strictly a local read of the source recovery projection and never contacts the
+target or advances recovery.
+
+The project Config maps its `task` input directly to the bounded worker's
+closed goal envelope. It maps `target_product_selections` only into the
+followed worker action; the outer Graph remains product-empty. Ordinary child
+admission resolves and seals the exact target-local batch, including a
+`content_dependency` selection targeting the worker's `environment` ref
+binding and any `workload_execution` selections needed by admitted child
+operations. Nothing inherits selections from the Graph parent.
+
+Produce the batch on the destination with the existing
+`external-content compose-product` authority for each exact consumer and
+project generation. Lift the returned `selections` into typed
+`content_dependency` or `workload_execution` targets and sort by
+target/declaration identity. Do not
+type witness or qualification hashes from memory and do not reuse a source-node
+composition response. This first seam deliberately has no named profile or
+automatic binding lookup.
+
+For the current Codex App Server profile, the bridge injects the workspace
+`cwd`, immutable approval policy, and bound `threadId`; the caller must not
+supply those fields. Put the complete request in a file so its selection batch
+is reviewable and reusable for exact replay:
+
+```yaml
+# .tmp/remote-worker-request.yaml
+task:
+  session_start_payload: {model: gpt-5.3-codex-spark}
+  turn_start_payload:
+    effort: low
+    input:
+      - type: text
+        text: Make the requested bounded change and use only the admitted verification operations.
+target_product_selections:
+  # Exact canonical ProductSelectionInput objects derived from this
+  # destination's compose-product responses belong here.
+  - target: {kind: content_dependency, binding: environment}
+    selection:
+      declaration_id: authoring-tools
+      witness_hash: <destination-compose-product-witness-hash>
+      witness_source: {kind: local_capture}
+      qualification_hash: <destination-qualification-hash-or-null>
+```
+
+The RyeOS development worker also requires exact `workload_execution` entries
+for each selected Cargo/format/platform operation; the abbreviated file above
+illustrates shape, not a complete development product batch. Launch the
+reviewed file through the command-owned input-file path:
+
+```bash
+ryeos --project . remote worker run qualification \
+  config:development/ryeos/remote-worker personal \
+  --input .tmp/remote-worker-request.yaml
+```
+
+Retain the returned `source_work_id`. Drive and inspect only through that
+stable source-local handle:
+
+```bash
+ryeos remote worker status <source_work_id>
+ryeos remote worker resume <source_work_id>
+```
+
+Repeat the explicit `resume` only when the recorded result says
+`allowed_next_action: resume`. Once it says `pull_result`, take the returned
+`remote` and `candidate_terminal_thread_id` and invoke the existing explicit
+candidate transfer:
+
+```bash
+ryeos --project . remote worker pull-result \
+  <remote> <candidate_terminal_thread_id>
+```
+
+The model name is an ordinary bounded-turn request choice supported by the
+pinned Codex version, not a Core default or provider branch. A different
+signed project workflow may select a different worker and task schema.
 
 `remote bundle-install` is remote-to-caller import: the caller fetches an
 installed bundle from its named remote into the caller's live node. It does
@@ -282,7 +395,7 @@ Invoke it as:
 
 ```bash
 RYEOS_APP_ROOT=/absolute/source-node-root \
-scripts/dev/qualify-configured-remote.sh \
+tests/e2e/configured-remote/qualify.sh \
   --remote stronger \
   --project "$PROJECT" \
   --remote-project /srv/ryeos/projects/qualification \
@@ -308,13 +421,33 @@ also retain and verify the workload's target-signed receipt, chain head, or
 other exact authority defined by that workload. Do not weaken owner-scoped
 chain APIs to manufacture that evidence for ordinary `remote execute`.
 
-For a long-running accepted workload, use the configured-operator push/run
-policy documented by the remote command reference, retain the returned launch
-and thread IDs, and inspect only that exact thread with `remote thread-status`.
-Treat the retained remote result/log/facets as the phase-one artifact surface.
-If recursive project artifacts must return automatically, that requires a
-separate generic owner-bound `remote pull-result` design and is not implemented
-by this workflow.
+For a long-running workload, use the configured-operator push/run policy
+documented by the remote command reference, retain the returned chain root,
+launch and placement IDs, and inspect only that exact authority. After a
+completed turn has been fenced, the session is terminated, and its frozen
+candidate closure and base have been validated, return that retained candidate
+explicitly for source-side review with:
+
+```bash
+ryeos --project "$PROJECT" remote worker pull-result stronger <chain-root>
+```
+
+The configured target grant must include the exact
+`ryeos.execute.service.worker-executions/candidate-result` and object-read
+scopes. The source caller needs
+`ryeos.execute.service.remote/pull-worker-result`. A retry addresses the same
+source-local job from the owner, route, project, site, and chain tuple. It
+cannot select a newer candidate, silently advance either project HEAD, or
+dispose of the target candidate. The result returns the complete target-signed
+candidate testimony alongside the source-local job ID and apply counts so the
+evidence can be retained without reading node databases.
+
+This return is not independent task qualification. A `frozen` owner-retained
+candidate may be returned for inspection while its target root remains open for
+an owner decision. `publish_ready` additionally proves that the separately
+admitted evaluator accepted the candidate. Workflows claiming an accepted or
+publishable result must require `publish_ready`; workflows only returning an
+exact candidate for review must describe the weaker evidence honestly.
 
 For a model qualification, retain the exact signed worker/model refs,
 realization receipt/artifact hash, device profile, deterministic prompt/input,

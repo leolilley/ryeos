@@ -1,0 +1,99 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.next.step.ended"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "number"
+        },
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "assistantMessageID": {
+          "type": "string",
+          "pattern": "^msg_"
+        },
+        "finish": {
+          "type": "string"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "tokens": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "number"
+            },
+            "output": {
+              "type": "number"
+            },
+            "reasoning": {
+              "type": "number"
+            },
+            "cache": {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "type": "number"
+                },
+                "write": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "read",
+                "write"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "input",
+            "output",
+            "reasoning",
+            "cache"
+          ],
+          "additionalProperties": false
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "timestamp",
+        "sessionID",
+        "assistantMessageID",
+        "finish",
+        "cost",
+        "tokens"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

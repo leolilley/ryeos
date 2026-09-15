@@ -344,6 +344,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::Http,
             session: None,
+            execution_evidence: None,
         }
     }
 
@@ -376,6 +377,7 @@ mod tests {
             },
             callback_channel: CallbackChannel::None,
             session: None,
+            execution_evidence: None,
         }
     }
 
@@ -445,6 +447,7 @@ mod tests {
                 parent_capabilities: None,
                 depth: 0,
                 suppress_stimulus: false,
+                scheduled_fire: None,
             },
             policy: EnvelopePolicy {
                 effective_caps: vec![],

@@ -1,0 +1,42 @@
+{
+  "observed_on": "2026-09-09",
+  "probe": "probe_pinned_codex_tools.py",
+  "codex_sha256": "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40",
+  "model_turns": 0,
+  "node_mutations": 0,
+  "actual_tool_emission_qualified": false,
+  "production_capability_enabled": false,
+  "schemas": [
+    {
+      "experimental_fields_included": false,
+      "thread_start_has_dynamic_tools": false,
+      "thread_start_schema_sha256": "792e2f32e37cece971bd616664ea2053741acbed4e9c92e9d1766427718f2ecd"
+    },
+    {
+      "experimental_fields_included": true,
+      "thread_start_has_dynamic_tools": true,
+      "thread_start_schema_sha256": "18e546303ecfe878b179a50da73e6fb99f634be4bc3f7650d5870f31787079b2"
+    }
+  ],
+  "registrations": [
+    {
+      "experimental_api": false,
+      "registration_accepted": false,
+      "error": {
+        "code": -32600,
+        "message": "thread/start.dynamicTools requires experimentalApi capability"
+      }
+    },
+    {
+      "experimental_api": true,
+      "registration_accepted": true,
+      "error": null
+    }
+  ],
+  "remaining": [
+    "Explicit decision to adopt the pinned vendor experimental capability in signed Codex profile data.",
+    "Compile and qualify the generic invocation contract; registration alone does not prove invocation.",
+    "Actual model-generated callback, child outcome, result consumption and turn progress.",
+    "Both interface lifecycle proofs, candidate evaluation and remote return."
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "permission.v2.replied"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "requestID": {
+          "type": "string",
+          "pattern": "^per"
+        },
+        "reply": {
+          "$ref": "#/$defs/PermissionV2Reply"
+        }
+      },
+      "required": [
+        "sessionID",
+        "requestID",
+        "reply"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PermissionV2Reply": {
+      "type": "string",
+      "enum": [
+        "once",
+        "always",
+        "reject"
+      ]
+    }
+  }
+}

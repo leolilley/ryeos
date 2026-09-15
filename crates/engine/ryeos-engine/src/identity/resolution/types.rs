@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_definition_v2_canonical_bytes_are_frozen_before_refactor() {
+    fn effective_definition_v3_canonical_bytes_are_frozen_before_refactor() {
         let mut resolution = effective_digest_fixture();
 
         let mut second_ancestor = resolution.ancestors[0].clone();
@@ -1083,7 +1083,7 @@ mod tests {
         let effective_canonical = effective.canonical_json().unwrap();
         assert_eq!(
             effective_canonical,
-            include_str!("fixtures/effective_definition_v2.json").trim_end()
+            include_str!("fixtures/effective_definition_v3.json").trim_end()
         );
         assert_eq!(
             authored.canonical_json().unwrap(),
@@ -1091,7 +1091,7 @@ mod tests {
         );
         assert_eq!(
             resolution.effective_definition_digest().unwrap().as_str(),
-            "51b557e50314dc76d89717daf17366717b2e6e31079d85eee4053513a190d270"
+            "3910d2e34024a13698b7cb99dd3ae84d6c9799f49b47db1f50629aa9c42ce5c5"
         );
         assert_eq!(
             resolution.authored_definition_digest().unwrap().as_str(),
@@ -1334,6 +1334,7 @@ mod tests {
                 "manifest_hash": "a".repeat(64),
                 "entry_count": 1,
                 "total_bytes": 5,
+                "mount_root": "project",
                 "mount": "vendor/sim"
             }]),
         );

@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-08T12:15:14Z:10e744dcdeb9746842e124a190d55825d85dbd4f01941e8eb525a155c084767c:dY9d97FsDGP+aua3c/SXGM/nfD5wvYxjHf4ec3ikn5IaKQDwtx4xl13wsQsFcFqfE28EDk5BDgtGvvTIHxh8Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.receive-product
+required_caps: ["ryeos.execute.service.external-content/receive-product"]
+schema:
+  remote: string
+  witness_hash: string
+  origin_admission_hash: string
+  maximum_bytes: integer
+description: Receive an exact same-operator product from a pinned node remote and publish local acceptance without transferring consumer or qualification authority

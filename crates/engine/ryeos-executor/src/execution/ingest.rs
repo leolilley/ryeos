@@ -29,14 +29,7 @@ pub fn ingest_project_tree_with_operational_exclusions(
 ) -> Result<ProjectTree> {
     authority.ensure_guard(guard)?;
     policy.validate()?;
-    let mut previous: Option<&str> = None;
-    for exclusion in operational_exclusions {
-        ryeos_state::project_sync::validate_safe_relative_path(exclusion)?;
-        if previous.is_some_and(|value| value >= exclusion.as_str()) {
-            anyhow::bail!("operational project exclusions are not uniquely path-sorted");
-        }
-        previous = Some(exclusion);
-    }
+    validate_operational_exclusions(operational_exclusions)?;
     let matcher = policy.matcher()?;
     let cas = authority.cas_store()?;
     let mut files = std::collections::BTreeMap::new();
@@ -109,13 +102,45 @@ pub fn ingest_project_tree_with_operational_exclusions(
     Ok(tree)
 }
 
-fn is_operationally_excluded(path: &str, exclusions: &[String]) -> bool {
+pub(super) fn validate_operational_exclusions(exclusions: &[String]) -> Result<()> {
+    let mut previous: Option<&str> = None;
+    for exclusion in exclusions {
+        ryeos_state::project_sync::validate_safe_relative_path(exclusion)?;
+        if previous.is_some_and(|value| value >= exclusion.as_str()) {
+            anyhow::bail!("operational project exclusions are not uniquely path-sorted");
+        }
+        previous = Some(exclusion);
+    }
+    Ok(())
+}
+
+pub(super) fn is_operationally_excluded(path: &str, exclusions: &[String]) -> bool {
     exclusions.iter().any(|root| {
         path == root
             || path
                 .strip_prefix(root)
                 .is_some_and(|suffix| suffix.starts_with('/'))
     })
+}
+
+pub(super) fn restore_operational_shadow_files(
+    captured: &mut ProjectTree,
+    base: &ProjectTree,
+    exclusions: &[String],
+) -> Result<()> {
+    captured
+        .files
+        .retain(|path, _| !is_operationally_excluded(path, exclusions));
+    captured.files.extend(
+        base.files
+            .iter()
+            .filter(|(path, _)| is_operationally_excluded(path, exclusions))
+            .map(|(path, hash)| (path.clone(), hash.clone())),
+    );
+    // The process can replace an input's ancestor with a regular file. The
+    // restored base and captured edits must still form one valid tree before
+    // any candidate snapshot can commit it.
+    captured.validate()
 }
 
 fn canonical_relative_path(relative: &Path) -> Result<String> {
@@ -158,7 +183,65 @@ pub fn materialize_project_file(
 
 #[cfg(test)]
 mod tests {
-    use super::is_operationally_excluded;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::{
+        ingest_project_tree, is_operationally_excluded, materialize_project_file,
+        restore_operational_shadow_files,
+    };
+    use ryeos_app::node_policy::NodePolicySection as _;
+
+    #[test]
+    fn private_input_shadows_preserve_base_files_and_do_not_publish_evidence() {
+        use ryeos_state::objects::ProjectTree;
+        let base = ProjectTree {
+            files: [
+                ("evidence/existing.json".to_owned(), "a".repeat(64)),
+                ("src/solver.py".to_owned(), "b".repeat(64)),
+            ]
+            .into(),
+        };
+        let mut captured = ProjectTree {
+            files: [
+                ("evidence/existing.json".to_owned(), "c".repeat(64)),
+                ("evidence/new.json".to_owned(), "d".repeat(64)),
+                ("src/solver.py".to_owned(), "e".repeat(64)),
+                ("evidence-adjacent.json".to_owned(), "f".repeat(64)),
+            ]
+            .into(),
+        };
+        let exclusions = vec![
+            "evidence/existing.json".to_owned(),
+            "evidence/new.json".to_owned(),
+        ];
+        restore_operational_shadow_files(&mut captured, &base, &exclusions).unwrap();
+        assert_eq!(
+            captured.files.get("evidence/existing.json"),
+            base.files.get("evidence/existing.json")
+        );
+        assert!(!captured.files.contains_key("evidence/new.json"));
+        assert_eq!(captured.files["src/solver.py"], "e".repeat(64));
+        assert_eq!(captured.files["evidence-adjacent.json"], "f".repeat(64));
+    }
+
+    #[test]
+    fn private_input_shadow_rejects_a_captured_regular_file_ancestor() {
+        use ryeos_state::objects::ProjectTree;
+        let base = ProjectTree {
+            files: [("evidence/input.json".to_owned(), "a".repeat(64))].into(),
+        };
+        let mut captured = ProjectTree {
+            files: [("evidence".to_owned(), "b".repeat(64))].into(),
+        };
+        let error = restore_operational_shadow_files(
+            &mut captured,
+            &base,
+            &["evidence/input.json".to_owned()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("nested below regular file"));
+    }
 
     #[test]
     fn operational_shadow_roots_match_only_segment_bounded_descendants() {
@@ -173,5 +256,130 @@ mod tests {
             &exclusions
         ));
         assert!(!is_operationally_excluded("vendor", &exclusions));
+    }
+
+    #[test]
+    fn signed_standard_policy_drives_capture_closure_and_materialization() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/.ai/node/init/profiles/standard.yaml"
+        ));
+        let body = lillux::signature::strip_signature_lines(raw);
+        let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+            serde_yaml::from_str(&body).unwrap();
+        profile
+            .validate(
+                &ryeos_app::node_policy::NodePolicyTable::new(),
+                Path::new("standard.yaml"),
+            )
+            .unwrap();
+        let parsed = ryeos_app::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
+            .parse(
+                &ryeos_app::node_policy::NodePolicyContext {
+                    section: "ingest_ignore".to_owned(),
+                    source_file: "standard.yaml".into(),
+                    signer_fingerprint: "ab".repeat(32),
+                },
+                profile.policies().get("ingest_ignore").unwrap(),
+            )
+            .unwrap();
+        let policy_record = parsed
+            .as_any()
+            .downcast_ref::<
+                ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy,
+            >()
+            .unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        for (relative, bytes) in [
+            ("src/lib.rs", b"pub fn retained() {}\n".as_slice()),
+            (
+                ".dev-keys/PUBLISHER_DEV.pem",
+                b"public development fixture\n".as_slice(),
+            ),
+            (".git/config", b"git metadata\n".as_slice()),
+            (".env", b"LOCAL_ONLY=value\n".as_slice()),
+            ("target/debug/output", b"build output\n".as_slice()),
+            (".ai/.bundles.lock", b"".as_slice()),
+        ] {
+            let path = project.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        let state_root = tempfile::tempdir().unwrap();
+        let state_db =
+            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+                .unwrap();
+        let authority = state_db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let project_root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let snapshot_policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+            &project_root,
+            &policy_record.matcher,
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+        )
+        .unwrap();
+        let tree =
+            ingest_project_tree(&authority, &guard, &project_root, &snapshot_policy).unwrap();
+
+        assert_eq!(
+            tree.files.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                ".dev-keys/PUBLISHER_DEV.pem".to_owned(),
+                "src/lib.rs".to_owned()
+            ]
+        );
+
+        let cas = authority.cas_store().unwrap();
+        let policy_hash = cas.store_object(&snapshot_policy.to_value()).unwrap();
+        let tree_hash = cas.store_object(&tree.to_value()).unwrap();
+        let snapshot = ryeos_state::objects::ProjectSnapshot {
+            project_tree_hash: tree_hash,
+            effective_policy_hash: policy_hash,
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: "2026-09-04T00:00:00Z".to_owned(),
+            source: "signed-standard-policy-test".to_owned(),
+        };
+        let snapshot_hash = cas.store_object(&snapshot.to_value()).unwrap();
+        let closure = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+            &cas,
+            &snapshot_hash,
+        )
+        .unwrap();
+        assert_eq!(closure.tree().tree().files, tree.files);
+        let object_closure =
+            ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+                &cas,
+                [snapshot_hash.clone()],
+                ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
+            )
+            .unwrap();
+        assert!(object_closure.is_complete());
+
+        let materialized = tempfile::tempdir().unwrap();
+        for (relative, object_hash) in &tree.files {
+            let target = materialized.path().join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            materialize_project_file(&authority, &guard, object_hash, &target).unwrap();
+        }
+        let admitted = ryeos_state::project_materialization::PinnedProjectMaterialization::verify(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            materialized.path(),
+        )
+        .unwrap();
+        admitted.ensure_path_binding().unwrap();
+        assert_eq!(
+            std::fs::read(materialized.path().join(".dev-keys/PUBLISHER_DEV.pem")).unwrap(),
+            b"public development fixture\n"
+        );
+        for excluded in [".git", ".env", "target", ".ai/.bundles.lock"] {
+            assert!(!materialized.path().join(excluded).exists(), "{excluded}");
+        }
     }
 }

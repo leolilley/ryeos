@@ -1,14 +1,31 @@
-<!-- ryeos:signed:2026-08-27T04:21:35Z:449dfa60ba12439edc23a3c4500afdd6e0ee016ce51e4785b79e709f1c72b9ec:xJ+dQmLA7T13lJhBtoCiBY3DBp5Rr371HiG9nX88EWGln/7nLrB+P4Ff9Vdnx3O+1Rim06M5VSbtOQskJcl0Cg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: README
 title: Future RyeOS Design Notes
 description: Index and ownership rules for scheduled and deferred RyeOS design work
 entry_type: reference
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # Future RyeOS Design Notes
+
+## Vision and discussion continuity
+
+- [Governed adaptation and memory evidence](governed-adaptation-and-memory-evidence.md)
+  — review of the shared learning/identity conversation, controlled memory
+  experiments, opaque-state risks and boundaries of cryptographic proof.
+
+- [Enduring working environment](enduring-working-environment.md) — synthesis
+  of the papers and principal-centered product vision, user scope decisions,
+  findings and open questions for resuming the discussion.
+- [Experience to reusable knowledge](experience-to-reusable-knowledge.md) —
+  proposed scoped adoption, selection, correction and privacy of lessons drawn
+  from execution evidence; not an implemented memory service.
+
+These are working discussion designs, not scheduled implementation promises.
+The edited index and new notes are unsigned pending normal project signing.
+
+## Scheduled and deferred work
 
 This directory holds scheduled and explicitly deferred design work. It should
 not contain completed implementation plans or stale branch notes. A note may
@@ -83,4 +100,8 @@ from the former top-level `docs/future` tree include:
 - [`resolution-pipeline-advanced.md`](resolution-pipeline-advanced.md) —
   criteria for adding new resolution stages; and
 - [`ryeos-native-development-platform.md`](ryeos-native-development-platform.md)
-  — RyeOS-native project hosting, checks, review, and release.
+  — RyeOS-native project hosting, checks, review, and release; and
+- [`environment-build-system.md`](environment-build-system.md) — production,
+  independent verification, publication, and simple reuse of portable
+  execution environments through existing Tool, Graph, content, and retained-
+  result authority.

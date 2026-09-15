@@ -1,0 +1,66 @@
+# ryeos:signed:2026-09-11T11:10:34Z:501727f1a25dba43029f9a6f3a0d1b4a7d6e9e6f75e8ce37aabf9db3e2deb889:SkezhnMW7FWg4KLMmIKsJZA/2HAvMeljohFE66MWqFeK1r5QBygbNpVH7JUexJHUAPcrlcYVSjrM+Umg27QoCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: execution
+version: "1.0.0"
+schema_version: "2.1.0"
+# Existing execution-config precedence owns the resolved per-operation values.
+# A Tool descriptor's timeout_secs is not a ceiling over bundle/project config.
+# Node limits and the parent's admitted workload-client grant still intersect.
+items:
+  graph:
+    ryeos/development/authoring-environment-production:
+      # Both 300-second leaves plus bounded graph/lifecycle overhead.
+      timeout: 660
+    ryeos/development/authoring-environment-production-recorded:
+      # The wrapper waits for the same exact producer root and its publication.
+      timeout: 720
+    ryeos/development/authoring-prepared-inputs-production:
+      timeout: 360
+    ryeos/development/authoring-prepared-inputs-production-recorded:
+      timeout: 420
+    ryeos/development/authoring-build-support-production:
+      timeout: 360
+    ryeos/development/authoring-build-support-production-recorded:
+      timeout: 420
+    ryeos/development/authoring-built-utilities-production:
+      timeout: 1860
+    ryeos/development/authoring-built-utilities-production-recorded:
+      timeout: 1920
+    ryeos/development/platform-production:
+      timeout: 900
+  tool:
+    ryeos/development/authoring-environment-production/build-utilities:
+      timeout: 1800
+    ryeos/development/registry-production/assemble:
+      timeout: 60
+    ryeos/development/platform-production/assemble:
+      timeout: 600
+    ryeos/development/repository-validation/dependency-layers:
+      timeout: 30
+    ryeos/development/repository-validation/naming:
+      timeout: 30
+    ryeos/development/repository-validation/no-content-wrap:
+      timeout: 30
+    ryeos/development/repository-validation/cli-presentation:
+      timeout: 30
+    ryeos/development/authoring-environment-production/prepare:
+      timeout: 300
+    ryeos/development/authoring-environment-production/assemble-build-support:
+      timeout: 300
+    ryeos/development/authoring-environment-production/assemble:
+      timeout: 300
+    ryeos/development/authoring-environment-production/verify:
+      timeout: 300
+    ryeos/development/cargo-vendor:
+      timeout: 300
+    ryeos/development/cargo-check:
+      timeout: 300
+    ryeos/development/cargo-build:
+      timeout: 300
+    ryeos/development/cargo-test:
+      timeout: 300
+    ryeos/development/platform-inspect:
+      timeout: 30
+    ryeos/development/format-check:
+      timeout: 60
+    ryeos/development/format-file:
+      timeout: 60

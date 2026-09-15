@@ -1192,6 +1192,7 @@ config:
                 "mode": "pinned",
                 "digest": "f".repeat(64),
                 "exclude": ["__pycache__"],
+                "mount_root": "project",
                 "mount": "tools/lib"
             }]
         }))

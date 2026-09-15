@@ -443,11 +443,7 @@ fn walk_yaml_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
 }
 
 fn workspace_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 fn api_handler_service_refs() -> Vec<String> {

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-02T20:32:26Z:9690facd9dd7551eca555c4652b21119fc06a276d917ee5ed4bc3d0bc0fa608d:8K2Tz47/qc4vOLJrtlE3EyRAleK4+fL5vrRP1RN3zkMwsrgZQJeUr+zKzBnALmy8EF94PaUitzn4h/fLRZExCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T20:28:16Z:d509c3b17ee301b9ff5ac51fd8eb4e101ec2123d5df47d281f62384fec5b4322:vWqko5BfpGmwRAcnkbnuIbRt4kPT4xK52C8YKZj/TSwAquwmnmRV5TkhgbFJUsrPgfJvbFlmfEWU3yB35UykAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
-version: "1.0.3"
+version: "1.0.4"
 description: >
   Manpage-style reference for ryeos remote commands, including local
   capabilities, remote authorized-key scopes, routes, examples, and
@@ -241,10 +241,9 @@ scope explicitly. It is create-only: `/authorize-key` cannot replace or
 reclassify any existing local-client, remote-node, remote-operator, bootstrap,
 or configured-operator grant. Admission claims are likewise create-only.
 
-Configured-operator continuity is provisioned only by an offline target-node
-action, not by remote delegation. With the target daemon stopped, its local
-operator installs the source operator's public key in an origin-bound,
-exact-scope grant:
+Configured-operator continuity is provisioned only by the target's configured
+local operator, not by remote delegation. Its node-owned authorization service
+installs the source operator's public key in an origin-bound, exact-scope grant:
 
 ```bash
 RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
@@ -253,6 +252,34 @@ RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
   --origin-site-id "site:<source>" \
   --scopes "<comma-separated exact scopes>"
 ```
+
+The command uses retained node signing authority through the same service
+online or standalone; it does not launch a Tool with access to node keys.
+On a freshly initialized node, start the node normally before provisioning
+peers. Standalone dispatch opens established state only; it does not create
+an execution-history projection as a side effect of changing a grant.
+Pass `--merge-scopes` to add exact capabilities while retaining existing ones.
+Keep the same `--origin-site-id` when updating a remote operator. Changing an
+incumbent principal's class or origin requires explicit
+`--allow-semantic-conversion` and stopped-node authority held through grant
+publication. Same-class scope updates need neither conversion nor a copied key.
+
+The admitted source-node key remains a distinct `remote_node` principal. Add
+the exact object, project, scheduler, or observation scopes required by the
+configured remote workflow without reclassifying that key:
+
+```bash
+RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
+  --public-key "<source_node_raw_ed25519_base64>" \
+  --label "admitted source node" \
+  --remote-node-origin-site-id "site:<source>" \
+  --merge-scopes \
+  --scopes "<comma-separated exact peer scopes>"
+```
+
+This is maintenance of the existing node-to-node authority, not configured
+operator continuity. The remote-node site must remain the same; changing its
+class or origin is an explicit stopped-node semantic conversion.
 
 Before installing that grant, admit the source node key with the exact
 `ryeos.attest.request.forwarded-operator` scope. The source site ID is the
@@ -297,9 +324,11 @@ ryeos remote push --remote prod --project /absolute/path/to/project
 
 The push pipeline ingests local project content, uploads missing CAS
 objects, and writes a principal-scoped remote pushed HEAD via
-`/push-head`. It uses the remote's cached ingest-ignore rules; if the
-cache is missing the handler fetches `/ingest-ignore` inline and aborts
-if that fetch fails.
+`/push-head`. Before local CAS ingestion, it unions the source node's current
+signed exclusions with the target's cached ingest-ignore rules. If the target
+cache is missing, the handler fetches `/ingest-ignore` inline and aborts if
+that fetch fails. The receiving node independently rechecks every transferred
+path against its then-current signed policy before advancing a HEAD.
 
 The ordinary command is node-owned. A durable workflow that must retain the
 configured operator across later remote control selects that principal
@@ -454,6 +483,17 @@ unary service calls. Accepted mode additionally requires a caller-retained
 `launch_id` and is used for durable projectless or project-backed workers.
 Project-backed live/current-HEAD modes still require a configured project
 binding.
+
+Optional `product_selections` use the ordinary typed root/content-dependency
+selection contract, but name witnesses and qualifications on the destination.
+The destination independently admits their exact owner, relationships and
+bindings against the selected pinned generation (or an explicitly projectless
+consumer). This does not make the command's default live project mode eligible
+for products, forward a source-admitted selection, or transfer product bytes.
+Use an explicit destination-local execution policy and configured-operator
+continuity for a retained product workflow. Accepted launch IDs remain
+create-only: query the exact launch after uncertain delivery, rather than
+resubmitting it and expecting a successful response replay.
 
 ## `ryeos remote doctor`
 

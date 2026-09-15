@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:c4034e601916d37d2a9f70811922d5d456fde780b598531e5f232db104c45a81:2rcDyggIKwQUpelQ0DkXqsU9hgdFn01vgh5Gql5CgwIDN6SuuJihOd7lxv0lRmoNf2hd9XVRP4V5LawcEaUqAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:58b7f34d3df5d0ff1454820feb9cd88bc652bec483ddf3d4ac734e7e305b660b:Lpo1G+agYShB8KqMQJkydA6/nHLMEhG0XnYvkwiqibSTODKCfkPqJw+lzuEV4Mp66TziZLue4CxMhVB6A6BAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "gc"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.gc"]
 description: "Remove expired sessions and exhausted or expired invites."
 

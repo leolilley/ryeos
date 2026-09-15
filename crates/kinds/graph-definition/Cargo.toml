@@ -13,3 +13,6 @@ ryeos-bundle = { workspace = true }
 ryeos-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

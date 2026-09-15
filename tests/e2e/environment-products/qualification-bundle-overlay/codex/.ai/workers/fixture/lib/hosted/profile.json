@@ -1,0 +1,147 @@
+{
+  "schema_version": 2,
+  "configuration_authority": "immutable_argv",
+  "workload_realization_id": "runtime",
+  "workload_executable": "bin/program",
+  "workload_args": [],
+  "workload_home_env": "FIXTURE_HOME",
+  "workload_client": null,
+  "baseline_config": "baseline.json",
+  "baseline_destination": "fixture.json",
+  "portable_state": null,
+  "credential_subject": {
+    "schema": 1,
+    "contract": "fixture.account.v1",
+    "json_pointers": ["/email", "/type"]
+  },
+  "initialization": [
+    {
+      "method": "initialize",
+      "effect_class": "pure_read",
+      "params": {},
+      "response_schema": "schema/initialize-response.json",
+      "notification": null
+    }
+  ],
+  "recovery": null,
+  "route_sets": {
+    "enrollment": ["credential.account.read", "credential.login.start"],
+    "session": ["session.run"]
+  },
+  "routes": [
+    {
+      "id": "credential.account.read",
+      "method": "fixture/credential/read",
+      "effect_class": "credential_read",
+      "request_schema": "schema/empty-request.json",
+      "response_schema": "schema/account-response.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "response_predicates": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "credential_enrollment_observed"},
+              "account": {
+                "op": "object",
+                "fields": {
+                  "email": {
+                    "op": "pointer",
+                    "pointer": "/response/result/account/email"
+                  },
+                  "type": {
+                    "op": "pointer",
+                    "pointer": "/response/result/account/type"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": "clear",
+      "post_success_routes": []
+    },
+    {
+      "id": "credential.login.start",
+      "method": "fixture/credential/start",
+      "effect_class": "credential_write",
+      "request_schema": "schema/empty-request.json",
+      "response_schema": "schema/login-response.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "response_predicates": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "credential_enrollment_started"},
+              "login_id": {
+                "op": "pointer",
+                "pointer": "/response/result/login_id"
+              },
+              "ttl_seconds": {"op": "literal", "value": 120}
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": "start",
+      "post_success_routes": []
+    },
+    {
+      "id": "session.run",
+      "method": "fixture/session/run",
+      "effect_class": "pure_read",
+      "request_schema": "schema/empty-request.json",
+      "response_schema": "schema/session-response.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "response_predicates": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "state"},
+              "expected": {"op": "literal", "value": "idle"},
+              "next": {"op": "literal", "value": "turn_running"},
+              "turn_id": {"op": "literal", "value": "fixture-selected-runtime-turn-v1"}
+            }
+          }
+        },
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "state"},
+              "expected": {"op": "literal", "value": "turn_running"},
+              "next": {"op": "literal", "value": "idle"},
+              "completed_turn_id": {"op": "literal", "value": "fixture-selected-runtime-turn-v1"}
+            }
+          }
+        }
+      ],
+      "result_retention": "durable",
+      "ceremony": null,
+      "post_success_routes": []
+    }
+  ],
+  "notifications": [],
+  "ignored_notifications": {},
+  "server_requests": []
+}

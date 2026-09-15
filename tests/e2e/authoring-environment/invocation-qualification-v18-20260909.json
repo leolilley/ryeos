@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-09",
+  "status": "installed_child_loop_passed_restart_exposed_cleanup_classification_defect",
+  "source_revision": "3b0ea050f14063637f18c4fa162050fbb4e5394c",
+  "installed_sha256": {
+    "ryeos": "a0f974c27918d76ea0d0fef4f9f0b3d35016b36e2be8f1fa4af832a9e907e0f1",
+    "ryeosd": "7fa953ea32b8b1c92b746d9ff29899793f5fd178e0992b40029d59a332c1867a",
+    "bridge": "d0b1306616f7337bda303207d8d9c47ef582ea434a64978efd03b51a652d5c45",
+    "adapter": "c1109d9f063314a5211940765f6ff748a42f6db46c692a2a51f9e30ac2314ce9"
+  },
+  "scope": "installed_two_node_loopback_nine_file_fixture",
+  "source_snapshot": "29fabe03c4f7702a31e7393348ae57115e514202f54450fb79f67692b80fdcbe",
+  "target_snapshot": "d9feab6a4309464ffcdf31c9e57b37b80e0a842b226fffcd98ab0f79e5be0902",
+  "tree_hash": "b17a04a20201eb51809c57db24d3fa7d705c027702f386fcee73e589ffe7d447",
+  "root": "T-afb1433c-8409-995d-7e09-b3b5e4716d98",
+  "model": "gpt-5.3-codex-spark",
+  "credential_generation": 2,
+  "command_observation": {
+    "admitted_capsule_hash": "ab8b11353e1f92900e83be5fd6c969fe6d4499cb4d7d41ba3398d8314092535a",
+    "chain_root_id": "T-afb1433c-8409-995d-7e09-b3b5e4716d98",
+    "command_kind": "route",
+    "command_sequence": 2,
+    "command_state": "completed",
+    "completion_fence": {
+      "admitted_capsule_hash": "ab8b11353e1f92900e83be5fd6c969fe6d4499cb4d7d41ba3398d8314092535a",
+      "command_sequence": 2,
+      "completion_operation_id": "1b801f5e0098fa1cbfa62d82d708ea6ba223af7bb42669030a94d998d5081b80",
+      "placement_thread_id": "T-afb1433c-8409-995d-7e09-b3b5e4716d98",
+      "request_digest": "c5f91a67ddc7e531d4462462320eef9fddb086d4aa78d8376f085db1bbccc55e",
+      "turn_id": "01a085b5-b70e-7ee0-a8b4-c9fad51c7336",
+      "worker_boot_epoch": 1
+    },
+    "idempotency_key": "invocation-v18-turn-start",
+    "operation": {
+      "completion_operation_id": "1b801f5e0098fa1cbfa62d82d708ea6ba223af7bb42669030a94d998d5081b80",
+      "completion_source": {
+        "batch_digest": "75997662e718009a1f9be55e0c10c7bf03356c178de8d9ae74bd5bcb2eb39efa",
+        "batch_operation_id": "ef9db5cd40fbe2e42709e56c0d17fd063d2ebb9aef5ac7ae3b4ee245c685b4a7",
+        "first_sequence": 16,
+        "kind": "pushed_observation_batch",
+        "through_sequence": 18
+      },
+      "id": "01a085b5-b70e-7ee0-a8b4-c9fad51c7336",
+      "kind": "turn",
+      "start_operation_id": "6bed786dcd7de2c68ccb3d9d4f5990d1ba4db23ab7363d86dd0c4cd6ba9f3068",
+      "state": "completed"
+    },
+    "placement_thread_id": "T-afb1433c-8409-995d-7e09-b3b5e4716d98",
+    "request_digest": "c5f91a67ddc7e531d4462462320eef9fddb086d4aa78d8376f085db1bbccc55e",
+    "response_digest": "dec99690c04912e323dfd914b64b23cd16eb44d15bc6ebb62e53fc8a31711fb8",
+    "route_id": "turn.start",
+    "worker_boot_epoch": 1
+  },
+  "children": [
+    {
+      "thread_id": "T-ab17aba7-f0ac-6be5-c9a8-c532a6a5ccf8",
+      "status": "failed",
+      "result": {
+        "error": {
+          "exit_code": 1,
+          "stderr": "",
+          "stdout": "Diff in /tmp/ryeos-codex-placement.kiyBnLrn/target-node/.ai/state/cache/snapshots/ac7f2c6ffb943dec268b34bf60f5cb7add23f30906027126a88e0821b2938f7d/crates/qualification/sample.rs:1:\n-pub fn value()->u32{2}\n+pub fn value() -> u32 {\n+    2\n+}\n \n"
+        },
+        "metadata": null,
+        "outcome_code": "exit:1",
+        "result": null
+      }
+    },
+    {
+      "thread_id": "T-2495c811-5271-dcf5-ccf8-a8f7f44aea9a",
+      "status": "completed",
+      "result": {
+        "error": null,
+        "metadata": null,
+        "outcome_code": "exit:0",
+        "result": ""
+      }
+    },
+    {
+      "thread_id": "T-933f1a7b-adf3-7fcd-df02-e0043971e10e",
+      "status": "completed",
+      "result": {
+        "error": null,
+        "metadata": null,
+        "outcome_code": "exit:0",
+        "result": ""
+      }
+    }
+  ],
+  "child_input_snapshots": [
+    "ac7f2c6ffb943dec268b34bf60f5cb7add23f30906027126a88e0821b2938f7d",
+    null,
+    "f05582d999a69726394d8a75357f73c7bec00657a658169d7940c9d74ad5446b"
+  ],
+  "workspace_reservations": "all_three_released",
+  "inspection_failure": {
+    "command_sequence": 3,
+    "route": "session.read",
+    "effect": "bridge refused recovery-only route; worker reaped; session outcome_unknown",
+    "qualification_effect": "Command 2 completed but its fence cannot be assumed current after command 3. Preserve original testimony. Focused precontact route-admission correction required."
+  },
+  "restart": {
+    "method": "existing supervised disposable target down/up",
+    "outcome": "startup_refused",
+    "error": "workspace capture has pending or identity-unknown dedicated worker contact",
+    "diagnosis": "exact worker boot is dead/reaped, but cleared-pointer outcome_unknown delivery was not accepted as settled process cleanup",
+    "disposition": "target stopped; history and candidate workspace preserved; focused source correction awaiting matched install"
+  },
+  "source_correction": {
+    "source_revision": "be91327f3bd5f0c17c38af97acee9deb2c083439",
+    "contract": [
+      "Public command admission checks the selected frozen route and its audience before reservation or worker contact.",
+      "Exact reaped process history permits workspace capture independently of unknown command delivery; unknown commands are not automatically replayed."
+    ],
+    "focused_checks": {
+      "public_command_surface": "passed",
+      "workspace_capture_pending_unknown_and_reaped": "passed",
+      "dedicated_session_service": "20 passed",
+      "hosted_command_terminal_replay": "5 passed",
+      "formatting_and_diff": "passed"
+    },
+    "reviews": "Independent ownership and safety reviews found no remaining blocker in these focused corrections.",
+    "package": {
+      "outcome": "full_bundle_publication_succeeded",
+      "selected_crates": ["ryeosd"],
+      "cargo_offline": true,
+      "jobs": 2,
+      "release_build_elapsed": "13m07s",
+      "publication_elapsed": "14m00s",
+      "embedded_daemon_revision": "be91327f3bd5",
+      "daemon_sha256": "37694e37200bd28c63eece3047a096bda01a6f53e0ebb9992977b5959f362c05",
+      "retained_static_worker_payloads": true,
+      "installation": "pending_privileged_install",
+      "installed_recovery_qualification": "not_run"
+    }
+  },
+  "real_remote_read_only_probe": {
+    "project": "d3a43ad8-6122-4f94-8b09-d106a782eb8d",
+    "service": "ryeos",
+    "environment": "production",
+    "observed_revision": "1db9ce4a13d82747b3d0a866de606ea02d2e8a6b",
+    "cgroup_mount": "read_only",
+    "scope_root_writable": false,
+    "qualification": "required_host_delegation_unavailable_in_current_configuration",
+    "mutations": "none"
+  },
+  "evidence_limits": [
+    "Host-side base project pathname is outside the worker mount namespace and does not show its private edits.",
+    "Child results were selected using the invocation ledger and verified through exact thread queries, not inferred from model prose.",
+    "Candidate freeze/evaluation, restart/reattachment, native CLI ingress, source-fenced return, repository development and real remote qualification remain open."
+  ]
+}

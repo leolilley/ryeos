@@ -76,9 +76,43 @@ pub(crate) struct ExpressionScope<'a> {
     result: Option<&'a Value>,
     execution: Option<&'a Value>,
     run: Value,
-    dispatch: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    post_action_dispatch: Option<PostActionDispatchExpressionContext<'a>>,
     foreach: Option<(&'a str, &'a Value)>,
     limits: EvaluationLimits,
+}
+
+#[derive(Clone, Copy)]
+struct PostActionDispatchExpressionContext<'a> {
+    evidence: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    child_thread_id: Option<&'a str>,
+}
+
+/// Build the transient post-action dispatch root. The child coordinate comes
+/// only from the daemon-parsed action outcome and is deliberately absent from
+/// persisted `RuntimeDispatchEvidence`.
+pub(crate) fn post_action_dispatch_value(
+    evidence: Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    child_thread_id: Option<&str>,
+) -> Value {
+    let mut value = evidence.map_or_else(
+        || json!({}),
+        |evidence| {
+            serde_json::to_value(evidence)
+                .expect("typed dispatch evidence is infallibly serializable")
+        },
+    );
+    let prior = value
+        .as_object_mut()
+        .expect("typed dispatch evidence serializes as an object")
+        .insert(
+            "child_thread_id".to_string(),
+            child_thread_id.map_or(Value::Null, |id| Value::String(id.to_string())),
+        );
+    assert!(
+        prior.is_none(),
+        "persisted dispatch evidence must not own child_thread_id"
+    );
+    value
 }
 
 #[cfg(test)]
@@ -99,6 +133,8 @@ mod tests {
             publication: RuntimeDispatchPublication::NotApplicable,
             record_hash: None,
             replayed_from: None,
+            result_projection:
+                ryeos_runtime::callback_contract::DispatchResultProjection::DispatchedSubject,
         }
     }
 
@@ -134,7 +170,7 @@ mod tests {
             },
         )
         .with_result(&result)
-        .with_dispatch(&dispatch)
+        .with_post_action_dispatch(Some(&dispatch), None)
         .render_json(&compiled)
         .unwrap();
 
@@ -146,11 +182,61 @@ mod tests {
             rendered["run"]["effective_definition_digest"],
             "d".repeat(64)
         );
-        assert_eq!(
-            rendered["dispatch"],
-            serde_json::to_value(dispatch).unwrap()
-        );
+        let mut expected_dispatch = serde_json::to_value(dispatch).unwrap();
+        expected_dispatch["child_thread_id"] = Value::Null;
+        assert_eq!(rendered["dispatch"], expected_dispatch);
         assert_eq!(rendered["answer"], 7);
+    }
+
+    #[test]
+    fn post_action_dispatch_child_is_explicit_and_never_inferred_from_result() {
+        let compiled = CompiledJsonTemplate::compile(
+            &json!({"child": "${dispatch.child_thread_id}"}),
+            "test.post_action_child",
+            &CompilationLimits::default(),
+        )
+        .unwrap();
+        let state = json!({});
+        let inputs = json!({});
+        let spoofed_result = json!({"child_thread_id": "T-spoofed"});
+        let dispatch = live_dispatch();
+        let digest = "d".repeat(64);
+
+        let exact = ExpressionScope::new(
+            &state,
+            &inputs,
+            None,
+            GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
+        )
+        .with_result(&spoofed_result)
+        .with_post_action_dispatch(Some(&dispatch), Some("T-daemon-child"))
+        .render_json(&compiled)
+        .unwrap();
+        assert_eq!(exact["child"], "T-daemon-child");
+
+        let no_child = ExpressionScope::new(
+            &state,
+            &inputs,
+            None,
+            GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
+        )
+        .with_result(&spoofed_result)
+        .with_post_action_dispatch(Some(&dispatch), None)
+        .render_json(&compiled)
+        .unwrap();
+        assert_eq!(no_child["child"], Value::Null);
+
+        let no_evidence = ExpressionScope::new(
+            &state,
+            &inputs,
+            None,
+            GraphRunExpressionContext::new("run-1", 1, "graph:test/solve", &digest),
+        )
+        .with_result(&spoofed_result)
+        .with_post_action_dispatch(None, None)
+        .render_json(&compiled)
+        .unwrap();
+        assert_eq!(no_evidence["child"], Value::Null);
     }
 }
 
@@ -167,7 +253,7 @@ impl<'a> ExpressionScope<'a> {
             result: None,
             execution,
             run: run.to_value(),
-            dispatch: None,
+            post_action_dispatch: None,
             foreach: None,
             limits: EvaluationLimits::default(),
         }
@@ -178,22 +264,16 @@ impl<'a> ExpressionScope<'a> {
         self
     }
 
-    pub(crate) fn with_dispatch(
+    pub(crate) fn with_post_action_dispatch(
         mut self,
-        dispatch: &'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence,
+        evidence: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+        child_thread_id: Option<&'a str>,
     ) -> Self {
-        self.dispatch = Some(dispatch);
+        self.post_action_dispatch = Some(PostActionDispatchExpressionContext {
+            evidence,
+            child_thread_id,
+        });
         self
-    }
-
-    pub(crate) fn with_dispatch_option(
-        self,
-        dispatch: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
-    ) -> Self {
-        match dispatch {
-            Some(dispatch) => self.with_dispatch(dispatch),
-            None => self,
-        }
     }
 
     pub(crate) fn with_foreach(mut self, name: &'a str, item: &'a Value) -> Self {
@@ -237,9 +317,9 @@ impl<'a> ExpressionScope<'a> {
         }
         context.insert("run", &self.run);
         let dispatch_value;
-        if let Some(dispatch) = self.dispatch {
-            dispatch_value = serde_json::to_value(dispatch)
-                .expect("typed dispatch evidence is infallibly serializable");
+        if let Some(dispatch) = self.post_action_dispatch {
+            dispatch_value =
+                post_action_dispatch_value(dispatch.evidence, dispatch.child_thread_id);
             context.insert("dispatch", &dispatch_value);
         }
         if let Some((name, item)) = self.foreach {

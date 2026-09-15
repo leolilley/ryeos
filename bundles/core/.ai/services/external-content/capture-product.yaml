@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-09T14:21:58Z:977251b824f58c29490d22ade57c6d04f7ce12a6f2708ea859d28c7568197147:e/zPJ4m9ES8uvDAxOLyEUuRuQPLs2H7f2n1wlWxmqRb/dsP9I35hbKluzrPFW1RlriWv9NGBjTFk31MVZygKCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.capture-product
+required_caps: ["ryeos.execute.service.external-content/capture-product"]
+schema:
+  chain_root_id: string
+  thread_id: string
+  recipe_binding: string
+  product_name: string
+description: Capture one named product from an exact successful retained producer using its admitted recipe; exact admitted operator owner only

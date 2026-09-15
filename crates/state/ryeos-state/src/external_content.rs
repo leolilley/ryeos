@@ -5,6 +5,10 @@ use std::ffi::OsStr;
 
 use anyhow::Context as _;
 
+pub mod products;
+pub mod retained_project;
+pub mod retained_workspace_output;
+
 use crate::objects::{
     ExternalContentManifestEntryKind, ExternalContentManifestObject,
     MAX_EXTERNAL_CONTENT_FILE_BYTES, MAX_EXTERNAL_CONTENT_MANIFEST_BYTES,
@@ -98,24 +102,56 @@ pub struct ExternalCapturePolicy<'a> {
     configured_ignore: &'a crate::ignore::IgnoreMatcher,
 }
 
+/// A locator may not jump beneath a directory that ordinary traversal would
+/// have excluded. In particular, basename globs do not themselves match every
+/// descendant. Establish this invariant before either filesystem capture or
+/// retained selection can report an optional member absent.
+fn validate_capture_locator(
+    path: &str,
+    configured_ignore: &crate::ignore::IgnoreMatcher,
+) -> anyhow::Result<()> {
+    crate::objects::validate_canonical_project_relative_path(path)?;
+    for (end, _) in path.match_indices('/') {
+        if capture_path_excluded(&path[..end], configured_ignore) {
+            anyhow::bail!("external content locator has an excluded ancestor");
+        }
+    }
+    if capture_path_excluded(path, configured_ignore) {
+        anyhow::bail!("external content locator is excluded by admitted capture policy");
+    }
+    Ok(())
+}
+
+fn capture_path_excluded(path: &str, configured_ignore: &crate::ignore::IgnoreMatcher) -> bool {
+    crate::project_sync::is_durable_content_capture_floor_excluded(path)
+        || configured_ignore.is_ignored(path)
+}
+
 impl<'a> ExternalCapturePolicy<'a> {
     pub fn new(
         locator_prefix: String,
         configured_ignore: &'a crate::ignore::IgnoreMatcher,
     ) -> anyhow::Result<Self> {
-        crate::objects::validate_canonical_project_relative_path(&locator_prefix)?;
-        let policy = Self {
+        validate_capture_locator(&locator_prefix, configured_ignore)?;
+        Ok(Self {
             locator_prefix,
             configured_ignore,
-        };
-        if policy.excludes_complete_path(&policy.locator_prefix) {
-            anyhow::bail!("external content locator is excluded by admitted capture policy");
-        }
-        Ok(policy)
+        })
     }
 
     pub fn locator_prefix(&self) -> &str {
         &self.locator_prefix
+    }
+
+    /// Apply the same traversal exclusions to a normalized mutation path.
+    /// A delta may name a descendant without visiting its excluded ancestor.
+    pub fn excludes_subtree_path(&self, relative: &str) -> anyhow::Result<bool> {
+        crate::objects::validate_canonical_project_relative_path(relative)?;
+        let complete = format!("{}/{}", self.locator_prefix, relative);
+        Ok(complete
+            .match_indices('/')
+            .any(|(end, _)| self.excludes_complete_path(&complete[..end]))
+            || self.excludes_complete_path(&complete))
     }
 
     fn excludes(&self, manifest_relative_path: &str) -> bool {
@@ -126,8 +162,7 @@ impl<'a> ExternalCapturePolicy<'a> {
     }
 
     fn excludes_complete_path(&self, path: &str) -> bool {
-        crate::project_sync::is_durable_content_capture_floor_excluded(path)
-            || self.configured_ignore.is_ignored(path)
+        capture_path_excluded(path, self.configured_ignore)
     }
 }
 
@@ -328,17 +363,13 @@ impl<'a> LargeContentCapturePolicy<'a> {
         configured_ignore: &'a crate::ignore::IgnoreMatcher,
         bounds: LargeContentCaptureBounds,
     ) -> anyhow::Result<Self> {
-        crate::objects::validate_canonical_project_relative_path(&locator_prefix)?;
+        validate_capture_locator(&locator_prefix, configured_ignore)?;
         bounds.validate()?;
-        let policy = Self {
+        Ok(Self {
             locator_prefix,
             configured_ignore,
             bounds,
-        };
-        if policy.excludes_complete_path(&policy.locator_prefix) {
-            anyhow::bail!("large-content locator is excluded by node capture policy");
-        }
-        Ok(policy)
+        })
     }
 
     fn excludes(&self, relative: &str) -> bool {
@@ -346,8 +377,7 @@ impl<'a> LargeContentCapturePolicy<'a> {
     }
 
     fn excludes_complete_path(&self, path: &str) -> bool {
-        crate::project_sync::is_durable_content_capture_floor_excluded(path)
-            || self.configured_ignore.is_ignored(path)
+        capture_path_excluded(path, self.configured_ignore)
     }
 }
 
@@ -379,6 +409,20 @@ pub fn capture_large_tree(
     policy: &LargeContentCapturePolicy<'_>,
     sink: &mut dyn ExternalLargeContentSink,
 ) -> anyhow::Result<crate::objects::ExternalLargeContentManifestObject> {
+    capture_large_tree_optional(root, policy, sink)?
+        .ok_or_else(|| anyhow::anyhow!("large-content tree contains no admitted entries"))
+}
+
+/// Capture a present authorized root while preserving the distinction between
+/// an invalid/missing root and a canonically empty tree after exclusions.
+/// Ordinary large-content imports retain `capture_large_tree`'s nonempty
+/// requirement; workspace partition capture records `None` as empty_directory.
+#[cfg(unix)]
+pub fn capture_large_tree_optional(
+    root: &lillux::PinnedDirectory,
+    policy: &LargeContentCapturePolicy<'_>,
+    sink: &mut dyn ExternalLargeContentSink,
+) -> anyhow::Result<Option<crate::objects::ExternalLargeContentManifestObject>> {
     let (root_device, _) = root.device_inode()?;
     let mut state = LargeCaptureState {
         observed_entries: 0,
@@ -388,7 +432,8 @@ pub fn capture_large_tree(
     };
     capture_large_directory(root, "", 0, root_device, policy, sink, &mut state)?;
     if state.entries.is_empty() {
-        anyhow::bail!("large-content tree contains no admitted entries");
+        root.ensure_path_binding()?;
+        return Ok(None);
     }
     state
         .entries
@@ -401,7 +446,8 @@ pub fn capture_large_tree(
         total_bytes: state.total_bytes,
     };
     manifest.validate()?;
-    Ok(manifest)
+    root.ensure_path_binding()?;
+    Ok(Some(manifest))
 }
 
 #[cfg(unix)]
@@ -1102,6 +1148,56 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn optional_large_tree_preserves_present_but_canonically_empty_root() {
+        struct EmptySink;
+        impl ExternalLargeContentSink for EmptySink {
+            fn store_large_file(
+                &mut self,
+                _: std::fs::File,
+                _: crate::large_object_store::PinnedLargeObjectSourceIdentity,
+                _: &str,
+                _: Option<&str>,
+            ) -> anyhow::Result<crate::large_object_store::IngestedLargeObject> {
+                unreachable!("empty root cannot store a large file")
+            }
+
+            fn store_content_file(
+                &mut self,
+                _: std::fs::File,
+                _: &str,
+                _: u64,
+            ) -> anyhow::Result<(String, u64)> {
+                unreachable!("empty root cannot store a content file")
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let ignore = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let policy = LargeContentCapturePolicy::new(
+            "products/runtime".to_owned(),
+            &ignore,
+            LargeContentCaptureBounds {
+                max_entries: 8,
+                max_depth: 4,
+                max_file_bytes: 1_024,
+                max_total_bytes: 4_096,
+            },
+        )
+        .unwrap();
+        assert!(
+            capture_large_tree_optional(&pinned, &policy, &mut EmptySink)
+                .unwrap()
+                .is_none()
+        );
+        assert!(capture_large_tree(&pinned, &policy, &mut EmptySink).is_err());
+    }
+
     #[test]
     fn a_stored_manifest_closure_round_trips_from_cas() {
         let (_dir, cas) = temp_cas();
@@ -1238,6 +1334,38 @@ mod tests {
     }
 
     #[test]
+    fn capture_locators_cannot_skip_excluded_ancestors_in_either_tier() {
+        let bounds = LargeContentCaptureBounds {
+            max_depth: 8,
+            max_entries: 32,
+            max_file_bytes: 1024,
+            max_total_bytes: 4096,
+        };
+        for patterns in [
+            vec!["private".to_owned()],
+            vec!["priv*".to_owned()],
+            vec!["private/".to_owned()],
+            vec!["/products/private/".to_owned()],
+        ] {
+            let configured =
+                crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+                    patterns,
+                })
+                .unwrap();
+            for path in ["products/private/bin", "products/private/missing/member"] {
+                assert!(ExternalCapturePolicy::new(path.to_owned(), &configured).is_err());
+                assert!(
+                    LargeContentCapturePolicy::new(path.to_owned(), &configured, bounds).is_err()
+                );
+            }
+            // Do not expand an exclusion into an unrelated sibling namespace.
+            let adjacent = "products/public/bin".to_owned();
+            assert!(ExternalCapturePolicy::new(adjacent.clone(), &configured).is_ok());
+            assert!(LargeContentCapturePolicy::new(adjacent, &configured, bounds).is_ok());
+        }
+    }
+
+    #[test]
     fn both_capture_tiers_apply_the_complete_non_bypassable_floor() {
         let configured = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
             patterns: Vec::new(),
@@ -1270,11 +1398,6 @@ mod tests {
             identity
                 .iter()
                 .any(|rule| rule.contains(".ryeos-pull-staging-*"))
-        );
-        assert!(
-            identity
-                .iter()
-                .any(|rule| rule.starts_with("built_in_ignore:"))
         );
     }
 }

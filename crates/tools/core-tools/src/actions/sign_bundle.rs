@@ -270,6 +270,7 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
         warnings: Vec::new(),
         notes: Vec::new(),
     };
+    let mut pending_source_units = Vec::new();
 
     let mut kind_names: Vec<String> = kinds.kinds().map(str::to_owned).collect();
     kind_names.sort();
@@ -335,6 +336,15 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
                         error: None,
                         declares_runtime_authority: info.declares_runtime_authority,
                     };
+                    if let Some(executor_id) = info.executor_id {
+                        pending_source_units.push(PendingSourceUnit {
+                            item_ref: outcome.item_ref.clone(),
+                            file_path: file_path.clone(),
+                            kind_name: kind_name.clone(),
+                            executor_id,
+                            expected_source_digest: info.resulting_content_digest.clone(),
+                        });
+                    }
                     match info.result {
                         SignResult::Unchanged => report.validated.push(outcome),
                         SignResult::Signed => report.signed.push(outcome),
@@ -348,6 +358,17 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
             }
         }
     }
+
+    sign_bundle_source_units(
+        source,
+        registry_roots,
+        &kinds,
+        &parser_dispatcher,
+        &trust_store,
+        signing_key,
+        &pending_source_units,
+        &mut report,
+    )?;
 
     // Loud pipeline: a populated item directory with no registered kind would
     // otherwise be skipped above with only a TRACE line. Fail before returning
@@ -369,6 +390,182 @@ fn read_bundle_source_name(source: &Path) -> Result<String> {
         serde_yaml::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
     ryeos_engine::protocol_vocabulary::validate_bundle_name(&manifest.name)?;
     Ok(manifest.name)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_bundle_source_units(
+    source: &Path,
+    registry_roots: &[PathBuf],
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    trust_store: &TrustStore,
+    signing_key: &lillux::crypto::SigningKey,
+    pending: &[PendingSourceUnit],
+    report: &mut SignBundleReport,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let roots = bundle_authoring_resolution_roots(source, registry_roots)?;
+    let configured_ignore =
+        ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+            // Bundle authoring is node-independent. Signing the complete
+            // durable-capture-safe unit covers every configured ignored
+            // subset a consuming node may later admit.
+            patterns: Vec::new(),
+        })?;
+
+    for unit in pending {
+        let kind_schema = kinds
+            .get(&unit.kind_name)
+            .ok_or_else(|| anyhow::anyhow!("source-unit kind disappeared after signing"))?;
+        let is_owner_signed_namespace = kind_schema
+            .execution()
+            .and_then(|execution| execution.source_closure.as_ref())
+            .is_some_and(|contract| {
+                matches!(
+                    (&contract.location, contract.testimony),
+                    (
+                        ryeos_engine::kind_registry::SourceClosureLocationDecl::ItemNamespace,
+                        ryeos_engine::kind_registry::SourceClosureTestimonyDecl::OwnerSignedFiles
+                    )
+                )
+            });
+        if !is_owner_signed_namespace {
+            continue;
+        }
+
+        let result = (|| -> Result<Option<super::source_unit_sign::SourceUnitSignResult>> {
+            super::sign::require_exact_signed_source_owner(
+                &unit.file_path,
+                &unit.expected_source_digest,
+            )?;
+            let policy = ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
+                &unit.executor_id,
+                &unit.file_path,
+                &unit.kind_name,
+                kinds,
+                parsers,
+                &roots,
+                trust_store,
+                trust_store,
+                None,
+            )?;
+            let signed = super::source_unit_sign::sign_owner_signed_source_unit(
+                source,
+                &unit.item_ref,
+                &unit.kind_name,
+                kind_schema,
+                &unit.expected_source_digest,
+                &configured_ignore,
+                policy.as_ref().map(|projection| &projection.policy),
+                signing_key,
+            )?;
+            let current = ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
+                &unit.executor_id,
+                &unit.file_path,
+                &unit.kind_name,
+                kinds,
+                parsers,
+                &roots,
+                trust_store,
+                trust_store,
+                None,
+            )?;
+            if current != policy {
+                bail!("executor source authority changed during source unit publication");
+            }
+            Ok(signed)
+        })();
+
+        match result {
+            Ok(Some(source_unit)) if source_unit.changed_files != 0 => {
+                mark_bundle_item_source_signed(report, &unit.item_ref)?;
+            }
+            Ok(_) => {}
+            Err(error) => mark_bundle_item_source_failed(report, &unit.item_ref, error)?,
+        }
+    }
+    Ok(())
+}
+
+fn bundle_authoring_resolution_roots(
+    source: &Path,
+    registry_roots: &[PathBuf],
+) -> Result<ryeos_engine::item_resolution::ResolutionRoots> {
+    let mut registered = Vec::new();
+    let mut names = std::collections::BTreeMap::new();
+    for root in std::iter::once(source).chain(registry_roots.iter().map(PathBuf::as_path)) {
+        let canonical_root = std::fs::canonicalize(root)
+            .with_context(|| format!("resolve bundle authoring root {}", root.display()))?;
+        if registered.iter().any(
+            |entry: &ryeos_engine::item_resolution::RegisteredBundleRoot| {
+                entry.canonical_root == canonical_root
+            },
+        ) {
+            continue;
+        }
+        let name = read_bundle_source_name(&canonical_root)?;
+        if let Some(existing) = names.insert(name.clone(), canonical_root.clone()) {
+            bail!(
+                "bundle authoring roots contain duplicate identity `{name}` at {} and {}",
+                existing.display(),
+                canonical_root.display()
+            );
+        }
+        registered.push(ryeos_engine::item_resolution::RegisteredBundleRoot {
+            name,
+            canonical_root,
+        });
+    }
+    Ok(ryeos_engine::item_resolution::ResolutionRoots::from_registered(None, &registered))
+}
+
+fn mark_bundle_item_source_signed(report: &mut SignBundleReport, item_ref: &str) -> Result<()> {
+    if report
+        .signed
+        .iter()
+        .any(|outcome| outcome.item_ref == item_ref)
+    {
+        return Ok(());
+    }
+    let position = report
+        .validated
+        .iter()
+        .position(|outcome| outcome.item_ref == item_ref)
+        .ok_or_else(|| anyhow::anyhow!("source-unit owner is absent from its signing report"))?;
+    report.signed.push(report.validated.remove(position));
+    Ok(())
+}
+
+fn mark_bundle_item_source_failed(
+    report: &mut SignBundleReport,
+    item_ref: &str,
+    error: anyhow::Error,
+) -> Result<()> {
+    let outcome = if let Some(position) = report
+        .signed
+        .iter()
+        .position(|outcome| outcome.item_ref == item_ref)
+    {
+        report.signed.remove(position)
+    } else if let Some(position) = report
+        .validated
+        .iter()
+        .position(|outcome| outcome.item_ref == item_ref)
+    {
+        report.validated.remove(position)
+    } else {
+        return Err(anyhow::anyhow!(
+            "source-unit owner is absent from its signing report"
+        ));
+    };
+    report.failed.push(ItemOutcome {
+        item_ref: outcome.item_ref,
+        error: Some(format!("owner-signed source unit refused: {error:#}")),
+        declares_runtime_authority: outcome.declares_runtime_authority,
+    });
+    Ok(())
 }
 
 /// Fail loudly when a populated `.ai/<dir>` is not covered by any registered
@@ -458,6 +655,16 @@ struct SignItemInfo {
     /// Whether the parsed item declares manifest-backed runtime-authority
     /// requirements (`requires.capabilities.manifest.runtime_authority`).
     declares_runtime_authority: bool,
+    executor_id: Option<String>,
+    resulting_content_digest: String,
+}
+
+struct PendingSourceUnit {
+    item_ref: String,
+    file_path: PathBuf,
+    kind_name: String,
+    executor_id: String,
+    expected_source_digest: String,
 }
 
 fn sign_one_item(
@@ -531,6 +738,13 @@ fn sign_one_item(
     // namespace lint uses this to distinguish a cap-minting item (actionable
     // namespace divergence) from an inert cross-namespace item (a note).
     let declares_runtime_authority = declares_manifest_runtime_authority(&parsed);
+    let executor_id = ryeos_engine::kind_registry::apply_extraction_rules(
+        &parsed,
+        &kind_schema.extraction_rules,
+        file_path,
+        &kind_schema.directory,
+    )
+    .executor_id;
 
     // Strip existing signature to get the canonical body
     let envelope = ryeos_engine::contracts::SignatureEnvelope {
@@ -538,8 +752,14 @@ fn sign_one_item(
         suffix: source_format.signature.suffix.clone(),
         after_shebang: source_format.signature.after_shebang,
     };
-    let changed =
-        super::sign::sign_validated_in_place_with_key(file_path, content, &envelope, signing_key)?;
+    let outcome = super::sign::sign_validated_in_place_with_key_outcome(
+        file_path,
+        content,
+        &envelope,
+        signing_key,
+    )?;
+    let changed = matches!(outcome, super::sign::SignOutcome::Signed { .. });
+    let resulting_content_digest = outcome.content_digest().to_owned();
 
     Ok(SignItemInfo {
         result: if changed {
@@ -548,6 +768,8 @@ fn sign_one_item(
             SignResult::Unchanged
         },
         declares_runtime_authority,
+        executor_id,
+        resulting_content_digest,
     })
 }
 

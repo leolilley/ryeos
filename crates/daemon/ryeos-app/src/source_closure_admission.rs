@@ -756,7 +756,10 @@ fn verify_owner_signed_files(
 /// signed kind's extension order. Host paths are deliberately absent: the
 /// typed content root has already selected the authority, while the kind
 /// schema defines the only filenames that may represent this canonical ref.
-fn item_namespace_source_request(
+/// Select the canonical source unit for both admission and owner signing.
+/// This only selects bytes from the supplied authoritative view; it grants no
+/// execution, signing, or publication authority to its caller.
+pub fn item_namespace_source_request(
     source: &dyn AuthoritativeSourceContent,
     expected_kind: &str,
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
@@ -933,14 +936,16 @@ impl AuthoritativeSourceContent for ProjectSourceContent<'_> {
     }
 }
 
-struct DirectorySourceContent<'a> {
+/// Read-only, path-pinned source view shared by admission and owner signing.
+/// Constructing this view does not authorize signing or execution.
+pub struct DirectorySourceContent<'a> {
     root: lillux::PinnedDirectory,
     identity: String,
     configured_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
 }
 
 impl<'a> DirectorySourceContent<'a> {
-    fn new(
+    pub fn new(
         root: &Path,
         identity: String,
         configured_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
@@ -1037,16 +1042,76 @@ impl AuthoritativeSourceContent for DirectorySourceContent<'_> {
         if !self.included(path).map_err(engine_internal)? {
             return Ok(None);
         }
-        let bytes =
-            lillux::read_regular_file_bounded_no_follow(&self.root.path().join(path), max_bytes)
-                .map_err(engine_internal)?;
+        let file = self
+            .root
+            .open_pinned_regular_descendant(path, false)
+            .map_err(engine_internal)?;
+        let bytes = file
+            .map(|file| file.read_bounded(max_bytes))
+            .transpose()
+            .map_err(engine_internal)?;
         self.root.ensure_path_binding().map_err(engine_internal)?;
-        Ok(Some(bytes))
+        Ok(bytes)
     }
 }
 
 fn engine_internal(error: anyhow::Error) -> ryeos_engine::error::EngineError {
     ryeos_engine::error::EngineError::Internal(error.to_string())
+}
+
+#[cfg(test)]
+mod directory_source_tests {
+    use super::*;
+
+    #[test]
+    fn absent_extension_candidate_is_not_a_read_failure() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".ai/tools/test")).unwrap();
+        std::fs::write(root.path().join(".ai/tools/test/item.yaml"), b"descriptor").unwrap();
+        let ignore =
+            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            })
+            .unwrap();
+        let source = DirectorySourceContent::new(root.path(), "test".into(), &ignore).unwrap();
+        assert_eq!(
+            source
+                .read_file(Path::new(".ai/tools/test/item.py"), 32)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            source
+                .read_file(Path::new(".ai/tools/test/item.yaml"), 32)
+                .unwrap(),
+            Some(b"descriptor".to_vec())
+        );
+        assert!(
+            source
+                .read_file(Path::new(".ai/tools/test/item.yaml"), 2)
+                .is_err()
+        );
+        assert!(source.read_file(Path::new("../outside"), 32).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_extension_candidate_is_not_treated_as_absent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".ai/tools/test")).unwrap();
+        std::os::unix::fs::symlink("missing", root.path().join(".ai/tools/test/item.py")).unwrap();
+        let ignore =
+            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            })
+            .unwrap();
+        let source = DirectorySourceContent::new(root.path(), "test".into(), &ignore).unwrap();
+        assert!(
+            source
+                .read_file(Path::new(".ai/tools/test/item.py"), 32)
+                .is_err()
+        );
+    }
 }
 
 struct RetainedSourceClosureStore {

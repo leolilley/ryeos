@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-29T13:17:36Z:0d392f1d541e6ffde468ce47fe4c94a37ee2f27dd0bf3ea6e881b5e7a3c4070a:prwCg1pJFBgV4y6ZXP1PEVpIiPSYiKBzQtn5S2I2023GJGcQ825K7Q20XuGpXOTY2zF2AgYyB128zLtkzoJYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-07T09:01:08Z:bbaa46d6b780ff12eaa2dd4bbdc1f9072773d19e8f3d165dd34ae879b2a7047f:CkhNie+sh1OPFB9Az7CQI+IWF9vujVLZdR4dmCQSExpp8T3bh5NiheU70uqJzaHZoMrhRfkxdm5wj05cfwRlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - validate
 description: "Resolve and validate an executable item through its complete threadless admission path without creating a thread or contacting its runtime."
@@ -22,6 +22,9 @@ parameter_binding:
   single_json_object_arg: true
   flag_key_normalization: hyphen_to_underscore
 control_flags:
+- flag: current-head
+  help: "Validate the current immutable project HEAD and its exact target-local bindings"
+  binding: pin_current_head_at_admission
 - flag: no-operator-vault
   help: "Validate without operator-vault exposure in project-environment authority"
   binding: exclude_operator_vault

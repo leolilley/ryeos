@@ -1,0 +1,521 @@
+# ryeos:signed:2026-09-08T16:56:40Z:dc091e4665a24779f7ba54b799d6f6971b9c8862c1f8af59ffd100f9871f8dc1:bi8bLeT+e5F3Ty1SGVSI1wOKTuF9PWXIiL1r/fjphn1FuWc/25iaZW0+T4UBnTunYbgHbf34uaiMxWxg+f25Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "authoring-build-support",
+  "version": "1.0.0",
+  "support": {
+    "commands": {
+      "awk": "bin/awk",
+      "basename": "bin/basename",
+      "bash": "bin/bash",
+      "cat": "bin/cat",
+      "chmod": "bin/chmod",
+      "cmp": "bin/cmp",
+      "cp": "bin/cp",
+      "cut": "bin/cut",
+      "dirname": "bin/dirname",
+      "env": "bin/env",
+      "expr": "bin/expr",
+      "false": "bin/false",
+      "find": "bin/find",
+      "grep": "bin/grep",
+      "head": "bin/head",
+      "install": "bin/install",
+      "ln": "bin/ln",
+      "ls": "bin/ls",
+      "make": "bin/make",
+      "mkdir": "bin/mkdir",
+      "mv": "bin/mv",
+      "printf": "bin/printf",
+      "pwd": "bin/pwd",
+      "rm": "bin/rm",
+      "rmdir": "bin/rmdir",
+      "sed": "bin/sed",
+      "sh": "bin/sh",
+      "sort": "bin/sort",
+      "strip": "bin/strip",
+      "tail": "bin/tail",
+      "tee": "bin/tee",
+      "test": "bin/test",
+      "touch": "bin/touch",
+      "tr": "bin/tr",
+      "uname": "bin/uname",
+      "uniq": "bin/uniq",
+      "wc": "bin/wc",
+      "xargs": "bin/xargs"
+    },
+    "inputs": {
+      "RYEOS-BUILD-SUPPORT.json": {
+        "bytes": 13056,
+        "mode": 420,
+        "sha256": "cb33412926d878e917ca641a50d8244cb8158d396de3bc67246ceb6dbcd5f009"
+      },
+      "bin/awk": {
+        "bytes": 176201,
+        "mode": 493,
+        "sha256": "133049fa414300e024ae11c08bc759da593738679c1d77a336c4baa32d728ff7"
+      },
+      "bin/basename": {
+        "bytes": 49225,
+        "mode": 493,
+        "sha256": "98e943931768e4d9c51885afbea5997c2b73853d8d238a61a7202a41a91763b3"
+      },
+      "bin/bash": {
+        "bytes": 1364041,
+        "mode": 493,
+        "sha256": "1a81a772f1edbabcf5e2a8ce2c0e55dd4ed82ea4e71c4123389b16ec1f2afa83"
+      },
+      "bin/cat": {
+        "bytes": 53321,
+        "mode": 493,
+        "sha256": "40743c59b5284d20d832f260e6c4688dcda51e82b830acfc9666fad43412824f"
+      },
+      "bin/chmod": {
+        "bytes": 77897,
+        "mode": 493,
+        "sha256": "9c97ffc1a1f9fa6127f31e6bbf16b247b16cde559c3fb963067c774c681b4824"
+      },
+      "bin/cmp": {
+        "bytes": 61513,
+        "mode": 493,
+        "sha256": "e77a59fb1c6e7a076a0e5e36e8829d861b1715239de3609d5d0efb8642c6d354"
+      },
+      "bin/cp": {
+        "bytes": 159817,
+        "mode": 493,
+        "sha256": "8bd200ff83ea0f23060d69b59e70c951c0327f5d8f94708cef0f6c66e438bed7"
+      },
+      "bin/cut": {
+        "bytes": 61513,
+        "mode": 493,
+        "sha256": "6caa730f1bb2b835b7b73e8a8d0ce924a6d1b1a9d66ce516393a65f073a9e08d"
+      },
+      "bin/dirname": {
+        "bytes": 49225,
+        "mode": 493,
+        "sha256": "b33f13e33fde24eed9de18826fff7155dc81b0f57e5b8bdde29422589554e4bf"
+      },
+      "bin/env": {
+        "bytes": 61513,
+        "mode": 493,
+        "sha256": "ba931fc286df1435a45fe5273322eecd985be341a8c8cb2ca02636a55954ad87"
+      },
+      "bin/expr": {
+        "bytes": 57417,
+        "mode": 493,
+        "sha256": "70dca4570e4595337aafd54e41b0ffea9224a90fc9e8825eff3b2e609b8b666a"
+      },
+      "bin/false": {
+        "bytes": 49225,
+        "mode": 493,
+        "sha256": "a5351105bc3f28b8543f1de216bd671244e926e438cdc529e3827787c6c6351e"
+      },
+      "bin/find": {
+        "bytes": 237641,
+        "mode": 493,
+        "sha256": "7d09abcae9ac3c84d8a2f765f4a0e67428cfe6d40cd93e556a39f3f0b689ab19"
+      },
+      "bin/grep": {
+        "bytes": 208969,
+        "mode": 493,
+        "sha256": "5ecc1e09b7c8613603f24d21ba548767be0274becf83bf21674e0291d942daa1"
+      },
+      "bin/head": {
+        "bytes": 57417,
+        "mode": 493,
+        "sha256": "dcee30524256a5e6bbc584e9c76587c177c904d441d66ba9e50062ad9a0a52b4"
+      },
+      "bin/install": {
+        "bytes": 163913,
+        "mode": 493,
+        "sha256": "c2a1f374c08a0b60859e466fdd8d5673fbf7ac8eb4f4b67ed1d67b1d4400715c"
+      },
+      "bin/ln": {
+        "bytes": 86089,
+        "mode": 493,
+        "sha256": "1c83f921622a9ce113842b25d36bf05b8340b22fe12ca9269716d8560477ed5b"
+      },
+      "bin/ls": {
+        "bytes": 163913,
+        "mode": 493,
+        "sha256": "6219c4b569ff5b1f16362daee80a7fe059b3786776847701a40a7ee951403c1a"
+      },
+      "bin/make": {
+        "bytes": 290889,
+        "mode": 493,
+        "sha256": "ffe70430d908e6c80aa3b7fa2511cf80c3328cdb128ec63626c6a5bc23feff16"
+      },
+      "bin/mkdir": {
+        "bytes": 98377,
+        "mode": 493,
+        "sha256": "b02bd216af14c6da7bf6fed87c90b7293f496c73ba3018acc43c8bc787b3e4cb"
+      },
+      "bin/mv": {
+        "bytes": 159817,
+        "mode": 493,
+        "sha256": "69523d10522522524bc66843e9ba4651194f293c326923ae00de3c2a31425a6c"
+      },
+      "bin/printf": {
+        "bytes": 73801,
+        "mode": 493,
+        "sha256": "903a3579d548cd45e3acace5d46be79c17535a835ca2bf10b61a8a79c199139d"
+      },
+      "bin/pwd": {
+        "bytes": 49225,
+        "mode": 493,
+        "sha256": "4c442c0a87147d2948e3349db27a8c393dfa442bf535544f7b25bfc3393fc6b8"
+      },
+      "bin/rm": {
+        "bytes": 81993,
+        "mode": 493,
+        "sha256": "1fe627a34a51e63aa70c1bceb0e19adff80324a1f768880f2d22ed9181df4e42"
+      },
+      "bin/rmdir": {
+        "bytes": 49225,
+        "mode": 493,
+        "sha256": "6f834dbb8b6c9c7d8725f9f515a3c13e9a2b9135f1fe6413122dff65a56d5155"
+      },
+      "bin/sed": {
+        "bytes": 135241,
+        "mode": 493,
+        "sha256": "d0adda22bdeb515b47969d141ceca85003a7392cc0d507c6ce5baa606daa0473"
+      },
+      "bin/sh": {
+        "bytes": 139337,
+        "mode": 493,
+        "sha256": "01e532cec732e12c25de6e263265df52619fd5d98fbcfdaa1c37b60d4229bbae"
+      },
+      "bin/sort": {
+        "bytes": 127049,
+        "mode": 493,
+        "sha256": "b5d4fb315c7ae8985a90a33af3f136ea751c4a35a437d4da3ce16ec71c90dbc7"
+      },
+      "bin/strip": {
+        "bytes": 168009,
+        "mode": 493,
+        "sha256": "cfc973b953e5386f63cecd6c4b8941c27dc7c821af61a42c96efa08f4c60baf9"
+      },
+      "bin/tail": {
+        "bytes": 90185,
+        "mode": 493,
+        "sha256": "d2468fe76f71aec84206a07f82b1ffc43c65f54b10d3e5896e98d0471a56f4f0"
+      },
+      "bin/tee": {
+        "bytes": 70272,
+        "mode": 493,
+        "sha256": "d73e8f7c8d2f6255d13f043053f95342c4bf51dbd4262e01293508559513940a"
+      },
+      "bin/test": {
+        "bytes": 53321,
+        "mode": 493,
+        "sha256": "7e4cb0d1071492396e0e3d20846efc388e8557aca1075fa14ad813539297a1fc"
+      },
+      "bin/touch": {
+        "bytes": 94281,
+        "mode": 493,
+        "sha256": "3e74e5c50f04bd4a918d43c5d72b97db6aed76c52fbce8f1150698e9944daa1f"
+      },
+      "bin/tr": {
+        "bytes": 65609,
+        "mode": 493,
+        "sha256": "fb8804b06add0343d14be9ef52e6cc4ffe4b5b30792cb20238be884e7d9a2b95"
+      },
+      "bin/uname": {
+        "bytes": 49225,
+        "mode": 493,
+        "sha256": "35c9e3576c4a1fb1a2b968352a0520041c0d1aff4a51e7355b1b72ac0da7d1bd"
+      },
+      "bin/uniq": {
+        "bytes": 61513,
+        "mode": 493,
+        "sha256": "d7644660cd6a9047a894e2058cef5f60a86e2a5e84c9f7699dde06ce5ca8443c"
+      },
+      "bin/wc": {
+        "bytes": 73801,
+        "mode": 493,
+        "sha256": "a6fd31eb19f66ba59f62dfbf1a78c2c3015e9fe3d506b4ef46cb85434bec8e3e"
+      },
+      "bin/xargs": {
+        "bytes": 81993,
+        "mode": 493,
+        "sha256": "aa69bcc6947c61736c5f21034766ab2260be532fabfe3484a018b74ff6c8d6b5"
+      },
+      "elf/bin/patchelf": {
+        "bytes": 264464,
+        "mode": 493,
+        "sha256": "db7d1d1be4a257c75a5bae14e68c2bc825a3be3d2bc13a405436bc56272cfc37"
+      },
+      "elf/bin/readelf": {
+        "bytes": 777864,
+        "mode": 493,
+        "sha256": "4a387d80a70e6e97ef940a666fab59d5c38e7cf19ff907192fa983cb8505a7de"
+      },
+      "elf/lib/ld-linux-x86-64.so.2": {
+        "bytes": 225672,
+        "mode": 493,
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "elf/lib/libc.so.6": {
+        "bytes": 1995216,
+        "mode": 420,
+        "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+      },
+      "elf/lib/libctf-nobfd.so.0": {
+        "bytes": 215992,
+        "mode": 420,
+        "sha256": "69e10bcecd3c354805887f5d848c5dc8e15f36fc6e36b91de62063c12db3bf7b"
+      },
+      "elf/lib/libgcc_s.so.1": {
+        "bytes": 182856,
+        "mode": 420,
+        "sha256": "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af"
+      },
+      "elf/lib/libm.so.6": {
+        "bytes": 977112,
+        "mode": 420,
+        "sha256": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3"
+      },
+      "elf/lib/libsframe.so.1": {
+        "bytes": 30976,
+        "mode": 420,
+        "sha256": "adb0b9a33909e7264ad724e138eb97995832e535b22b192c1a898c349c918a9f"
+      },
+      "elf/lib/libstdc++.so.6": {
+        "bytes": 2497768,
+        "mode": 420,
+        "sha256": "972bb2a18b71140dab0240f8a1f68ab3fb1d56bcd4c4f824a91b70888faf5a00"
+      },
+      "elf/lib/libtinfo.so.6": {
+        "bytes": 220464,
+        "mode": 420,
+        "sha256": "4013e7651ac68f547d8333517def25b2366c97eec7de7f06e105dbf3444ffebf"
+      },
+      "elf/lib/libz.so.1": {
+        "bytes": 125376,
+        "mode": 420,
+        "sha256": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e"
+      },
+      "elf/lib/libzstd.so.1": {
+        "bytes": 825336,
+        "mode": 420,
+        "sha256": "27f07c9a49c2c956bcfb64cd4712976586a66facbf15fc7f09bc37413b5f2b21"
+      },
+      "lib/ld-linux-x86-64.so.2": {
+        "bytes": 225672,
+        "mode": 493,
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "lib/libacl.so.1": {
+        "bytes": 43049,
+        "mode": 420,
+        "sha256": "c8d7929650752f44a4d667ef3e9efc3d24da2abe75aff3735f2ff0163dd1ce46"
+      },
+      "lib/libattr.so.1": {
+        "bytes": 30161,
+        "mode": 420,
+        "sha256": "f542d7bd4caca9b0b3ac215c31c1d39d36e5903b97e22df2b2683cc4655e0435"
+      },
+      "lib/libbfd-2.44-system.so": {
+        "bytes": 1495601,
+        "mode": 420,
+        "sha256": "323c3811a7baa855fe5d7e53b43ebe84122685dc559f844ce2db6ac21a3f9959"
+      },
+      "lib/libc.so.6": {
+        "bytes": 2052169,
+        "mode": 493,
+        "sha256": "b8985f186940e1c63c8c7092395d75e92e53152d9c1f6c0b32cd6c84c647884a"
+      },
+      "lib/libcap.so.2": {
+        "bytes": 53321,
+        "mode": 420,
+        "sha256": "b0345c5d1c344cd2108fe0ab25d2c5756dc43fab2104a2f07f92616a64850836"
+      },
+      "lib/libgmp.so.10": {
+        "bytes": 590321,
+        "mode": 420,
+        "sha256": "c6f1bf97042ea490d7893a40a91962c5d4a85f24cba8d0d59b3d85789351ee52"
+      },
+      "lib/libm.so.6": {
+        "bytes": 1000065,
+        "mode": 420,
+        "sha256": "b30b4a29bb6977eacb090be7d26dbe4671e307b4503960fa666ced3ad570b923"
+      },
+      "lib/libpcre2-8.so.0": {
+        "bytes": 717297,
+        "mode": 420,
+        "sha256": "bc62c16578dda87e11f7047a8d64347fd71a0d26f6089199447816b974c25120"
+      },
+      "lib/libselinux.so.1": {
+        "bytes": 214577,
+        "mode": 420,
+        "sha256": "ffc4b1045d41ea16f4e49db52a3c3e889939f2d62f2506b6cb1fcbd2e0531cd3"
+      },
+      "lib/libsframe.so.1": {
+        "bytes": 37393,
+        "mode": 420,
+        "sha256": "ea3aacfa74c4825e3d13c4d01e12420473e295b27739de9ddde506202fa39e22"
+      },
+      "lib/libtinfo.so.6": {
+        "bytes": 228617,
+        "mode": 420,
+        "sha256": "446b4663e891b4c71f83e7da7af4e5c6601c4a132a6fe7ce902990e92ac2c507"
+      },
+      "lib/libz.so.1": {
+        "bytes": 131601,
+        "mode": 420,
+        "sha256": "732d3da7f58110638cc95a5605b1f3b6abf839f0a7124dae589d963fdfa25116"
+      },
+      "lib/libzstd.so.1": {
+        "bytes": 834417,
+        "mode": 420,
+        "sha256": "b8694960cbb3ea1bf4dc9935a651e3b53747c939f397af3abea0c0d72b15ff20"
+      },
+      "licenses/GPL-2": {
+        "bytes": 17984,
+        "mode": 420,
+        "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
+      },
+      "licenses/GPL-3": {
+        "bytes": 35149,
+        "mode": 420,
+        "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+      },
+      "licenses/LGPL-2.1": {
+        "bytes": 26419,
+        "mode": 420,
+        "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+      },
+      "licenses/bash-COPYRIGHT": {
+        "bytes": 9764,
+        "mode": 420,
+        "sha256": "06319d84c3e5ed096036f6a9310a030c7e84e50dff2b8a6792285c83ec0ada73"
+      },
+      "licenses/binutils-COPYRIGHT": {
+        "bytes": 1795,
+        "mode": 420,
+        "sha256": "20a9818b14f941467bcc0f459a1b1951e3bfecc1cc259e5004f8b9a80d7dc804"
+      },
+      "licenses/coreutils-COPYRIGHT": {
+        "bytes": 5572,
+        "mode": 420,
+        "sha256": "3a63d4b11a7ba4c1c17175072ea28e07b0f80c7bc1ca042b27431fe65a14755b"
+      },
+      "licenses/dash-COPYRIGHT": {
+        "bytes": 3878,
+        "mode": 420,
+        "sha256": "d98c53f281321baad38164aa9ae6e368a9253be6ec51bd26a759b5e72b326f4a"
+      },
+      "licenses/diffutils-COPYRIGHT": {
+        "bytes": 16445,
+        "mode": 420,
+        "sha256": "ac6fcf18142bab7569188ae75b204a9e1c73c050c0f9467adaf080759e516123"
+      },
+      "licenses/findutils-COPYRIGHT": {
+        "bytes": 24411,
+        "mode": 420,
+        "sha256": "f51541fbdfe15c01cd3fd3a06ad3b74478902d36a958d95b1756434979d97ed5"
+      },
+      "licenses/grep-COPYRIGHT": {
+        "bytes": 1807,
+        "mode": 420,
+        "sha256": "42d9b4d610396b1e8d1303dcb9487af3f5a2d2709623cf03a04cf76acdf6c5e3"
+      },
+      "licenses/libacl1-COPYRIGHT": {
+        "bytes": 2048,
+        "mode": 420,
+        "sha256": "9a2dfb4a5abc7e84be2cc41f1089be665519c9409549296f6c19de57ab1d37c2"
+      },
+      "licenses/libattr1-COPYRIGHT": {
+        "bytes": 1947,
+        "mode": 420,
+        "sha256": "0cbec745d85ea775450b2d54fac55277197f429e52d611f72852ed420450620e"
+      },
+      "licenses/libc6-COPYRIGHT": {
+        "bytes": 51200,
+        "mode": 420,
+        "sha256": "f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d"
+      },
+      "licenses/libcap2-COPYRIGHT": {
+        "bytes": 4496,
+        "mode": 420,
+        "sha256": "04f9fb974e10f6ca0cd226811f72b3855f8383daad0e5de7adac8d5b0b7796c3"
+      },
+      "licenses/libgmp10-COPYRIGHT": {
+        "bytes": 4153,
+        "mode": 420,
+        "sha256": "7d366aef5ba325150246de1d7820c4c9926cd27ca61a69948492b26cd3b61601"
+      },
+      "licenses/libpcre2-8-0-COPYRIGHT": {
+        "bytes": 6627,
+        "mode": 420,
+        "sha256": "e915cde4251f96ec6af107ecd2e194440a4e69440893b0c982802f8a1e4ae40a"
+      },
+      "licenses/libselinux1-COPYRIGHT": {
+        "bytes": 1957,
+        "mode": 420,
+        "sha256": "864f1bb189f609075d580b8c4aada16d85a44546884f1687989e1cacc8c56751"
+      },
+      "licenses/libsframe1-COPYRIGHT": {
+        "bytes": 1795,
+        "mode": 420,
+        "sha256": "20a9818b14f941467bcc0f459a1b1951e3bfecc1cc259e5004f8b9a80d7dc804"
+      },
+      "licenses/libtinfo6-COPYRIGHT": {
+        "bytes": 4670,
+        "mode": 420,
+        "sha256": "f838d6048fbc59356b7e56c207a7cb32dc6bf4adea95514a002596bde8f6e1e7"
+      },
+      "licenses/libzstd1-COPYRIGHT": {
+        "bytes": 5332,
+        "mode": 420,
+        "sha256": "5cec9fef4d3fa7e0371fbef4ec3fc416e0105dc2a9922117f84e825cb11f50f8"
+      },
+      "licenses/make-COPYRIGHT": {
+        "bytes": 1759,
+        "mode": 420,
+        "sha256": "2289e44c25c3c55925a9342bb209330c32d21e6f28cc5ce70155dcdd8c4cae86"
+      },
+      "licenses/mawk-COPYRIGHT": {
+        "bytes": 22806,
+        "mode": 420,
+        "sha256": "f6b94f461b09398ef192207356d89d7bf59833fe03082a14b910b3c740f2a318"
+      },
+      "licenses/sed-COPYRIGHT": {
+        "bytes": 8618,
+        "mode": 420,
+        "sha256": "719320e425e8e6da53a55e0fcfa2f2ed9b1332cea16abd65321bd651b2a88568"
+      },
+      "licenses/zlib1g-COPYRIGHT": {
+        "bytes": 2927,
+        "mode": 420,
+        "sha256": "9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6"
+      }
+    },
+    "notices": {
+      "licenses/GPL-2": "licenses/GPL-2",
+      "licenses/GPL-3": "licenses/GPL-3",
+      "licenses/LGPL-2.1": "licenses/LGPL-2.1",
+      "licenses/bash-COPYRIGHT": "licenses/bash-COPYRIGHT",
+      "licenses/binutils-COPYRIGHT": "licenses/binutils-COPYRIGHT",
+      "licenses/coreutils-COPYRIGHT": "licenses/coreutils-COPYRIGHT",
+      "licenses/dash-COPYRIGHT": "licenses/dash-COPYRIGHT",
+      "licenses/diffutils-COPYRIGHT": "licenses/diffutils-COPYRIGHT",
+      "licenses/findutils-COPYRIGHT": "licenses/findutils-COPYRIGHT",
+      "licenses/grep-COPYRIGHT": "licenses/grep-COPYRIGHT",
+      "licenses/libacl1-COPYRIGHT": "licenses/libacl1-COPYRIGHT",
+      "licenses/libattr1-COPYRIGHT": "licenses/libattr1-COPYRIGHT",
+      "licenses/libc6-COPYRIGHT": "licenses/libc6-COPYRIGHT",
+      "licenses/libcap2-COPYRIGHT": "licenses/libcap2-COPYRIGHT",
+      "licenses/libgmp10-COPYRIGHT": "licenses/libgmp10-COPYRIGHT",
+      "licenses/libpcre2-8-0-COPYRIGHT": "licenses/libpcre2-8-0-COPYRIGHT",
+      "licenses/libselinux1-COPYRIGHT": "licenses/libselinux1-COPYRIGHT",
+      "licenses/libsframe1-COPYRIGHT": "licenses/libsframe1-COPYRIGHT",
+      "licenses/libtinfo6-COPYRIGHT": "licenses/libtinfo6-COPYRIGHT",
+      "licenses/libzstd1-COPYRIGHT": "licenses/libzstd1-COPYRIGHT",
+      "licenses/make-COPYRIGHT": "licenses/make-COPYRIGHT",
+      "licenses/mawk-COPYRIGHT": "licenses/mawk-COPYRIGHT",
+      "licenses/sed-COPYRIGHT": "licenses/sed-COPYRIGHT",
+      "licenses/zlib1g-COPYRIGHT": "licenses/zlib1g-COPYRIGHT"
+    }
+  }
+}

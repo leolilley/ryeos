@@ -112,8 +112,18 @@ pub async fn handle(
             // `__pycache__/`, etc. are dropped before we POST a
             // manifest the remote would reject.
             let remote_ignore = match remote_cfg.as_ref() {
-                Some(cfg) => Some(IgnoreMatcher::from_config(&cfg.ingest_ignore)?),
-                None => None,
+                Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
+                None => {
+                    let fetched = client.get_ingest_ignore().await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "no remote config for '{}' and inline fetch failed: {e:#} \
+                             — run `ryeos remote configure --remote {}` first",
+                            req.remote,
+                            req.remote
+                        )
+                    })?;
+                    IgnoreMatcher::from_config(&fetched)?
+                }
             };
             let authority = state
                 .state_store
@@ -124,7 +134,7 @@ pub async fn handle(
                 &authority,
                 &abs_project_path,
                 &project_path_for_ref,
-                remote_ignore.as_ref(),
+                &remote_ignore,
             )
             .await?;
             Ok(serde_json::json!({

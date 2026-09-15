@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use ryeos_app::node_document;
 use ryeos_scheduler::types::ScheduleSpecRecord;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ProjectDeployContext;
 
 const MANAGED_BY_TYPE: &str = "project_ai_sync";
+const MAX_RECOVERY_SCHEDULE_SOURCE_BYTES: u64 = 1024 * 1024;
+const SCHEDULE_DIRECTORY_LOCK_TIMEOUT: lillux::time::Duration =
+    lillux::time::Duration::from_secs(5);
 
 fn project_path_identity(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| {
@@ -50,6 +53,161 @@ enum ScheduleAction {
     },
 }
 
+/// Exact signed node-schedule source present before one project apply.
+/// The source document, not a reconstructed record, is the durable before
+/// image because it is what owns the scheduler projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScheduleRecoveryBeforeImage {
+    pub schedule_id: String,
+    pub signed_yaml: Option<String>,
+}
+
+/// Recovery preparation retains the exact node schedule-directory lock from
+/// before-image capture through the eventual projection mutation. A caller
+/// must not split those phases and reopen the directory by pathname: doing so
+/// would let a replacement become the durable rollback authority.
+pub(crate) struct ScheduleRecoveryPreparation {
+    before_images: Vec<ScheduleRecoveryBeforeImage>,
+    tx: ScheduleReconcileTx,
+}
+
+impl ScheduleRecoveryPreparation {
+    pub(crate) fn before_images(&self) -> &[ScheduleRecoveryBeforeImage] {
+        &self.before_images
+    }
+}
+
+pub(crate) async fn prepare_recovery_before_images(
+    plan: &ScheduleDeployPlan,
+    ctx: &ProjectDeployContext<'_>,
+) -> Result<ScheduleRecoveryPreparation> {
+    let schedules_dir = ctx
+        .state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/schedules");
+    let schedule_ids = recovery_schedule_ids(plan)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        let tx =
+            ScheduleReconcileTx::new_with_timeout(&schedules_dir, SCHEDULE_DIRECTORY_LOCK_TIMEOUT)?;
+        let before_images = schedule_ids
+            .into_iter()
+            .map(|schedule_id| {
+                let name = format!("{schedule_id}.yaml");
+                let signed_yaml = tx
+                    .directory
+                    .open_pinned_regular(std::ffi::OsStr::new(&name), false)?
+                    .map(|file| {
+                        String::from_utf8(file.read_bounded(MAX_RECOVERY_SCHEDULE_SOURCE_BYTES)?)
+                            .context("signed schedule before-image is not UTF-8")
+                    })
+                    .transpose()?;
+                Ok(ScheduleRecoveryBeforeImage {
+                    schedule_id,
+                    signed_yaml,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ScheduleRecoveryPreparation { before_images, tx })
+    })
+    .await
+    .context("join schedule recovery preparation")?
+}
+
+fn recovery_schedule_ids(plan: &ScheduleDeployPlan) -> Vec<&str> {
+    let mut ids = plan
+        .actions
+        .iter()
+        .map(|action| match action {
+            ScheduleAction::Create(desired) | ScheduleAction::Update { desired, .. } => {
+                desired.declaration.schedule_id.as_str()
+            }
+            ScheduleAction::DeleteMissing { schedule_id, .. } => schedule_id.as_str(),
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+pub(crate) async fn restore_recovery_before_images(
+    state: &ryeos_app::state::AppState,
+    entries: &[ScheduleRecoveryBeforeImage],
+) -> Result<()> {
+    let schedules_dir = state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/schedules");
+    let scheduler_db = state.scheduler_db.clone();
+    let trust_store = state.engine.trust_store.clone();
+    let entries = entries.to_vec();
+    let touched = tokio::task::spawn_blocking(move || {
+        let directory = lillux::PinnedDirectory::open_or_create(&schedules_dir)?;
+        let _lock = directory.lock_exclusive_with_timeout(SCHEDULE_DIRECTORY_LOCK_TIMEOUT)?;
+        restore_recovery_sources_and_projection(&directory, &scheduler_db, &trust_store, &entries)
+    })
+    .await
+    .context("join schedule recovery restoration")??;
+    if let Some(ref tx) = state.scheduler_reload_tx {
+        for schedule_id in touched {
+            if let Err(error) = tx.try_send(ryeos_scheduler::ReloadSignal {
+                schedule_id: Some(schedule_id.clone()),
+            }) {
+                tracing::warn!(%schedule_id, %error, "failed to notify scheduler after project apply recovery");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_recovery_sources_and_projection(
+    directory: &lillux::PinnedDirectory,
+    scheduler_db: &ryeos_scheduler::db::SchedulerDb,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    entries: &[ScheduleRecoveryBeforeImage],
+) -> Result<HashSet<String>> {
+    let mut touched = HashSet::new();
+    for entry in entries.iter().rev() {
+        let name = format!("{}.yaml", entry.schedule_id);
+        let name = std::ffi::OsStr::new(&name);
+        let expected = directory.open_pinned_regular(name, false)?;
+        match &entry.signed_yaml {
+            Some(content) => {
+                if content.len() as u64 > MAX_RECOVERY_SCHEDULE_SOURCE_BYTES {
+                    anyhow::bail!("schedule recovery source exceeds its byte limit");
+                }
+                directory.atomic_write_pinned_if_same(
+                    name,
+                    expected.as_ref(),
+                    content.as_bytes(),
+                    0o600,
+                )?;
+                let path = directory.path().join(name);
+                let verified = ryeos_scheduler::projection::verify_schedule_source_content(
+                    &path,
+                    content,
+                    trust_store,
+                )?;
+                scheduler_db.upsert_spec(&verified.to_spec_record()?)?;
+            }
+            None => {
+                if let Some(file) = expected {
+                    directory.remove_pinned_regular_if_same(&file)?;
+                }
+                scheduler_db.delete_spec(&entry.schedule_id)?;
+            }
+        }
+        touched.insert(entry.schedule_id.clone());
+    }
+    Ok(touched)
+}
+
 #[derive(Debug, Clone)]
 struct DesiredSchedule {
     declaration: ScheduleDeclaration,
@@ -69,7 +227,7 @@ struct ScheduleDeclarationFile {
     schedules: Vec<ScheduleDeclaration>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScheduleDeclaration {
     schedule_id: String,
@@ -82,9 +240,11 @@ struct ScheduleDeclaration {
     overlap_policy: String,
     lateness_grace_secs: i64,
     enabled: bool,
+    capabilities: Vec<String>,
     #[serde(default)]
     project_root: Option<String>,
     params: Value,
+    execution_policy: ryeos_engine::execution_contract::ExecutionPolicy,
 }
 
 #[cfg(test)]
@@ -158,7 +318,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
                 require_project_reconcile_schedule_owner(
                     ctx.caller,
                     schedule_id,
-                    &existing.requester_fingerprint,
+                    existing.execution.principal_id(),
                 )?;
                 actions.push(ScheduleAction::Update {
                     desired: desired_schedule.clone(),
@@ -193,7 +353,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
         require_project_reconcile_schedule_owner(
             ctx.caller,
             schedule_id,
-            &existing.requester_fingerprint,
+            existing.execution.principal_id(),
         )?;
         actions.push(ScheduleAction::DeleteMissing {
             schedule_id: schedule_id.clone(),
@@ -255,6 +415,11 @@ impl PreparedScheduleDeploy {
         }
         self.finalized = true;
     }
+
+    pub fn retain_for_recovery(&mut self) {
+        self.tx.take();
+        self.finalized = true;
+    }
 }
 
 impl Drop for PreparedScheduleDeploy {
@@ -277,7 +442,32 @@ pub fn prepare_commit(
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let schedules_dir = node_dir.join("schedules");
-    let mut tx = ScheduleReconcileTx::new(&schedules_dir)?;
+    let tx = ScheduleReconcileTx::new(&schedules_dir)?;
+    prepare_commit_with_tx(plan, ctx, tx)
+}
+
+pub(crate) fn prepare_commit_with_recovery(
+    plan: &ScheduleDeployPlan,
+    ctx: &ProjectDeployContext<'_>,
+    preparation: ScheduleRecoveryPreparation,
+) -> Result<PreparedScheduleDeploy> {
+    let expected_ids = recovery_schedule_ids(plan);
+    if expected_ids.len() != preparation.before_images.len()
+        || expected_ids
+            .iter()
+            .zip(&preparation.before_images)
+            .any(|(expected, observed)| *expected != observed.schedule_id.as_str())
+    {
+        anyhow::bail!("schedule recovery preparation does not match its deploy plan");
+    }
+    prepare_commit_with_tx(plan, ctx, preparation.tx)
+}
+
+fn prepare_commit_with_tx(
+    plan: &ScheduleDeployPlan,
+    ctx: &ProjectDeployContext<'_>,
+    mut tx: ScheduleReconcileTx,
+) -> Result<PreparedScheduleDeploy> {
     let mut report = ScheduleDeployReport {
         declared: plan.declared,
         ..ScheduleDeployReport::default()
@@ -285,7 +475,7 @@ pub fn prepare_commit(
 
     let result = (|| -> Result<()> {
         for action in &plan.actions {
-            revalidate_action(action, ctx, &schedules_dir)?;
+            revalidate_action(action, ctx, tx.directory.path())?;
             match action {
                 ScheduleAction::Create(desired) => {
                     tx.backup(ctx, &desired.declaration.schedule_id)?;
@@ -294,8 +484,6 @@ pub fn prepare_commit(
                         desired,
                         ctx,
                         lillux::time::timestamp_millis(),
-                        &ctx.caller.fingerprint,
-                        &ctx.caller.scopes,
                     )?;
                     tx.touch(desired.declaration.schedule_id.clone());
                     report.created += 1;
@@ -306,14 +494,7 @@ pub fn prepare_commit(
                     adopt_manual: _,
                 } => {
                     tx.backup(ctx, &desired.declaration.schedule_id)?;
-                    write_reconciled_schedule(
-                        &tx.directory,
-                        desired,
-                        ctx,
-                        existing.registered_at,
-                        &existing.requester_fingerprint,
-                        &existing.capabilities,
-                    )?;
+                    write_reconciled_schedule(&tx.directory, desired, ctx, existing.registered_at)?;
                     tx.touch(desired.declaration.schedule_id.clone());
                     report.updated += 1;
                 }
@@ -444,7 +625,7 @@ fn revalidate_action(
                 })?;
             if current.spec_hash != existing.spec_hash
                 || current.registered_at != existing.registered_at
-                || current.requester_fingerprint != existing.requester_fingerprint
+                || current.execution.principal_id() != existing.execution.principal_id()
             {
                 anyhow::bail!(
                     "schedule_id '{}' changed during project deploy; retry project sync",
@@ -494,7 +675,7 @@ fn revalidate_action(
                     require_project_reconcile_schedule_owner(
                         ctx.caller,
                         schedule_id,
-                        &current.requester_fingerprint,
+                        current.execution.principal_id(),
                     )?;
                 }
                 None => {
@@ -521,7 +702,7 @@ fn revalidate_action(
                 })?;
             if current.spec_hash != existing.spec_hash
                 || current.registered_at != existing.registered_at
-                || current.requester_fingerprint != existing.requester_fingerprint
+                || current.execution.principal_id() != existing.execution.principal_id()
             {
                 anyhow::bail!(
                     "schedule_id '{}' changed during project deploy; refusing delete",
@@ -570,7 +751,7 @@ fn revalidate_action(
             require_project_reconcile_schedule_owner(
                 ctx.caller,
                 schedule_id,
-                &current.requester_fingerprint,
+                current.execution.principal_id(),
             )?;
         }
     }
@@ -750,6 +931,36 @@ fn validate_schedule_declaration(
             schedule.schedule_id
         );
     }
+    if schedule.capabilities.is_empty()
+        || schedule
+            .capabilities
+            .iter()
+            .any(|capability| capability.trim().is_empty())
+        || schedule
+            .capabilities
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        anyhow::bail!(
+            "capabilities must be non-empty, sorted, and unique for schedule '{}'",
+            schedule.schedule_id
+        );
+    }
+    schedule.execution_policy.validate().with_context(|| {
+        format!(
+            "invalid execution_policy for schedule '{}'",
+            schedule.schedule_id
+        )
+    })?;
+    if matches!(
+        &schedule.execution_policy.project,
+        ryeos_engine::execution_contract::ProjectExecutionPolicy::Projectless
+    ) {
+        anyhow::bail!(
+            "project-managed schedule '{}' must use a project-backed execution policy; register projectless work directly with the scheduler service",
+            schedule.schedule_id
+        );
+    }
     if let Some(ref project_root) = schedule.project_root {
         let declared = Path::new(project_root);
         if !declared.is_absolute() {
@@ -902,10 +1113,8 @@ fn write_reconciled_schedule(
     desired: &DesiredSchedule,
     ctx: &ProjectDeployContext<'_>,
     registered_at: i64,
-    requester_fingerprint: &str,
-    capabilities: &[String],
 ) -> Result<()> {
-    if requester_fingerprint.is_empty() || capabilities.is_empty() {
+    if ctx.caller.fingerprint.is_empty() || desired.declaration.capabilities.is_empty() {
         anyhow::bail!(
             "project schedule '{}' cannot be reconciled without execution requester and capabilities",
             desired.declaration.schedule_id
@@ -914,8 +1123,36 @@ fn write_reconciled_schedule(
 
     let schedule = &desired.declaration;
     let canonical_project_path = project_path_identity(ctx.project_path)?.to_owned();
+    let capabilities = desired.declaration.capabilities.clone();
+    let authorizer = ryeos_runtime::authorizer::Authorizer::new();
+    for capability in &capabilities {
+        authorizer
+            .authorize(
+                &ctx.caller.scopes,
+                &ryeos_runtime::authorizer::AuthorizationPolicy::require(capability),
+            )
+            .map_err(|_| anyhow!(
+                "project schedule '{}' capability {:?} is not covered by the authenticated deployment grant",
+                schedule.schedule_id,
+                capability,
+            ))?;
+    }
+    let registration_request_hash =
+        ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+            "operation": "project_schedule_registration",
+            "project_key": ctx.project_key,
+            "project_snapshot_hash": ctx.snapshot_hash,
+            "source_path": desired.source_path,
+            "source_body_hash": desired.source_body_hash,
+            "schedule": schedule,
+        }))?;
+    let authority = crate::handlers::scheduler_register::authenticated_schedule_authority(
+        ctx.caller,
+        ctx.state,
+        registration_request_hash,
+    )?;
     let body = serde_json::json!({
-        "spec_version": 1,
+        "spec_version": 2,
         "schedule_id": schedule.schedule_id,
         "item_ref": schedule.item_ref,
         "ref_bindings": schedule.ref_bindings,
@@ -930,8 +1167,9 @@ fn write_reconciled_schedule(
         "params": schedule.params,
         "project_root": canonical_project_path,
         "execution": {
-            "requester_fingerprint": requester_fingerprint,
+            "authority": authority,
             "capabilities": capabilities,
+            "policy": schedule.execution_policy,
         },
         "managed_by": {
             "type": MANAGED_BY_TYPE,
@@ -992,6 +1230,17 @@ impl ScheduleReconcileTx {
         })
     }
 
+    fn new_with_timeout(schedules_dir: &Path, timeout: lillux::time::Duration) -> Result<Self> {
+        let directory = lillux::PinnedDirectory::open_or_create(schedules_dir)?;
+        let directory_lock = directory.lock_exclusive_with_timeout(timeout)?;
+        Ok(Self {
+            directory,
+            _directory_lock: directory_lock,
+            backups: Vec::new(),
+            touched: HashSet::new(),
+        })
+    }
+
     fn schedule_path(&self, schedule_id: &str) -> PathBuf {
         self.directory.path().join(format!("{schedule_id}.yaml"))
     }
@@ -1006,13 +1255,8 @@ impl ScheduleReconcileTx {
             .ok_or_else(|| anyhow!("schedule path has no filename"))?;
         let yaml_bytes = self
             .directory
-            .open_regular(name, false)?
-            .map(|mut file| {
-                let mut bytes = Vec::new();
-                use std::io::Read as _;
-                file.read_to_end(&mut bytes)?;
-                Ok::<_, std::io::Error>(bytes)
-            })
+            .open_pinned_regular(name, false)?
+            .map(|file| file.read_bounded(MAX_RECOVERY_SCHEDULE_SOURCE_BYTES))
             .transpose()
             .with_context(|| format!("backup {}", yaml_path.display()))?;
         let db_record = ctx.state.scheduler_db.get_spec(schedule_id)?;
@@ -1087,9 +1331,61 @@ fn reload_touched(ctx: &ProjectDeployContext<'_>, touched: &HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::require_project_reconcile_schedule_owner;
+    use super::*;
     use crate::handler_context::HandlerContext;
     use crate::handler_error::{HandlerError, extract_handler_error};
+
+    fn recovery_test_source(
+        schedule_id: &str,
+        expression: &str,
+    ) -> ryeos_scheduler::types::ScheduleSourceRecord {
+        ryeos_scheduler::types::ScheduleSourceRecord {
+            spec_version: 2,
+            schedule_id: schedule_id.to_owned(),
+            item_ref: "directive:test/hello".to_owned(),
+            ref_bindings: std::collections::BTreeMap::new(),
+            schedule_type: "interval".to_owned(),
+            expression: expression.to_owned(),
+            params: serde_json::json!({}),
+            timezone: "UTC".to_owned(),
+            misfire_policy: "fire_once_now".to_owned(),
+            overlap_policy: "skip".to_owned(),
+            lateness_grace_secs: 60,
+            enabled: true,
+            project_root: None,
+            registered_at: 1_700_000_000_000,
+            execution: ryeos_scheduler::types::ScheduleExecution {
+                authority: ryeos_scheduler::types::ScheduleExecutionAuthority::Node {
+                    principal_id: format!("fp:{}", "33".repeat(32)),
+                    effective_origin_site_id: "site:test".to_owned(),
+                },
+                capabilities: vec!["ryeos.execute.*".to_owned()],
+                policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                    ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ),
+            },
+            managed_by: None,
+        }
+    }
+
+    fn signed_recovery_test_source(
+        source: &ryeos_scheduler::types::ScheduleSourceRecord,
+        key: &[u8; 32],
+    ) -> String {
+        let body = serde_yaml::to_string(source).unwrap();
+        let signing_key = lillux::crypto::SigningKey::from_bytes(key);
+        lillux::signature::sign_content(&body, &signing_key, "#", None)
+    }
+
+    fn recovery_test_trust_store(key: &[u8; 32]) -> ryeos_engine::trust::TrustStore {
+        let signing_key = lillux::crypto::SigningKey::from_bytes(key);
+        let verifying_key = lillux::crypto::VerifyingKey::from(&signing_key);
+        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::sha256_hex(verifying_key.to_bytes().as_ref()),
+            verifying_key,
+            label: Some("project-apply-recovery-test".to_owned()),
+        }])
+    }
 
     fn verified(fp: &str) -> HandlerContext {
         HandlerContext::new(fp.to_string(), vec!["*".to_string()], true)
@@ -1143,5 +1439,76 @@ mod tests {
             .expect_err("unverified caller must fail closed");
         let he = extract_handler_error(&err).expect("typed HandlerError in chain");
         assert!(matches!(he, HandlerError::NotFound), "got: {he:?}");
+    }
+
+    #[test]
+    fn recovery_restores_exact_schedule_sources_and_their_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let schedule_root = root.path().join(".ai/node/schedules");
+        std::fs::create_dir_all(&schedule_root).unwrap();
+        let directory = lillux::PinnedDirectory::open(&schedule_root)
+            .unwrap()
+            .unwrap();
+        let _lock = directory.lock_exclusive().unwrap();
+        let db = ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap();
+        let key = [37_u8; 32];
+        let trust = recovery_test_trust_store(&key);
+
+        let restore_id = "restore-after-projection-crash";
+        let before = signed_recovery_test_source(&recovery_test_source(restore_id, "60"), &key);
+        let projected = signed_recovery_test_source(&recovery_test_source(restore_id, "120"), &key);
+        let restore_path = schedule_root.join(format!("{restore_id}.yaml"));
+        std::fs::write(&restore_path, &projected).unwrap();
+        let projected = ryeos_scheduler::projection::verify_schedule_source_content(
+            &restore_path,
+            &projected,
+            &trust,
+        )
+        .unwrap();
+        db.upsert_spec(&projected.to_spec_record().unwrap())
+            .unwrap();
+
+        let delete_id = "delete-after-projection-crash";
+        let created = signed_recovery_test_source(&recovery_test_source(delete_id, "180"), &key);
+        let delete_path = schedule_root.join(format!("{delete_id}.yaml"));
+        std::fs::write(&delete_path, &created).unwrap();
+        let created = ryeos_scheduler::projection::verify_schedule_source_content(
+            &delete_path,
+            &created,
+            &trust,
+        )
+        .unwrap();
+        db.upsert_spec(&created.to_spec_record().unwrap()).unwrap();
+
+        restore_recovery_sources_and_projection(
+            &directory,
+            &db,
+            &trust,
+            &[
+                ScheduleRecoveryBeforeImage {
+                    schedule_id: restore_id.to_owned(),
+                    signed_yaml: Some(before.clone()),
+                },
+                ScheduleRecoveryBeforeImage {
+                    schedule_id: delete_id.to_owned(),
+                    signed_yaml: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&restore_path).unwrap(), before);
+        let restored = ryeos_scheduler::projection::verify_schedule_source_content(
+            &restore_path,
+            &before,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_spec(restore_id).unwrap().unwrap().spec_hash,
+            restored.spec_hash
+        );
+        assert!(!delete_path.exists());
+        assert!(db.get_spec(delete_id).unwrap().is_none());
     }
 }

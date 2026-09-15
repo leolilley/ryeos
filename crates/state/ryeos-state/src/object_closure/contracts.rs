@@ -69,6 +69,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "persistent_session_capsule",
     "placement_runtime_seed",
     "placement_transfer_manifest",
+    "product_build_accepted_result",
     "project_file",
     "project_snapshot",
     "project_snapshot_policy",
@@ -79,6 +80,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "state_manifest",
     "thread_event",
     "thread_snapshot",
+    "workspace_output_capture",
 ];
 
 const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
@@ -168,6 +170,12 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_placement_transfer_manifest,
     },
     ObjectContract {
+        kind:
+            crate::external_content::products::accepted_result::PRODUCT_BUILD_ACCEPTED_RESULT_KIND,
+        validate: validate_product_build_accepted_result,
+        links: links_product_build_accepted_result,
+    },
+    ObjectContract {
         kind: "project_file",
         validate: validate_project_file,
         links: links_project_file,
@@ -216,6 +224,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: "thread_snapshot",
         validate: validate_thread_snapshot,
         links: links_thread_snapshot,
+    },
+    ObjectContract {
+        kind: crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND,
+        validate: validate_workspace_output_capture,
+        links: links_workspace_output_capture,
     },
 ];
 
@@ -327,6 +340,39 @@ fn validate_project_file(value: &Value) -> anyhow::Result<()> {
     crate::objects::ProjectFile::from_value(value).map(|_| ())
 }
 
+fn validate_product_build_accepted_result(value: &Value) -> anyhow::Result<()> {
+    crate::external_content::products::accepted_result::ProductBuildAcceptedResult::from_value(
+        value,
+    )
+    .map(|_| ())
+}
+
+fn links_product_build_accepted_result(value: &Value) -> Result<ContractLinks, String> {
+    let result =
+        crate::external_content::products::accepted_result::ProductBuildAcceptedResult::from_value(
+            value,
+        )
+        .map_err(|error| format!("invalid accepted product build result: {error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    for product in result.products {
+        super::push_typed_hash(
+            &product.witness_hash,
+            ExpectedObject::Kind("attestation"),
+            None,
+            &mut links.object_edges,
+        )?;
+        if let Some(hash) = product.qualification_hash {
+            super::push_typed_hash(
+                &hash,
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
+    Ok(links)
+}
+
 fn validate_project_snapshot(value: &Value) -> anyhow::Result<()> {
     crate::objects::ProjectSnapshot::from_value(value).map(|_| ())
 }
@@ -368,6 +414,10 @@ fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
     crate::objects::ThreadSnapshot::from_current_value(value.clone()).map(|_| ())
 }
 
+fn validate_workspace_output_capture(value: &Value) -> anyhow::Result<()> {
+    crate::objects::WorkspaceOutputCapture::from_value(value).map(|_| ())
+}
+
 fn links_leaf(_value: &Value) -> Result<ContractLinks, String> {
     Ok(ContractLinks::leaf())
 }
@@ -394,6 +444,30 @@ fn links_source_closure_manifest(value: &Value) -> Result<ContractLinks, String>
 
 fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
+    let answer: ryeos_effect_contract::DispatchEffectAnswer = serde_json::from_value(
+        value
+            .get("answer")
+            .cloned()
+            .ok_or_else(|| "dispatch_effect_record missing answer".to_owned())?,
+    )
+    .map_err(|error| format!("invalid dispatch effect answer: {error}"))?;
+    answer.validate().map_err(|error| error.to_string())?;
+    if let ryeos_effect_contract::DispatchEffectAnswer::Retained {
+        retained_result, ..
+    } = answer
+    {
+        match retained_result {
+            ryeos_effect_contract::RetainedEffectResult::ProductBuildAcceptedResult {
+                object_hash,
+            } => {
+                super::push_typed_hash(
+                    &object_hash,
+                    ExpectedObject::Kind(crate::external_content::products::accepted_result::PRODUCT_BUILD_ACCEPTED_RESULT_KIND),
+                    None, &mut links.object_edges,
+                )?;
+            }
+        }
+    }
     super::push_required_object_edge(
         value,
         "admission_evidence_hash",
@@ -510,6 +584,35 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         None,
         &mut links.object_edges,
     )?;
+    let attestation = crate::objects::Attestation::from_value(value)
+        .map_err(|error| format!("invalid attestation links: {error}"))?;
+    if attestation.claim
+        == crate::external_content::products::qualification::PRODUCT_QUALIFICATION_CLAIM
+        && attestation.policy
+            == crate::external_content::products::qualification::PRODUCT_QUALIFICATION_ATTESTATION_POLICY
+    {
+        let evidence = crate::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)
+            .map_err(|error| format!("invalid product qualification evidence links: {error}"))?;
+        for hash in evidence
+            .owning_attestation_hashes()
+            .map_err(|error| format!("invalid product qualification proof links: {error}"))?
+        {
+            super::push_typed_hash(
+                &hash,
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+        for verifier in evidence.execution_verifiers() {
+            super::push_typed_hash(
+                &verifier.execution_realization_hash,
+                ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
     Ok(links)
 }
 
@@ -610,6 +713,13 @@ fn links_chain_state(value: &Value) -> Result<ContractLinks, String> {
 
 fn links_thread_snapshot(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
+    super::push_optional_object_edge(
+        value,
+        "result_workspace_output_capture_hash",
+        ExpectedObject::Kind(crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
     for field in ["base_project_snapshot_hash", "result_project_snapshot_hash"] {
         super::push_optional_object_edge(
             value,
@@ -672,6 +782,18 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
                 &mut links.object_edges,
             )?;
         }
+        if let Some(workspace_outputs) = authority
+            .get("workspace_outputs")
+            .and_then(Value::as_object)
+        {
+            super::push_optional_object_edge(
+                &Value::Object(workspace_outputs.clone()),
+                "capture_hash",
+                ExpectedObject::Kind(crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
     }
     for hash in super::external_realization_manifest_hashes(value)? {
         super::push_typed_hash(
@@ -681,6 +803,10 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
             &mut links.object_edges,
         )?;
     }
+    push_retained_product_proof_edges(
+        value.pointer("/sealed_invocation/resolution_output"),
+        &mut links,
+    )?;
 
     let execution_closure = value
         .get("execution_closure")
@@ -703,6 +829,19 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
             &Value::Object(command.cloned().expect("checked direct command")),
             "executable_blob_hash",
             &mut links.blob_hashes,
+        )?;
+    }
+    if command
+        .and_then(|command| command.get("authority"))
+        .and_then(Value::as_str)
+        == Some("realization_member")
+    {
+        super::push_required_object_edge(
+            &Value::Object(command.cloned().expect("checked direct command")),
+            "realization_manifest_hash",
+            ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+            None,
+            &mut links.object_edges,
         )?;
     }
     if let Some(sessions) = execution_closure
@@ -732,11 +871,12 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
             .as_object()
             .ok_or_else(|| "admitted launch content dependencies must be an object".to_owned())?;
         for dependency in dependencies.values() {
-            for hash in super::retained_resolution_external_realization_manifest_hashes(
-                dependency
-                    .get("resolution")
-                    .ok_or_else(|| "content dependency is missing its resolution".to_owned())?,
-            )? {
+            let resolution = dependency
+                .get("resolution")
+                .ok_or_else(|| "content dependency is missing its resolution".to_owned())?;
+            push_retained_product_proof_edges(Some(resolution), &mut links)?;
+            for hash in super::retained_resolution_external_realization_manifest_hashes(resolution)?
+            {
                 super::push_typed_hash(
                     &hash,
                     ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
@@ -746,6 +886,12 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
             }
         }
     }
+    push_evidence_attachment_event_edges(
+        execution_closure
+            .get("prepared_runtime_launch")
+            .and_then(|launch| launch.get("evidence_attachments")),
+        &mut links,
+    )?;
     Ok(links)
 }
 
@@ -773,6 +919,26 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
             &mut links.object_edges,
         )?;
     }
+    match value.get("retained_product_selections") {
+        Some(Value::Null) => {}
+        Some(selections) => {
+            for hash in super::retained_product_selection_proof_hashes(selections)? {
+                super::push_typed_hash(
+                    &hash,
+                    ExpectedObject::Kind("attestation"),
+                    None,
+                    &mut links.object_edges,
+                )?;
+            }
+        }
+        None => {
+            return Err("persistent-session capsule missing retained product selections".into());
+        }
+    }
+    push_evidence_attachment_event_edges(
+        value.pointer("/exact_program/evidence_attachments"),
+        &mut links,
+    )?;
     let execution_closure = value
         .get("execution_closure")
         .and_then(Value::as_object)
@@ -788,7 +954,56 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
             &mut links.blob_hashes,
         )?;
     }
+    if command.get("authority").and_then(Value::as_str) == Some("realization_member") {
+        super::push_required_object_edge(
+            &Value::Object(command.clone()),
+            "realization_manifest_hash",
+            ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
     Ok(links)
+}
+
+fn push_retained_product_proof_edges(
+    resolution: Option<&Value>,
+    links: &mut ContractLinks,
+) -> Result<(), String> {
+    let Some(resolution) = resolution else {
+        return Ok(());
+    };
+    for hash in super::retained_resolution_product_proof_hashes(resolution)? {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind("attestation"),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    Ok(())
+}
+
+fn push_evidence_attachment_event_edges(
+    attachments: Option<&Value>,
+    links: &mut ContractLinks,
+) -> Result<(), String> {
+    let Some(attachments) = attachments else {
+        return Ok(());
+    };
+    let attachments = attachments
+        .as_array()
+        .ok_or_else(|| "evidence_attachments must be an array".to_owned())?;
+    for attachment in attachments {
+        super::push_required_object_edge(
+            attachment,
+            "event_hash",
+            ExpectedObject::Kind(crate::objects::BUNDLE_EVENT_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    Ok(())
 }
 
 fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
@@ -961,10 +1176,17 @@ fn links_external_content_binding(value: &Value) -> Result<ContractLinks, String
             _ => return Err("external-content binding has unsupported manifest kind".to_owned()),
         };
         links.object_edges.push(ObjectEdge {
-            hash: binding.manifest_hash,
+            hash: binding.manifest_hash.clone(),
             expected,
             history_graph: None,
         });
+        if let Some(source_closure) = binding.consumer.source_closure() {
+            links.object_edges.push(ObjectEdge {
+                hash: source_closure.binding_hash.clone(),
+                expected: ExpectedObject::Kind(crate::objects::EFFECTIVE_SOURCE_BINDING_KIND),
+                history_graph: None,
+            });
+        }
     }
     Ok(links)
 }
@@ -1009,6 +1231,38 @@ fn links_project_snapshot(value: &Value) -> Result<ContractLinks, String> {
             Some(HistoryGraph::ProjectSnapshotParents),
             &mut links.object_edges,
         )?;
+    }
+    Ok(links)
+}
+
+fn links_workspace_output_capture(value: &Value) -> Result<ContractLinks, String> {
+    let capture = crate::objects::WorkspaceOutputCapture::from_value(value)
+        .map_err(|error| format!("invalid workspace output capture: {error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &capture.result_project_snapshot_hash,
+        ExpectedObject::Kind("project_snapshot"),
+        None,
+        &mut links.object_edges,
+    )?;
+    for (_, state) in capture.outputs {
+        let crate::objects::WorkspaceOutputCaptureState::Captured {
+            manifest_kind,
+            manifest_hash,
+        } = state
+        else {
+            continue;
+        };
+        let expected = match manifest_kind.as_str() {
+            crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND => {
+                ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND)
+            }
+            crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND => {
+                ExpectedObject::Kind(crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND)
+            }
+            _ => return Err("workspace output capture has unsupported manifest kind".to_owned()),
+        };
+        super::push_typed_hash(&manifest_hash, expected, None, &mut links.object_edges)?;
     }
     Ok(links)
 }
@@ -1072,6 +1326,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepted_product_result_owns_only_exact_attestations() {
+        use crate::external_content::products::accepted_result::*;
+        let result = ProductBuildAcceptedResult {
+            schema: PRODUCT_BUILD_ACCEPTED_RESULT_SCHEMA.into(),
+            kind: PRODUCT_BUILD_ACCEPTED_RESULT_KIND.into(),
+            owner_principal: format!("fp:{}", "1".repeat(64)),
+            producer_ref: "graph:example/build".into(),
+            producer_project_snapshot_hash: "2".repeat(64),
+            producer_effective_definition_digest: "3".repeat(64),
+            producer_parameters_digest: "4".repeat(64),
+            producer_partition_identity: "5".repeat(64),
+            products: vec![ProductBuildAcceptedProduct {
+                product_name: "runtime".into(),
+                witness_hash: "6".repeat(64),
+                qualification_hash: Some("7".repeat(64)),
+            }],
+        };
+        let value = result.to_value().unwrap();
+        let links = links_product_build_accepted_result(&value).unwrap();
+        assert_eq!(links.object_edges.len(), 2);
+        assert_eq!(
+            links
+                .object_edges
+                .iter()
+                .map(|edge| edge.hash.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                result.products[0].witness_hash.as_str(),
+                result.products[0].qualification_hash.as_deref().unwrap()
+            ]
+        );
+        assert!(
+            links
+                .object_edges
+                .iter()
+                .all(|edge| edge.expected == ExpectedObject::Kind("attestation")
+                    && edge.history_graph.is_none())
+        );
+        assert!(links.blob_hashes.is_empty() && links.large_object_hashes.is_empty());
+        let mut malformed = value;
+        malformed["products"][0]["witness_hash"] = serde_json::json!("not-a-hash");
+        assert!(links_product_build_accepted_result(&malformed).is_err());
+    }
+
+    #[test]
     fn inventory_and_registry_are_sorted_and_identical() {
         let registry = CURRENT_OBJECT_CONTRACTS
             .iter()
@@ -1086,12 +1385,240 @@ mod tests {
         let evidence = "a".repeat(64);
         let links = links_dispatch_effect_record(&serde_json::json!({
             "admission_evidence_hash": evidence,
+            "answer": {"envelope":"bare", "result":null},
             "first_observation": {}
         }))
         .unwrap();
 
         assert_eq!(links.object_edges.len(), 1);
         assert_eq!(links.object_edges[0].hash, "a".repeat(64));
+    }
+
+    #[test]
+    fn dispatch_effect_retained_result_is_a_typed_edge_not_arbitrary_result_json() {
+        let retained = "a".repeat(64);
+        let arbitrary = "b".repeat(64);
+        let admission = "c".repeat(64);
+        let mut value = serde_json::json!({
+            "admission_evidence_hash": admission,
+            "first_observation": {},
+            "answer": {"envelope":"retained", "result":{"object_hash":arbitrary},
+                "retained_result":{"kind":"product_build_accepted_result", "object_hash":retained}},
+        });
+        let links = links_dispatch_effect_record(&value).unwrap();
+        assert_eq!(links.object_edges.len(), 2);
+        assert!(links.object_edges.iter().any(|edge| edge.hash == retained
+            && edge.expected == ExpectedObject::Kind("product_build_accepted_result")));
+        assert!(!links.object_edges.iter().any(|edge| edge.hash == arbitrary));
+        value["answer"] = serde_json::json!({"envelope":"bare", "result":{"retained_result":{"kind":"product_build_accepted_result", "object_hash":retained}}});
+        assert_eq!(
+            links_dispatch_effect_record(&value)
+                .unwrap()
+                .object_edges
+                .len(),
+            1
+        );
+        value["answer"] = serde_json::json!({"envelope":"retained", "result":null,
+            "retained_result":{"kind":"product_build_accepted_result", "object_hash":"invalid"}});
+        assert!(links_dispatch_effect_record(&value).is_err());
+    }
+
+    #[test]
+    fn declarative_project_external_binding_roots_only_its_external_manifest() {
+        let consumer = crate::objects::ExternalContentConsumerAuthority::pinned_project(
+            "tool:project/build".to_owned(),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            None,
+        )
+        .unwrap();
+        let binding = crate::objects::ExternalContentBinding::active(
+            "a".repeat(64),
+            crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            consumer,
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+        )
+        .unwrap();
+        let links = links_external_content_binding(&binding.to_value().unwrap()).unwrap();
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(links.object_edges[0].hash, "a".repeat(64));
+        assert_eq!(
+            links.object_edges[0].expected,
+            ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND)
+        );
+    }
+
+    #[test]
+    fn project_external_binding_roots_its_manifest_and_source_authority() {
+        let source_binding = "e".repeat(64);
+        let consumer = crate::objects::ExternalContentConsumerAuthority::pinned_project(
+            "tool:project/build".to_owned(),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            Some(crate::objects::EffectiveSourceClosureProjection {
+                schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+                binding_hash: source_binding.clone(),
+                content_manifest_hash: "f".repeat(64),
+                owner_key: "1".repeat(64),
+                file_count: 1,
+                total_bytes: 1,
+            }),
+        )
+        .unwrap();
+        let binding = crate::objects::ExternalContentBinding::active(
+            "a".repeat(64),
+            crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            consumer,
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+        )
+        .unwrap();
+        let links = links_external_content_binding(&binding.to_value().unwrap()).unwrap();
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == "a".repeat(64)
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND)
+        }));
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == source_binding
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EFFECTIVE_SOURCE_BINDING_KIND)
+        }));
+        assert_eq!(links.object_edges.len(), 2);
+    }
+
+    #[test]
+    fn workspace_output_capture_roots_only_result_snapshot_and_captured_manifests() {
+        use crate::external_content::products::{ProductBounds, ProductStorage};
+
+        let result_snapshot = "a".repeat(64);
+        let content_manifest = "b".repeat(64);
+        let large_manifest = "c".repeat(64);
+        let bounds = || ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 1_024,
+            maximum_total_bytes: 4_096,
+        };
+        let mut partition = crate::objects::WorkspaceOutputPartition {
+            schema: crate::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA.to_owned(),
+            recipe_binding: "product_recipe".to_owned(),
+            recipe_ref: "config:fixtures/products".to_owned(),
+            recipe_raw_content_digest: "f".repeat(64),
+            declarations_hash: "1".repeat(64),
+            project_snapshot_policy_hash: "2".repeat(64),
+            roots: [
+                ("absent", ProductStorage::Content),
+                ("content", ProductStorage::Content),
+                ("empty", ProductStorage::LargeContent),
+                ("large", ProductStorage::LargeContent),
+            ]
+            .into_iter()
+            .map(|(name, storage)| crate::objects::WorkspaceOutputRoot {
+                name: name.to_owned(),
+                path: format!("products/{name}"),
+                storage,
+                declared_bounds: bounds(),
+                effective_bounds: bounds(),
+            })
+            .collect(),
+            products: Vec::new(),
+            partition_identity: String::new(),
+            capture_policy_digest: "3".repeat(64),
+        };
+        partition.partition_identity = partition.derived_partition_identity().unwrap();
+        let capture = crate::objects::WorkspaceOutputCapture {
+            schema: crate::objects::WORKSPACE_OUTPUT_CAPTURE_SCHEMA.to_owned(),
+            kind: crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND.to_owned(),
+            producer_chain_root_id: "T-root".to_owned(),
+            producer_thread_id: "T-producer".to_owned(),
+            admitted_launch_capsule_hash: "d".repeat(64),
+            base_project_snapshot_hash: "e".repeat(64),
+            result_project_snapshot_hash: result_snapshot.clone(),
+            partition,
+            outputs: std::collections::BTreeMap::from([
+                (
+                    "absent".to_owned(),
+                    crate::objects::WorkspaceOutputCaptureState::Absent,
+                ),
+                (
+                    "content".to_owned(),
+                    crate::objects::WorkspaceOutputCaptureState::Captured {
+                        manifest_kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+                        manifest_hash: content_manifest.clone(),
+                    },
+                ),
+                (
+                    "empty".to_owned(),
+                    crate::objects::WorkspaceOutputCaptureState::EmptyDirectory,
+                ),
+                (
+                    "large".to_owned(),
+                    crate::objects::WorkspaceOutputCaptureState::Captured {
+                        manifest_kind: crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
+                            .to_owned(),
+                        manifest_hash: large_manifest.clone(),
+                    },
+                ),
+            ]),
+        };
+
+        let links = links_workspace_output_capture(&capture.to_value().unwrap()).unwrap();
+        assert_eq!(links.object_edges.len(), 3);
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == result_snapshot
+                && edge.expected == ExpectedObject::Kind("project_snapshot")
+        }));
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == content_manifest
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND)
+        }));
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == large_manifest
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND)
+        }));
+        for non_owning in [
+            &capture.admitted_launch_capsule_hash,
+            &capture.base_project_snapshot_hash,
+            &capture.partition.recipe_raw_content_digest,
+            &capture.partition.declarations_hash,
+            &capture.partition.partition_identity,
+            &capture.partition.capture_policy_digest,
+            &capture.partition.project_snapshot_policy_hash,
+        ] {
+            assert!(
+                links
+                    .object_edges
+                    .iter()
+                    .all(|edge| &edge.hash != non_owning)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_thread_snapshot_owns_the_result_output_capture() {
+        let capture_hash = "a".repeat(64);
+        let links = links_thread_snapshot(&serde_json::json!({
+            "base_project_snapshot_hash": null,
+            "result_project_snapshot_hash": null,
+            "result_workspace_output_capture_hash": capture_hash,
+            "last_event_hash": null,
+            "admitted_launch_capsule_hash": null,
+        }))
+        .unwrap();
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(links.object_edges[0].hash, capture_hash);
+        assert_eq!(
+            links.object_edges[0].expected,
+            ExpectedObject::Kind(crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND)
+        );
     }
 
     #[test]
@@ -1146,5 +1673,26 @@ mod tests {
         let links = links_external_content_activation(&receipt.to_value().unwrap()).unwrap();
         assert_eq!(links.object_edges.len(), 1);
         assert_eq!(links.object_edges[0].hash, "3".repeat(64));
+    }
+
+    #[test]
+    fn evidence_attachment_binding_roots_its_exact_bundle_event() {
+        let event_hash = "9".repeat(64);
+        let mut links = ContractLinks::leaf();
+        push_evidence_attachment_event_edges(
+            Some(&serde_json::json!([{
+                "binding_id": "observations",
+                "event_hash": event_hash,
+            }])),
+            &mut links,
+        )
+        .unwrap();
+
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(links.object_edges[0].hash, "9".repeat(64));
+        assert_eq!(
+            links.object_edges[0].expected,
+            ExpectedObject::Kind(crate::objects::BUNDLE_EVENT_KIND)
+        );
     }
 }

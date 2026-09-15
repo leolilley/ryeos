@@ -1,0 +1,9 @@
+category: test
+version: "1.0.0"
+description: Qualify the exact selected subject using the unchanged two-slot verifier
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: tool:test/verify-dynamic-products
+  subject_declaration_id: subject
+  allowed_claims: [bounded_payload_pair]
+  verifier_parameters: {}

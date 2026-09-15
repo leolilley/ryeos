@@ -1,8 +1,7 @@
-<!-- ryeos:signed:2026-08-23T21:53:41Z:6c46ab869e2f1186e9161a96147cf8a0d377c3ad322f967e9457abceb89a6328:iBD+mSjddG+23CrXwGJtk5/CJFNl81yGrVEwf11TcuETeoy0ZRysyE+YxuQ0gdkke/XOzhYqfR6VgkSp4aqcDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/papers
 tags: [papers, measurement, sincerity, character, game-theory, research-note]
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Math companion to measurement-not-benchmarking.md: toy-model results on
   when permanent records and diverse evaluation frames make sincerity the
@@ -134,11 +133,15 @@ today's evaluation pathologies:
 | Whole-record coherence folds | frames may fold the entire chain | siloed evals: audience-partitioned simulacra, full premium forever |
 | Probe diversity spanning the character space | open frame authorship; admissibility earned, frames minted freely | one closed benchmark: permanent free dimensions — the Goodhart subspace |
 
-The contemporary AI evaluation regime fails all three at once: closed
-static benchmarks, siloed per-eval judgment, stateless sessions. The
-substrate sets all three knobs the other way. That is the practical
-content of this note: sincerity-dominance is not a hope about agents; it
-is a parameter regime, and the parameters are architectural.
+These are experimental assumptions to investigate, not properties established
+by retaining signed records. A deployed system may lack complete observations,
+independent frames, stable identities or legitimate access to whole histories.
+Privacy and correction may intentionally limit retention.
+
+The toy model suggests hypotheses about incentives. It does not prove that
+RyeOS induces honesty or that other systems cannot supply the same controls.
+No equations or reported numerical results were revalidated in this editorial
+alignment.
 
 ## Adjacent literature (stays in this note)
 
@@ -165,9 +168,9 @@ framework, sincerity and intelligence are measured by the same fold.
   strategic frame authorship. The rating-agency failure mode is outside
   this model and unresolved by it.
 - Perfect simulation is not distinguished from possession — by design.
-  On a testimony substrate there is no fact of the matter beyond the
-  record (the specification gap); a simulator coherent under every probe
-  *is*, extensionally, a possessor. The theorems bound the profitability
+  Within this model, a simulator coherent under every permitted probe is
+  observationally equivalent to a possessor. That does not establish the
+  absence of external facts or hidden differences in deployed agents. The theorems bound the profitability
   of imperfect simulation; the mask that must fit every question becomes
   the face.
 
@@ -188,7 +191,8 @@ framework, sincerity and intelligence are measured by the same fold.
   model*, never as facts about agents. Promotion of any claim requires
   either a general proof or empirical folds over real records.
 - Adds no substrate primitives; the theorem's three conditions must map
-  to mechanisms that already exist, and do.
+  to qualified mechanisms and explicit experimental assumptions. The mapping
+  is an obligation, not evidence that every condition is already realised.
 - The corrected conjecture supersedes the character-thread phrasing
   wherever the two differ; do not quote the original form.
 - External formalism stays here, per the measurement note's rule.

@@ -7,6 +7,7 @@
 //! kind / id from `LaunchEnvelope.resolution.root` directly.
 
 pub use ryeos_runtime::envelope::{
-    EnvelopeAccountingScope, EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots,
-    HardLimits, LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeResult, RuntimeResultStatus,
+    AggregateExecutionLimits, EnvelopeAccountingScope, EnvelopeCallback, EnvelopePolicy,
+    EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope, LaunchEnvelopeBuilder,
+    RuntimeResult, RuntimeResultStatus,
 };

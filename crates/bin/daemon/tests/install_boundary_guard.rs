@@ -76,11 +76,7 @@ fn install_root_does_not_leak_writable_paths() {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("crates").is_dir())
-        .expect("workspace root")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 fn scan_dir(dir: &Path, visit: &mut impl FnMut(&Path)) {

@@ -5675,7 +5675,6 @@ owner = "ryeos-dev"
         async fn attach_process(
             &self,
             _thread_id: &str,
-            _pid: u32,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
             Ok(json!({}))
         }

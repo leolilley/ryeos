@@ -47,6 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -102,6 +103,11 @@ pub struct InitOptions {
     /// Contains operator config, mutable node state, and installed bundle
     /// content — there is no separate user-space tier.
     pub app_root: PathBuf,
+    /// Optional explicit TCP endpoint for the node's create-once bootstrap
+    /// configuration.
+    pub bind: Option<SocketAddr>,
+    /// Optional explicit local lifecycle endpoint for the same configuration.
+    pub uds_path: Option<PathBuf>,
     /// Source directory containing one or more bundle subdirectories.
     /// Each immediate child that contains a `.ai/` directory is a bundle;
     /// the bundle name is its directory name.
@@ -236,6 +242,29 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     run_init_with_progress(opts, |_| Ok(()))
 }
 
+/// Read-only compatibility gate used before an installer changes lifecycle or
+/// package state. Strict mode compiles the exact current generation through
+/// the registered policy table. An explicitly selected schema cut instead
+/// proves only the complete node-signed predecessor occupant, because decoding
+/// retired section schemas is precisely what the cut must not require.
+pub fn preflight_existing_policy_generation(app_root: &Path, schema_cut: bool) -> Result<()> {
+    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
+    let trust = TrustStore::load(None, &operator_config_root)
+        .context("load node trust for policy-generation preflight")?;
+    if schema_cut {
+        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
+            .context("prove complete signed predecessor policy generation")
+    } else {
+        ryeos_app::node_policy::generation::load_policy_generation(
+            app_root,
+            &trust,
+            &ryeos_app::node_policy::NodePolicyTable::new(),
+        )
+        .context("compile current signed node policy generation")
+        .map(|_| ())
+    }
+}
+
 pub fn run_init_with_progress(
     opts: &InitOptions,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
@@ -289,7 +318,15 @@ fn run_init_internal(
     create_layout(&opts.app_root)?;
     ryeos_app::config::retire_pre_node_policy_config(&opts.app_root)
         .context("retire predecessor daemon policy fields")?;
-
+    let bootstrap_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(opts.app_root.clone()),
+        bind: opts.bind,
+        uds_path: opts.uds_path.clone(),
+        ..Default::default()
+    })
+    .context("resolve node bootstrap configuration")?;
+    ryeos_app::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
+        .context("seed node bootstrap configuration")?;
     // Operator config root (`<app_root>/.ai/config`) — the single trust
     // source for `ryeos init`. Bundles are never a trust source.
     let operator_config_root = opts.app_root.join(ryeos_engine::AI_DIR).join("config");
@@ -548,7 +585,7 @@ fn run_init_internal(
         isolation_policy,
         prospective_policy.generation_digest(),
     )
-    .context("prospective init source set would fail node boot")?;
+    .context("prospective init source set failed definition admission")?;
 
     // Re-init inherits the existing immutable node policy, but resolves its
     // selected backend and all supporting kinds through the prospective source
@@ -556,7 +593,11 @@ fn run_init_internal(
     // make a clean schema cut impossible: an obsolete bundle could prevent the
     // very init transaction that atomically replaces it. The prospective
     // admission above still fails closed on the signed policy and proves the
-    // exact generation that will become active before any installed tree moves.
+    // exact signed definition generation before any installed tree moves.
+    // The installer is not the supervised node controller. It must not probe
+    // or allocate that controller's process scopes here. Validators still use
+    // enforced ordinary subprocess isolation; daemon startup separately owns
+    // complete host qualification before accepting scoped execution.
     let isolation = Arc::clone(&prospective_isolation);
 
     if !opts.skip_preflight {
@@ -1203,7 +1244,9 @@ fn validate_prospective_staging(
         isolation_policy,
         policy_snapshot.generation_digest(),
     )
-    .with_context(|| format!("completed `{bundle_name}` staging tree would fail next boot"))?;
+    .with_context(|| {
+        format!("completed `{bundle_name}` staging tree failed definition admission")
+    })?;
     Ok(())
 }
 
@@ -1451,6 +1494,12 @@ fn create_layout(app_root: &Path) -> Result<()> {
     let runtime_state_path = app_root.join(ryeos_engine::AI_DIR).join("state");
     let runtime_state = lillux::PinnedDirectory::open_or_create(&runtime_state_path)
         .context("pin initialized runtime-state directory")?;
+    runtime_state
+        .open_or_create_child(
+            std::ffi::OsStr::new(ryeos_engine::roots::DAEMON_STATE_DIR),
+            0o700,
+        )
+        .context("create initialized daemon-state authority")?;
     let recovery = runtime_state
         .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
         .context("create initialized recovery authority")?;
@@ -1798,6 +1847,8 @@ mod tests {
     fn make_opts(state: &Path, _user: &Path) -> InitOptions {
         InitOptions {
             app_root: state.to_path_buf(),
+            bind: None,
+            uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
@@ -1914,6 +1965,8 @@ mod tests {
         let state = tmp.path().join("state");
         let opts = InitOptions {
             app_root: state.to_path_buf(),
+            bind: None,
+            uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-node".to_owned()),
@@ -1960,6 +2013,13 @@ mod tests {
                 .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
                 .exists()
         );
+        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+            app_root: Some(state.clone()),
+            ..Default::default()
+        })
+        .expect("load init-owned bootstrap config");
+        assert_eq!(config.app_root, state);
+        assert!(state.join(".ai/node/config.yaml").is_file());
     }
 
     #[test]
@@ -2078,7 +2138,7 @@ mod tests {
         let mut policies = current.policies().clone();
         policies.insert(
             "ingest_ignore".to_owned(),
-            serde_json::json!({"schema": 1, "additional_patterns": ["*.trace"]}),
+            serde_json::json!({"schema": 2, "patterns": ["*.trace"]}),
         );
         let update = current
             .prepare_replacement(&table, policies, Path::new("operator-policy.yaml"))
@@ -2177,6 +2237,8 @@ mod tests {
 
         let replacement = InitOptions {
             app_root: state.clone(),
+            bind: None,
+            uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-workflow".to_owned()),
@@ -2211,6 +2273,55 @@ mod tests {
     }
 
     #[test]
+    fn explicit_policy_cut_replaces_a_trusted_predecessor_section_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = make_opts(&state, &user);
+        run_init(&opts).expect("initial current generation");
+
+        let identity = ryeos_app::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let predecessor = serde_json::json!({
+            "schema": 1,
+            "additional_patterns": [],
+        });
+        let bytes = ryeos_app::node_document::render_signed_item(
+            "ingest_ignore",
+            "policy",
+            &predecessor,
+            &identity,
+        )
+        .unwrap();
+        fs::write(state.join(".ai/node/policies/ingest_ignore.yaml"), bytes).unwrap();
+
+        let error = run_init(&opts).expect_err("ordinary init must not reinterpret schema 1");
+        assert!(
+            format!("{error:#}").contains("ingest_ignore policy schema is not current"),
+            "got: {error:#}"
+        );
+
+        let mut replacement = opts;
+        replacement.replace_node_policy_generation = true;
+        run_init(&replacement).expect("explicit schema cut replaces predecessor generation");
+
+        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let current = ryeos_app::node_policy::generation::load_optional_policy_generation(
+            &state,
+            &trust,
+            &ryeos_app::node_policy::NodePolicyTable::new(),
+        )
+        .unwrap()
+        .expect("current policy generation");
+        assert_eq!(
+            current.policies()["ingest_ignore"]["schema"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[test]
     fn explicit_policy_cut_requires_an_existing_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let mut opts = make_opts(&tmp.path().join("state"), &tmp.path().join("home"));
@@ -2233,6 +2344,8 @@ mod tests {
         let state = tmp.path().join("state");
         let opts = InitOptions {
             app_root: state,
+            bind: None,
+            uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
@@ -2254,6 +2367,8 @@ mod tests {
         let state = tmp.path().join("state");
         let opts = InitOptions {
             app_root: state,
+            bind: None,
+            uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
             node_profile: Some("full".to_owned()),
@@ -2634,6 +2749,8 @@ typo_field: oops
 
         let opts = InitOptions {
             app_root: state.clone(),
+            bind: None,
+            uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),

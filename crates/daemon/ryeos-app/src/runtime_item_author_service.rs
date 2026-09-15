@@ -1,10 +1,12 @@
 //! Daemon-mediated runtime callback for signed project item authoring.
 //!
 //! Runtimes may propose bytes for a project item, but they never receive an
-//! item-signing key. The daemon authenticates the live runtime callback,
-//! authorizes the target with `ryeos.author.<kind>.<bare_id>`, derives the path
-//! from the kind schema, injects signed provenance, signs with the daemon's
-//! trusted identity, and atomically writes the normal project-space item.
+//! item-signing key. The daemon authenticates the runtime callback, authorizes
+//! the target with `ryeos.author.<kind>.<bare_id>`, derives the path from the
+//! kind schema, injects signed provenance, and signs with the daemon's trusted
+//! identity. Ordinary execution writes its admitted live project root; an
+//! explicitly sealed candidate-integration operation writes only its private
+//! retained CoW workspace.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -72,20 +74,29 @@ impl RuntimeItemAuthorService {
         thread_auth: &ThreadAuthState,
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
-        // The callback's item-specific grant is not by itself authority to
-        // mutate a live project. Preserve the caller's independently admitted
-        // project-write ceiling across pinned execution, while keeping the
-        // runtime confined to its immutable/COW project view.
-        authorizer
-            .authorize(
-                cap.provenance.project_authority().capability_ceiling(),
-                &AuthorizationPolicy::require(LIVE_PROJECT_WRITE_CAPABILITY),
-            )
-            .context("runtime item authoring requires admitted caller project-write authority")?;
-        let project_root = cap
-            .provenance
-            .durable_item_publication_root("project")
-            .context("runtime item authoring requires durable project publication authority")?;
+        // Candidate integration and live publication are separate authorities.
+        // The former writes only the exact private COW workspace admitted and
+        // capsule-sealed by the owner service; it never receives an ambient
+        // live-tree path. Ordinary callbacks retain the existing independent
+        // live-project write ceiling and durable publication-root check.
+        let project_root = match cap.provenance.candidate_item_authoring_root()? {
+            Some(root) => root,
+            None => {
+                authorizer
+                    .authorize(
+                        cap.provenance.project_authority().capability_ceiling(),
+                        &AuthorizationPolicy::require(LIVE_PROJECT_WRITE_CAPABILITY),
+                    )
+                    .context(
+                        "runtime item authoring requires admitted caller project-write authority",
+                    )?;
+                cap.provenance
+                    .durable_item_publication_root("project")
+                    .context(
+                        "runtime item authoring requires durable project publication authority",
+                    )?
+            }
+        };
         if params.content.contains(PROVENANCE_MARKER) {
             bail!("runtime-authored item content must not contain `{PROVENANCE_MARKER}`");
         }

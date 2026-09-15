@@ -479,6 +479,7 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
             verified: true,
             authorized_key_class: None,
             authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
             metadata,
         }))
     }
@@ -1388,7 +1389,12 @@ mod tests {
             ),
             scheduler_runtime_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             scheduler_reload_tx: None,
-            ignore_matcher: std::sync::Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+            ignore_matcher: std::sync::Arc::new(
+                ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
+                    patterns: Vec::new(),
+                })
+                .unwrap(),
+            ),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: std::sync::Arc::new(

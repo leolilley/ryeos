@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-04T05:54:47Z:d9dcdcbbad5b10d1094e7f83fca0fd1e2f2d7d684563a0f64088d91bc9d51db0:oVVzeWHYYGhp2ArafCsNOiKY5MAt9KmeZHDIfYdcEpNWMvSfUmdAb4M3k8gGvmChT4+IuN0j6V6EIMh+9/b1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T03:59:20Z:15971247496e006c3ad1fab887e444a5decc909d9e41f4c5eeff83bf7281c2e1:64a35fKjsU87QtmW2dKXE/tBrmdnAw3slcLxARtnv3FVE/Efz7kiAZr2x53XPANmuWrFAl1ys3wawFBN9XSgBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: structured_session
 category: ryeos/core
@@ -34,5 +34,5 @@ session:
   channel_env: RYEOS_SESSION_FD
   framing: u32_be_json
   wire_protocol: ryeos.structured-session
-  wire_version: 1
+  wire_version: 2
   max_frame_bytes: 16777216

@@ -333,84 +333,15 @@ pub fn encode_cognition_in_payloads(content: &str) -> Result<Vec<Value>> {
     }
 
     let content_hash = lillux::signature::content_hash(content);
-    let mut chunks = Vec::new();
-    let mut start = 0usize;
-    while start < content.len() {
-        let mut low = start + 1;
-        let mut high = content.len();
-        let mut best = None;
-        while low <= high {
-            let middle = low + (high - low) / 2;
-            let mut end = middle;
-            while end > start && !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            if end == start {
-                low = middle + 1;
-                continue;
-            }
-            let candidate = CognitionInChunk {
-                schema_version: 1,
-                content_hash: content_hash.clone(),
-                chunk_index: (MAX_RUNTIME_EVENT_BATCH_ITEMS - 1) as u32,
-                chunk_count: MAX_RUNTIME_EVENT_BATCH_ITEMS as u32,
-                content_chunk: content[start..end].to_string(),
-            };
-            let bytes = serde_json::to_vec(&candidate)
-                .context("serialize candidate cognition_in chunk")?
-                .len();
-            if bytes <= MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
-                best = Some(end);
-                low = middle + 1;
-            } else {
-                high = end.saturating_sub(1);
-            }
-        }
-        let end = best.context("one UTF-8 scalar does not fit in a cognition_in chunk")?;
-        chunks.push(content[start..end].to_string());
-        if chunks.len() > MAX_RUNTIME_EVENT_BATCH_ITEMS {
-            bail!(
-                "rendered cognition_in requires more than {} atomic event chunks",
-                MAX_RUNTIME_EVENT_BATCH_ITEMS
-            );
-        }
-        start = end;
-    }
-    if chunks.len() < 2 {
-        bail!("oversized cognition_in did not produce a multipart payload");
-    }
-
-    let chunk_count = u32::try_from(chunks.len()).context("cognition_in chunk count overflow")?;
-    let payloads = chunks
-        .into_iter()
-        .enumerate()
-        .map(|(chunk_index, content_chunk)| {
-            serde_json::to_value(CognitionInChunk {
-                schema_version: 1,
-                content_hash: content_hash.clone(),
-                chunk_index: u32::try_from(chunk_index)
-                    .expect("runtime event chunk count is bounded by u32"),
-                chunk_count,
-                content_chunk,
-            })
-            .expect("CognitionInChunk serialization cannot fail")
+    let payloads = encode_bounded_text_payloads(content, |chunk_index, chunk_count, chunk| {
+        json!({
+            "schema_version": 1,
+            "content_hash": content_hash,
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "content_chunk": chunk,
         })
-        .collect::<Vec<_>>();
-
-    let total_bytes = payloads.iter().try_fold(0usize, |total, payload| {
-        let bytes = serde_json::to_vec(payload)
-            .context("serialize chunked cognition_in payload")?
-            .len();
-        total
-            .checked_add(bytes)
-            .context("chunked cognition_in byte count overflow")
     })?;
-    if total_bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
-        bail!(
-            "chunked cognition_in payloads total {total_bytes} bytes (max {})",
-            MAX_RUNTIME_EVENT_BATCH_BYTES
-        );
-    }
 
     let mut assembler = CognitionInAssembler::default();
     let mut recovered = None;
@@ -425,6 +356,75 @@ pub fn encode_cognition_in_payloads(content: &str) -> Result<Vec<Value>> {
     }
 
     Ok(payloads)
+}
+
+/// Project bounded UTF-8 content into one atomic event batch. The caller owns
+/// the payload schema; this helper owns only exact JSON byte budgeting and
+/// scalar boundaries. It does not publish, truncate, or introduce a queue.
+/// The encoder must not grow when its indices/count shrink from the maximum.
+pub fn encode_bounded_text_payloads(
+    content: &str,
+    encode: impl Fn(u32, u32, &str) -> Value,
+) -> Result<Vec<Value>> {
+    if content.len() > MAX_RUNTIME_EVENT_BATCH_BYTES {
+        bail!("text exceeds atomic event batch byte ceiling");
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    loop {
+        let mut low = start;
+        let mut high = content.len();
+        let mut best = None;
+        while low <= high {
+            let middle = low + (high - low) / 2;
+            let mut end = middle;
+            while end > start && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            let candidate = encode(
+                (MAX_RUNTIME_EVENT_BATCH_ITEMS - 1) as u32,
+                MAX_RUNTIME_EVENT_BATCH_ITEMS as u32,
+                &content[start..end],
+            );
+            if serde_json::to_vec(&candidate)?.len() <= MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
+                best = Some(end);
+                low = middle + 1;
+            } else if middle == 0 {
+                break;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let end = best.context("event metadata exceeds payload byte ceiling")?;
+        if end == start && start < content.len() {
+            bail!("one UTF-8 scalar does not fit in event payload");
+        }
+        chunks.push(&content[start..end]);
+        if chunks.len() > MAX_RUNTIME_EVENT_BATCH_ITEMS {
+            bail!("text exceeds atomic event batch item ceiling");
+        }
+        start = end;
+        if start == content.len() {
+            break;
+        }
+    }
+    let count = chunks.len() as u32;
+    let mut total = 0usize;
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let payload = encode(index as u32, count, chunk);
+            let bytes = serde_json::to_vec(&payload)?.len();
+            total = total
+                .checked_add(bytes)
+                .context("event batch byte overflow")?;
+            if bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES || total > MAX_RUNTIME_EVENT_BATCH_BYTES {
+                bail!("encoded text exceeds atomic event admission ceilings");
+            }
+            Ok(payload)
+        })
+        .collect()
 }
 
 /// Storage strategy for a persisted event.

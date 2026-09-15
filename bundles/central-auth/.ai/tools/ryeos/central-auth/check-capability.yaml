@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:74bfd2b96ee67e09b16911053143e8961f46d9bf38ac40e1a4235854a6603982:EAY4chXiGW/9HaBD9xlAJcvAFN+HeAgH31cSGIgvXlyLs9LbG/YxQOtHwL8CPH8poht8MYfd+17/S4+srGwvBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:e957118d0c5168bbe1bde73280185d9b5933a6be6fb42a4691f0aa815a98940d:dTZfMW1T2mgpWvl/H28th4MAgqYXr3tQLMwbf21klWyF8TvEIE1R3aXX2JEG+iXe+b8LM1+eg1EeLd4JhX8eCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "check-capability"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.check-capability"]
 description: "Verify a session token and check one required capability."
 

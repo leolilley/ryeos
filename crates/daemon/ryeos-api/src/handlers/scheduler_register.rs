@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -15,9 +15,11 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_scheduler::crontab;
 use ryeos_scheduler::projection;
-use ryeos_scheduler::types::{ScheduleExecution, ScheduleManagedBy, ScheduleSourceRecord};
+use ryeos_scheduler::types::{
+    ScheduleExecution, ScheduleExecutionAuthority, ScheduleManagedBy, ScheduleSourceRecord,
+};
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub schedule_id: String,
@@ -31,8 +33,10 @@ pub struct Request {
     pub overlap_policy: String,
     pub lateness_grace_secs: i64,
     pub enabled: bool,
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub project_root: Option<String>,
+    pub execution_policy: ryeos_engine::execution_contract::ExecutionPolicy,
 }
 
 pub async fn handle(
@@ -87,7 +91,7 @@ pub async fn handle(
     // requester. On create, no ownership check needed —
     // the caller becomes the owner.
     if let Some(ref existing) = existing_spec {
-        ctx.require_owner(Some(&existing.requester_fingerprint))
+        ctx.require_owner(Some(existing.execution.principal_id()))
             .map_err(|e| -> anyhow::Error { e.into() })?;
     }
 
@@ -155,31 +159,42 @@ pub async fn handle(
     // The service executor injects _ctx from ExecutionContext before
     // dispatching the handler. Fail-closed: if injection didn't happen,
     // error out rather than silently degrading to node identity.
-    let caller_fingerprint = if ctx.fingerprint.is_empty() {
+    if ctx.fingerprint.is_empty() {
         bail!("scheduler.register requires verified caller context (executor must inject _ctx)");
-    } else {
-        ctx.fingerprint.clone()
-    };
-    let capabilities = if let Some(ref existing) = existing_spec {
-        existing.capabilities.clone()
-    } else if ctx.scopes.is_empty() {
+    }
+    if ctx.scopes.is_empty() {
         bail!("scheduler.register requires verified caller context with non-empty scopes");
-    } else {
-        ctx.scopes.clone()
-    };
+    }
+    let requested_capabilities = req.capabilities.clone();
+    let mut capabilities = requested_capabilities.clone();
+    capabilities.sort();
+    capabilities.dedup();
+    if capabilities.is_empty() || capabilities != requested_capabilities {
+        bail!("scheduler capabilities must be a non-empty sorted unique capability subset");
+    }
+    let authorizer = ryeos_runtime::authorizer::Authorizer::new();
+    for capability in &capabilities {
+        authorizer
+            .authorize(
+                &ctx.scopes,
+                &ryeos_runtime::authorizer::AuthorizationPolicy::require(capability),
+            )
+            .map_err(|_| anyhow::anyhow!(
+                "scheduler capability {capability:?} is not covered by the authenticated caller grant"
+            ))?;
+    }
 
-    // On UPDATE, preserve the existing requester_fingerprint — only the
-    // original owner can update, but the owner identity and
-    // granted capabilities stay the same. On CREATE, the caller becomes
-    // the owner and current caller scopes become the schedule grant.
-    let requester_fingerprint = if let Some(ref existing) = existing_spec {
-        existing.requester_fingerprint.clone()
-    } else {
-        caller_fingerprint
-    };
+    // On update the authenticated owner explicitly replaces the policy,
+    // capability ceiling, and stable grant generation. Nothing is inherited
+    // from ambient transport state or silently broadened.
+    let registration_request_hash = ryeos_state::objects::canonical_value_digest(
+        &serde_json::to_value(&req).context("encode canonical schedule registration request")?,
+    )?;
+    let authority =
+        authenticated_schedule_authority(&ctx, state.as_ref(), registration_request_hash)?;
 
     let source_record = ScheduleSourceRecord {
-        spec_version: 1,
+        spec_version: 2,
         schedule_id: req.schedule_id.clone(),
         item_ref: req.item_ref.clone(),
         ref_bindings: req.ref_bindings.clone(),
@@ -194,8 +209,9 @@ pub async fn handle(
         project_root: req.project_root.clone(),
         registered_at,
         execution: ScheduleExecution {
-            requester_fingerprint,
+            authority,
             capabilities,
+            policy: req.execution_policy.clone(),
         },
         managed_by: None,
     };
@@ -232,6 +248,29 @@ pub async fn handle(
         "spec_path": spec_path.display().to_string(),
         "created": !was_existing,
     }))
+}
+
+pub(crate) fn authenticated_schedule_authority(
+    ctx: &crate::handler_context::HandlerContext,
+    state: &AppState,
+    registration_request_hash: String,
+) -> Result<ScheduleExecutionAuthority> {
+    ctx.require_verified()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let principal_class = ctx
+        .authorized_key_class
+        .context("schedule registration requires a RyeOS authorized-key principal class")?;
+    let grant_authority = ctx.authenticated_grant_authority.clone().context(
+        "schedule registration requires stable authorized-key grant-generation evidence",
+    )?;
+    let origin_site_id = ctx.execution_origin(state.threads.site_id());
+    Ok(ScheduleExecutionAuthority::Authenticated {
+        principal_id: ctx.fingerprint.clone(),
+        principal_class,
+        effective_origin_site_id: origin_site_id,
+        grant_authority,
+        registration_request_hash,
+    })
 }
 
 pub(super) fn canonical_schedule_source_path(

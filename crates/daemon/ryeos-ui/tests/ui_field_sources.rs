@@ -9,10 +9,7 @@ use ryeos_ui::state::get_ui_state;
 use test_state::build_test_state;
 
 fn workspace_root() -> String {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|path| path.join("bundles").is_dir())
-        .expect("workspace root with bundles")
+    ryeos_engine::test_support::workspace_root()
         .to_string_lossy()
         .to_string()
 }

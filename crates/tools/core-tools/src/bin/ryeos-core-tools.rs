@@ -1,7 +1,7 @@
 //! `ryeos-core-tools` — unified core tools binary.
 //!
 //! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client,
-//! admission-token, remote-descriptor.
+//! remote-descriptor.
 //!
 //! Multi-tool binary for signing and inspecting RyeOS items.
 //! Invoked by tool YAMLs via `bin:ryeos-core-tools <subcommand>`.
@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
-use base64::Engine;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -259,29 +258,15 @@ enum Cmd {
         #[arg(long)]
         origin_site_id: Option<String>,
 
+        /// Bind this key as the authenticated identity of a remote RyeOS
+        /// node at this site. Mutually exclusive with --origin-site-id.
+        #[arg(long, conflicts_with = "origin_site_id")]
+        remote_node_origin_site_id: Option<String>,
+
         /// Explicitly permit an incumbent grant's principal class or origin
         /// to change. Use only while the daemon is stopped.
         #[arg(long)]
         allow_semantic_conversion: bool,
-    },
-
-    /// Mint a one-time node-local admission token for remote bootstrap.
-    AdmissionToken {
-        /// App root directory for the target node.
-        #[arg(long)]
-        app_root: Option<String>,
-
-        /// Comma-separated scopes this token may grant.
-        #[arg(long)]
-        scopes: Option<String>,
-
-        /// Optional default label for the authorized key created by claim.
-        #[arg(long)]
-        label: Option<String>,
-
-        /// Token lifetime in seconds.
-        #[arg(long, default_value_t = 600)]
-        ttl_secs: u64,
     },
 
     /// Export a remote descriptor trust pin for this node.
@@ -592,7 +577,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 let mut obj = serde_json::json!({});
                 if let Some(s) = app_root {
-                    obj["app_root"] = serde_json::json!(s);
+                    obj["system_space_dir"] = serde_json::json!(s);
                 }
                 obj
             };
@@ -609,6 +594,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             label,
             merge_scopes,
             origin_site_id,
+            remote_node_origin_site_id,
             allow_semantic_conversion,
         } => run_authorize_client(
             app_root,
@@ -617,15 +603,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             label,
             merge_scopes,
             origin_site_id,
+            remote_node_origin_site_id,
             allow_semantic_conversion,
             cli.stdin_json,
         ),
-        Cmd::AdmissionToken {
-            app_root,
-            scopes,
-            label,
-            ttl_secs,
-        } => run_admission_token(app_root, scopes, label, ttl_secs, cli.stdin_json),
         Cmd::RemoteDescriptor {
             app_root,
             name,
@@ -1312,7 +1293,7 @@ fn run_bundle_verify(
                 .expect("could not determine XDG data directory")
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
-    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
+    let isolation = ryeos_app::engine_init::load_locked_registered_definition_isolation(&app_root)
         .context("load node isolation policy")?;
 
     let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
@@ -1501,7 +1482,7 @@ fn run_sign(
     source: String,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::sign::{BatchReport, ItemOutcome, SignSource, run_sign};
+    use ryeos_core_tools::actions::sign::{SignSource, run_sign_batch};
 
     let (item_refs, project_arg, source_str) = if stdin_json {
         if !item_refs.is_empty() {
@@ -1523,21 +1504,7 @@ fn run_sign(
     let source = SignSource::parse(&source_str)?;
     let project = project_arg.or_else(|| std::env::current_dir().ok());
 
-    let mut batch = BatchReport::default();
-    let batch_mode = item_refs.len() > 1;
-    for item_ref in item_refs {
-        let signed = run_sign(&item_ref, project.as_deref(), source);
-        match signed {
-            Ok(report) => batch.extend(report),
-            Err(e) if batch_mode => batch.failed.push(ItemOutcome {
-                item_ref,
-                signature: None,
-                error: Some(format!("{e:#}")),
-                warnings: Vec::new(),
-            }),
-            Err(e) => return Err(e),
-        }
-    }
+    let batch = run_sign_batch(&item_refs, project.as_deref(), source)?;
     println!("{}", serde_json::to_string_pretty(&batch)?);
     if !batch.is_total_success() {
         anyhow::bail!(
@@ -1706,6 +1673,8 @@ struct AuthorizeClientStdinParams {
     #[serde(default)]
     origin_site_id: Option<String>,
     #[serde(default)]
+    remote_node_origin_site_id: Option<String>,
+    #[serde(default)]
     allow_semantic_conversion: bool,
 }
 
@@ -1720,12 +1689,12 @@ fn run_authorize_client(
     label: String,
     merge_scopes: bool,
     origin_site_id: Option<String>,
+    remote_node_origin_site_id: Option<String>,
     allow_semantic_conversion: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use lillux::crypto::VerifyingKey;
     use ryeos_core_tools::actions::authorize::{
-        AuthorizeClientParams, run_authorize_client as run,
+        AuthorizeClientRequest, run_authorize_client as run,
     };
 
     let params = if stdin_json {
@@ -1737,6 +1706,7 @@ fn run_authorize_client(
             value.label,
             value.merge_scopes,
             value.origin_site_id,
+            value.remote_node_origin_site_id,
             value.allow_semantic_conversion,
         )
     } else {
@@ -1752,6 +1722,7 @@ fn run_authorize_client(
             label,
             merge_scopes,
             origin_site_id,
+            remote_node_origin_site_id,
             allow_semantic_conversion,
         )
     };
@@ -1763,49 +1734,22 @@ fn run_authorize_client(
         label,
         merge_scopes,
         origin_site_id,
+        remote_node_origin_site_id,
         allow_semantic_conversion,
     ) = params;
 
     let app_root = resolve_app_root(app_root)?;
 
-    let pk_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&pk_b64)
-        .map_err(|e| anyhow::anyhow!("invalid base64 public key: {e}"))?;
-    let verifying_key = VerifyingKey::from_bytes(
-        pk_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("public key must be 32 bytes (ed25519)"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("invalid ed25519 public key: {e}"))?;
-
-    let scopes: Vec<String> = scopes_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if scopes.is_empty() {
-        anyhow::bail!("--scopes must not be empty");
-    }
-
-    // Validate each scope is in canonical form. core-tools is not the
-    // bootstrap path, so wildcard '*' is rejected at the writer below.
-    for scope in &scopes {
-        ryeos_runtime::authorizer::validate_scope_pattern(scope)
-            .map_err(|e| anyhow::anyhow!("invalid scope: {e}"))?;
-    }
-
-    let result = run(AuthorizeClientParams {
-        app_root,
-        public_key: verifying_key,
-        scopes,
+    let result = run(AuthorizeClientRequest {
+        public_key: pk_b64,
+        scopes: scopes_str,
         label,
-        allow_wildcard: false, // core-tools is not the bootstrap path
-        merge: merge_scopes,
+        merge_scopes,
         origin_site_id,
+        remote_node_origin_site_id,
         allow_semantic_conversion,
-    })?;
+    }
+    .into_params(app_root)?)?;
 
     if !result.dropped_scopes.is_empty() {
         eprintln!(
@@ -1846,50 +1790,6 @@ fn run_authorize_client(
     Ok(())
 }
 
-fn run_admission_token(
-    app_root: Option<String>,
-    scopes: Option<String>,
-    label: Option<String>,
-    ttl_secs: u64,
-    stdin_json: bool,
-) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::authorize::{
-        MintAdmissionTokenParams, run_mint_admission_token,
-    };
-
-    let (app_root, scopes, label, ttl_secs) = if stdin_json {
-        let val = read_stdin_json()?;
-        let ssd = val["app_root"].as_str().map(String::from);
-        let scopes = val["scopes"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
-            .to_string();
-        let label = val["label"].as_str().map(String::from);
-        let ttl_secs = val["ttl_secs"].as_u64().unwrap_or(600);
-        (ssd, scopes, label, ttl_secs)
-    } else {
-        let scopes = scopes.ok_or_else(|| anyhow::anyhow!("--scopes required"))?;
-        (app_root, scopes, label, ttl_secs)
-    };
-
-    let app_root = resolve_app_root(app_root)?;
-    let scopes: Vec<String> = scopes
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let report = run_mint_admission_token(MintAdmissionTokenParams {
-        app_root,
-        scopes,
-        label,
-        ttl_secs,
-    })?;
-
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_remote_descriptor(
     app_root: Option<String>,
@@ -1917,7 +1817,7 @@ fn run_remote_descriptor(
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         ExportRemoteDescriptorParams {
-            app_root,
+            system_space_dir: app_root,
             name,
             url,
             capabilities,
@@ -1957,8 +1857,24 @@ mod tests {
 
         assert_eq!(params.label, "cli-authorized");
         assert_eq!(params.origin_site_id.as_deref(), Some("site:source"));
+        assert_eq!(params.remote_node_origin_site_id, None);
         assert!(params.allow_semantic_conversion);
         assert!(params.merge_scopes);
+    }
+
+    #[test]
+    fn authorize_client_stdin_contract_carries_remote_node_subject() {
+        let params: AuthorizeClientStdinParams = serde_json::from_value(serde_json::json!({
+            "public_key": "ZmFrZQ==",
+            "scopes": "scope:a",
+            "remote_node_origin_site_id": "site:source"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.remote_node_origin_site_id.as_deref(),
+            Some("site:source")
+        );
+        assert_eq!(params.origin_site_id, None);
     }
 
     #[test]

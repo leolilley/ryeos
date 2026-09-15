@@ -559,7 +559,7 @@ mod tests {
 
     fn test_source(schedule_id: &str) -> ScheduleSourceRecord {
         ScheduleSourceRecord {
-            spec_version: 1,
+            spec_version: 2,
             schedule_id: schedule_id.to_owned(),
             item_ref: "directive:test/hello".to_owned(),
             ref_bindings: std::collections::BTreeMap::new(),
@@ -574,8 +574,14 @@ mod tests {
             project_root: None,
             registered_at: 1_700_000_000_000,
             execution: super::super::types::ScheduleExecution {
-                requester_fingerprint: "requester:test".to_owned(),
+                authority: super::super::types::ScheduleExecutionAuthority::Node {
+                    principal_id: format!("fp:{}", "33".repeat(32)),
+                    effective_origin_site_id: "site:test".to_owned(),
+                },
                 capabilities: vec!["ryeos.execute.*".to_owned()],
+                policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                    ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ),
             },
             managed_by: None,
         }
@@ -617,14 +623,15 @@ mod tests {
 
     fn test_fire(schedule_id: &str, scheduled_at: i64, status: &str) -> FireRecord {
         let fire_id = super::super::types::fire_id(schedule_id, scheduled_at);
+        let launched = status != "skipped";
         FireRecord {
             fire_id: fire_id.clone(),
             schedule_id: schedule_id.to_owned(),
             scheduled_at,
-            fired_at: Some(scheduled_at),
+            reserved_at: scheduled_at,
+            dispatched_at: launched.then_some(scheduled_at),
             completed_at: (status != "dispatched").then_some(scheduled_at + 1),
-            thread_id: (status != "skipped")
-                .then(|| super::super::types::thread_id_from_fire(&fire_id)),
+            thread_id: launched.then(|| super::super::types::thread_id_from_fire(&fire_id)),
             status: status.to_owned(),
             trigger_reason: "normal".to_owned(),
             outcome: match status {
@@ -635,6 +642,16 @@ mod tests {
                 _ => Some("thread_failed".to_owned()),
             },
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: launched
+                .then(|| {
+                    ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                        ryeos_state::objects::EnvironmentAuthority::None,
+                    )
+                })
+                .transpose()
+                .unwrap(),
+            admitted_capsule_hash: launched.then(|| "44".repeat(32)),
         }
     }
 
@@ -899,7 +916,7 @@ mod tests {
         let illegal_path = fire_journal(illegal_dir.path(), "test");
         let dispatched = test_fire("test", 1_000, "dispatched");
         let mut completed = test_fire("test", 1_000, "completed");
-        completed.fired_at = Some(1_001);
+        completed.dispatched_at = Some(1_001);
         completed.completed_at = Some(1_002);
         append_jsonl_entry(&illegal_path, &dispatched).unwrap();
         append_jsonl_entry(&illegal_path, &completed).unwrap();

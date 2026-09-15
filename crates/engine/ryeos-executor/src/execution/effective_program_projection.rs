@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{PlanContext, SubjectResolutionAuthority};
 use ryeos_engine::effective_program::FinalizedEffectiveProgram;
-use ryeos_engine::hooks::{EffectiveHookPlan, HookLayer};
+use ryeos_engine::hooks::EffectiveHookPlan;
+#[cfg(test)]
+use ryeos_engine::hooks::HookLayer;
 use ryeos_engine::launch_config::{LaunchConfigProofStatus, LaunchConfigSnapshotSet};
 use ryeos_engine::resolution::{EffectiveDefinitionDigest, ResolutionOutput};
 
@@ -353,6 +355,7 @@ fn projection_cache_key(
 
 pub(crate) fn capture_and_finalize_fresh_effective_program(
     state: &ryeos_app::state::AppState,
+    current_site_id: &str,
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
     resolution: ResolutionOutput,
@@ -362,6 +365,9 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
     inherited_external: Option<&ryeos_engine::external_realization::RealizedExternalContentSet>,
+    selection_owner: Option<&str>,
+    selection_context: Option<&ryeos_app::handler_context::HandlerContext>,
+    product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
 ) -> Result<
     (
         FinalizedEffectiveProgram,
@@ -374,6 +380,7 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
         match capture_and_finalize_fresh_effective_program_once(
             engine,
             state,
+            current_site_id,
             kind,
             resolution.clone(),
             effective_caps,
@@ -382,6 +389,9 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
             trust_store,
             materialization,
             inherited_external,
+            selection_owner,
+            selection_context,
+            product_selections,
         ) {
             Err(DispatchError::LaunchPreparationFailed { code, .. })
                 if code == "effective_program_authority_changed"
@@ -404,6 +414,7 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
 fn capture_and_finalize_fresh_effective_program_once(
     engine: &ryeos_engine::engine::Engine,
     state: &ryeos_app::state::AppState,
+    current_site_id: &str,
     kind: &str,
     resolution: ResolutionOutput,
     effective_caps: &[String],
@@ -412,6 +423,9 @@ fn capture_and_finalize_fresh_effective_program_once(
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
     inherited_external: Option<&ryeos_engine::external_realization::RealizedExternalContentSet>,
+    selection_owner: Option<&str>,
+    selection_context: Option<&ryeos_app::handler_context::HandlerContext>,
+    product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
 ) -> Result<
     (
         FinalizedEffectiveProgram,
@@ -429,13 +443,43 @@ fn capture_and_finalize_fresh_effective_program_once(
         trust_store,
         materialization,
     )?;
-    let mut resolution = resolution;
+    let (resolution, validation) = capture_and_validate_with_hook_snapshots(
+        engine,
+        kind,
+        resolution,
+        effective_caps,
+        trust_store,
+        &snapshots,
+    )?;
+    let mut resolution =
+        ryeos_engine::effective_program::capture_validated_effective_program_derived(
+            resolution, validation,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    let projectless_authority = ryeos_engine::contracts::SubjectResolutionAuthority::Projectless;
+    let subject_resolution_authority = materialization
+        .map(|binding| binding.subject_authority())
+        .unwrap_or(&projectless_authority);
+    ryeos_app::operator_external_content::product_composition::admit_root_product_selections(
+        state,
+        current_site_id,
+        engine,
+        roots,
+        subject_resolution_authority,
+        &mut resolution,
+        selection_owner,
+        selection_context,
+        product_selections,
+        false,
+    )
+    .map_err(DispatchError::Internal)?;
     let captured_external = ryeos_app::external_content_admission::admit_external_realizations(
         state,
         engine,
         kind,
         &mut resolution,
         roots,
+        subject_resolution_authority,
         inherited_external,
     )
     .map_err(DispatchError::Internal)?;
@@ -492,6 +536,10 @@ pub(crate) fn validate_admitted_effective_program(
                 content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
             )
         });
+    let projectless_authority = ryeos_engine::contracts::SubjectResolutionAuthority::Projectless;
+    let subject_resolution_authority = materialization
+        .map(|binding| binding.subject_authority())
+        .unwrap_or(&projectless_authority);
     let mut mutable_authority_races = 0usize;
     loop {
         let snapshots = super::launch_preparation::load_launch_config_set_under_current_authority(
@@ -521,6 +569,7 @@ pub(crate) fn validate_admitted_effective_program(
                     kind,
                     &resolution,
                     roots,
+                    subject_resolution_authority,
                 )
                 .map_err(DispatchError::Internal);
             }
@@ -570,7 +619,7 @@ fn validate_external_content_contract(
         .and_then(|schema| schema.external_content_contract());
     let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    ryeos_engine::external_content::declarations_from_composed(
+    ryeos_engine::external_content::authored_external_content_shape(
         &resolution.composed.composed,
         external_contract,
         declarer,
@@ -593,7 +642,7 @@ fn invalid_external_content(error: anyhow::Error) -> DispatchError {
 fn capture_and_finalize_with_hook_snapshots(
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
-    resolution: ResolutionOutput,
+    mut resolution: ResolutionOutput,
     effective_caps: &[String],
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     trust_store: &ryeos_engine::trust::TrustStore,
@@ -603,6 +652,19 @@ fn capture_and_finalize_with_hook_snapshots(
         &ryeos_app::external_content_admission::AdmittedExternalRealizations,
     >,
 ) -> Result<FinalizedEffectiveProgram, DispatchError> {
+    let was_prepared = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.hooks.as_ref())
+        .is_some_and(|hooks| {
+            resolution
+                .composed
+                .derived
+                .contains_key(&hooks.plan_derived)
+        });
+    let previous =
+        ryeos_engine::effective_program::take_recovered_effective_program_derived(&mut resolution);
     let (resolution, validation) = capture_and_validate_with_hook_snapshots(
         engine,
         kind,
@@ -611,9 +673,14 @@ fn capture_and_finalize_with_hook_snapshots(
         trust_store,
         snapshots,
     )?;
-    let candidate =
+    let candidate = if was_prepared {
+        ryeos_engine::effective_program::relock_recovered_effective_program(
+            resolution, validation, previous,
+        )
+    } else {
         ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    }
+    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
     let config_roots = engine.launch_config_roots(roots);
     let project = materialization
         .map(|binding| binding.authoritative_project_content())
@@ -628,6 +695,10 @@ fn capture_and_finalize_with_hook_snapshots(
         });
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
         &candidate,
+        engine
+            .kinds
+            .get(kind)
+            .and_then(|schema| schema.external_content_contract()),
         std::slice::from_ref(&snapshots.dependency_proof),
         &config_roots,
         project,
@@ -653,7 +724,7 @@ fn capture_and_finalize_with_hook_snapshots(
 fn capture_and_validate_with_hook_snapshots(
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
-    mut resolution: ResolutionOutput,
+    resolution: ResolutionOutput,
     effective_caps: &[String],
     trust_store: &ryeos_engine::trust::TrustStore,
     snapshots: &LaunchConfigSnapshotSet,
@@ -664,197 +735,22 @@ fn capture_and_validate_with_hook_snapshots(
     ),
     DispatchError,
 > {
-    let hook_contract = engine
-        .kinds
-        .get(kind)
-        .and_then(|schema| schema.execution.as_ref())
-        .and_then(|execution| execution.hooks.as_ref())
-        .ok_or_else(|| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "managed runtime kind `{kind}` has no signed hook contract"
-            ))
-        })?;
-    let authored =
-        value_at_composed_path(&resolution.composed.composed, &hook_contract.authored_path);
-    let known_event_contracts = engine
-        .kinds
-        .kinds()
-        .filter_map(|known_kind| {
-            engine
-                .kinds
-                .get(known_kind)
-                .and_then(|schema| schema.execution.as_ref())
-                .and_then(|execution| execution.hooks.as_ref())
-                .map(|hooks| (known_kind.to_string(), hooks.events.clone()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let plan = ryeos_engine::hooks::capture_effective_hook_plan(
+    ryeos_app::effective_program_preparation::capture_and_validate_with_hook_snapshots(
+        engine,
         kind,
-        hook_contract.events.clone(),
-        &known_event_contracts,
-        authored,
-        effective_caps.to_vec(),
-        &snapshots.snapshots,
+        resolution,
+        effective_caps,
+        trust_store,
+        snapshots,
     )
-    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    for (layer, body) in plan
-        .iter_layers()
-        .filter(|(layer, _)| *layer != HookLayer::Authored)
-    {
-        ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&body.dispatch_caps)
-            .map_err(|error| {
-                DispatchError::Internal(anyhow::anyhow!(
-                    "{} hook source declares an inadmissible dispatch grant: {error}",
-                    layer.as_str()
-                ))
-            })?;
-    }
-    validate_captured_hook_plan_pre_spawn(&plan)?;
-    super::admitted_trust::validate_hook_plan_current_trust(engine, trust_store, &plan)
-        .map_err(DispatchError::Internal)?;
-    resolution.composed.derived.insert(
-        hook_contract.plan_derived.clone(),
-        plan.to_value()
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?,
-    );
-
-    let validation = engine
-        .effective_validators
-        .validate(kind, &resolution)
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    Ok((resolution, validation))
+    .map_err(DispatchError::Internal)
 }
 
-/// Compile and validate the exact admitted plan before any callback token,
-/// capsule, or runtime process exists. This deliberately reuses the runtime's
-/// single compiler and hook-action parser; admission does not maintain a
-/// second expression/template or action grammar.
 pub(crate) fn validate_captured_hook_plan_pre_spawn(
     plan: &EffectiveHookPlan,
 ) -> Result<(), DispatchError> {
-    ryeos_runtime::compile_effective_hook_plan(plan, &ryeos_runtime::CompilationLimits::default())
-        .map_err(|error| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "captured hook plan does not compile: {error}"
-            ))
-        })?;
-
-    for (layer, body) in plan.iter_layers() {
-        for hook in &body.hooks {
-            let action = ryeos_runtime::callback::parse_hook_action(hook.action.clone()).map_err(
-                |error| {
-                    DispatchError::Internal(anyhow::anyhow!(
-                        "{} hook `{}` has an invalid action: {error}",
-                        layer.as_str(),
-                        hook.id
-                    ))
-                },
-            )?;
-            if action.thread != "inline" {
-                return Err(DispatchError::Internal(anyhow::anyhow!(
-                    "{} hook `{}` must dispatch inline",
-                    layer.as_str(),
-                    hook.id
-                )));
-            }
-            if layer == HookLayer::Authored {
-                continue;
-            }
-            validate_configured_action_grants(
-                layer,
-                &hook.id,
-                &action.item_id,
-                action.ref_bindings.values().map(String::as_str),
-                &body.dispatch_caps,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum DispatchTargetCoverage {
-    Exact(String),
-    Kind(String),
-    Any,
-}
-
-/// Derive a conservative capability requirement for an unrendered target.
-/// A literal ref requires its exact execution cap. A template with a literal
-/// canonical kind prefix requires kind-wide authority; an arbitrary template
-/// requires execute authority across kinds. This is intentionally broader
-/// than the eventual rendered target, so passing it proves the source grant
-/// covers every value the template could produce.
-fn dispatch_target_coverage(target: &str) -> Result<DispatchTargetCoverage, DispatchError> {
-    let Some(template_start) = target.find("${") else {
-        let canonical = CanonicalRef::parse(target).map_err(|error| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "configured hook target `{target}` is not canonical: {error}"
-            ))
-        })?;
-        return Ok(DispatchTargetCoverage::Exact(format!(
-            "ryeos.execute.{}.{}",
-            canonical.kind, canonical.bare_id
-        )));
-    };
-
-    let literal_prefix = &target[..template_start];
-    if let Some((kind, _)) = literal_prefix.split_once(':')
-        && CanonicalRef::parse(&format!("{kind}:probe")).is_ok()
-    {
-        return Ok(DispatchTargetCoverage::Kind(kind.to_string()));
-    }
-    Ok(DispatchTargetCoverage::Any)
-}
-
-fn grant_covers_target(grant: &str, target: &DispatchTargetCoverage) -> bool {
-    match target {
-        DispatchTargetCoverage::Exact(required) => {
-            ryeos_runtime::authorizer::cap_matches(grant, required)
-        }
-        DispatchTargetCoverage::Kind(kind) => {
-            matches!(grant, "*" | "ryeos.*" | "ryeos.execute.*")
-                || grant == format!("ryeos.execute.{kind}")
-                || grant == format!("ryeos.execute.{kind}.*")
-                || grant == "ryeos.execute.*.*"
-        }
-        DispatchTargetCoverage::Any => {
-            matches!(
-                grant,
-                "*" | "ryeos.*" | "ryeos.execute.*" | "ryeos.execute.*.*"
-            )
-        }
-    }
-}
-
-fn validate_configured_action_grants<'a>(
-    layer: HookLayer,
-    hook_id: &str,
-    item_id: &'a str,
-    ref_bindings: impl Iterator<Item = &'a str>,
-    dispatch_caps: &[String],
-) -> Result<(), DispatchError> {
-    for target in std::iter::once(item_id).chain(ref_bindings) {
-        let coverage = dispatch_target_coverage(target)?;
-        if !dispatch_caps
-            .iter()
-            .any(|grant| grant_covers_target(grant, &coverage))
-        {
-            return Err(DispatchError::Internal(anyhow::anyhow!(
-                "{} hook `{hook_id}` action target `{target}` is not covered by its source-owned dispatch grants",
-                layer.as_str()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn value_at_composed_path<'a>(
-    value: &'a serde_json::Value,
-    path: &[String],
-) -> Option<&'a serde_json::Value> {
-    path.iter()
-        .try_fold(value, |current, part| current.get(part))
+    ryeos_app::effective_program_preparation::validate_captured_hook_plan_pre_spawn(plan)
+        .map_err(DispatchError::Internal)
 }
 
 #[cfg(test)]

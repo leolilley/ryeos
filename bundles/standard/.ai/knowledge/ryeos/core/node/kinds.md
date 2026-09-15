@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:32Z:e39426740e637c823f8791e22cb5b46e3a8a25fb0b2f86c0bd100f89f046d9ff:FDzW/zRiiQ1xBW0DyNsR0ae2yhLTppqF/1xpFnoBr4k2rNysI+JDNKCgdGMt14hLQuwlQ+eh0TCNCBfhKV/NCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T01:55:10Z:91a138253599f03e4253978f8a44c98c116c4e1959f5c48d174f9afe39a2ccfd:hrixXES41Nt03iBI+x+ovGEK30vc/H+LOhhlZbQ/Ed0CVsT62xZ8Y7FAiqcGDMWOpdU1h94nFj/g7EDnsquXBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The 12 item kinds in Rye OS — what each kind is for, how it's
   parsed, composed, and executed.
@@ -14,7 +14,7 @@ Every item in Rye OS has a **kind** — a schema + behavior contract that
 determines how the item is parsed, composed, and executed. Kinds are
 defined by kind-schema YAML files in the core bundle.
 
-## The 12 Kinds
+## Kind Contracts
 
 ### `directive` — LLM-Facing Workflows
 The primary agent-facing item. Directives are markdown files with YAML
@@ -32,22 +32,20 @@ merge strategies for body, permissions, and context.
 
 ### `tool` — Executable Scripts
 The primary executable unit. Tools run as subprocesses with plan-owned opaque
-stdin and return opaque bytes on stdout. Default wrappers serialize params as
+stdin and an explicit signed output protocol. Default wrappers serialize params as
 JSON; explicit executor `input_data` may be arbitrary bytes.
 
 - **Directory:** `tools/`
 - **Formats:** `.py`, `.yaml`, `.js`, `.ts`, `.json`
 - **Composer:** `handler:ryeos/core/identity` (no composition)
-- **Execution:** Subprocess via `protocol:ryeos/core/tool_callback`
+- **Execution:** Subprocess via an explicit `execution_protocol` from the Tool allowlist
 
 Tools declare `executor_id: "@subprocess"` which resolves to
 `tool:ryeos/core/subprocess/execute`.
 
-### `streaming_tool` — Streaming Executables
-Same as `tool` but emits length-prefixed JSON frames on stdout for
-streaming output during execution.
-
-- **Execution:** Subprocess via `protocol:ryeos/core/tool_streaming`
+For incremental output, the same Tool selects `protocol:ryeos/core/tool_streaming`.
+This preserves the admitted executor plan and uses callback-free, non-detachable
+framed stdout. See `knowledge:ryeos/core/protocols/tool-streaming`.
 
 ### `knowledge` — Context and Documentation
 Structured context items injected into LLM prompts. Knowledge can be

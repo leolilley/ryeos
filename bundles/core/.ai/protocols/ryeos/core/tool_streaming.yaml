@@ -1,11 +1,13 @@
-# ryeos:signed:2026-08-11T02:28:13Z:ca11a783bfa11a235549846ce8a230d1c80f5096fbc117cc02876008c001edb3:oU7vzzlgpHiYYtSjGA9UnaPTpf9UGPZaIdLqaeZ0NpyHFDwqXa/Vdo2aSR9JObJDNeu8eqx4JNNN+oBHNg/ICQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-06T01:54:55Z:5fe3606717bb9f7e252fe36cfcf82d78f98f2b8fa121633763bba986ddbb7611:GrErQ5+eay0Cu15KnsYVrmRQ2McXDoZ9jTYwyJN9zzARc0Kmn63YYcC06zFsOHiSTcBIRmZ3mlTD10YwyT64Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: tool_streaming
 category: ryeos/core
 abi_version: v1
 description: Tool with streaming stdout chunks; daemon reads length-prefixed JSON frames during execution.
 stdin:
-  shape: parameters_json
+  # Input remains the ordinary signed executor plan's input_data. Framing
+  # changes stdout interpretation, not command, environment, stdin or mounts.
+  shape: opaque
 stdout:
   shape: streaming_chunks
   mode: streaming

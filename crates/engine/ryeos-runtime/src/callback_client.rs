@@ -539,9 +539,12 @@ impl CallbackClient {
         call(client, self.thread_id.clone(), value).await
     }
 
-    /// Report this process's pid so the daemon records the runtime's process
-    /// group. Resume-critical: hard-fails when the callback channel is
-    /// unavailable. A live runtime that cannot register its pgid must exit
+    /// Acknowledge this runtime through its kernel-authenticated Unix peer so
+    /// the daemon revalidates the exact attached process and group identity.
+    /// Never report a caller-local PID: an isolated runtime sees PID 1, while
+    /// the daemon observes its own PID namespace. Resume-critical: fails when
+    /// the callback channel is unavailable. A runtime that cannot acknowledge
+    /// its exact process attachment must exit
     /// rather than keep doing untracked work — otherwise, after a daemon
     /// restart, reconcile cannot tell it from a crashed thread and would
     /// resume a duplicate alongside the still-running original.
@@ -553,7 +556,7 @@ impl CallbackClient {
             )
         })?;
         client
-            .attach_process(&self.thread_id, std::process::id())
+            .attach_process(&self.thread_id)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
@@ -659,6 +662,7 @@ impl CallbackClient {
         step_count: i64,
         child_item_ref: &str,
         ref_bindings: std::collections::BTreeMap<String, String>,
+        product_selections: ryeos_state::external_content::products::composition::ProductSelectionInputs,
         child_parameters: Value,
         frontier_id: Option<String>,
         completion: TerminalCompletion,
@@ -678,6 +682,7 @@ impl CallbackClient {
             children: vec![crate::callback::FollowChildSpec {
                 item_ref: child_item_ref.to_string(),
                 ref_bindings,
+                product_selections,
                 parameters: child_parameters,
                 facets: None,
             }],
@@ -1414,11 +1419,7 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(
-            &self,
-            _thread_id: &str,
-            _pid: u32,
-        ) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _thread_id: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _thread_id: &str) -> Result<Value, CallbackError> {
@@ -1796,6 +1797,7 @@ mod tests {
         let req = DispatchActionRequest {
             thread_id: "T-test".to_string(),
             action: ActionPayload {
+                product_selections: Vec::new(),
                 operation_id: Some(TEST_OPERATION_ID.to_string()),
                 item_id: "my/tool".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
@@ -2115,7 +2117,7 @@ mod tests {
         async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {

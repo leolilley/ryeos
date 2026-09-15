@@ -246,15 +246,11 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         return Ok(());
     }
 
-    // 6. Token dispatch — send tokens to daemon, it resolves the command
-    //    registry and binds tail parameters server-side.
-    //
-    //    For remote commands that take a project root, CLI-side rewrite injects a canonical
-    //    `--project <abs>` or `--no-project` into the tail. The daemon
-    //    cannot do this — its cwd is irrelevant to the caller. Accepting
-    //    `--project` here is deliberate: project-aware aliases expose a
-    //    service-schema `project` field, while global `-p/--project` before
-    //    the command remains supported by clap above.
+    // 6. Resolve the verified command, bind typed parameters once, and apply
+    //    its declared project policy before authenticated daemon dispatch.
+    //    The CLI owns canonicalization against the caller's cwd; the daemon
+    //    revalidates the requested item and authority. Keep JSON typed across
+    //    this boundary instead of manufacturing a second argv representation.
 
     let mut resolved = resolve_command_for_daemon(
         &dispatch_rest,
@@ -275,6 +271,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
+        "product_selections": resolved.product_selections,
         "parameters": resolved.parameters,
         "validate_only": resolved.validate_only,
         "execution_policy": execution_policy_value(
@@ -759,6 +756,7 @@ enum StreamTerminalFailure {
 struct CliResolvedExecute {
     item_ref: String,
     ref_bindings: BTreeMap<String, String>,
+    product_selections: Value,
     parameters: Value,
     project_path: Option<PathBuf>,
     async_launch: bool,
@@ -812,6 +810,7 @@ struct ResolvedControlFlags {
     call_args: Option<Value>,
     state_root: Option<String>,
     ref_bindings: BTreeMap<String, String>,
+    product_selections: Option<Value>,
 }
 
 fn resolve_command_for_daemon(
@@ -838,27 +837,19 @@ fn resolve_command_for_daemon_with_commands(
         CommandRegistry::from_records(commands, policy).map_err(|error| CliError::Local {
             detail: format!("load verified node commands: {error:#}"),
         })?;
-    let initial_match = registry.resolve(rest).map_err(|error| CliError::Local {
+    let matched = registry.resolve(rest).map_err(|error| CliError::Local {
         detail: error.to_string(),
     })?;
-    let tokens = if matches!(
-        initial_match.command.dispatch,
-        CommandDispatch::DirectExecuteItemRef { .. }
-    ) {
-        rest.to_vec()
-    } else {
-        canonicalize_tokens_with_commands_policy_and_project(
-            rest,
-            commands,
-            policy,
-            default_project,
-        )?
-    };
-    let matched = registry.resolve(&tokens).map_err(|error| CliError::Local {
-        detail: error.to_string(),
-    })?;
-    let command_label = command_display_label(&tokens, &matched);
-    let mut tail = tokens[matched.consumed..].to_vec();
+    let command_label = command_display_label(rest, &matched);
+    let mut tail = rest[matched.consumed..].to_vec();
+    if matched.command.forms.is_empty()
+        && command_project_resolution(&matched.command) == CommandProjectResolution::None
+    {
+        // Preserve the existing global-selector behavior for commands that
+        // take no project. All other fields reach the one shared binder below
+        // unchanged; a JSON -> argv pre-pass loses authored types/defaults.
+        tail = strip_project_control_flags(&tail);
+    }
     let direct_execute = matches!(
         matched.command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
@@ -906,9 +897,47 @@ fn resolve_command_for_daemon_with_commands(
             .as_ref()
             .and_then(|project| project.bind_parameter.as_deref()),
     )?;
-    let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
-    let project_path = apply_project_policy(&matched.command, &mut parameters, default_project)?;
-    if control.pin_project_at_admission && project_path.is_none() {
+    let (parameters, project_path) = if direct_execute && matched.command.project.is_some() {
+        // The direct command selects an arbitrary item. Its structured input
+        // belongs to that item, not this command's control namespace. Resolve
+        // only argv selectors through the existing project-policy owner;
+        // never strip an item's JSON `project`/`no_project` fields or infer a
+        // project fallback in the daemon to compensate for lost parameters.
+        let (payload_tail, controls) =
+            crate::arg_bind::separate_project_control_flags(parameter_tail)?;
+        let mut controls = Value::Object(controls);
+        let project_path = apply_project_policy(&matched.command, &mut controls, default_project)?;
+        let mut parameters = bind_command_parameters_for_daemon(&payload_tail, &matched.command)?;
+        // Honor explicit signed selector-to-payload bindings if declared, but
+        // refuse a competing item value rather than silently overwriting it.
+        for (field, value) in controls
+            .as_object()
+            .expect("project controls are an object")
+        {
+            let obj = parameters.as_object_mut().ok_or_else(|| {
+                CliError::ProjectResolution("command parameters must be a JSON object".into())
+            })?;
+            if obj.contains_key(field) {
+                return Err(CliError::ProjectResolution(format!(
+                    "parameter '{field}' conflicts with the command's runtime-bound project selector"
+                )));
+            }
+            obj.insert(field.clone(), value.clone());
+        }
+        (parameters, project_path)
+    } else {
+        let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
+        let project_path =
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+        (parameters, project_path)
+    };
+    let descriptor_pin_at_admission = matched
+        .command
+        .project
+        .as_ref()
+        .is_some_and(|project| project.pin_at_admission);
+    let pin_project_at_admission = control.pin_project_at_admission || descriptor_pin_at_admission;
+    if pin_project_at_admission && project_path.is_none() {
         return Err(CliError::Local {
             detail:
                 "--pin-project requires a project root; it cannot be combined with --no-project"
@@ -928,13 +957,13 @@ fn resolve_command_for_daemon_with_commands(
                 .to_string(),
         });
     }
-    if control.pin_project_at_admission && control.pin_current_head_at_admission {
+    if pin_project_at_admission && control.pin_current_head_at_admission {
         return Err(CliError::Local {
             detail: "capture-live and current-HEAD project sources are mutually exclusive"
                 .to_string(),
         });
     }
-    if control.pin_project_at_admission && control.state_root.is_some() {
+    if pin_project_at_admission && control.state_root.is_some() {
         return Err(CliError::Local {
             detail: "--pin-project cannot be combined with --state-root; the pinned generation owns runtime state"
                 .to_string(),
@@ -963,10 +992,13 @@ fn resolve_command_for_daemon_with_commands(
     Ok(CliResolvedExecute {
         item_ref,
         ref_bindings: control.ref_bindings,
+        product_selections: control
+            .product_selections
+            .unwrap_or_else(|| serde_json::json!([])),
         parameters,
         project_path,
         async_launch: control.async_launch,
-        pin_project_at_admission: control.pin_project_at_admission,
+        pin_project_at_admission,
         pin_current_head_at_admission: control.pin_current_head_at_admission,
         retain_child_results: control.retain_child_results,
         exclude_operator_vault: control.exclude_operator_vault,
@@ -1105,6 +1137,30 @@ fn strip_declared_control_flags(
                         })?);
                 }
                 Bind::StateRoot => flags.state_root = Some(value),
+                Bind::ProductSelections => {
+                    if flags.product_selections.is_some() {
+                        return Err(CliError::Local {
+                            detail: format!("duplicate --{name} flag"),
+                        });
+                    }
+                    let maximum_bytes = ryeos_state::external_content::products::composition::MAX_PRODUCT_SELECTION_INPUTS_BYTES;
+                    if value.len() > maximum_bytes {
+                        return Err(CliError::Local {
+                            detail: format!("--{name} JSON exceeds {maximum_bytes} bytes"),
+                        });
+                    }
+                    let parsed: ryeos_state::external_content::products::composition::ProductSelectionInputs =
+                        serde_json::from_str(&value).map_err(|e| CliError::Local {
+                            detail: format!("--{name} must be a typed product-selection list: {e}"),
+                        })?;
+                    let canonical = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(parsed)
+                        .map_err(|e| CliError::Local { detail: format!("--{name}: {e}") })?;
+                    flags.product_selections = Some(serde_json::to_value(canonical).map_err(
+                        |e| CliError::Local {
+                            detail: e.to_string(),
+                        },
+                    )?);
+                }
                 Bind::RefBinding => {
                     let (binding_name, item_ref) = match control_flag.ref_binding_name.as_deref() {
                         Some(binding_name) => (binding_name, value.as_str()),
@@ -1301,12 +1357,30 @@ fn resolve_invocation_contract(
         .map_err(CliError::ProjectResolution)
 }
 
-fn apply_project_policy(
+/// Bind only project-control fields in place. Offline dispatch shares this
+/// owner so project resolution never round-trips already typed parameters
+/// through argv (which loses numeric/default/structured value identity).
+pub(crate) fn apply_project_policy(
     command: &CommandDef,
     parameters: &mut Value,
     default_project: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
+    // This global selector is CLI control even when the command is intrinsically
+    // projectless. Never forward it to the command's closed service payload.
+    // Validate before mutation so malformed controls remain a refusal.
+    let no_project = match parameters.get("no_project") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(CliError::ProjectResolution(
+                "--no-project must be a boolean".into(),
+            ));
+        }
+    };
     let Some(project) = command.project.as_ref() else {
+        if let Some(obj) = parameters.as_object_mut() {
+            obj.remove("no_project");
+        }
         return Ok(None);
     };
 
@@ -1322,10 +1396,19 @@ fn apply_project_policy(
             bind_parameter.replace('_', "-")
         )));
     }
-    let no_project = obj
-        .remove("no_project")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
+    if let Some(field) = &project.bind_no_project_parameter
+        && field != "no_project"
+        && obj.contains_key(field)
+    {
+        return Err(CliError::ProjectResolution(format!(
+            "--{} is runtime-bound from the projectless selector; use --no-project instead",
+            field.replace('_', "-"),
+        )));
+    }
+    // These fields select project authority, not ordinary payload values.
+    // Absence permits the descriptor's default; malformed supplied controls
+    // must never be erased and reinterpreted as that absence. Validate before
+    // canonicalizing/discovering a path, and preserve the input on refusal.
     if no_project && !project.no_project_flag {
         return Err(CliError::ProjectRequired(format!(
             "command '{}' does not accept --no-project",
@@ -1333,9 +1416,20 @@ fn apply_project_policy(
         )));
     }
 
-    let mut project_path = obj
-        .remove("project")
-        .and_then(|value| value.as_str().map(PathBuf::from));
+    let mut project_path = match obj.get("project") {
+        None => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(PathBuf::from(value)),
+        Some(Value::String(_)) => {
+            return Err(CliError::ProjectResolution(
+                "--project must be a non-empty path string".into(),
+            ));
+        }
+        Some(_) => {
+            return Err(CliError::ProjectResolution(
+                "--project must be a path string".into(),
+            ));
+        }
+    };
     if no_project && project_path.is_some() {
         return Err(CliError::ProjectResolution(
             "cannot pass both --no-project and --project: choose one".into(),
@@ -1364,14 +1458,19 @@ fn apply_project_policy(
         )));
     }
 
+    obj.remove("no_project");
+    obj.remove("project");
     if let (Some(bind_parameter), Some(path)) = (&project.bind_parameter, &project_path) {
         obj.insert(
             bind_parameter.clone(),
             Value::String(path.to_string_lossy().into_owned()),
         );
     }
-    if no_project && project.bind_parameter.is_none() && !project.request_project_path {
-        obj.insert("no_project".to_string(), Value::Bool(true));
+    // Selector support is not permission to invent a service argument.
+    // The signed command declares whether/where its consumer needs this value;
+    // never infer it from a command spelling, item kind, or positive path binding.
+    if no_project && let Some(field) = &project.bind_no_project_parameter {
+        obj.insert(field.clone(), Value::Bool(true));
     }
 
     if project.request_project_path {
@@ -1414,90 +1513,6 @@ fn discover_upward_ai_project() -> Result<Option<PathBuf>, CliError> {
     Ok(None)
 }
 
-#[cfg(test)]
-fn canonicalize_tokens_with_commands(
-    rest: &[String],
-    commands: &[CommandDef],
-) -> Result<Vec<String>, CliError> {
-    canonicalize_tokens_with_commands_and_project(rest, commands, None)
-}
-
-#[cfg(test)]
-fn canonicalize_tokens_with_commands_and_project(
-    rest: &[String],
-    commands: &[CommandDef],
-    default_project: Option<&std::path::Path>,
-) -> Result<Vec<String>, CliError> {
-    let policy = ryeos_runtime::CommandRegistrationPolicy::default();
-    canonicalize_tokens_with_commands_policy_and_project(rest, commands, &policy, default_project)
-}
-
-fn canonicalize_tokens_with_commands_policy_and_project(
-    rest: &[String],
-    commands: &[CommandDef],
-    policy: &ryeos_runtime::CommandRegistrationPolicy,
-    default_project: Option<&std::path::Path>,
-) -> Result<Vec<String>, CliError> {
-    let registry =
-        CommandRegistry::from_records(commands, policy).map_err(|error| CliError::Local {
-            detail: format!("load verified node commands: {error:#}"),
-        })?;
-    let Ok(matched) = registry.resolve(rest) else {
-        return Ok(rest.to_vec());
-    };
-    let tail = &rest[matched.consumed..];
-    let resolution = command_project_resolution(&matched.command);
-
-    if matched.command.forms.is_empty() && resolution == CommandProjectResolution::None {
-        // This command declares no args and takes no project, but a global
-        // `-p/--project/--no-project` may still be placed *after* the verb
-        // (e.g. `scheduler list -p /path`). Those are the project selector, not
-        // arguments to this command — strip them so they never leak to the
-        // handler as stray positionals. Accepting them here (rather than only
-        // before the verb) is what makes `-p` consistent around the verb.
-        let cleaned_tail = strip_project_control_flags(tail);
-        let mut out = rest[..matched.consumed].to_vec();
-        out.extend(cleaned_tail);
-        return Ok(out);
-    }
-
-    let bound = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(&matched.command))
-        .map_err(CliError::ProjectResolution)?;
-    let mut canonical_tail = params_to_tail(&bound);
-
-    match resolution {
-        CommandProjectResolution::None => {}
-        CommandProjectResolution::Optional => {
-            canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
-                &canonical_tail,
-                default_project,
-            )?;
-        }
-        CommandProjectResolution::Required => {
-            if canonical_tail.iter().any(|t| t == "--no-project") {
-                return Err(CliError::ProjectRequired(
-                    "this command requires a project; do not pass --no-project".into(),
-                ));
-            }
-            canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
-                &canonical_tail,
-                default_project,
-            )?;
-            if canonical_tail.iter().any(|t| t == "--no-project") {
-                return Err(CliError::ProjectRequired(
-                    "this command requires a project; run it from a directory containing .ai/ \
-                     or pass --project <path>"
-                        .into(),
-                ));
-            }
-        }
-    }
-
-    let mut out = rest[..matched.consumed].to_vec();
-    out.extend(canonical_tail);
-    Ok(out)
-}
-
 /// Remove `-p`/`--project`/`--project=…`/`-p=…`/`--no-project` (and the value
 /// following the bare `-p`/`--project` form) from a command tail. Used for
 /// commands that take no project, so a project selector placed after the verb
@@ -1528,38 +1543,6 @@ fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution 
         .as_ref()
         .map(|p| p.resolution)
         .unwrap_or_default()
-}
-
-fn params_to_tail(params: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(obj) = params.as_object() else {
-        return out;
-    };
-    let mut keys: Vec<&String> = obj.keys().collect();
-    keys.sort();
-    for key in keys {
-        emit_param(&mut out, key, &obj[key]);
-    }
-    out
-}
-
-fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
-    match value {
-        Value::Bool(true) => out.push(format!("--{}", key.replace('_', "-"))),
-        Value::Bool(false) | Value::Null => {}
-        Value::Array(values) => {
-            for v in values {
-                emit_param(out, key, v);
-            }
-        }
-        other => {
-            out.push(format!("--{}", key.replace('_', "-")));
-            out.push(match other {
-                Value::String(s) => s.clone(),
-                _ => other.to_string(),
-            });
-        }
-    }
 }
 
 /// POST a JSON body to a daemon execute route and return the response.
@@ -2088,7 +2071,9 @@ mod tests {
                 default: ryeos_runtime::CommandProjectDefault::None,
                 no_project_flag: false,
                 request_project_path: false,
+                pin_at_admission: false,
                 bind_parameter: None,
+                bind_no_project_parameter: None,
             }),
             dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
                 execute: "tool:test/command".into(),
@@ -2185,9 +2170,60 @@ mod tests {
             CommandProjectResolution::None,
         );
         let rest = s(&["scheduler", "list", "-p", "/data/projects/snap-track"]);
-        let out = canonicalize_tokens_with_commands(&rest, std::slice::from_ref(&cmd))
-            .expect("dispatch should accept -p after the verb");
-        assert_eq!(out, s(&["scheduler", "list"]));
+        let out = resolve_command_for_daemon_with_commands(
+            &rest,
+            &[cmd],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .expect("dispatch should accept -p after the verb");
+        assert_eq!(out.parameters, serde_json::json!({}));
+    }
+
+    #[test]
+    fn projectless_form_consumes_global_no_project_before_service_payload() {
+        let mut cmd = command(
+            &["external-content", "capture-product"],
+            vec![vec![("thread_id", CommandArgumentKind::String)]],
+            CommandProjectResolution::None,
+        );
+        cmd.project = None;
+        let rest = rest_with_global_no_project(
+            &s(&["external-content", "capture-product", "T-fixture"]),
+            true,
+        );
+        let out = resolve_command_for_daemon_with_commands(
+            &rest,
+            &[cmd],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .expect("intrinsically projectless command accepts the global selector");
+        assert_eq!(out.parameters, serde_json::json!({"thread_id":"T-fixture"}));
+    }
+
+    #[test]
+    fn projectless_policy_refuses_malformed_selector_without_mutation() {
+        let mut cmd = command(&["inspect"], vec![], CommandProjectResolution::None);
+        cmd.project = None;
+        for value in [
+            Value::Null,
+            serde_json::json!("true"),
+            serde_json::json!([]),
+        ] {
+            let mut parameters = serde_json::json!({"no_project":value,"subject":"exact"});
+            let original = parameters.clone();
+            assert!(apply_project_policy(&cmd, &mut parameters, None).is_err());
+            assert_eq!(parameters, original);
+        }
+        for value in [false, true] {
+            let mut parameters = serde_json::json!({"no_project":value,"subject":"exact"});
+            assert_eq!(
+                apply_project_policy(&cmd, &mut parameters, None).unwrap(),
+                None
+            );
+            assert_eq!(parameters, serde_json::json!({"subject":"exact"}));
+        }
     }
 
     /// The execute command's control flags, mirroring
@@ -2284,7 +2320,45 @@ mod tests {
                 ref_binding_name: None,
                 aliases: vec![],
             },
+            F {
+                flag: "product-selections".into(),
+                help: "Select admitted product witnesses with a closed typed JSON list".into(),
+                binding: B::ProductSelections,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
         ]
+    }
+
+    #[test]
+    fn product_selections_control_is_one_bounded_typed_json_list() {
+        let controls = execute_control_flags();
+        let selector = serde_json::json!([{
+            "target": {"kind": "content_dependency", "binding": "environment"},
+            "selection": {
+                "declaration_id": "runtime",
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "qualification_hash": null,
+            }
+        }]);
+        let encoded = serde_json::to_string(&selector).unwrap();
+        let mut tail = vec!["--product-selections".to_string(), encoded];
+        let flags = strip_declared_control_flags(&mut tail, &controls).unwrap();
+        assert!(tail.is_empty());
+        assert_eq!(flags.product_selections, Some(selector));
+
+        for values in [
+            vec!["--product-selections".to_string(), "{}".to_string()],
+            vec!["--product-selections".to_string(), "not-json".to_string()],
+            vec![
+                "--product-selections={}".to_string(),
+                "--product-selections={}".to_string(),
+            ],
+        ] {
+            let mut values = values;
+            assert!(strip_declared_control_flags(&mut values, &controls).is_err());
+        }
     }
 
     #[test]
@@ -2373,7 +2447,9 @@ mod tests {
                 default: ryeos_runtime::CommandProjectDefault::DiscoverUpwardAi,
                 no_project_flag: true,
                 request_project_path: true,
+                pin_at_admission: false,
                 bind_parameter: None,
+                bind_no_project_parameter: None,
             }),
             dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                 item_ref_arg: "item_ref".into(),
@@ -2611,6 +2687,94 @@ mod tests {
     }
 
     #[test]
+    fn authored_external_binding_command_uses_only_canonical_project_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let command: CommandDef = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/external-content-bind.yaml"
+        )))
+        .unwrap();
+        let mut project_args = s(&[
+            "external-content",
+            "bind",
+            "stage",
+            "request",
+            "manifest",
+            "tool:fixture/build",
+            "pinned_project",
+            "snapshot",
+            "--project",
+        ]);
+        project_args.push(tmp.path().to_str().unwrap().into());
+        let resolved = resolve_command_for_daemon_with_commands(
+            &project_args,
+            std::slice::from_ref(&command),
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.item_ref, "service:external-content/bind");
+        assert_eq!(
+            resolved.parameters["project_path"],
+            tmp.path().to_str().unwrap()
+        );
+        assert_eq!(resolved.parameters["project_snapshot_hash"], "snapshot");
+        let installed = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "external-content",
+                "bind",
+                "stage",
+                "request",
+                "manifest",
+                "worker:fixture/hosted",
+                "installed_bundle",
+                "--no-project",
+            ]),
+            std::slice::from_ref(&command),
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+        assert!(installed.parameters.get("project_path").is_none());
+        assert!(installed.parameters.get("project_snapshot_hash").is_none());
+
+        let selections = serde_json::json!([{
+            "declaration_id":"runtime",
+            "witness_hash":"a".repeat(64),
+            "witness_source":{"kind":"local_capture"},
+            "qualification_hash":null
+        }]);
+        let selections_arg = selections.to_string();
+        let product_owner = format!("fp:{}", "b".repeat(64));
+        let selected = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "external-content",
+                "bind",
+                "stage",
+                "request",
+                "manifest",
+                "worker:fixture/hosted",
+                "installed_bundle",
+                "--product-selections",
+                &selections_arg,
+                "--product-owner-principal",
+                &product_owner,
+                "--no-project",
+            ]),
+            std::slice::from_ref(&command),
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(selected.parameters["product_selections"], selections);
+        assert_eq!(
+            selected.parameters["product_owner_principal"],
+            product_owner
+        );
+        assert!(selected.parameters.get("project_path").is_none());
+    }
+
+    #[test]
     fn project_named_binding_accepts_canonical_project_selector() {
         let tmp = tempfile::tempdir().unwrap();
         let mut command = command(
@@ -2694,6 +2858,50 @@ mod tests {
         assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
         assert_eq!(resolved.parameters["profile"], "fast");
         assert!(resolved.parameters.get("current_head").is_none());
+    }
+
+    #[test]
+    fn signed_validate_command_uses_existing_pinned_admission_controls() {
+        let path =
+            ryeos_engine::test_support::core_bundle_root().join(".ai/node/commands/validate.yaml");
+        let body = std::fs::read_to_string(path).expect("read signed validate command");
+        let mut command: CommandDef =
+            serde_yaml::from_str(&body).expect("parse signed validate command");
+        command.name = "validate".to_string();
+        let project = tempfile::tempdir().unwrap();
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "validate",
+                "worker:test/session",
+                "--current-head",
+                "--no-operator-vault",
+                "--profile",
+                "bounded",
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(project.path()),
+        )
+        .unwrap();
+
+        assert!(resolved.validate_only);
+        assert!(!resolved.async_launch);
+        assert!(resolved.pin_current_head_at_admission);
+        assert!(!resolved.pin_project_at_admission);
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({"profile": "bounded"})
+        );
+        assert_eq!(
+            execution_policy_value(true, false, false, true, false, true),
+            serde_json::to_value(
+                ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                )
+                .exclude_operator_vault()
+            )
+            .unwrap(),
+        );
     }
 
     #[test]
@@ -2784,6 +2992,81 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.project_path.as_deref(), Some(tail.path()));
+    }
+
+    #[test]
+    fn direct_execute_structured_payload_is_not_project_control() {
+        let outer = tempfile::tempdir().unwrap();
+        let input = outer.path().join("params.json");
+        for payload in [
+            serde_json::json!({"project":"/not-a-local-selector", "no_project":false, "project_path":"verbatim"}),
+            serde_json::json!({"project":{"kind":"pinned"}, "no_project":true, "nested":[null, 7, false]}),
+        ] {
+            let json = payload.to_string();
+            std::fs::write(&input, &json).unwrap();
+            for input_tail in [
+                s(&[&json]),
+                s(&["--input", &json]),
+                s(&["--input", input.to_str().unwrap()]),
+            ] {
+                for project_tail in [
+                    s(&["--no-project"]),
+                    s(&["--project", outer.path().to_str().unwrap()]),
+                    s(&[]),
+                ] {
+                    let mut argv = s(&["execute", "service:test/operation"]);
+                    argv.extend(input_tail.clone());
+                    argv.extend(project_tail.clone());
+                    let resolved = resolve_command_for_daemon_with_commands(
+                        &argv,
+                        &[direct_execute_command()],
+                        &ryeos_runtime::CommandRegistrationPolicy::default(),
+                        Some(outer.path()),
+                    )
+                    .unwrap();
+                    assert_eq!(resolved.parameters, payload);
+                    assert_eq!(
+                        resolved.project_path.as_deref(),
+                        if project_tail == s(&["--no-project"]) {
+                            None
+                        } else {
+                            Some(outer.path())
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_execute_structured_payload_does_not_hide_invalid_selectors() {
+        for tail in [
+            s(&["--project", "--no-project"]),
+            s(&["--project="]),
+            s(&["--no-project=invalid"]),
+            s(&["--project", ".", "--no-project"]),
+            s(&["--project=", "--project=."]),
+            s(&["--no-project=invalid", "--no-project"]),
+            s(&["--limit", "4"]),
+            s(&["--input={}"]),
+        ] {
+            let mut argv = s(&[
+                "execute",
+                "tool:test/run",
+                "--input",
+                "{\"project\":\"payload\"}",
+            ]);
+            argv.extend(tail);
+            assert!(
+                resolve_command_for_daemon_with_commands(
+                    &argv,
+                    &[direct_execute_command()],
+                    &ryeos_runtime::CommandRegistrationPolicy::default(),
+                    None,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2957,34 +3240,35 @@ mod tests {
             vec![vec![("remote", CommandArgumentKind::String)]],
             CommandProjectResolution::None,
         )];
-        let out =
-            canonicalize_tokens_with_commands(&s(&["remote", "threads", "railway"]), &commands)
-                .unwrap();
-        assert_eq!(out, s(&["remote", "threads", "--remote", "railway"]));
+        let out = resolve_command_for_daemon_with_commands(
+            &s(&["remote", "threads", "railway"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.parameters, serde_json::json!({"remote": "railway"}));
     }
 
     #[test]
     fn remote_project_status_positional_remote_is_normalized() {
-        let commands = vec![command(
+        let mut commands = vec![command(
             &["remote", "project-status"],
             vec![vec![("remote", CommandArgumentKind::String)]],
             CommandProjectResolution::Required,
         )];
-        let out = canonicalize_tokens_with_commands(
+        commands[0].project.as_mut().unwrap().request_project_path = true;
+        let out = resolve_command_for_daemon_with_commands(
             &s(&["remote", "project-status", "railway", "--project", "/tmp"]),
             &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
         )
         .unwrap();
+        assert_eq!(out.parameters, serde_json::json!({"remote": "railway"}));
         assert_eq!(
-            out,
-            s(&[
-                "remote",
-                "project-status",
-                "--remote",
-                "railway",
-                "--project",
-                "/tmp",
-            ])
+            out.project_path,
+            Some(Path::new("/tmp").canonicalize().unwrap())
         );
     }
 
@@ -3056,184 +3340,380 @@ mod tests {
     }
 
     #[test]
-    fn remote_bind_project_accepts_project_after_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let commands = vec![command(
-            &["remote", "bind-project"],
-            vec![vec![("remote", CommandArgumentKind::String)]],
-            CommandProjectResolution::Required,
-        )];
-        let out = canonicalize_tokens_with_commands(
-            &s(&[
-                "remote",
-                "bind-project",
-                "prod",
-                "--project",
-                &tmp.path().to_string_lossy(),
-                "--remote-project",
-                "/data/app",
-                "--sync-scope",
-                "ai_only",
-            ]),
-            &commands,
+    fn signed_remote_worker_run_binds_both_forms_and_task_envelope() {
+        let mut command: CommandDef = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/remote-worker-run.yaml"
+        )))
+        .expect("signed remote-worker run command descriptor");
+        command.name = "remote-worker-run".to_string();
+        let project = tempfile::tempdir().unwrap();
+
+        for (argv, expected_remote) in [
+            (
+                s(&[
+                    "remote",
+                    "worker",
+                    "run",
+                    "production",
+                    "config:development/remote-worker",
+                    "codex-main",
+                    "--input",
+                    r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
+                ]),
+                "production",
+            ),
+            (
+                s(&[
+                    "remote",
+                    "worker",
+                    "run",
+                    "config:development/remote-worker",
+                    "codex-main",
+                    "--input",
+                    r#"{"task":{"goal":"fix the tests"},"target_product_selections":[]}"#,
+                ]),
+                "default",
+            ),
+        ] {
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                std::slice::from_ref(&command),
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                Some(project.path()),
+            )
+            .unwrap();
+
+            assert_eq!(resolved.item_ref, "service:remote-worker-workflows/start");
+            assert_eq!(resolved.parameters["remote"], expected_remote);
+            assert_eq!(
+                resolved.parameters["workflow_ref"],
+                "config:development/remote-worker"
+            );
+            assert_eq!(resolved.parameters["credential_profile_id"], "codex-main");
+            assert_eq!(
+                resolved.parameters["task"],
+                serde_json::json!({"goal": "fix the tests"})
+            );
+            assert_eq!(
+                resolved.parameters["target_product_selections"],
+                serde_json::json!([])
+            );
+            assert!(!resolved.async_launch);
+            assert!(resolved.pin_project_at_admission);
+            assert_eq!(
+                resolved.project_path.as_deref(),
+                Some(project.path().canonicalize().unwrap().as_path())
+            );
+        }
+    }
+
+    #[test]
+    fn signed_remote_worker_run_accepts_complete_yaml_file_input() {
+        let source = std::fs::read_to_string(
+            ryeos_engine::test_support::core_bundle_root()
+                .join(".ai/node/commands/remote-worker-run.yaml"),
         )
         .unwrap();
-        assert_eq!(
-            out[0..4],
-            s(&["remote", "bind-project", "--remote", "prod"])
-        );
-        assert!(
-            out.windows(2)
-                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy())
-        );
-    }
-
-    #[test]
-    fn remote_doctor_accepts_optional_project_after_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let commands = vec![command(
-            &["remote", "doctor"],
-            vec![vec![("remote", CommandArgumentKind::String)]],
-            CommandProjectResolution::Optional,
-        )];
-        let out = canonicalize_tokens_with_commands(
-            &s(&[
-                "remote",
-                "doctor",
-                "prod",
-                "--project",
-                &tmp.path().to_string_lossy(),
-            ]),
-            &commands,
+        let mut command: CommandDef = serde_yaml::from_str(&source).unwrap();
+        command.name = "remote-worker-run".to_string();
+        let project = tempfile::tempdir().unwrap();
+        let input = project.path().join("remote-worker-launch.yaml");
+        std::fs::write(
+            &input,
+            r#"remote: qualification
+workflow_ref: config:development/ryeos/remote-worker
+credential_profile_id: personal
+target_product_selections: []
+task:
+  goal: fix the focused test
+"#,
         )
         .unwrap();
-        assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
-        assert!(
-            out.windows(2)
-                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy())
-        );
-    }
 
-    #[test]
-    fn project_aware_alias_uses_global_project_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        let commands = vec![command(
-            &["remote", "bind-project"],
-            vec![vec![("remote", CommandArgumentKind::String)]],
-            CommandProjectResolution::Required,
-        )];
-        let out = canonicalize_tokens_with_commands_and_project(
+        let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
                 "remote",
-                "bind-project",
-                "prod",
-                "--remote-project",
-                "/data/app",
+                "worker",
+                "run",
+                "--input",
+                input.to_str().unwrap(),
             ]),
-            &commands,
-            Some(tmp.path()),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(project.path()),
         )
         .unwrap();
-        assert!(out.windows(2).any(|w| {
-            w[0] == "--project" && w[1] == tmp.path().canonicalize().unwrap().to_string_lossy()
-        }));
+
+        assert_eq!(resolved.item_ref, "service:remote-worker-workflows/start");
+        assert_eq!(resolved.parameters["remote"], "qualification");
+        assert_eq!(
+            resolved.parameters["workflow_ref"],
+            "config:development/ryeos/remote-worker"
+        );
+        assert_eq!(resolved.parameters["credential_profile_id"], "personal");
+        assert_eq!(
+            resolved.parameters["target_product_selections"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            resolved.parameters["task"],
+            serde_json::json!({"goal": "fix the focused test"})
+        );
+        assert_eq!(
+            resolved.project_path.as_deref(),
+            Some(project.path().canonicalize().unwrap().as_path())
+        );
     }
 
     #[test]
-    fn remote_execute_remote_then_item_is_normalized() {
-        let commands = vec![command(
-            &["remote", "execute"],
-            vec![
-                vec![
-                    ("remote", CommandArgumentKind::String),
-                    ("item_ref", CommandArgumentKind::CanonicalRef),
-                ],
-                vec![("item_ref", CommandArgumentKind::CanonicalRef)],
-            ],
-            CommandProjectResolution::Optional,
-        )];
-        let out = canonicalize_tokens_with_commands(
-            &s(&[
-                "remote",
-                "execute",
-                "railway",
-                "service:health/status",
-                "--no-project",
-            ]),
-            &commands,
+    fn signed_remote_worker_recovery_commands_accept_only_source_work_id() {
+        for (file, tokens, service_ref) in [
+            (
+                "remote-worker-resume.yaml",
+                s(&["remote", "worker", "resume"]),
+                "service:remote-worker-workflows/resume",
+            ),
+            (
+                "remote-worker-status.yaml",
+                s(&["remote", "worker", "status"]),
+                "service:remote-worker-workflows/query",
+            ),
+        ] {
+            let source = std::fs::read_to_string(
+                ryeos_engine::test_support::workspace_root()
+                    .join("bundles/core/.ai/node/commands")
+                    .join(file),
+            )
+            .unwrap();
+            let mut command: CommandDef = serde_yaml::from_str(&source).unwrap();
+            command.name = file.to_string();
+            let mut argv = tokens;
+            argv.push("T-source-work".to_string());
+
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                &[command],
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(resolved.item_ref, service_ref);
+            assert_eq!(
+                resolved.parameters,
+                serde_json::json!({
+                    "source_work_id": "T-source-work"
+                })
+            );
+            assert!(!resolved.async_launch);
+            assert!(resolved.project_path.is_none());
+        }
+    }
+
+    #[test]
+    fn project_aware_aliases_preserve_typed_defaults_and_explicit_selectors() {
+        let project = tempfile::tempdir().unwrap();
+        let explicit = tempfile::tempdir().unwrap();
+        let command: CommandDef = serde_yaml::from_str(
+            r#"
+tokens: [inspect]
+description: Inspect a project fixture
+aliases:
+  - tokens: [show]
+forms:
+  - slots:
+      - field: name
+sensitive_fields: [name]
+defaults:
+  limit: 37
+  enabled: false
+  nullable: null
+  items: [1, false, {nested: []}]
+  empty_items: []
+  settings: {ratio: 0.5}
+project:
+  resolution: required
+  request_project_path: true
+  bind_parameter: project_path
+dispatch:
+  kind: execute_ref
+  execute: tool:test/inspect
+"#,
         )
         .unwrap();
-        assert_eq!(
-            out,
-            s(&[
-                "remote",
-                "execute",
-                "--item-ref",
-                "service:health/status",
-                "--remote",
-                "railway",
-                "--no-project",
-            ])
-        );
+        for (mut argv, expected_path) in [
+            (s(&["inspect", "private-value"]), project.path()),
+            (s(&["show", "--name=private-value"]), explicit.path()),
+            (s(&["inspect", "--name", "private-value"]), explicit.path()),
+        ] {
+            if expected_path == explicit.path() {
+                if argv.len() == 2 {
+                    argv.push(format!("--project={}", explicit.path().display()));
+                } else {
+                    argv.extend([
+                        "--project".into(),
+                        explicit.path().to_string_lossy().into_owned(),
+                    ]);
+                }
+            }
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                std::slice::from_ref(&command),
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                Some(project.path()),
+            )
+            .unwrap();
+            assert_eq!(resolved.item_ref, "tool:test/inspect");
+            assert_eq!(resolved.parameters["name"], "private-value");
+            for (field, expected) in &command.defaults {
+                assert_eq!(&resolved.parameters[field], expected, "default {field}");
+            }
+            let expected_path = expected_path.canonicalize().unwrap();
+            assert_eq!(
+                resolved.project_path.as_deref(),
+                Some(expected_path.as_path())
+            );
+            assert_eq!(
+                resolved.parameters["project_path"],
+                expected_path.to_string_lossy().as_ref()
+            );
+            assert!(!resolved.command_label.contains("private-value"));
+            assert!(resolved.command_label.contains("<redacted>"));
+        }
     }
 
     #[test]
-    fn remote_execute_item_only_is_left_for_default_remote() {
-        let commands = vec![command(
-            &["remote", "execute"],
-            vec![
-                vec![
-                    ("remote", CommandArgumentKind::String),
-                    ("item_ref", CommandArgumentKind::CanonicalRef),
-                ],
-                vec![("item_ref", CommandArgumentKind::CanonicalRef)],
-            ],
-            CommandProjectResolution::Optional,
-        )];
-        let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
-        let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
-        assert_eq!(
-            out,
-            s(&[
-                "remote",
-                "execute",
-                "--item-ref",
-                "service:health/status",
-                "--no-project",
-            ])
-        );
+    fn remote_execute_forms_preserve_declared_optional_project() {
+        let command: CommandDef = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                ryeos_engine::test_support::workspace_root()
+                    .join("bundles/core/.ai/node/commands/remote-execute.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for (argv, expected) in [
+            (
+                s(&[
+                    "remote",
+                    "execute",
+                    "host",
+                    "service:health/status",
+                    "--no-project",
+                ]),
+                serde_json::json!({"remote":"host","item_ref":"service:health/status","no_project":true}),
+            ),
+            (
+                s(&["remote", "execute", "service:health/status", "--no-project"]),
+                serde_json::json!({"item_ref":"service:health/status","no_project":true}),
+            ),
+            (
+                s(&[
+                    "remote",
+                    "execute",
+                    "--remote=host",
+                    "--item-ref=service:health/status",
+                    "--no-project",
+                ]),
+                serde_json::json!({"remote":"host","item_ref":"service:health/status","no_project":true}),
+            ),
+        ] {
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                std::slice::from_ref(&command),
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                None,
+            )
+            .unwrap();
+            let mut expected_fields = command.defaults.clone();
+            expected_fields.extend(expected.as_object().unwrap().clone());
+            assert_eq!(
+                resolved.parameters,
+                serde_json::to_value(expected_fields).unwrap()
+            );
+            assert!(resolved.project_path.is_none());
+        }
     }
 
     #[test]
-    fn explicit_remote_forms_are_not_rewritten() {
-        let commands = vec![command(
-            &["remote", "threads"],
-            vec![vec![("remote", CommandArgumentKind::String)]],
-            CommandProjectResolution::None,
-        )];
-        let flag = s(&["remote", "threads", "--remote", "railway"]);
-        assert_eq!(
-            canonicalize_tokens_with_commands(&flag, &commands).unwrap(),
-            flag
-        );
-
-        let equals_flag = s(&["remote", "threads", "--remote=railway"]);
-        assert_eq!(
-            canonicalize_tokens_with_commands(&equals_flag, &commands).unwrap(),
-            s(&["remote", "threads", "--remote", "railway"])
-        );
+    fn commands_without_positional_forms_refuse_positional_tail() {
+        let command = command(&["status"], Vec::new(), CommandProjectResolution::None);
+        let error = resolve_command_for_daemon_with_commands(
+            &s(&["status", "extra-arg"]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .err()
+        .expect("the actual shared binder must refuse undeclared positionals");
+        assert!(error.to_string().contains("positional"));
     }
 
     #[test]
-    fn aliases_without_metadata_preserve_positional_tail() {
-        let commands = vec![command(
-            &["status"],
-            Vec::new(),
-            CommandProjectResolution::None,
-        )];
-        let input = s(&["status", "extra-arg"]);
-        let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
-        assert_eq!(out, input);
+    fn live_commands_do_not_erase_malformed_project_controls_before_policy() {
+        let project = tempfile::tempdir().unwrap();
+        let mut command = command(&["inspect"], Vec::new(), CommandProjectResolution::Optional);
+        let policy = command.project.as_mut().unwrap();
+        policy.bind_parameter = Some("project_path".into());
+        policy.request_project_path = true;
+        policy.no_project_flag = true;
+        command.parameter_binding = Some(ryeos_runtime::CommandParameterBinding {
+            mode: CommandParameterBindingMode::SchemaObject,
+            input_flag: None,
+            single_json_object_arg: true,
+            flag_key_normalization: Default::default(),
+        });
+        for (input, expected) in [
+            (
+                serde_json::json!({"project":null}),
+                "--project must be a path string",
+            ),
+            (
+                serde_json::json!({"project":[]}),
+                "--project must be a path string",
+            ),
+            (
+                serde_json::json!({"project":true}),
+                "--project must be a path string",
+            ),
+            (
+                serde_json::json!({"no_project":null}),
+                "--no-project must be a boolean",
+            ),
+            (
+                serde_json::json!({"no_project":"true"}),
+                "--no-project must be a boolean",
+            ),
+            (
+                serde_json::json!({"no_project":[]}),
+                "--no-project must be a boolean",
+            ),
+            (
+                serde_json::json!({"project":"/unselected","no_project":true}),
+                "cannot pass both --no-project and --project",
+            ),
+        ] {
+            // Neither typed descriptor defaults nor declared structured caller
+            // input may disappear in a pre-policy argv normalization pass.
+            for structured_input in [false, true] {
+                let mut command = command.clone();
+                let mut argv = s(&["inspect"]);
+                if structured_input {
+                    argv.push(input.to_string());
+                } else {
+                    command.defaults = serde_json::from_value(input.clone()).unwrap();
+                }
+                let error = resolve_command_for_daemon_with_commands(
+                    &argv,
+                    &[command],
+                    &ryeos_runtime::CommandRegistrationPolicy::default(),
+                    Some(project.path()),
+                )
+                .err()
+                .expect("invalid selector must not resolve to the default project");
+                assert!(error.to_string().contains(expected), "{input}: {error}");
+            }
+        }
     }
 
     #[test]

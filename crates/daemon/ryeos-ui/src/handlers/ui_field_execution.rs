@@ -2499,6 +2499,8 @@ mod tests {
                 ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
             record_hash: None,
             replayed_from: None,
+            result_projection:
+                ryeos_runtime::callback_contract::DispatchResultProjection::DispatchedSubject,
         }
     }
 

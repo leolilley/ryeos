@@ -45,6 +45,9 @@ pub struct ExecuteRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
     pub item_ref: String,
     pub ref_bindings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     /// Project root path for resolution.
     #[serde(default)]
     pub project_path: Option<String>,
@@ -121,9 +124,7 @@ fn execution_project_context(
     }
 }
 
-pub(crate) fn project_source_from_execution_policy(
-    policy: &ProjectExecutionPolicy,
-) -> ProjectSource {
+pub fn project_source_from_execution_policy(policy: &ProjectExecutionPolicy) -> ProjectSource {
     match policy {
         ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::LiveDirect { .. } => {
             ProjectSource::LiveFs
@@ -143,7 +144,7 @@ pub(crate) fn project_source_from_execution_policy(
     }
 }
 
-pub(crate) fn pinned_realization_from_execution_policy(
+pub fn pinned_realization_from_execution_policy(
     policy: &ProjectExecutionPolicy,
 ) -> Option<project_source::PinnedContextRealization> {
     match policy {
@@ -231,11 +232,16 @@ pub(crate) fn create_isolated_no_project_workspace(
     .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error}"))
 }
 
-fn resolve_project_authority(
+/// Resolve the portable policy and one already-selected project coordinate
+/// into the same persisted project authority used by ordinary execution.
+/// Callers must separately retain any selected CAS generation until that
+/// authority is durably rooted.
+pub fn resolve_execution_project_authority(
     policy: &ExecutionPolicy,
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
     current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
+    project_site_id: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
@@ -244,6 +250,8 @@ fn resolve_project_authority(
         ExecutionProjectAuthority, LiveProjectAccess, PinnedChildProjectRealization,
         PinnedProjectRealization, PinnedTerminalPublication,
     };
+
+    ryeos_app::identity::validate_canonical_site_id(project_site_id)?;
 
     // Authorization scopes are a set. Authorized-key files and composed
     // grants need not preserve a particular ordering, while the immutable
@@ -266,42 +274,52 @@ fn resolve_project_authority(
             }
         };
 
-    let environment = match &policy.environment {
-        ExecutionEnvironmentPolicy::None => EnvironmentAuthority::None,
-        ExecutionEnvironmentPolicy::ProjectOverlay {
-            include_operator_vault,
-            name_policy,
-        } => {
-            let root = project_path.ok_or_else(|| {
-                anyhow::anyhow!("project overlay requires a resolved project root")
-            })?;
-            EnvironmentAuthority::ProjectOverlay {
-                project_authority_id: lillux::sha256_hex(
-                    format!("live-project\0local:{}\0{}", root.display(), root.display(),)
-                        .as_bytes(),
-                ),
-                source_identity: format!("dotenv:{}", root.join(".env").display()),
-                include_operator_vault: *include_operator_vault,
-                name_authority: resolve_name_authority(name_policy),
-            }
-        }
-        ExecutionEnvironmentPolicy::Vault {
-            namespace,
-            name_policy,
-        } => EnvironmentAuthority::Vault {
-            namespace: namespace.clone(),
-            name_authority: resolve_name_authority(name_policy),
-        },
-        ExecutionEnvironmentPolicy::Delegated {
-            provider,
-            grant_id,
-            name_policy,
-        } => EnvironmentAuthority::Delegated {
-            provider: provider.clone(),
-            grant_id: grant_id.clone(),
-            name_authority: resolve_name_authority(name_policy),
-        },
-    };
+    // A project-overlay environment is part of the exact project authority,
+    // not an independently authored path setting. Resolve it only after the
+    // live or pinned project identity is known so remote pinned generations
+    // bind to their destination-site identity instead of a synthetic local
+    // identity. Vault and delegated environments remain project-independent.
+    let resolve_environment =
+        |project: Option<(&str, &Path)>| -> anyhow::Result<EnvironmentAuthority> {
+            Ok(match &policy.environment {
+                ExecutionEnvironmentPolicy::None => EnvironmentAuthority::None,
+                ExecutionEnvironmentPolicy::ProjectOverlay {
+                    include_operator_vault,
+                    name_policy,
+                } => {
+                    let (project_identity, root) = project.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "project overlay requires an exact resolved project authority"
+                        )
+                    })?;
+                    EnvironmentAuthority::ProjectOverlay {
+                        project_authority_id: lillux::sha256_hex(
+                            format!("live-project\0{}\0{}", project_identity, root.display())
+                                .as_bytes(),
+                        ),
+                        source_identity: format!("dotenv:{}", root.join(".env").display()),
+                        include_operator_vault: *include_operator_vault,
+                        name_authority: resolve_name_authority(name_policy),
+                    }
+                }
+                ExecutionEnvironmentPolicy::Vault {
+                    namespace,
+                    name_policy,
+                } => EnvironmentAuthority::Vault {
+                    namespace: namespace.clone(),
+                    name_authority: resolve_name_authority(name_policy),
+                },
+                ExecutionEnvironmentPolicy::Delegated {
+                    provider,
+                    grant_id,
+                    name_policy,
+                } => EnvironmentAuthority::Delegated {
+                    provider: provider.clone(),
+                    grant_id: grant_id.clone(),
+                    name_authority: resolve_name_authority(name_policy),
+                },
+            })
+        };
 
     let child_policy = match &policy.project {
         ProjectExecutionPolicy::Projectless => ChildProjectAuthorityPolicy::Inherit,
@@ -329,14 +347,17 @@ fn resolve_project_authority(
     };
 
     let authority = match &policy.project {
-        ProjectExecutionPolicy::Projectless => ExecutionProjectAuthority::projectless(environment),
+        ProjectExecutionPolicy::Projectless => {
+            ExecutionProjectAuthority::projectless(resolve_environment(None)?)
+        }
         ProjectExecutionPolicy::LiveDirect { access, .. } => {
             let root = project_path
                 .ok_or_else(|| anyhow::anyhow!("live project policy requires project root"))?
                 .to_path_buf();
+            let authored_project_identity = format!("local:{}", root.display());
             ExecutionProjectAuthority::live(
                 root.clone(),
-                format!("local:{}", root.display()),
+                authored_project_identity.clone(),
                 match access {
                     ryeos_app::execution_policy::LiveAccess::ReadOnly => {
                         LiveProjectAccess::ReadOnly
@@ -346,9 +367,9 @@ fn resolve_project_authority(
                     }
                 },
                 ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
-                    isolation.mode(),
+                    isolation.inspection(),
                 ),
-                environment,
+                resolve_environment(Some((&authored_project_identity, &root)))?,
                 capability_ceiling.clone(),
             )
         }
@@ -357,6 +378,17 @@ fn resolve_project_authority(
             let snapshot_hash = snapshot_hash.ok_or_else(|| {
                 anyhow::anyhow!("pinned project policy did not resolve an immutable snapshot")
             })?;
+            let stable_project_identity = root
+                .as_ref()
+                .map(|path| {
+                    ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                        path,
+                        project_site_id,
+                    )
+                    .map(|identity| identity.normalized_logical_key)
+                })
+                .transpose()?
+                .unwrap_or_else(|| format!("snapshot:{snapshot_hash}"));
             let realization = match realization {
                 PinnedRealization::ReadOnly => PinnedProjectRealization::ReadOnly,
                 PinnedRealization::Cow {
@@ -395,13 +427,14 @@ fn resolve_project_authority(
                 },
             };
             ExecutionProjectAuthority::pinned(
-                root.as_ref()
-                    .map(|path| format!("local:{}", path.display()))
-                    .unwrap_or_else(|| format!("snapshot:{snapshot_hash}")),
-                root,
+                stable_project_identity.clone(),
+                root.clone(),
                 snapshot_hash.to_string(),
                 realization,
-                environment,
+                resolve_environment(
+                    root.as_deref()
+                        .map(|root| (stable_project_identity.as_str(), root)),
+                )?,
                 capability_ceiling,
             )
         }
@@ -415,13 +448,13 @@ fn resolve_project_authority(
 /// caller's exact policy and resolved project generation. Keeping provenance,
 /// project/environment/child authority, and lifecycle authority in one value
 /// prevents an endpoint from rebuilding any leg with local defaults.
-pub(crate) struct ResolvedExecutionContract {
-    pub(crate) provenance: ryeos_app::execution_provenance::ExecutionProvenance,
-    pub(crate) lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+pub struct ResolvedExecutionContract {
+    pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_execution_contract(
+pub fn resolve_execution_contract(
     policy: &ExecutionPolicy,
     project_source: &ProjectSource,
     project_ctx: &project_source::ResolvedProjectContext,
@@ -489,11 +522,12 @@ pub(crate) fn resolve_execution_contract(
     {
         anyhow::bail!("live project authority requires a project root containing .ai");
     }
-    let authority = resolve_project_authority(
+    let authority = resolve_execution_project_authority(
         policy,
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
         project_ctx.current_head_destination.as_ref(),
+        state.threads.site_id(),
         &state.isolation,
         caller_scopes,
     )?;
@@ -560,7 +594,7 @@ pub(crate) fn resolve_execution_contract(
 /// Project capture and checkout perform blocking filesystem/CAS work. Keep
 /// that work off the async HTTP worker for every execution endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectRootNormalization {
+pub enum ProjectRootNormalization {
     /// The caller already supplied the canonical root, or the path is a
     /// daemon-owned workspace whose lease is keyed by its exact spelling.
     Preserve,
@@ -568,7 +602,7 @@ pub(crate) enum ProjectRootNormalization {
     CanonicalizeLive,
 }
 
-pub(crate) fn project_root_normalization_from_execution_policy(
+pub fn project_root_normalization_from_execution_policy(
     policy: &ProjectExecutionPolicy,
 ) -> ProjectRootNormalization {
     match policy {
@@ -585,7 +619,7 @@ pub(crate) fn project_root_normalization_from_execution_policy(
     }
 }
 
-pub(crate) struct ResolveProjectContextRequest {
+pub struct ResolveProjectContextRequest {
     pub state: ryeos_app::state::AppState,
     pub source: ProjectSource,
     pub project_path: PathBuf,
@@ -596,7 +630,7 @@ pub(crate) struct ResolveProjectContextRequest {
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
 }
 
-pub(crate) async fn resolve_project_context_off_thread(
+pub async fn resolve_project_context_off_thread(
     request: ResolveProjectContextRequest,
 ) -> Result<project_source::ResolvedProjectContext, project_source::ProjectSourceError> {
     let ResolveProjectContextRequest {
@@ -654,7 +688,7 @@ pub(crate) fn map_project_source_error(
     }
 }
 
-fn authorize_terminal_publication(
+pub fn authorize_terminal_publication(
     policy: &ExecutionPolicy,
     original_project_path: &Path,
     acting_principal: &str,
@@ -723,7 +757,7 @@ fn authorize_terminal_publication(
         })
 }
 
-pub(crate) fn preauthorize_execution_policy(
+pub fn preauthorize_execution_policy(
     policy: &ExecutionPolicy,
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
@@ -979,6 +1013,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         ) {
             return Ok(dispatch_error_response(error));
         }
+        request.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(request.product_selections)
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         let no_project_requested = matches!(
             &request.execution_policy.project,
             ProjectExecutionPolicy::Projectless
@@ -996,6 +1032,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
             .target_site_id
             .as_deref()
             .is_some_and(|target| target != state.threads.site_id());
+        if remote_target_requested && !request.product_selections.is_empty() {
+            return Err(RouteDispatchError::BadRequest(
+                "product selectors are not supported for remote execution in the first composition lane"
+                    .to_string(),
+            ));
+        }
         if request.launch_mode == "accepted" && remote_target_requested {
             return Ok(dispatch_error_response(target_site_unsupported(
                 request.target_site_id.as_deref().unwrap_or_default(),
@@ -1007,11 +1049,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 "validate_only is not supported with launch_mode='accepted'".to_string(),
             ));
         }
-        if request.validate_only && !matches!(&project_source, ProjectSource::LiveFs) {
-            return Err(RouteDispatchError::BadRequest(
-                "validate_only is not supported with pinned project authority".to_string(),
-            ));
-        }
+        // Validation uses the same selected project generation, request engine
+        // and root admission as execution. Do not replace pinned authority with
+        // LiveFs to inspect it: that loses its exact content bindings. The
+        // downstream validate-only branches prepare/preview the admitted route
+        // without launching the workload or publishing a terminal candidate.
         if request.state_root.is_some()
             && !matches!(
                 &request.execution_policy.project,
@@ -1333,8 +1375,22 @@ impl CompiledResponseMode for CompiledExecuteMode {
         };
 
         // Resolve project execution context.
-        let pinned_realization =
-            pinned_realization_from_execution_policy(&request.execution_policy.project);
+        let pinned_realization = pinned_realization_from_execution_policy(
+            &request.execution_policy.project,
+        )
+        .map(|realization| {
+            if request.validate_only {
+                // Preflight resolves immutable source, not a running
+                // workspace. Retain the requested execution policy for
+                // admission checks, but borrow the exact read-only cache
+                // generation for inspection. Allocating a CoW workspace
+                // here would leave a journal owner with no thread to
+                // settle it, and copy a project that is never executed.
+                project_source::PinnedContextRealization::ReadOnly
+            } else {
+                realization
+            }
+        });
         let mut project_ctx =
             match resolve_project_context_off_thread(ResolveProjectContextRequest {
                 state: state.clone(),
@@ -1400,6 +1456,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 }
                 hints
             },
+            scheduled_fire: None,
             validate_only: request.validate_only,
         };
 
@@ -1481,6 +1538,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             let preflight_kind = root_canonical.kind.clone();
             let preflight_parameters = request.parameters.clone();
             let preflight_ref_bindings = request.ref_bindings.clone();
+            let preflight_product_selections = request.product_selections.clone();
             let preflight_usage_subject = usage_subject.clone();
             let preflight_usage_authority = usage_subject_asserted_by.clone();
             let preflight_exec_ctx = ryeos_executor::executor::ExecutionContext {
@@ -1505,6 +1563,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     &preflight_kind,
                     &preflight_parameters,
                     &preflight_ref_bindings,
+                    &preflight_product_selections,
                     preflight_usage_subject.as_ref(),
                     preflight_usage_authority.as_deref(),
                     &accepted_project_binding,
@@ -1577,6 +1636,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 accepted_preflight.root_dispatch_evidence,
                 &project_ctx.effective_path,
                 request.ref_bindings.clone(),
+                request.product_selections.clone(),
                 lifecycle_authority,
                 Some(principal.handler_context()),
             )
@@ -1832,6 +1892,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             let preflight_kind = root_canonical.kind.clone();
             let preflight_parameters = request.parameters.clone();
             let preflight_ref_bindings = request.ref_bindings.clone();
+            let preflight_product_selections = request.product_selections.clone();
             let preflight_usage_subject = usage_subject.clone();
             let preflight_usage_authority = usage_subject_asserted_by.clone();
             let preflight_exec_ctx = exec_ctx.clone();
@@ -1843,6 +1904,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     &preflight_kind,
                     &preflight_parameters,
                     &preflight_ref_bindings,
+                    &preflight_product_selections,
                     preflight_usage_subject.as_ref(),
                     preflight_usage_authority.as_deref(),
                     &project_binding,
@@ -1900,6 +1962,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             validate_only: request.validate_only,
             params: request.parameters.clone(),
             ref_bindings: request.ref_bindings.clone(),
+            product_selections: request.product_selections.clone(),
             acting_principal: caller_principal_id.as_str(),
             project_path: &project_ctx.effective_path,
             provenance,
@@ -1916,13 +1979,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             effect_authority: None,
         };
 
-        let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
-            principal.id.clone(),
-            principal.scopes.clone(),
-            principal.verified,
-            principal.authorized_key_class,
-            principal.authenticated_origin_site_id.clone(),
-        );
+        let handler_context = principal.handler_context();
         let dispatch_result = ryeos_executor::dispatch::dispatch_with_handler_context(
             item_ref,
             handler_context,
@@ -2311,11 +2368,12 @@ mod tests {
             ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
         ];
 
-        let authority = resolve_project_authority(
+        let authority = resolve_execution_project_authority(
             &policy,
             Some(project.path()),
             None,
             None,
+            "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
         )
@@ -2355,15 +2413,27 @@ mod tests {
             },
         };
 
-        let authority = resolve_project_authority(
+        let authority = resolve_execution_project_authority(
             &policy,
             Some(project.path()),
             Some(&snapshot_hash),
             Some(&destination),
+            "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
         )
         .unwrap();
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity,
+            ..
+        } = &authority
+        else {
+            panic!("expected pinned project authority");
+        };
+        assert_eq!(
+            stable_project_identity,
+            &format!("site:test:{}", project.path().display())
+        );
         assert_eq!(
             authority.terminal_publication(),
             Some(
@@ -2376,11 +2446,12 @@ mod tests {
         );
 
         assert!(
-            resolve_project_authority(
+            resolve_execution_project_authority(
                 &policy,
                 Some(project.path()),
                 Some(&snapshot_hash),
                 None,
+                "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
             )
@@ -2391,16 +2462,83 @@ mod tests {
             ..destination
         };
         assert!(
-            resolve_project_authority(
+            resolve_execution_project_authority(
                 &policy,
                 Some(project.path()),
                 Some(&snapshot_hash),
                 Some(&mismatch),
+                "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn pinned_project_overlay_binds_to_destination_site_identity() {
+        let project = tempfile::tempdir().unwrap();
+        let snapshot_hash = "d".repeat(64);
+        let destination = project_source::ResolvedCurrentHeadDestination {
+            principal_key: "e".repeat(64),
+            project_hash: "f".repeat(64),
+            expected_hash: snapshot_hash.clone(),
+        };
+        let policy = ExecutionPolicy {
+            schema_version: 2,
+            ownership: ryeos_app::execution_policy::ExecutionOwnership::DaemonOwned,
+            recovery: ryeos_app::execution_policy::ExecutionRecovery::RestartRecoverable,
+            response: ExecutionResponse::Accepted,
+            target: ryeos_app::execution_policy::ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::ProjectOverlay {
+                include_operator_vault: false,
+                name_policy:
+                    ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
+            },
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                },
+                child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+            },
+        };
+
+        let authority = resolve_execution_project_authority(
+            &policy,
+            Some(project.path()),
+            Some(&snapshot_hash),
+            Some(&destination),
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &[],
+        )
+        .unwrap();
+
+        let stable_identity = format!("site:test:{}", project.path().display());
+        let expected_environment_id = lillux::sha256_hex(
+            format!(
+                "live-project\0{}\0{}",
+                stable_identity,
+                project.path().display()
+            )
+            .as_bytes(),
+        );
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity,
+            environment:
+                ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                    project_authority_id,
+                    ..
+                },
+            ..
+        } = &authority
+        else {
+            panic!("expected pinned project-overlay authority");
+        };
+        assert_eq!(stable_project_identity, &stable_identity);
+        assert_eq!(project_authority_id, &expected_environment_id);
+        authority.validate().unwrap();
     }
 
     #[test]
@@ -2591,6 +2729,7 @@ mod tests {
         ExecuteRequest {
             item_ref: "tool:test/thing".into(),
             ref_bindings: std::collections::BTreeMap::new(),
+            product_selections: Vec::new(),
             project_path: Some("/tmp/project".into()),
             parameters: serde_json::Value::Null,
             execution_policy: ExecutionPolicy {

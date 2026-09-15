@@ -61,11 +61,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 /// The exact scope `handler_mode.rs` mints for this fixed handler. We derive it
@@ -162,6 +158,7 @@ fn plan_ctx(project_dir: &Path, scopes: Vec<String>) -> PlanContext {
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: false,
     }
 }
@@ -187,6 +184,7 @@ fn anonymous_route_principal_is_denied_at_build_plan() {
         &serde_json::Value::Null,
         &ctx.execution_hints,
         None,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -233,6 +231,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             &serde_json::Value::Null,
             &ctx.execution_hints,
             None,
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         )
         .expect("build_plan must succeed under fixed route-handler authority");
 
@@ -242,10 +241,12 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             .expect("load disabled isolation fixture"),
     );
     let engine_ctx = EngineContext {
-        isolation_target_channel: None,
+        isolation_target_channels: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_immutable_project: None,
+        isolation_workspace_view: None,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_network_authority_ceiling:
@@ -267,6 +268,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_writable_runtime_view_mounts: Vec::new(),
         isolation_workspace: None,
         subprocess_limits: None,
         inherited_fds: Vec::new(),

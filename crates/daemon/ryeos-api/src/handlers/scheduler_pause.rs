@@ -40,10 +40,10 @@ pub async fn handle(
     // are controllable by any verified local operator: the operator can
     // invoke the scheduled service directly, so gating its cadence tighter
     // than the action itself would be incoherent.
-    if spec.requester_fingerprint == state.identity.fingerprint() {
+    if spec.execution.principal_id() == state.identity.principal_id() {
         ctx.require_verified()?;
     } else {
-        ctx.require_owner(Some(&spec.requester_fingerprint))?;
+        ctx.require_owner(Some(spec.execution.principal_id()))?;
     }
 
     if !spec.enabled {

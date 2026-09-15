@@ -115,7 +115,11 @@ pub struct ProjectObservationPublishParams {
 pub fn dispatch_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
     let mut behavior = action.clone();
     behavior.operation_id = None;
-    let value = serde_json::to_value(behavior)?;
+    let semantic_product_selections = ryeos_state::external_content::products::composition::product_selection_inputs_semantic_identity(
+        &behavior.product_selections,
+    )?;
+    let mut value = serde_json::to_value(behavior)?;
+    value["product_selections"] = semantic_product_selections;
     let canonical = lillux::cas::canonical_json(&value)?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
@@ -276,6 +280,10 @@ pub enum FollowResultShape {
 pub struct FollowChildSpec {
     pub item_ref: String,
     pub ref_bindings: BTreeMap<String, String>,
+    /// Exact selections for this child only. They are sealed by ordinary child
+    /// admission and never inherited from the follow parent.
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     #[serde(default)]
     pub parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -456,6 +464,10 @@ pub struct ActionPayload {
     pub operation_id: Option<String>,
     pub item_id: String,
     pub ref_bindings: BTreeMap<String, String>,
+    /// Exact input-product selection, separate from the callee's parameters.
+    /// Callbacks retain the canonical complete set in their action identity.
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     #[serde(default)]
     pub params: Value,
     pub thread: String,
@@ -481,6 +493,10 @@ pub struct ActionPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_window: Option<LaunchWindow>,
 }
+
+pub use ryeos_state::external_content::products::composition::{
+    ProductSelectionInputs, canonicalize_product_selection_inputs,
+};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -544,6 +560,7 @@ pub fn parse_hook_action(action: Value) -> Result<ActionPayload, String> {
         operation_id: None,
         item_id,
         ref_bindings,
+        product_selections: Vec::new(),
         params,
         thread,
         call,
@@ -570,6 +587,7 @@ pub mod action_keys {
     pub const OPERATION_ID: &str = "operation_id";
     pub const ITEM_ID: &str = "item_id";
     pub const REF_BINDINGS: &str = "ref_bindings";
+    pub const PRODUCT_SELECTIONS: &str = "product_selections";
     pub const PARAMS: &str = "params";
     pub const THREAD: &str = "thread";
     pub const CALL: &str = "call";
@@ -580,7 +598,14 @@ pub mod action_keys {
     /// `CompiledActionTemplate`. `THREAD` stays literal (a dispatch mode,
     /// never a template); the callback-owned ref bindings and `CALL` block may
     /// contain templates, so those complete values are included.
-    pub const INTERPOLATED: &[&str] = &[ITEM_ID, REF_BINDINGS, PARAMS, CALL, FACETS];
+    pub const INTERPOLATED: &[&str] = &[
+        ITEM_ID,
+        REF_BINDINGS,
+        PRODUCT_SELECTIONS,
+        PARAMS,
+        CALL,
+        FACETS,
+    ];
 }
 
 /// Runtime-owned control keys carried in dispatch/launch params — parent budget,
@@ -621,6 +646,10 @@ pub struct DedicatedSessionStartRequest {
     pub workspace_env: String,
     pub require_pinned_cow: bool,
     pub required_terminal_publication: String,
+    /// Signed root policy for the captured candidate. Interactive sessions
+    /// wait for an owner decision; bounded turns become terminal only after
+    /// retaining the frozen candidate for later independent review.
+    pub candidate_disposition: String,
     /// Whether this execution may recover a retained upstream session after a
     /// worker restart. The daemon verifies this against the signed protocol
     /// profile before launching the worker.
@@ -639,11 +668,101 @@ pub struct DedicatedSessionCommandRequest {
     pub payload: Value,
 }
 
+/// Exact durable coordinate for observing one command issued to a dedicated
+/// session. The daemon derives every other identity dimension from retained
+/// session and command authority.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionCommandObservationRequest {
+    pub thread_id: String,
+    pub command_sequence: u64,
+}
+
+/// Immutable proof that one command-started turn reached its authoritative
+/// terminal observation. A completed dedicated-session termination must carry
+/// this entire fence; mutable session status is not completion authority.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedCommandCompletionFence {
+    pub placement_thread_id: String,
+    pub admitted_capsule_hash: String,
+    pub worker_boot_epoch: u64,
+    pub command_sequence: u64,
+    pub request_digest: String,
+    pub turn_id: String,
+    pub completion_operation_id: String,
+}
+
+/// Closed terminal classification for the generic bounded-session controller.
+/// This is orthogonal to the session lifecycle's completed/cancelled reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DedicatedSessionBoundedOutcomeKind {
+    Completed,
+    BudgetExhausted,
+    ApprovalRequired,
+    RetryableUncontactedExhausted,
+    OutcomeUnknown,
+    WorkerFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DedicatedSessionBoundedBudgetDimension {
+    Duration,
+    WorkerExecutions,
+    ProviderContacts,
+}
+
+/// Window reserved before the execution-tree hard deadline so a bounded
+/// session can durably record budget exhaustion and retire its worker before
+/// the executor enforces the absolute process deadline. Both the controller
+/// and daemon validation use this exact protocol constant.
+pub const DEDICATED_SESSION_AGGREGATE_TERMINALIZATION_RESERVE_MS: i64 = 1_000;
+
+/// Exact durable authority for one unresolved approval requested by the
+/// worker's current turn. The daemon projects this only after matching the
+/// approval ledger row to its immutable root-chain fact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedApprovalFence {
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub admitted_capsule_hash: String,
+    pub worker_boot_epoch: u64,
+    pub turn_id: String,
+    pub approval_id: String,
+    pub request_digest: String,
+    pub approval_operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionBoundedOutcome {
+    pub kind: DedicatedSessionBoundedOutcomeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<DedicatedSessionBoundedBudgetDimension>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<HostedApprovalFence>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DedicatedSessionTerminateRequest {
     pub thread_id: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounded_outcome: Option<DedicatedSessionBoundedOutcome>,
+}
+
+/// Completion-fenced terminal request. This is separate from the existing
+/// cancellation request so callers cannot accidentally label an unfenced stop
+/// as successful completion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionCompletedTerminateRequest {
+    pub thread_id: String,
+    pub completion: HostedCommandCompletionFence,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -659,7 +778,9 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
     -> Result<Value, CallbackError>;
 
-    async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
+    /// Acknowledge this runtime through the authenticated connection. PID and
+    /// group identity are daemon-observed facts, not namespace-local inputs.
+    async fn attach_process(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Feature-gated daemon crash-qualification seam.
     ///
@@ -725,9 +846,33 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         })
     }
 
+    async fn dedicated_session_command_observation(
+        &self,
+        request: DedicatedSessionCommandObservationRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
     async fn terminate_dedicated_session(
         &self,
         request: DedicatedSessionTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn terminate_completed_dedicated_session(
+        &self,
+        request: DedicatedSessionCompletedTerminateRequest,
     ) -> Result<Value, CallbackError> {
         let _ = request;
         Err(CallbackError::ActionFailed {
@@ -1085,6 +1230,7 @@ mod tests {
     #[test]
     fn action_payload_omits_call_when_none() {
         let payload = ActionPayload {
+            product_selections: Vec::new(),
             operation_id: None,
             item_id: "tool:t/echo".to_string(),
             ref_bindings: BTreeMap::new(),
@@ -1104,7 +1250,8 @@ mod tests {
     #[test]
     fn action_payload_round_trips_call() {
         let wire = json!({
-            "item_id": "knowledge:arc/resources",
+            "item_id": "knowledge:test/resources",
+            "product_selections": [],
             "ref_bindings": {},
             "params": {},
             "thread": "inline",
@@ -1121,6 +1268,7 @@ mod tests {
         // A wire payload with no `call` (the common case) deserializes fine.
         let wire = json!({
             "item_id": "tool:t/echo",
+            "product_selections": [],
             "ref_bindings": {},
             "thread": "inline"
         });
@@ -1203,6 +1351,7 @@ mod tests {
         let request = DispatchActionRequest {
             thread_id: "T-hook".to_string(),
             action: ActionPayload {
+                product_selections: Vec::new(),
                 operation_id: None,
                 item_id: "tool:test/hook".to_string(),
                 ref_bindings: BTreeMap::new(),
@@ -1241,6 +1390,7 @@ mod tests {
     #[test]
     fn action_digest_excludes_occurrence_but_binds_behavior() {
         let action = ActionPayload {
+            product_selections: Vec::new(),
             operation_id: Some("1".repeat(64)),
             item_id: "tool:test/mutate".to_string(),
             ref_bindings: BTreeMap::new(),
@@ -1258,6 +1408,56 @@ mod tests {
             dispatch_action_digest(&different_occurrence).unwrap(),
             original
         );
+
+        let mut selected_behavior = action.clone();
+        selected_behavior.product_selections = serde_json::from_value(json!([{
+            "target": {"kind": "root"},
+            "selection": {
+                "declaration_id": "subject",
+                "witness_hash": "a".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "qualification_hash": null
+            }
+        }]))
+        .unwrap();
+        let selected_digest = dispatch_action_digest(&selected_behavior).unwrap();
+        assert_ne!(selected_digest, original);
+        let mut received_selection = selected_behavior.clone();
+        received_selection.product_selections[0]
+            .selection
+            .witness_source =
+            ryeos_state::external_content::products::transfer::ProductWitnessSource::Received {
+                acceptance_hash: "b".repeat(64),
+            };
+        assert_ne!(
+            serde_json::to_value(&received_selection.product_selections).unwrap(),
+            serde_json::to_value(&selected_behavior.product_selections).unwrap(),
+            "sealed selector input must retain its exact witness source"
+        );
+        assert_eq!(
+            dispatch_action_digest(&received_selection).unwrap(),
+            selected_digest,
+            "receiver-local redemption proof is not behavior identity"
+        );
+        let mut changed_witness = selected_behavior.clone();
+        changed_witness.product_selections[0].selection.witness_hash = "c".repeat(64);
+        assert_ne!(
+            dispatch_action_digest(&changed_witness).unwrap(),
+            selected_digest,
+            "the selected immutable product remains behavior identity"
+        );
+        let mut missing_source = serde_json::to_value(&selected_behavior).unwrap();
+        missing_source["product_selections"][0]["selection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("witness_source");
+        assert!(serde_json::from_value::<ActionPayload>(missing_source).is_err());
+        let mut missing_control = serde_json::to_value(&selected_behavior).unwrap();
+        missing_control
+            .as_object_mut()
+            .unwrap()
+            .remove("product_selections");
+        assert!(serde_json::from_value::<ActionPayload>(missing_control).is_err());
 
         let mut different_behavior = action;
         different_behavior.params = json!({"value": 2});
@@ -1322,6 +1522,24 @@ mod tests {
             }
         });
         assert!(serde_json::from_value::<SpawnFollowChildRequest>(follow).is_err());
+    }
+
+    #[test]
+    fn follow_child_wire_requires_explicit_product_selections() {
+        let child = json!({
+            "item_ref": "graph:test/child",
+            "ref_bindings": {},
+            "parameters": {}
+        });
+        assert!(serde_json::from_value::<FollowChildSpec>(child).is_err());
+
+        let child = json!({
+            "item_ref": "graph:test/child",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": {}
+        });
+        assert!(serde_json::from_value::<FollowChildSpec>(child).is_ok());
     }
 
     #[test]

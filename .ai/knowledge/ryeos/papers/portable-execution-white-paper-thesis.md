@@ -1,8 +1,7 @@
-<!-- ryeos:signed:2026-07-23T10:04:49Z:0bbb70aa83ca746406c0a1ab9ca1efddc1c5a4aeda75b1c1652f3a097e327a99:yPUKhkg0qqNvr/a8NS3qB2Qm50fGc1QlP/R847OLjpxjU6cDUdPfoyttVdO7qOea/YqMtM5eByrBREQD9JzmAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [white-paper, portable-execution, cryptographic-identity, architecture]
-version: "0.3.0"
+version: "0.4.0"
 description: >
   Working notes for the RyeOS white paper thesis: portable verified execution
   through cryptographic identity. This is reference material, not a draft.
@@ -28,11 +27,11 @@ Short version:
 > RyeOS is portable verified execution: cryptographic identity gives execution
 > both properties in one act.
 
-Portable and verified are one fused property, not a goal and a mechanism. A
-signed, content-addressed object is verified (it proves what it is and who
-stands behind it) and portable (a hash means the same thing on every machine,
-so trust travels with the bits) by the same act. Execution inherits both
-because execution is represented as data end to end.
+Portable identity and verifiable provenance are deliberately integrated.
+Hashes identify content across sites, and signatures support attribution under
+explicit trust assumptions. Neither supplies runtime compatibility, custody,
+availability or permission to execute. The fused property is RyeOS's design
+objective, not a proof that all portability requires this architecture.
 
 Expanded version:
 
@@ -70,27 +69,23 @@ The general systems conclusion is:
 > Existing systems made source code, packages, containers, and data portable.
 > RyeOS targets execution itself: executable capability plus operational history.
 
-## The necessity argument
+## Why combine portability and verification?
 
-The fused property should be derived, not asserted. Derivation:
+When work leaves its original process or trust domain, a recipient needs
+evidence of what it is and a policy for deciding what may happen next.
 
-1. Represent an execution as data and it can leave the machine that ran it —
-   across a restart, to another node, into the future.
-2. Once an execution can outlive and leave its machine, the machine can no
-   longer serve as the authority for what the execution is or who authorized
-   it. Location-based trust does not survive portability.
-3. Therefore the data must vouch for itself: content addressing for identity,
-   signatures for authorship and authority. Self-certification is not a
-   security feature layered onto portable execution; it is the minimal
-   machinery portability forces.
-4. Once identity, authority, and history travel inside the data, the executor
-   becomes fungible: any node with the right trust can be the site of an
-   execution.
+RyeOS binds executable content, invocation authority and recorded consequence
+through hashes, signatures and typed contracts. This makes evidence portable
+without requiring the recipient to equate a network address with authority.
 
-Compressed: portability forces proof. Portable and verified are one property
-because the first is impossible without the second. An asserted fusion is a
-design choice; a forced fusion is a theorem, and the paper should present it
-as the latter.
+The argument is conditional: a compatible target must possess the required
+closure, validate the relevant evidence, admit the work and receive any
+necessary continuation custody. A valid history alone authorises none of those
+actions. Other architectures can provide portability using other trust models,
+or adopt equivalent evidence contracts.
+
+The research claim is the value of this integration. It is not a theorem that
+durability, federation or safe executor replacement follows from signatures.
 
 ## Historical lineage
 
@@ -183,18 +178,15 @@ authorization, isolationing, and deterministic replay.
 RyeOS is not novel because it uses hashes, signatures, registries, bundles, or
 runtimes. The novelty is the layer where those primitives are applied.
 
-There is a sharper cut than the layer distinction. The verified-execution
-lineage — Nix, build systems, deterministic replay, blockchains — verifies by
-recomputation: re-run and compare against a specification. That model
-requires an external correctness predicate for the executor. Executors that
-have no specification independent of themselves (human operators, LLM
-runtimes — see the actor model below) cannot be verified this way even in
-principle; they can only be attributed and held to account. RyeOS sits on the
-other branch: verification by signed testimony over a durable record. The
-adjacent systems below are therefore not merely at a different layer; most
-are on the other branch of verification theory, which is why none of them
-could host this class of executor by extension. The full argument is the
-second paper in this series (`testimony-not-determinism.md`).
+Reproduction, attribution and evaluation answer different questions.
+Reproduction can establish computational agreement within a qualified scope.
+Signed testimony attributes a claim. Independent evaluation tests whether an
+output meets a declared objective. A workflow can use all three, including when
+its executor is a model or a person.
+
+Adjacent systems overlap with these concerns and can be extended to address
+them. Comparisons below are architectural positioning hypotheses, not exhaustive
+feature audits or claims that those systems cannot host judgment-bearing work.
 
 Useful positioning:
 
@@ -289,19 +281,14 @@ Define the model:
 - bundle: transport unit for related executable objects;
 - thread/event/snapshot: durable execution history and resumable state.
 
-The actor primitive is the signing key. An operator, a node, an agent: each is
-a key, and anything that acts, acts by signing. Trust is always a decision
-about a key, never about a machine. This is not agent framing — it is what
-remains when every component of execution is data: the only thing that can act
-on data with checkable consequence is a key.
+Cryptographic keys identify signers, not the full semantics of actors.
+Operator, node, publisher, workload and vault roles remain distinct. A node
+may sign an observation in custody; that does not mean a model personally
+held the key or that its claim is true.
 
-A consequence worth stating: the actor class always contained authored-output
-executors — operators. A human running a command has no external
-specification of correct behavior; their acts can only be attributed, never
-recomputed. The substrate's juridical shape (keys, signatures, grants,
-records) was therefore required before any model entered the picture, and
-model executors slot in without a single new primitive because they are the
-second member of a class humans founded.
+People and models both make judgment-bearing choices. Some outputs have exact
+task checks; others need partial or contested evaluation. Neither repeating a
+computation nor identifying its signer automatically establishes correctness.
 
 ### 5. RyeOS object model
 
@@ -352,29 +339,23 @@ before execution, auditability, delegation, and revocation limits.
 
 ### 8. Replay, resume, and ownership
 
-The strong claim, grounded in implementation:
+The architectural claim:
 
-> The record is the execution. A running process is only a rebuildable
-> projection of the execution object (process : execution :: SQLite
-> projection : CAS). Completed steps are consumed as data and never
-> re-crossed; nondeterminism exists only at the frontier — the
-> not-yet-executed edge where the run touches the world.
+> Retained execution history and admitted authority are primary. A process
+> advances that work under an explicit runtime and lifecycle contract.
 
-Consequences:
+Replay reads retained results under the relevant effect contract. Resume
+restores supported continuation state. Migration additionally establishes
+compatible placement and exclusive continuation authority. These operations
+share data but have different proof and failure obligations.
 
-- Resume after process death, replay of history, continuation across a
-  segment cut, and (future) cross-node resume are all the same operation:
-  reading the execution back in from its own record.
-- "Record-complete" and "reproducible" are one property, not a trade-off.
-  Once execution is data, re-instantiating it is reading the data back; the
-  dichotomy only exists if execution means process.
-- Deterministic re-execution of the world remains out of scope (see
-  limitations); replay never meant re-running the world.
+Record completeness is not computational reproducibility. Exact re-execution
+requires a qualified profile; uncertain external effects require reconciliation,
+not blind repetition. Some processes are deliberately non-recoverable.
 
-Implemented today: checkpoint plus event-log resume, project snapshot pinned
-at spawn, reconciliation re-spawning resumable work under the same thread
-identity after a daemon restart, and completed child results spliced into a
-successor's resume state instead of re-dispatched.
+Checkpoint/follow/reconciliation mechanisms provide demonstrations to qualify,
+not a blanket guarantee. Record the current revision, route and interruption
+cuts when citing acceptance.
 
 ### 9. Applications
 
@@ -423,8 +404,8 @@ Possible future work:
 
 ## Suggested demonstrations/evaluation criteria
 
-A rigorous paper could demonstrate (most of these exist today and should be
-presented as demonstrations, not aspirations):
+A rigorous paper should attach current, route-specific evidence to these
+candidate demonstrations. Historical implementation notes are not fresh tests:
 
 - moving a signed tool bundle from one project/machine to another and verifying
   identity (implemented: bundle publish/install/verify, remote sync);

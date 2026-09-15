@@ -1,0 +1,44 @@
+category: test
+name: produce-dynamic
+version: "1.0.0"
+description: Copy one bounded fixture input into two named unknown-output products
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+workspace_access: shared_exclusive
+filesystem_authority: node_policy
+network_authority: isolated
+env_config:
+  interpreter:
+    type: local_binary
+    binary: bash
+    candidates: []
+    search_paths: []
+    path_candidates: [bash]
+config:
+  command: "${interpreter}"
+  args:
+    - --noprofile
+    - --norc
+    - -c
+    - literal: |
+        # fixture-dynamic-producer-begin
+        set -euo pipefail
+        # Restrict this Bash probe, without injecting reserved runtime env keys.
+        export PATH=''
+        [[ $# -eq 1 && $1 == /* ]]
+        IFS= read -r variant < "$1/variant.txt"
+        [[ $variant =~ ^[a-z][a-z-]{0,31}$ ]]
+        /usr/bin/mkdir -p -- "$1/products/dynamic"
+        printf '%s\n' "$variant" > "$1/products/dynamic/subject"
+        printf '%s-aux\n' "$variant" > "$1/products/dynamic/auxiliary"
+        /usr/bin/chmod 0644 -- "$1/products/dynamic/subject" "$1/products/dynamic/auxiliary"
+        printf '{"produced":true}\n'
+        # fixture-dynamic-producer-end
+    - fixture-producer
+    - "${project_path}"
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

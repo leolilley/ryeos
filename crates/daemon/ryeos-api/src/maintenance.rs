@@ -391,6 +391,11 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
             .active_resume_snapshot_roots()
             .context("failed to collect active runtime snapshot roots")?,
     );
+    operational_object_roots.extend(
+        scheduler_db
+            .operational_snapshot_roots()
+            .context("failed to collect scheduler snapshot roots")?,
+    );
     let mirrored_entries = state_store
         .with_state_db(|db| db.list_cas_entries_by_state(ryeos_state::CasEntryState::Mirrored))
         .context("read durable mirrored CAS roots before sweep")?;

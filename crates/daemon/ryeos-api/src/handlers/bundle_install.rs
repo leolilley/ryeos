@@ -398,7 +398,7 @@ pub(crate) fn admit_completed_staging(
         policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?,
         policy_snapshot.generation_digest(),
     )
-    .context("prospective bundle set would fail node engine boot")?;
+    .context("prospective bundle set failed node definition admission")?;
     Ok(())
 }
 

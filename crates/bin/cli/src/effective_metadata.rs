@@ -24,8 +24,9 @@ pub fn build_effective_item_engine(
         app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })?;
-    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&config.app_root)
-        .context("load node isolation policy")?;
+    let isolation =
+        ryeos_app::engine_init::load_locked_registered_definition_isolation(&config.app_root)
+            .context("load node isolation policy")?;
     let policy = crate::node_descriptors::load_verified_policy_snapshot(app_root)
         .context("load exact node execution policy")?;
     let execution_policy =

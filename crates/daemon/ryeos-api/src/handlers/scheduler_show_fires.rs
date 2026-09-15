@@ -39,7 +39,7 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(spec.requester_fingerprint.as_str()))?;
+    ctx.require_owner(Some(spec.execution.principal_id()))?;
 
     let limit = req.limit.clamp(1, 500);
     let (fires, total) = state
@@ -54,13 +54,17 @@ pub async fn handle(
                 "fire_id": f.fire_id,
                 "schedule_id": f.schedule_id,
                 "scheduled_at": f.scheduled_at,
-                "fired_at": f.fired_at,
+                "reserved_at": f.reserved_at,
+                "dispatched_at": f.dispatched_at,
                 "completed_at": f.completed_at,
                 "thread_id": f.thread_id,
                 "status": f.status,
                 "trigger_reason": f.trigger_reason,
                 "outcome": f.outcome,
                 "signer_fingerprint": f.signer_fingerprint,
+                "schedule_spec_hash": f.schedule_spec_hash,
+                "project_authority": f.project_authority,
+                "admitted_capsule_hash": f.admitted_capsule_hash,
             })
         })
         .collect();

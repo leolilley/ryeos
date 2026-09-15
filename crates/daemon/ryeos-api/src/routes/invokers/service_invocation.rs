@@ -37,15 +37,7 @@ fn route_handler_context(
     principal: Option<&crate::routes::invocation::RoutePrincipal>,
 ) -> crate::handler_context::HandlerContext {
     principal
-        .map(|principal| {
-            crate::handler_context::HandlerContext::new_with_authority(
-                principal.id.clone(),
-                principal.scopes.clone(),
-                principal.verified,
-                principal.authorized_key_class,
-                principal.authenticated_origin_site_id.clone(),
-            )
-        })
+        .map(crate::routes::invocation::RoutePrincipal::handler_context)
         .unwrap_or_else(crate::handler_context::HandlerContext::anonymous)
 }
 
@@ -102,6 +94,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             current_site_id: site_id,
             origin_site_id,
             execution_hints: Default::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
@@ -249,6 +242,7 @@ mod tests {
             verified: false,
             authorized_key_class: None,
             authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
             metadata: BTreeMap::new(),
         };
 
@@ -270,6 +264,7 @@ mod tests {
                 ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             ),
             authenticated_origin_site_id: Some("site:remote".to_string()),
+            authenticated_grant_authority: None,
             metadata: BTreeMap::new(),
         };
 

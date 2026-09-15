@@ -1,0 +1,15 @@
+[package]
+name = "ryeos-workload-client"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "ryeos-workload-client"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+lillux.workspace = true
+ryeos-runtime.workspace = true
+serde_json.workspace = true

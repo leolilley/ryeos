@@ -94,13 +94,41 @@ pub fn import_dry_run(
     isolation: &IsolationRuntime,
     isolation_context: IsolationLaunchContext<'_>,
 ) -> Value {
-    let plan = match engine.build_plan(
-        plan_ctx,
-        verified,
-        &json!({}),
-        &ExecutionHints::default(),
-        None,
-    ) {
+    // An import can execute arbitrary module initialization. It is not an
+    // authority-free diagnostic: use the same signed projections and refuse
+    // when this probe cannot supply the required captured launch authority.
+    let plan = match engine.with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
+        let effective = generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref: verified.resolved.canonical_ref.clone(),
+            expected_kind: Some(verified.resolved.kind.clone()),
+            project_root: match &plan_ctx.project_context {
+                ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
+                _ => None,
+            },
+            subject_resolution_authority: plan_ctx.subject_resolution_authority.clone(),
+        })?;
+        if effective.source.content_hash != verified.resolved.content_hash {
+            anyhow::bail!("import-check subject changed after verification");
+        }
+        let execution = engine.kinds.get(&verified.resolved.kind)
+            .and_then(|schema| schema.execution.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("import-check subject has no execution contract"))?;
+        let filesystem = execution.project_filesystem_authority_ceiling(&effective.composed_value)?
+            .intersect(isolation_context.filesystem_authority_ceiling);
+        let network = execution.project_network_authority_ceiling(&effective.composed_value)?
+            .intersect(isolation_context.network_authority_ceiling);
+        if filesystem == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution {
+            anyhow::bail!("import probe cannot provide captured execution admission; run the admitted tool instead");
+        }
+        let mut plan = generation.build_plan(
+            plan_ctx, verified, &json!({}), &ExecutionHints::default(), None, filesystem,
+        )?;
+        plan.network_authority_ceiling = plan.network_authority_ceiling.intersect(network);
+        if plan.filesystem_authority_ceiling == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution {
+            anyhow::bail!("import probe cannot provide the captured plan's execution authority");
+        }
+        Ok(plan)
+    }) {
         Ok(p) => p,
         Err(e) => {
             return json!({
@@ -176,6 +204,12 @@ pub fn import_dry_run(
         }
     }
     let isolation_context = IsolationLaunchContext {
+        filesystem_authority_ceiling: isolation_context
+            .filesystem_authority_ceiling
+            .intersect(plan.filesystem_authority_ceiling),
+        network_authority_ceiling: isolation_context
+            .network_authority_ceiling
+            .intersect(plan.network_authority_ceiling),
         verified_code: &verified_code,
         verified_command: spec.verified_command.as_ref().map(|command| {
             command.code() as &dyn ryeos_engine::isolation::IsolationCommandAuthority
@@ -214,6 +248,7 @@ fn run_probe(
         timeout: IMPORT_TIMEOUT_SECS,
         limits: None,
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     };
     let request = match isolation.apply(request, isolation_context) {
@@ -341,6 +376,8 @@ mod tests {
             envs,
             &isolation,
             IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
                 project_path: project,
                 project_authority: IsolationProjectAuthority::ReadOnly,
                 filesystem_authority_ceiling:
@@ -357,7 +394,8 @@ mod tests {
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
-                target_channel: None,
+                writable_runtime_view_mounts: &[],
+                target_channels: &[],
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
             },

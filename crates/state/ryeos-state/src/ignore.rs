@@ -7,9 +7,6 @@
 //! Patterns are compiled from the mandatory `ingest_ignore` member of the
 //! atomic node policy generation. Missing policy is a startup error.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -78,16 +75,6 @@ fn normalize_anchored(pattern: &str) -> Result<String> {
 }
 
 impl IgnoreMatcher {
-    /// Load from a YAML file. Returns an error if the file doesn't exist
-    /// or contains invalid patterns.
-    pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("ingest ignore config not found: {}", path.display()))?;
-        let config: IgnoreConfig = serde_yaml::from_str(&content)
-            .with_context(|| format!("invalid ingest ignore config: {}", path.display()))?;
-        Self::from_config(&config)
-    }
-
     /// Build from a config struct. Validates all patterns up front.
     pub fn from_config(config: &IgnoreConfig) -> Result<Self> {
         let mut dir_patterns = Vec::new();
@@ -139,6 +126,15 @@ impl IgnoreMatcher {
         &self.canonical_patterns
     }
 
+    /// Compile the intersection-safe transfer policy for two independently
+    /// authoritative nodes. Ignore rules are exclusions, so admitting content
+    /// on both nodes requires the set union of their canonical patterns.
+    pub fn union(&self, other: &Self) -> Result<Self> {
+        let mut patterns = self.canonical_patterns.clone();
+        patterns.extend(other.canonical_patterns.iter().cloned());
+        Self::from_config(&IgnoreConfig { patterns })
+    }
+
     /// Returns true if the relative path should be ignored.
     pub fn is_ignored(&self, rel_path: &str) -> bool {
         // Normalize a stray leading slash so anchored matching is repo-relative.
@@ -169,57 +165,6 @@ impl IgnoreMatcher {
 
         false
     }
-}
-
-/// Built-in patterns for when no config file exists (e.g. tests,
-/// standalone mode). NOT a silent fallback — production startup
-/// uses `load()` which fails if the file is missing.
-pub fn builtin_patterns() -> Vec<&'static str> {
-    vec![
-        ".git/",
-        ".hg/",
-        ".svn/",
-        "node_modules/",
-        "target/",
-        ".venv/",
-        "__pycache__/",
-        ".DS_Store",
-        "*.pyc",
-        ".env",
-        // Environment-specific: a project's remotes config points at *this*
-        // machine's nodes (e.g. the prod node a dev pushes to). The remote has
-        // no use for a copy, so never ship it. Anchored so it only matches the
-        // project's own `.ai/config/remotes/`, not any dir named `remotes`.
-        "/.ai/config/remotes/",
-        // Runtime-owned and rebuildable project data must never be folded
-        // into a durable source snapshot. Besides wasting hundreds of MB,
-        // ingesting `.ai/state` recursively snapshots the very thread state
-        // being created and can prevent admission from ever converging.
-        "/.ai/state/",
-        "/.ai/cache/",
-    ]
-}
-
-/// Create an ignore matcher from the built-in patterns.
-pub fn matcher_from_builtins() -> IgnoreMatcher {
-    let config = IgnoreConfig {
-        patterns: builtin_patterns()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
-    IgnoreMatcher::from_config(&config).expect("built-in patterns must be valid")
-}
-
-/// Non-bypassable baseline for bytes that may be copied into durable CAS.
-///
-/// Production still loads the node's configured matcher and applies it as an
-/// additional restriction. This baseline prevents removing a configured
-/// ignore from turning repository metadata, credentials, runtime state, or
-/// generated dependency trees into permanently stored content.
-pub fn durable_capture_floor() -> &'static IgnoreMatcher {
-    static FLOOR: OnceLock<IgnoreMatcher> = OnceLock::new();
-    FLOOR.get_or_init(matcher_from_builtins)
 }
 
 #[cfg(test)]
@@ -263,15 +208,6 @@ mod tests {
         assert!(m.is_ignored("target/debug/ryeosd"));
         assert!(m.is_ignored("target"));
         assert!(!m.is_ignored("my-target/file.txt"));
-    }
-
-    #[test]
-    fn builtins_exclude_runtime_state_and_virtualenvs() {
-        let matcher = matcher_from_builtins();
-        assert!(matcher.is_ignored(".venv/bin/python"));
-        assert!(matcher.is_ignored(".ai/state/cas/objects/aa/hash"));
-        assert!(matcher.is_ignored(".ai/cache/generated"));
-        assert!(!matcher.is_ignored(".ai/graphs/arc/hash_probe.yaml"));
     }
 
     #[test]
@@ -348,6 +284,18 @@ mod tests {
         // Single-component dir patterns keep their match-anywhere behavior.
         let m = matcher_from_patterns(&["node_modules/"]);
         assert!(m.is_ignored("a/b/node_modules/c"));
+    }
+
+    #[test]
+    fn union_applies_both_nodes_exclusions() {
+        let source = matcher_from_patterns(&[".env", "target/"]);
+        let target = matcher_from_patterns(&["*.pyc", "target/"]);
+        let transfer = source.union(&target).unwrap();
+
+        assert_eq!(transfer.canonical_patterns(), &["*.pyc", ".env", "target/"]);
+        assert!(transfer.is_ignored(".env"));
+        assert!(transfer.is_ignored("src/cache.pyc"));
+        assert!(transfer.is_ignored("target/debug/app"));
     }
 
     #[test]

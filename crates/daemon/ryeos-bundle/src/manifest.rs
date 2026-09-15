@@ -1366,8 +1366,7 @@ typo_field: oops
 
     fn isolation_backend(id: &str) -> ryeos_isolation_protocol::IsolationBackendDeclaration {
         use ryeos_isolation_protocol::{
-            IsolationAdapterProtocolVersion, IsolationArtifactRole, IsolationCapability,
-            IsolationTargetTriple,
+            IsolationAdapterProtocolVersion, IsolationCapability, IsolationTargetTriple,
         };
 
         ryeos_isolation_protocol::IsolationBackendDeclaration {
@@ -1375,10 +1374,7 @@ typo_field: oops
             protocol: IsolationAdapterProtocolVersion::Current,
             targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
             adapter: "adapter".to_string(),
-            artifacts: std::collections::BTreeMap::from([(
-                IsolationArtifactRole::Launcher,
-                "launcher".to_string(),
-            )]),
+            artifacts: std::collections::BTreeMap::new(),
             capabilities: std::collections::BTreeSet::from([
                 IsolationCapability::FilesystemPrivateRoot,
             ]),
@@ -1398,10 +1394,10 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v3
+    protocol: ryeos.isolation-adapter/v10
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
-    artifacts: { launcher: launcher }
+    artifacts: {}
     capabilities: [filesystem.private_root]
     undeclared_field: true
 "#;

@@ -17,6 +17,7 @@ use ryeos_app::state::AppState;
 use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
+const HASH_REQUEST_MAX_ENTRIES: usize = 1024;
 pub const DISTRIBUTED_SUBSTRATE_PROTOCOL_VERSION: u64 = 2;
 
 /// HTTP error from a remote-node call, carrying the status code and the **full
@@ -427,8 +428,9 @@ impl RemoteClient {
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
-        if typed_hashes_request_body_size(object_hashes, blob_hashes)
-            <= HASH_REQUEST_BODY_BUDGET_BYTES
+        if object_hashes.len().saturating_add(blob_hashes.len()) <= HASH_REQUEST_MAX_ENTRIES
+            && typed_hashes_request_body_size(object_hashes, blob_hashes)
+                <= HASH_REQUEST_BODY_BUDGET_BYTES
         {
             return self.objects_has_once(object_hashes, blob_hashes).await;
         }
@@ -706,6 +708,26 @@ impl RemoteClient {
             blob_hashes,
             max_response_bytes,
             Some(total_timeout),
+        )
+        .await
+    }
+
+    /// Fetch ordinary inline CAS objects under the transport's established
+    /// JSON response bound and an explicit caller-owned total deadline. The
+    /// transport owns this limit because it must admit every valid inline
+    /// object plus its response envelope; protocol handlers must not invent a
+    /// smaller content limit for an already-admitted object type.
+    pub async fn objects_get_with_total_timeout(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+        total_timeout: lillux::time::Duration,
+    ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit_and_total_timeout(
+            object_hashes,
+            blob_hashes,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            total_timeout,
         )
         .await
     }
@@ -1085,21 +1107,42 @@ impl RemoteClient {
         self.signed_post("/project/status", &body).await
     }
 
+    /// Bounded project-status read for recovery decisions that hold a durable
+    /// operation attempt. Bulk project transfer remains separately bounded.
+    pub async fn project_status_bounded(&self, project_path: &str) -> Result<Value> {
+        let body = serde_json::json!({ "project_path": project_path });
+        self.signed_post_with_response_limit_and_timeout(
+            "/project/status",
+            &body,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            CONTROL_PLANE_TIMEOUT,
+        )
+        .await
+    }
+
     /// POST `/execute` for wait mode or `/execute/launch` for accepted mode
     /// (authenticated).
+    /// Product selections name the destination's retained witnesses, not
+    /// source-bound product resolutions. Only destination admission may resolve
+    /// them against its current owner, project, and qualification authorities.
     pub async fn execute(
         &self,
         item_ref: &str,
         ref_bindings: &BTreeMap<String, String>,
+        product_selections: &[ryeos_state::external_content::products::composition::ProductSelectionInput],
         project_path: Option<&str>,
         parameters: &Value,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
         launch_id: Option<&str>,
     ) -> Result<Value> {
         let path = remote_execute_path(&execution_policy.response, launch_id)?;
+        ryeos_state::external_content::products::composition::validate_product_selection_inputs(
+            product_selections,
+        )?;
         let mut body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
+            "product_selections": product_selections,
             "project_path": project_path,
             "parameters": parameters,
             "execution_policy": execution_policy,
@@ -1117,6 +1160,45 @@ impl RemoteClient {
         let response = self.signed_post(path, &body).await?;
         validate_remote_execute_response(&response, launch_id)?;
         Ok(response)
+    }
+
+    /// Submit one accepted launch under an explicit caller-owned total
+    /// deadline. Generic `/execute` remains deliberately unbounded; durable
+    /// orchestration uses this narrow boundary so an admitted operation
+    /// attempt cannot be held forever by a peer that stops producing bytes.
+    pub async fn execute_accepted_with_total_timeout(
+        &self,
+        item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
+        product_selections: &[ryeos_state::external_content::products::composition::ProductSelectionInput],
+        project_path: Option<&str>,
+        parameters: &Value,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        launch_id: &str,
+        total_timeout: lillux::time::Duration,
+    ) -> Result<Value> {
+        if execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Accepted {
+            anyhow::bail!("bounded accepted execution requires accepted response mode");
+        }
+        tokio::time::timeout(
+            total_timeout,
+            self.execute(
+                item_ref,
+                ref_bindings,
+                product_selections,
+                project_path,
+                parameters,
+                execution_policy,
+                Some(launch_id),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "remote accepted launch `{launch_id}` exceeded total timeout of {} seconds",
+                total_timeout.as_secs()
+            )
+        })?
     }
 
     /// Execute one wait-mode service and return its typed service value rather
@@ -1138,6 +1220,7 @@ impl RemoteClient {
             .execute(
                 item_ref,
                 ref_bindings,
+                &[],
                 project_path,
                 parameters,
                 execution_policy,
@@ -1629,10 +1712,11 @@ fn chunk_typed_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) ->
             .len();
         let separator_size = usize::from(!current.is_empty());
         if !current.is_empty()
-            && current_size
-                .saturating_add(separator_size)
-                .saturating_add(encoded_hash_size)
-                > budget_bytes
+            && (current.len() == HASH_REQUEST_MAX_ENTRIES
+                || current_size
+                    .saturating_add(separator_size)
+                    .saturating_add(encoded_hash_size)
+                    > budget_bytes)
         {
             chunks.push(std::mem::take(&mut current));
             current_size = empty_body_size;
@@ -3368,6 +3452,91 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn destination_product_selectors_reach_both_execute_wire_modes() {
+        use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
+        use ryeos_state::external_content::products::composition::ProductSelectionInputs;
+
+        async fn echo(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+            axum::Json(serde_json::json!({
+                "status": "accepted",
+                "launch_id": body.get("launch_id"),
+                "thread_id": "T-12345678-1234-1234-1234-123456789abc",
+                "request": body,
+            }))
+        }
+        let app = axum::Router::new()
+            .route("/execute", axum::routing::post(echo))
+            .route("/execute/launch", axum::routing::post(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let identity =
+            Arc::new(NodeIdentity::create(&directory.path().join("operator.pem")).unwrap());
+        let forwarding =
+            Arc::new(NodeIdentity::create(&directory.path().join("node.pem")).unwrap());
+        let mut client = RemoteClient::new(&format!("http://{address}"), "fp:peer", identity);
+        client.required_forwarding_origin_site_id = Some("site:source".to_owned());
+        client.forwarding_identity = Some(forwarding);
+        let selectors: ProductSelectionInputs = serde_json::from_value(serde_json::json!([
+            {
+                "target": {"kind": "root"},
+                "selection": {
+                    "declaration_id": "authoring-runtime",
+                    "witness_hash": "ab".repeat(32),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": null
+                }
+            },
+            {
+                "target": {"kind": "content_dependency", "binding": "environment"},
+                "selection": {
+                    "declaration_id": "authoring-tools",
+                    "witness_hash": "cd".repeat(32),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": "ef".repeat(32)
+                }
+            }
+        ]))
+        .unwrap();
+        for (response, launch_id) in [
+            (ExecutionResponse::Wait, None),
+            (
+                ExecutionResponse::Accepted,
+                Some("L-0123456789abcdef0123456789abcdef"),
+            ),
+        ] {
+            let policy = ExecutionPolicy::projectless(response);
+            let result = client
+                .execute(
+                    "tool:fixture/verify",
+                    &BTreeMap::new(),
+                    &selectors,
+                    None,
+                    &serde_json::json!({}),
+                    &policy,
+                    launch_id,
+                )
+                .await
+                .unwrap();
+            // Decode the real signed request using the destination's existing
+            // contract, not a second test-only selector transport model.
+            let request: crate::routes::response_modes::execute_mode::ExecuteRequest =
+                serde_json::from_value(result["request"].clone()).unwrap();
+            assert_eq!(request.product_selections, selectors);
+            assert_eq!(
+                request.required_origin_site_id.as_deref(),
+                Some("site:source")
+            );
+            assert_eq!(request.launch_id.as_deref(), launch_id);
+            assert_eq!(request.execution_policy, policy);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn exact_remote_call_timeouts_cancel_a_never_finishing_peer() {
         async fn never_finishes() -> axum::Json<Value> {
             std::future::pending::<axum::Json<Value>>().await
@@ -3375,6 +3544,8 @@ mod tests {
 
         let app = axum::Router::new()
             .route("/execute", axum::routing::post(never_finishes))
+            .route("/execute/launch", axum::routing::post(never_finishes))
+            .route("/objects/get", axum::routing::post(never_finishes))
             .route("/objects/closure/get", axum::routing::post(never_finishes));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3402,6 +3573,33 @@ mod tests {
             .unwrap_err();
         assert!(execute_error.to_string().contains("exceeded total timeout"));
 
+        let accepted_error = client
+            .execute_accepted_with_total_timeout(
+                "graph:test/never-finishes",
+                &BTreeMap::new(),
+                &[],
+                Some("/target"),
+                &serde_json::json!({}),
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Accepted,
+                ),
+                "L-0123456789abcdef0123456789abcdef",
+                timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            accepted_error
+                .to_string()
+                .contains("exceeded total timeout")
+        );
+
+        let object_error = client
+            .objects_get_with_total_timeout(&["b".repeat(64)], &[], timeout)
+            .await
+            .unwrap_err();
+        assert!(object_error.to_string().contains("exceeded total timeout"));
+
         let closure_error = client
             .objects_closure_get_with_total_timeout(
                 &["a".repeat(64)],
@@ -3416,6 +3614,13 @@ mod tests {
             .unwrap_err();
         assert!(closure_error.to_string().contains("exceeded total timeout"));
         server.abort();
+    }
+
+    #[test]
+    fn default_json_bound_admits_a_maximum_inline_object_and_envelope() {
+        let inline = usize::try_from(crate::handlers::objects_get::MAX_INLINE_OBJECT_BYTES)
+            .expect("inline object limit fits usize");
+        assert!(DEFAULT_JSON_RESPONSE_MAX_BYTES >= inline.saturating_mul(2));
     }
 
     fn public_key_response(seed: u8) -> PublicKeyResponse {
@@ -3649,6 +3854,18 @@ mod tests {
         for chunk in chunks {
             assert!(typed_hashes_request_body_size(&chunk, &[]) <= 512);
         }
+    }
+
+    #[test]
+    fn chunk_typed_hashes_caps_entry_count() {
+        let hashes: Vec<String> = (0..(HASH_REQUEST_MAX_ENTRIES + 1))
+            .map(|i| format!("{:064x}", i))
+            .collect();
+        let chunks = chunk_typed_hashes_for_body_budget(&hashes, usize::MAX);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), HASH_REQUEST_MAX_ENTRIES);
+        assert_eq!(chunks[1].len(), 1);
     }
 
     #[test]

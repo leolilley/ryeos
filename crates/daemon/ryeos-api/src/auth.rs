@@ -24,6 +24,7 @@ pub struct Principal {
     pub owner: String,
     pub principal_class: AuthorizedKeyPrincipalClass,
     pub authenticated_site_id: Option<String>,
+    pub grant_authority: ryeos_engine::principal_contract::AuthenticatedGrantAuthority,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ struct AuthorizedKey {
     owner: String,
     principal_class: AuthorizedKeyPrincipalClass,
     configured_origin_site_id: Option<String>,
+    source_file_hash: String,
 }
 
 fn load_authorized_key(
@@ -108,6 +110,7 @@ fn load_authorized_key(
         owner: grant.owner,
         principal_class: grant.principal_class,
         configured_origin_site_id: grant.configured_origin_site_id,
+        source_file_hash: grant.source_file_hash,
     })
 }
 
@@ -317,12 +320,12 @@ pub(crate) fn verify_request(
     let forwarding_headers_present = forwarding_key_id.is_some()
         || forwarding_site_id.is_some()
         || forwarding_signature.is_some();
-    let authenticated_site_id = match auth_key.principal_class {
+    let (authenticated_site_id, forwarding_authority) = match auth_key.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
             if forwarding_headers_present {
                 return Err("local_client request cannot carry forwarding proof".to_string());
             }
-            None
+            (None, None)
         }
         AuthorizedKeyPrincipalClass::RemoteNode => {
             if forwarding_headers_present {
@@ -330,7 +333,7 @@ pub(crate) fn verify_request(
                     "remote_node request cannot carry operator forwarding proof".to_string()
                 );
             }
-            auth_key.configured_origin_site_id.clone()
+            (auth_key.configured_origin_site_id.clone(), None)
         }
         AuthorizedKeyPrincipalClass::RemoteOperator => {
             let (forwarding_key_id, forwarding_site_id, forwarding_signature) =
@@ -406,7 +409,15 @@ pub(crate) fn verify_request(
                 .public_key
                 .verify(forwarding_content_hash.as_bytes(), &forwarding_sig)
                 .map_err(|_| "invalid forwarding signature".to_string())?;
-            Some(forwarding_site_id.to_string())
+            (
+                Some(forwarding_site_id.to_string()),
+                Some(
+                    ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
+                        source_node_fingerprint: forwarding_fingerprint.to_string(),
+                        source_node_grant_hash: forwarding_key.source_file_hash,
+                    },
+                ),
+            )
         }
     };
 
@@ -430,6 +441,10 @@ pub(crate) fn verify_request(
         owner: auth_key.owner,
         principal_class: auth_key.principal_class,
         authenticated_site_id,
+        grant_authority: ryeos_engine::principal_contract::AuthenticatedGrantAuthority {
+            principal_grant_hash: auth_key.source_file_hash,
+            forwarding: forwarding_authority,
+        },
     })
 }
 
@@ -946,7 +961,12 @@ mod tests {
             scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
             scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
             scheduler_reload_tx: None,
-            ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+            ignore_matcher: Arc::new(
+                ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
+                    patterns: Vec::new(),
+                })
+                .unwrap(),
+            ),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(

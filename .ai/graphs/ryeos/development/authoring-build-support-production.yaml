@@ -1,0 +1,37 @@
+# ryeos:signed:2026-09-08T10:36:32Z:da53783f3729d32eb901b9e0ec4e6caba920c09c91e45625ba9da5646dcfec9a:LHC5RqPegaSzwx+6gKOLNVn4n4CYN7gwGNOL/KlGl9l1q77egYvzp1K/FYBATW6yc+YTC5jh3N6HUdwnh/Y0DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Assemble the exact authoring build support as one retained named product
+effects: recorded
+product_recipe: config:development/ryeos/authoring-build-support-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/authoring-build-support-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/assemble-build-support
+config:
+  start: assemble
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    assemble:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/authoring-environment-production/assemble-build-support
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        build_support: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.build_support}"

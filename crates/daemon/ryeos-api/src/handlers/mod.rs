@@ -17,12 +17,15 @@ pub mod admission_attestations_for_subject;
 pub mod admission_claim;
 pub mod admission_status;
 pub mod admission_submit;
+pub mod admission_token;
+pub mod authorize_client;
 pub mod authorize_key;
 pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_remove;
 pub mod bundle_smoke;
+pub mod bundle_verify;
 pub mod commands_dispatch;
 pub mod commands_get;
 pub mod commands_list;
@@ -36,6 +39,8 @@ pub mod events_replay;
 pub mod external_content_activate;
 pub mod external_content_bind;
 pub mod external_content_import;
+pub mod external_content_product_receive;
+pub mod external_content_products;
 pub mod external_content_release;
 pub mod external_content_scrub;
 pub mod federated_follow;
@@ -56,6 +61,7 @@ pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
 pub mod project_apply_snapshot;
+pub mod project_snapshot_status;
 pub mod project_status;
 pub mod push_head;
 pub mod rebuild;
@@ -71,6 +77,7 @@ pub mod remote_import_admitted_root;
 pub mod remote_list;
 pub mod remote_project_status;
 pub mod remote_pull;
+pub mod remote_pull_worker_result;
 pub mod remote_push;
 pub mod remote_reconcile_project_head;
 pub mod remote_run;
@@ -82,6 +89,7 @@ pub mod remote_threads;
 pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
+pub mod remote_worker_workflows;
 pub mod scheduler_deregister;
 pub mod scheduler_explain;
 pub mod scheduler_list;
@@ -121,6 +129,7 @@ pub(crate) fn default_replay_limit() -> usize {
 
 pub const ALL: &[ServiceDescriptor] = &[
     admission_claim::DESCRIPTOR,
+    admission_token::DESCRIPTOR,
     admission_submit::DESCRIPTOR,
     admission_status::DESCRIPTOR,
     admission_attestations_for_subject::DESCRIPTOR,
@@ -141,6 +150,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     push_head::DESCRIPTOR,
     project_apply_snapshot::DESCRIPTOR,
     project_status::DESCRIPTOR,
+    project_snapshot_status::DESCRIPTOR,
     launch_cancel::DESCRIPTOR,
     launch_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
@@ -165,6 +175,11 @@ pub const ALL: &[ServiceDescriptor] = &[
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,
     external_content_import::DESCRIPTOR,
+    external_content_product_receive::DESCRIPTOR,
+    external_content_products::CAPTURE_DESCRIPTOR,
+    external_content_products::GET_DESCRIPTOR,
+    external_content_products::COMPOSE_DESCRIPTOR,
+    external_content_products::QUALIFY_DESCRIPTOR,
     external_content_activate::DESCRIPTOR,
     external_content_bind::DESCRIPTOR,
     external_content_release::DESCRIPTOR,
@@ -177,10 +192,12 @@ pub const ALL: &[ServiceDescriptor] = &[
     content_pin::DESCRIPTOR,
     credential_profiles::CREATE_DESCRIPTOR,
     credential_profiles::GET_DESCRIPTOR,
+    credential_profiles::LIST_DESCRIPTOR,
     credential_profiles::CONFIRM_DESCRIPTOR,
     credential_profiles::REVOKE_DESCRIPTOR,
     credential_profiles::DELETE_DESCRIPTOR,
     dedicated_sessions::STATUS_DESCRIPTOR,
+    dedicated_sessions::CANDIDATE_RESULT_DESCRIPTOR,
     dedicated_sessions::CHECKPOINT_DESCRIPTOR,
     dedicated_sessions::RESUME_DESCRIPTOR,
     dedicated_sessions::HANDOFF_PREFLIGHT_DESCRIPTOR,
@@ -191,6 +208,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     dedicated_sessions::RESOLVE_APPROVAL_DESCRIPTOR,
     dedicated_sessions::TERMINATE_DESCRIPTOR,
     dedicated_sessions::VALIDATE_CANDIDATE_DESCRIPTOR,
+    dedicated_sessions::START_CANDIDATE_EVALUATION_DESCRIPTOR,
+    dedicated_sessions::START_CANDIDATE_INTEGRATION_DESCRIPTOR,
+    dedicated_sessions::QUALIFY_CANDIDATE_DESCRIPTOR,
     dedicated_sessions::PUBLISH_DESCRIPTOR,
     dedicated_sessions::DISCARD_DESCRIPTOR,
     worker_placements::PREFLIGHT_DESCRIPTOR,
@@ -202,10 +222,12 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_list::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_smoke::DESCRIPTOR,
+    bundle_verify::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
     rebuild::VERIFY_DESCRIPTOR,
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
+    authorize_client::DESCRIPTOR,
     scheduler_register::DESCRIPTOR,
     scheduler_deregister::DESCRIPTOR,
     scheduler_explain::DESCRIPTOR,
@@ -220,11 +242,15 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,
     remote_status::DESCRIPTOR,
+    remote_worker_workflows::START_DESCRIPTOR,
+    remote_worker_workflows::RESUME_DESCRIPTOR,
+    remote_worker_workflows::QUERY_DESCRIPTOR,
     remote_push::DESCRIPTOR,
     remote_reconcile_project_head::DESCRIPTOR,
     remote_sync_project_ai::DESCRIPTOR,
     remote_project_status::DESCRIPTOR,
     remote_pull::DESCRIPTOR,
+    remote_pull_worker_result::DESCRIPTOR,
     remote_execute::DESCRIPTOR,
     remote_import_admitted_head::DESCRIPTOR,
     remote_import_admitted_root::DESCRIPTOR,

@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:20Z:dcc5075a1bd6a0e01bcff4e204fbeb1f412814c79072f76d62574e732baf6e0d:tI5SBn7L8S+ykQpDGt2Ez2AGEG/TcW0HNZYQuuiGMauhmBQKpf105tPSk/d042lL/SIQNxZBOo95iCcC1E7gDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:20Z:3a60565795068ab202ed19134443d7f1253ed1c118bad0302e5cafcd52e8f565:N60kSKdMvGTHmeGZ/yBm+5r6UnLwczLseLI7SDkzUFIRYxFDdePK+btXjddCx9UbZeNQ7OwhuxIcD0+JgOC2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "sign"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: []
 description: "Sign all signable items in a bundle source tree and rebuild binary manifest sidecars when needed."
 

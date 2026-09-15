@@ -4,7 +4,7 @@ use ryeos_runtime::{EvaluationContext, EvaluationLimits, EvaluationSession, Expr
 
 use ryeos_graph_definition::{CompiledCondition, CompiledEdgeSpec, CompiledNode};
 
-use crate::evaluation::GraphRunExpressionContext;
+use crate::evaluation::{GraphRunExpressionContext, post_action_dispatch_value};
 
 pub(crate) fn evaluate_next(
     node: &CompiledNode,
@@ -24,7 +24,36 @@ pub(crate) fn evaluate_next_with_result(
     run: GraphRunExpressionContext<'_>,
     dispatch: Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 ) -> Result<Option<String>, ExpressionError> {
-    evaluate_next_with_optional_result(node, state, inputs, Some(result), execution, run, dispatch)
+    evaluate_next_with_optional_result(
+        node,
+        state,
+        inputs,
+        Some(result),
+        execution,
+        run,
+        dispatch.map(|dispatch| (Some(dispatch), None)),
+    )
+}
+
+pub(crate) fn evaluate_next_with_action_result(
+    node: &CompiledNode,
+    state: &Value,
+    inputs: &Value,
+    result: &Value,
+    execution: Option<&Value>,
+    run: GraphRunExpressionContext<'_>,
+    dispatch: Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    child_thread_id: Option<&str>,
+) -> Result<Option<String>, ExpressionError> {
+    evaluate_next_with_optional_result(
+        node,
+        state,
+        inputs,
+        Some(result),
+        execution,
+        run,
+        Some((dispatch, child_thread_id)),
+    )
 }
 
 fn evaluate_next_with_optional_result(
@@ -34,7 +63,10 @@ fn evaluate_next_with_optional_result(
     result: Option<&Value>,
     execution: Option<&Value>,
     run: GraphRunExpressionContext<'_>,
-    dispatch: Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    post_action_dispatch: Option<(
+        Option<&ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+        Option<&str>,
+    )>,
 ) -> Result<Option<String>, ExpressionError> {
     let Some(edge) = &node.next else {
         return Ok(None);
@@ -54,9 +86,8 @@ fn evaluate_next_with_optional_result(
             }
             context.insert("run", &run);
             let dispatch_value;
-            if let Some(dispatch) = dispatch {
-                dispatch_value = serde_json::to_value(dispatch)
-                    .expect("typed dispatch evidence is infallibly serializable");
+            if let Some((dispatch, child_thread_id)) = post_action_dispatch {
+                dispatch_value = post_action_dispatch_value(dispatch, child_thread_id);
                 context.insert("dispatch", &dispatch_value);
             }
             let limits = EvaluationLimits::default();

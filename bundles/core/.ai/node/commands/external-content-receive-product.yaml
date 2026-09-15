@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-08T12:15:06Z:7298227287e087a465d63c5fb26e0a8274649e771b0e6dba3db172822792e2d9:1bdu107wY9lQS9/o2a3AlrH+NFvFQ11yCvkuUbEt9syzDjwQ2Ysr7WC+az/+UqNONng7Mf8Q9O+N7oCvnaibAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, receive-product]
+description: Receive an exact admitted product from a configured pinned remote
+forms:
+  - slots:
+      - field: remote
+      - field: witness_hash
+      - field: origin_admission_hash
+      - field: maximum_bytes
+help:
+  usage: ryeos external-content receive-product <remote> <witness-hash> <origin-admission-hash> <maximum-bytes>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/receive-product

@@ -6,13 +6,20 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ryeos_engine::execution_contract::{
+    ExecutionOwnership, ExecutionPolicy, ExecutionRecovery, ExecutionResponse, ExecutionTarget,
+    ProjectExecutionPolicy,
+};
+use ryeos_engine::principal_contract::{AuthenticatedGrantAuthority, AuthorizedKeyPrincipalClass};
 
 pub const NODE_MAINTENANCE_POLICY_SOURCE: &str = "policies/maintenance.yaml";
 
 /// The one current wire shape for signed schedule sources.
 ///
-/// Every scheduler consumer deserializes this type before making policy or
-/// projection decisions. Unknown fields and partial nested records are
+/// Every execution/projection consumer deserializes this type before using a
+/// schedule. Policy-owned document regeneration authenticates ownership
+/// separately; it never reuses the replaced execution payload.
+/// Unknown fields and partial nested records are
 /// rejected instead of being filtered into a different effective schedule.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScheduleSourceRecord {
@@ -91,8 +98,56 @@ impl<'de> Deserialize<'de> for ScheduleSourceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleExecution {
-    pub requester_fingerprint: String,
+    pub authority: ScheduleExecutionAuthority,
     pub capabilities: Vec<String>,
+    pub policy: ExecutionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScheduleExecutionAuthority {
+    Node {
+        principal_id: String,
+        effective_origin_site_id: String,
+    },
+    Authenticated {
+        principal_id: String,
+        principal_class: AuthorizedKeyPrincipalClass,
+        effective_origin_site_id: String,
+        grant_authority: AuthenticatedGrantAuthority,
+        /// Canonical digest of the typed schedule-registration request. This
+        /// is semantic request identity, not the ingress nonce or signature.
+        registration_request_hash: String,
+    },
+}
+
+impl ScheduleExecutionAuthority {
+    pub fn principal_id(&self) -> &str {
+        match self {
+            Self::Node { principal_id, .. } | Self::Authenticated { principal_id, .. } => {
+                principal_id
+            }
+        }
+    }
+
+    pub fn origin_site_id(&self) -> &str {
+        match self {
+            Self::Node {
+                effective_origin_site_id,
+                ..
+            }
+            | Self::Authenticated {
+                effective_origin_site_id,
+                ..
+            } => effective_origin_site_id,
+        }
+    }
+}
+
+impl ScheduleExecution {
+    pub fn principal_id(&self) -> &str {
+        self.authority.principal_id()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +167,7 @@ pub enum ScheduleManagedBy {
 
 impl ScheduleSourceRecord {
     pub fn validate(&self, expected_id: Option<&str>) -> Result<()> {
-        if self.spec_version != 1 {
+        if self.spec_version != 2 {
             anyhow::bail!(
                 "schedule {} declares unsupported spec_version {}",
                 self.schedule_id,
@@ -149,8 +204,8 @@ impl ScheduleSourceRecord {
             anyhow::bail!("schedule registered_at must not be negative");
         }
         require_non_empty(
-            &self.execution.requester_fingerprint,
-            "execution.requester_fingerprint",
+            self.execution.authority.principal_id(),
+            "execution.authority.principal_id",
         )?;
         if self.execution.capabilities.is_empty() {
             anyhow::bail!("schedule execution.capabilities must not be empty");
@@ -158,8 +213,17 @@ impl ScheduleSourceRecord {
         for capability in &self.execution.capabilities {
             require_non_empty(capability, "execution.capabilities entry")?;
         }
+        validate_schedule_execution(&self.execution)?;
         if let Some(project_root) = &self.project_root {
             validate_canonical_absolute_path(project_root, "project_root")?;
+        }
+        match (&self.execution.policy.project, &self.project_root) {
+            (ProjectExecutionPolicy::Projectless, None) => {}
+            (ProjectExecutionPolicy::Projectless, Some(_)) => {
+                anyhow::bail!("projectless scheduled execution must not declare project_root")
+            }
+            (_, Some(_)) => {}
+            (_, None) => anyhow::bail!("project-backed scheduled execution requires project_root"),
         }
         if let Some(managed_by) = &self.managed_by {
             validate_managed_by(managed_by, self.project_root.as_deref())?;
@@ -196,8 +260,7 @@ impl ScheduleSourceRecord {
             signer_fingerprint: signer_fingerprint.to_owned(),
             spec_hash: spec_hash.to_owned(),
             registered_at: self.registered_at,
-            requester_fingerprint: self.execution.requester_fingerprint.clone(),
-            capabilities: self.execution.capabilities.clone(),
+            execution: self.execution.clone(),
         };
         validate_schedule_spec_record(&record)?;
         Ok(record)
@@ -366,12 +429,8 @@ pub struct ScheduleSpecRecord {
     /// Immutable scheduling anchor (millis since epoch).
     /// Set once at creation, preserved on updates. Used by timer for fire-time calculation.
     pub registered_at: i64,
-    /// Fingerprint of the principal who registered this schedule.
-    /// Used as the acting principal at dispatch time.
-    pub requester_fingerprint: String,
-    /// Capabilities granted at registration time. The schedule runs with
-    /// only these capabilities — least privilege.
-    pub capabilities: Vec<String>,
+    /// Complete admitted execution authority and ordinary execution policy.
+    pub execution: ScheduleExecution,
 }
 
 /// Validate the complete, authored schedule contract before it enters the
@@ -406,11 +465,9 @@ pub fn validate_schedule_spec_record(record: &ScheduleSpecRecord) -> Result<()> 
     if !is_canonical_hash(&record.spec_hash) {
         anyhow::bail!("schedule spec_hash must be lowercase SHA-256 hex");
     }
-    if record.requester_fingerprint.trim().is_empty() {
-        anyhow::bail!("schedule requester_fingerprint must not be empty");
-    }
-    if record.capabilities.is_empty()
+    if record.execution.capabilities.is_empty()
         || record
+            .execution
             .capabilities
             .iter()
             .any(|capability| capability.trim().is_empty())
@@ -419,6 +476,131 @@ pub fn validate_schedule_spec_record(record: &ScheduleSpecRecord) -> Result<()> 
     }
     if let Some(project_root) = &record.project_root {
         validate_canonical_absolute_path(project_root, "project_root")?;
+    }
+    match (&record.execution.policy.project, &record.project_root) {
+        (ProjectExecutionPolicy::Projectless, None) => {}
+        (ProjectExecutionPolicy::Projectless, Some(_)) => {
+            anyhow::bail!("projectless scheduled execution must not declare project_root")
+        }
+        (_, Some(_)) => {}
+        (_, None) => anyhow::bail!("project-backed scheduled execution requires project_root"),
+    }
+    validate_schedule_execution(&record.execution)?;
+    Ok(())
+}
+
+fn validate_schedule_execution(execution: &ScheduleExecution) -> Result<()> {
+    execution.policy.validate()?;
+    if execution.policy.ownership != ExecutionOwnership::DaemonOwned
+        || execution.policy.recovery != ExecutionRecovery::RestartRecoverable
+        || execution.policy.response != ExecutionResponse::Accepted
+        || execution.policy.target != ExecutionTarget::Here
+    {
+        anyhow::bail!(
+            "scheduled execution must be daemon-owned, restart-recoverable, accepted, and targeted here"
+        );
+    }
+    // Scheduling does not redefine the ordinary live-versus-pinned policy
+    // distinction. A signed `live_direct` policy deliberately follows the
+    // named live path; current-head and explicit-snapshot policies retain one
+    // immutable authority for the fire. Capture-live remains an interactive
+    // admission operation: a recurring schedule must either follow live bytes
+    // explicitly or point at already-durable project state.
+    if matches!(
+        &execution.policy.project,
+        ProjectExecutionPolicy::Pinned {
+            source: ryeos_engine::execution_contract::PinnedSource::CaptureLive { .. },
+            ..
+        }
+    ) {
+        anyhow::bail!(
+            "scheduled execution cannot use capture_live; select explicit live_direct, current_head, or a snapshot"
+        );
+    }
+    if execution.capabilities.is_empty() {
+        anyhow::bail!("schedule execution.capabilities must not be empty");
+    }
+    let mut previous: Option<&str> = None;
+    for capability in &execution.capabilities {
+        require_non_empty(capability, "execution.capabilities entry")?;
+        if previous.is_some_and(|value| value >= capability.as_str()) {
+            anyhow::bail!("schedule execution.capabilities must be sorted and unique");
+        }
+        previous = Some(capability);
+    }
+    ryeos_engine::principal_contract::validate_canonical_site_id(
+        execution.authority.origin_site_id(),
+    )?;
+    match &execution.authority {
+        ScheduleExecutionAuthority::Node { principal_id, .. } => {
+            validate_principal_id(principal_id)?;
+        }
+        ScheduleExecutionAuthority::Authenticated {
+            principal_id,
+            principal_class,
+            effective_origin_site_id,
+            grant_authority,
+            registration_request_hash,
+        } => {
+            validate_principal_id(principal_id)?;
+            grant_authority.validate_for_class(*principal_class)?;
+            for (label, hash) in [
+                (
+                    "principal grant",
+                    grant_authority.principal_grant_hash.as_str(),
+                ),
+                ("registering request", registration_request_hash.as_str()),
+            ] {
+                validate_lower_hash(label, hash)?;
+            }
+            match principal_class {
+                AuthorizedKeyPrincipalClass::LocalClient => {
+                    if grant_authority.forwarding.is_some() {
+                        anyhow::bail!(
+                            "local-client schedule authority cannot carry forwarding evidence"
+                        );
+                    }
+                }
+                AuthorizedKeyPrincipalClass::RemoteNode => {
+                    if grant_authority.forwarding.is_some() {
+                        anyhow::bail!(
+                            "remote-node schedule authority cannot carry forwarding evidence"
+                        );
+                    }
+                }
+                AuthorizedKeyPrincipalClass::RemoteOperator => {
+                    let forwarding = grant_authority.forwarding.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "remote-operator schedule authority requires forwarding evidence"
+                        )
+                    })?;
+                    validate_principal_id(&format!("fp:{}", forwarding.source_node_fingerprint))?;
+                    validate_lower_hash("source-node grant", &forwarding.source_node_grant_hash)?;
+                }
+            }
+            if matches!(principal_class, AuthorizedKeyPrincipalClass::LocalClient)
+                && effective_origin_site_id.is_empty()
+            {
+                anyhow::bail!("local-client schedule authority has no target site identity");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_principal_id(value: &str) -> Result<()> {
+    let fingerprint = value
+        .strip_prefix("fp:")
+        .ok_or_else(|| anyhow::anyhow!("schedule principal_id must begin with `fp:`"))?;
+    validate_lower_hash("principal fingerprint", fingerprint)
+}
+
+fn validate_lower_hash(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("schedule {label} must be lowercase SHA-256 hex");
     }
     Ok(())
 }
@@ -480,6 +662,37 @@ pub fn thread_id_from_fire(fire_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_with_policy(
+        policy: ryeos_engine::execution_contract::ExecutionPolicy,
+        project_root: Option<&str>,
+    ) -> ScheduleSourceRecord {
+        ScheduleSourceRecord {
+            spec_version: 2,
+            schedule_id: "policy-lane".to_string(),
+            item_ref: "directive:test/job".to_string(),
+            ref_bindings: BTreeMap::new(),
+            schedule_type: "interval".to_string(),
+            expression: "60".to_string(),
+            params: serde_json::json!({}),
+            timezone: "UTC".to_string(),
+            misfire_policy: "skip".to_string(),
+            overlap_policy: "skip".to_string(),
+            lateness_grace_secs: 60,
+            enabled: true,
+            project_root: project_root.map(str::to_string),
+            registered_at: 1_000,
+            execution: ScheduleExecution {
+                authority: ScheduleExecutionAuthority::Node {
+                    principal_id: format!("fp:{}", "33".repeat(32)),
+                    effective_origin_site_id: "site:test".to_string(),
+                },
+                capabilities: vec!["ryeos.execute.directive.test/job".to_string()],
+                policy,
+            },
+            managed_by: None,
+        }
+    }
 
     #[test]
     fn fire_id_format() {
@@ -544,5 +757,53 @@ mod tests {
         let a = thread_id_from_fire("sched@1000");
         let b = thread_id_from_fire("sched@2000");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn scheduled_execution_preserves_explicit_live_direct_lane() {
+        let source = source_with_policy(
+            ryeos_engine::execution_contract::ExecutionPolicy::local_live(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
+            Some("/project"),
+        );
+
+        source.validate(None).unwrap();
+        assert!(matches!(
+            source.execution.policy.project,
+            ProjectExecutionPolicy::LiveDirect { .. }
+        ));
+    }
+
+    #[test]
+    fn scheduled_execution_preserves_explicit_pinned_lane() {
+        let source = source_with_policy(
+            ryeos_engine::execution_contract::ExecutionPolicy::local_pinned_current_head(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
+            Some("/project"),
+        );
+
+        source.validate(None).unwrap();
+        assert!(matches!(
+            source.execution.policy.project,
+            ProjectExecutionPolicy::Pinned {
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn scheduled_execution_rejects_interactive_capture_live_lane() {
+        let source = source_with_policy(
+            ryeos_engine::execution_contract::ExecutionPolicy::local_pinned_capture(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
+            Some("/project"),
+        );
+
+        let error = source.validate(None).unwrap_err();
+        assert!(format!("{error:#}").contains("cannot use capture_live"));
     }
 }

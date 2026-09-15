@@ -124,6 +124,7 @@ mod tests {
             manifest_hash: std::iter::repeat_n(hash_seed, 64).collect(),
             entry_count: 1,
             total_bytes: 1,
+            mount_root: ryeos_state::objects::ExternalContentMountRoot::Project,
             mount: format!("mnt/{id}"),
         }
     }

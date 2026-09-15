@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:33Z:ed5f00836eca59b5332a807a304d7cfce85db90eb8040764017b5ada41f5b150:m5brE0PYVW02O0iwG4vusIVCYiGh4W0jQNPuE65I2mYSVWlnLufPALWqDy3pYRtmHehRdBA19ANB9h/ZpLxCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T23:37:02Z:1c548fe820d91f56e8f315bb04fd14d9aa7e8bde73b4669ede02f8137fe3f7ea:YXvlBXtlSB9QixqJISEKe2QqlL5Px4jl0j5+7Pas9M5kOMOwOjEVez3mw6XsGt1DnF1Q1HY5jnAHEivk3hJvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Per-route audit of the UDS runtime-callback surface: every runtime.*
   method, the access tier that gates it, and the exact prelude check it
@@ -63,7 +63,7 @@ requests already past token validation still meet the locked lifecycle check.
 | `runtime.publish_artifact` | exact-thread write | |
 | `runtime.get_facets` | exact-thread write | |
 | `runtime.submit_command` / `claim_commands` / `complete_command` | exact-thread write | |
-| `runtime.attach_process` | exact-thread | The runtime reports only its own PID. It must equal the accepted socket's kernel `SO_PEERCRED` PID; `SO_PEERPIDFD` pins that exact incarnation, then the daemon derives and records the target/group birth tuple. Runtime-supplied PGIDs are never accepted. |
+| `runtime.attach_process` | exact-thread | The request carries only thread identity. Lillux captures the connecting process from kernel `SO_PEERCRED` and `SO_PEERPIDFD`; the daemon derives its target/group birth tuple in the daemon's PID namespace and revalidates the immutable attachment under the exact launch owner. Runtime-supplied PID, PGID and process-identity fields are rejected. |
 
 ## Deeper (post-prelude) checks
 

@@ -1,0 +1,18 @@
+category: test
+name: probe-dynamic-products
+version: "1.0.0"
+description: Ordinary packaged probe of normalized inputs inherited from its selected Graph parent
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+config:
+  command: bin:fixture-dynamic-product-verifier
+  args:
+    - "${project_path}"
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

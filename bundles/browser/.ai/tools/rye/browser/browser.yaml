@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:e52b46fc2b28cc0792f54639f7dcc1e24e8c45d6b9208299aa8e2c76340662fe:N6YWEC3RGWUkbr2U/8TdtCPl1JERe7grtWEiRRxkLOdxfttB6pXMTM0S2Vf1ftxuV9Gjf1vKOTJNuJ8fZvQKAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:40Z:305b46d98d15ec5cb57164a8d022e47755b09bad9ed0593f92e693efd95be04b:clDEjLh3fPhLTomCIwyLVhzCV6n8yt3P1tMAaKYJfrzCKmjKZyOVLRqRDHxV9MJrAwxnNwlQqufpT4tHN7pQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/browser"
 version: "1.0.0"
 tool_type: "subprocess"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Browser automation facade backed by Node and Playwright. Browser execution is disabled by default and enabled via enabled: true in .ai/config/browser/browser.yaml; otherwise the tool validates inputs and returns diagnostics."
 
 config:

@@ -219,7 +219,11 @@ pub fn load_registered_isolation(
     let _generation_lock =
         crate::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
             .context("acquire bundle-generation lock for isolation composition")?;
-    load_registered_generation_under_lock(app_root).map(|generation| generation.0)
+    load_registered_generation_under_lock(
+        app_root,
+        ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy,
+    )
+    .map(|generation| generation.0)
 }
 
 /// Standalone composition pins and verifies one generation under a bounded
@@ -231,10 +235,46 @@ pub fn load_registered_isolation(
 pub fn load_locked_registered_isolation(
     app_root: &std::path::Path,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
+    load_locked_registered_isolation_with(
+        app_root,
+        ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy,
+    )
+}
+
+/// Verify registered definitions under the same trust, lock and generation
+/// lifeline as execution, without acquiring the supervisor's process scopes.
+/// Metadata discovery and bundle verification are not execution controllers.
+/// This is not an execution-admission fallback: an actual scope-requiring
+/// launch must use its execution owner's fully admitted runtime.
+pub fn load_locked_registered_definition_isolation(
+    app_root: &std::path::Path,
+) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
+    load_locked_registered_isolation_with(
+        app_root,
+        ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation,
+    )
+}
+
+type RegisteredIsolationResolver = fn(
+    &std::path::Path,
+    ryeos_engine::isolation::IsolationPolicy,
+    PathBuf,
+    String,
+    Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>,
+) -> std::result::Result<
+    ryeos_engine::isolation::IsolationRuntime,
+    ryeos_engine::error::EngineError,
+>;
+
+fn load_locked_registered_isolation_with(
+    app_root: &std::path::Path,
+    resolve: RegisteredIsolationResolver,
+) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
     let generation_lock =
         crate::bundle_transaction::BundleRegistryReadLock::acquire_for_composition(app_root)
             .context("acquire bundle-generation read lock for isolation composition")?;
-    let (runtime, node_trust, generation) = load_registered_generation_under_lock(app_root)?;
+    let (runtime, node_trust, generation) =
+        load_registered_generation_under_lock(app_root, resolve)?;
     let bundle_roots = generation.registered_roots();
     let lifeline = Arc::new(RetainedRegisteredGeneration {
         app_root: app_root.to_path_buf(),
@@ -251,6 +291,7 @@ pub fn load_locked_registered_isolation(
 
 fn load_registered_generation_under_lock(
     app_root: &std::path::Path,
+    resolve: RegisteredIsolationResolver,
 ) -> Result<(
     Arc<ryeos_engine::isolation::IsolationRuntime>,
     TrustStore,
@@ -289,7 +330,7 @@ fn load_registered_generation_under_lock(
     let backend = generation.checked(&trust_store, || {
         resolve_isolation_backend(&generation, &trust_store, &policy)
     })?;
-    let runtime = ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
+    let runtime = resolve(
         app_root,
         policy,
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
@@ -331,6 +372,9 @@ pub fn resolve_isolation_backend(
 /// Compose the exact isolation generation that would be selected from a
 /// prospective installed-root set. Enforced policy captures and inspects the
 /// candidate adapter and artifacts; disabled policy never resolves them.
+/// This validates definitions, not the installer's placement as a controller.
+/// It grants no process-scope capabilities; execution admission must qualify
+/// those from its actual supervised process instead of reusing this snapshot.
 pub fn load_prospective_isolation(
     app_root: &std::path::Path,
     bundle_roots: &[PathBuf],
@@ -374,7 +418,7 @@ pub fn load_prospective_isolation(
             "prospective ",
         )?)
     };
-    ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
+    ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation(
         app_root,
         policy.clone(),
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
@@ -484,10 +528,10 @@ fn host_isolation_target() -> Result<ryeos_isolation_protocol::IsolationTargetTr
 }
 
 fn inspect_isolation_backend(
-    adapter: &Arc<std::fs::File>,
+    adapter: &lillux::InheritedDescriptorAuthority,
     artifact_handles: &std::collections::BTreeMap<
         ryeos_isolation_protocol::IsolationArtifactRole,
-        Arc<std::fs::File>,
+        lillux::InheritedDescriptorAuthority,
     >,
     artifact_digests: &std::collections::BTreeMap<
         ryeos_isolation_protocol::IsolationArtifactRole,
@@ -509,12 +553,10 @@ fn inspect_isolation_backend(
     }
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd as _;
         let artifacts = artifact_handles
             .iter()
             .map(|(role, handle)| {
-                let fd = u32::try_from(handle.as_raw_fd())
-                    .map_err(|_| anyhow::anyhow!("captured descriptor is negative"))?;
+                let fd = handle.inherited_descriptor().map_err(anyhow::Error::msg)?;
                 Ok((*role, fd))
             })
             .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
@@ -535,11 +577,14 @@ fn inspect_isolation_backend(
         let request_handle = lillux::sealed_memfd(c"ryeos-isolation-inspection", &request)
             .map_err(|error| anyhow::anyhow!("seal isolation inspection request: {error}"))?;
         let result = lillux::run(lillux::SubprocessRequest {
-            cmd: format!("/proc/self/fd/{}", adapter.as_raw_fd()),
+            cmd: adapter.path().to_string_lossy().into_owned(),
             argv0: None,
             args: vec![
                 "inspect".to_string(),
-                request_handle.as_raw_fd().to_string(),
+                request_handle
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
             ],
             cwd: Some("/".to_string()),
             envs: Vec::new(),
@@ -555,6 +600,7 @@ fn inspect_isolation_backend(
                 .chain(artifact_handles.values().cloned())
                 .chain(std::iter::once(request_handle))
                 .collect(),
+            inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         });
         if !result.success {
@@ -843,9 +889,9 @@ fn build_engine_for_roots_with_isolation(
 /// Admit a prospective node bundle-root set without constructing an Engine.
 ///
 /// Install and replace handlers call this against the exact post-operation
-/// graph before activation. Daemon boot calls the same private constructor and
-/// consumes the admitted registries, so the two admission surfaces cannot
-/// silently drift.
+/// graph before activation. Daemon boot shares the private registry constructor,
+/// but separately qualifies its host execution facilities from its supervised
+/// placement. Do not retain this definition-only snapshot for live execution.
 pub fn admit_node_bundle_roots(
     app_root: &std::path::Path,
     bundle_roots: &[PathBuf],

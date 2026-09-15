@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:1bb8806ec72dd18fa964f2b4784895f3fa0b45ee9e4bd7860c05a4f2674d3d01:HBn9pWFiARVkqtMHLWG3d0gRx4KXzF5hMPGurchFzFur7HVNbhbfxlHpYOa55ojV47psi2VjXpyMxjANAH+qDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T08:52:01Z:102960bb09ea79cdebc81449d50099bcb2e5c0a9bf27a45b6857f7f78937aecb:yLuE+qfkAvWKHeRG63GDPzx8M+VIIsuejZHdbTwCFq5bjgcB6muwtJqwxoqlRVG+3KRFxwz9+D0vDs/kTVcWAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
-version: "1.1.0"
+version: "1.1.1"
 description: Remote service reference.
 ---
 
@@ -63,8 +63,11 @@ The authoritative matrix is in
 - `remote doctor` is an operator diagnostic: it combines remote discovery,
   pinned-identity checks, signed authorization probing, project binding
   checks, and next-step commands.
-- `remote push` and `remote execute` use the target node's ingest-ignore
-  rules, not local ignore rules, when building a pushed manifest.
+- `remote push` and `remote execute` build a transfer policy from the union of
+  the source and target nodes' signed ingest-ignore exclusions. This keeps
+  source-forbidden content out of local CAS/upload and target-forbidden content
+  out of the generation. The receiving node rechecks its current policy before
+  HEAD publication or reconciliation.
 - `remote reconcile-project-head` is the explicit full-project DAG convergence
   operation. It requires exact expected local and remote configured-operator
   HEADs plus an explicit `local` or `remote` content winner. It creates one

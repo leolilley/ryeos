@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-08T10:36:32Z:64c5280e3b591014b9a17064b3e378bc5646ec86a9cde1d8459aec989d77308d:1evxHdh1MdND6tXCd7UjgLqkrLtVkJ4E4ihyf3JzOQ3qQKgPu3o1EMHkCYZ1b2N/FQXHsk8cYTxeCRfQSZzaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Reuse or run the exact retained authoring build-support assembly
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.ryeos/development/authoring-build-support-production
+      - ryeos.execute.config.development/ryeos/authoring-build-support-products
+      - ryeos.execute.tool.ryeos/development/authoring-environment-production/assemble-build-support
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:ryeos/development/authoring-build-support-production
+        ref_bindings: {}
+        params: {}
+      assign:
+        accepted_products: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.accepted_products}"

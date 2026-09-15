@@ -1,0 +1,46 @@
+name: Lillux native lifecycle qualification
+
+# Deliberately separate from releases and the full workspace gate. A fresh
+# hosted VM supplies administrator authority; no human sudo prompt or live
+# RyeOS node is part of the test contract.
+on:
+  workflow_dispatch:
+  # Allows qualification of this workflow before it is on the default branch.
+  # Publishing this exact opt-in branch is an explicit maintainer operation;
+  # ordinary development pushes and release tags do not run privileged tests.
+  push:
+    branches: [qualification/lillux-native]
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.95.0
+      - name: Provision disposable qualification host
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y --no-install-recommends pkg-config libssl-dev jq
+          # This selects the namespace-enabled test-host baseline on this
+          # disposable Ubuntu VM, not an application fallback or node policy.
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Compile only the kernel qualification fixture
+        run: |
+          cargo test --locked -p lillux --lib --no-run -j2 --message-format=json > "$RUNNER_TEMP/lillux-tests.jsonl"
+      - name: Qualify exact native lifecycle and nested isolation
+        run: |
+          native_test_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "lillux" and .profile.test == true and .executable != null) | .executable' "$RUNNER_TEMP/lillux-tests.jsonl")"
+          test -n "$native_test_binary"
+          test -x "$native_test_binary"
+          sudo -n -- "$native_test_binary" --ignored --exact process_control::cgroup::tests::cgroup_native_freeze_covers_detached_nested_writers_and_recovery --nocapture --test-threads=1
+          sudo -n -- "$native_test_binary" --ignored --exact process_control::scope::tests::scope_native_held_launch_cleanup_and_failed_launch_retain_exact_evidence --nocapture --test-threads=1
+          "$native_test_binary" --ignored --exact sandbox::imp::namespace_source_tests::nested_sandbox_generation_is_actually_qualified --nocapture --test-threads=1
+          "$native_test_binary" --ignored --exact sandbox::imp::namespace_source_tests::pid_proc_supports_exact_realized_and_sealed_executable_after_exec --nocapture --test-threads=1

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-08T01:19:27Z:6b7444db7898107ee9b2a4b33fb43c752aa4b274506beb4015da9015c61a6a92:zC2tKmZDAjhe44+OxxIP5E1U+o+ebae0SCeqOO2dDxyTatFkFsVNkMdQWIT19idH0SE1Rd883WavPjM+wq3hCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, product]
+description: Read a producer's exact durable product witness
+defaults:
+  recipe_binding: product_recipe
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: thread_id
+      - field: product_name
+help:
+  usage: ryeos external-content product <chain-root> <terminal-thread> <product-name>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/product

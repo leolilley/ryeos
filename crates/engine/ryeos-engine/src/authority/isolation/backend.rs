@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use ryeos_isolation_protocol::{
     InspectedArtifact, IsolationArtifactRole, IsolationBackendDeclaration,
@@ -16,8 +15,8 @@ pub struct ResolvedIsolationBackend {
     pub bundle_manifest_digest: String,
     pub signer_fingerprint: String,
     pub adapter_digest: String,
-    pub adapter_handle: Arc<std::fs::File>,
-    pub artifact_handles: BTreeMap<IsolationArtifactRole, Arc<std::fs::File>>,
+    pub adapter_handle: lillux::InheritedDescriptorAuthority,
+    pub artifact_handles: BTreeMap<IsolationArtifactRole, lillux::InheritedDescriptorAuthority>,
     pub adapter_build: String,
     pub effective_capabilities: BTreeSet<IsolationCapability>,
     pub inspected_artifacts: BTreeMap<IsolationArtifactRole, InspectedArtifact>,

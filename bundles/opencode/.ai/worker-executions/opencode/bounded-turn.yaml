@@ -1,0 +1,37 @@
+# ryeos:signed:2026-09-10T10:35:03Z:169a2ccf44f92076ac6ac9e29a09426d86a488ecf27c4c947b9ab40840b384ae:+JJOQesKkm8asHsYwwEvg+j6vnW7B1Ka9J0o14KODvH8zOHF4Ko/d6B6+2S1b0BGUUV8wXg81bmgkGHP3kqSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: opencode
+description: Run one completion-fenced opencode turn and retain its private candidate for owner review.
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: session
+  allowed_effect_classes:
+    - credential_read
+    - external_effect
+    - pure_read
+    - session_mutation
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 14400
+  recover_upstream_session: true
+  mode:
+    kind: bounded_turn
+    session_start_route: session.start
+    turn_start_route: turn.start
+    max_uncontacted_attempts: 3
+  candidate_disposition: retained_for_review
+  # Development environments add their finite Tool set explicitly.
+  workload_client_delegation_caps: []
+limits:
+  turns: 1
+  duration_seconds: 15000
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

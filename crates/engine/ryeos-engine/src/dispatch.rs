@@ -28,7 +28,14 @@ pub fn execute_plan(
             PlanNode::DispatchSubprocess { spec, .. } => {
                 tracing::info!(cmd = %spec.cmd, "launching subprocess");
                 let start = std::time::Instant::now();
-                let completion = dispatch_subprocess(spec, plan.debug_raw, &plan.root_ref, ctx)?;
+                let completion = dispatch_subprocess(
+                    spec,
+                    plan.debug_raw,
+                    &plan.root_ref,
+                    plan.filesystem_authority_ceiling,
+                    plan.network_authority_ceiling,
+                    ctx,
+                )?;
                 let elapsed = start.elapsed();
                 tracing::debug!(
                     cmd = %spec.cmd,
@@ -72,9 +79,17 @@ fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
     item_ref: &str,
+    filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let request = isolation_plan_request(spec, item_ref, ctx)?;
+    let request = isolation_plan_request(
+        spec,
+        item_ref,
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+        ctx,
+    )?;
     let capture = debug_raw.then(|| DebugCapture::from_spec(spec));
     let result = lillux::run(request);
     let debug = capture.map(|c| c.into_block(&result));
@@ -191,6 +206,7 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         timeout: spec.timeout_secs as f64,
         limits: None,
         inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
         supervised_status: None,
     })
 }
@@ -377,6 +393,10 @@ impl SpawnedExecutionAwaitingAttachment {
         self.pending.pgid()
     }
 
+    pub fn scope_recovery(&self) -> Option<&lillux::ProcessScopeRecovery> {
+        self.pending.scope_recovery()
+    }
+
     #[cfg(target_os = "linux")]
     pub fn pidfd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.pending.pidfd()
@@ -391,11 +411,10 @@ impl SpawnedExecutionAwaitingAttachment {
     }
 
     pub fn release_after_attachment(self) -> Result<RunningExecution, EngineError> {
-        let running = self.pending.release_after_attachment().map_err(|error| {
-            EngineError::ExecutionFailed {
-                reason: error.to_string(),
-            }
-        })?;
+        let running = self
+            .pending
+            .release_after_attachment()
+            .map_err(|source| EngineError::AttachmentReleaseFailed { source })?;
         Ok(RunningExecution {
             running,
             debug: self.debug,
@@ -411,6 +430,14 @@ pub struct RunningExecution {
 }
 
 impl RunningExecution {
+    /// Observe the existing bounded raw-byte capture. This grants no process
+    /// lifecycle authority: the caller must keep the normal wait/abort owner
+    /// advancing concurrently. Protocol decoders must not reconstruct binary
+    /// frames from the ordinary human-readable completion string.
+    pub fn take_stdout_reader(&mut self) -> Option<lillux::ProcessStdoutReader> {
+        self.running.take_stdout_reader()
+    }
+
     /// Read the fixed-size diagnostic tail already captured by Lillux without
     /// changing process ownership or settlement.
     pub fn stderr_diagnostic_tail(&self) -> Option<String> {
@@ -418,7 +445,8 @@ impl RunningExecution {
     }
 
     /// Settle a process that exits naturally within `timeout`, or return the
-    /// still-running execution with ownership intact.
+    /// execution with ownership intact if it is live or cleanup is unproved.
+    /// Target exit alone must not grant the caller completed-cleanup authority.
     pub fn wait_for_natural_exit(
         self,
         timeout: std::time::Duration,
@@ -452,13 +480,37 @@ impl RunningExecution {
 
     /// Block until the subprocess completes and return the completion.
     pub fn wait(self) -> ExecutionCompletion {
-        let result = self.running.wait();
+        self.wait_interruptible(|| false)
+    }
+
+    /// Protocol failure is settled by the existing exact process wait owner,
+    /// never by an observer retaining a second signal authority.
+    pub fn wait_interruptible(self, interrupted: impl FnMut() -> bool) -> ExecutionCompletion {
+        let result = self.running.wait_interruptible(interrupted);
         let debug = self.debug.map(|c| c.into_block(&result));
         let mut completion = translate_result(result);
         if let Some(debug) = debug {
             inject_debug(&mut completion, debug);
         }
         completion
+    }
+
+    /// Lillux coordinates observation and settlement under one wait owner;
+    /// do not split them into competing jobs on a bounded blocking pool.
+    pub fn wait_with_stdout<T: Send, E: Send>(
+        self,
+        observe: impl FnOnce(lillux::ProcessStdoutReader) -> Result<T, E> + Send,
+    ) -> (
+        ExecutionCompletion,
+        Result<T, lillux::ProcessObservationError<E>>,
+    ) {
+        let (result, observation) = self.running.wait_with_stdout(observe);
+        let debug = self.debug.map(|c| c.into_block(&result));
+        let mut completion = translate_result(result);
+        if let Some(debug) = debug {
+            inject_debug(&mut completion, debug);
+        }
+        (completion, observation)
     }
 }
 
@@ -468,10 +520,28 @@ pub fn spawn_plan(
     plan: &ExecutionPlan,
     ctx: &EngineContext,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    spawn_plan_with_scope(plan, ctx, None)
+}
+
+/// The scope is allocated and durably retained by the existing launch owner,
+/// not inferred from a kind name or provider-specific executable.
+pub(crate) fn spawn_plan_with_scope(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
-                return spawn_subprocess(spec, plan.debug_raw, &plan.root_ref, ctx);
+                return spawn_subprocess(
+                    spec,
+                    plan.debug_raw,
+                    &plan.root_ref,
+                    plan.filesystem_authority_ceiling,
+                    plan.network_authority_ceiling,
+                    ctx,
+                    scope,
+                );
             }
             PlanNode::Complete { .. } => {
                 return Err(EngineError::Internal(
@@ -487,39 +557,79 @@ fn spawn_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
     item_ref: &str,
+    filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
-    let request = isolation_plan_request_awaiting_attachment(spec, item_ref, ctx)?;
+    let request = isolation_plan_request_awaiting_attachment(
+        spec,
+        item_ref,
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+        ctx,
+        scope,
+    )?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
-    match request.spawn() {
-        Ok(pending) => Ok(SpawnedExecutionAwaitingAttachment { pending, debug }),
-        Err(err_result) => Err(EngineError::ExecutionFailed {
-            reason: format!("subprocess spawn failed: {}", err_result.stderr),
-        }),
+    let pending = request.spawn().map_err(subprocess_spawn_error)?;
+    Ok(SpawnedExecutionAwaitingAttachment { pending, debug })
+}
+
+pub(crate) fn subprocess_spawn_error(result: lillux::SubprocessResult) -> EngineError {
+    // Lillux retains the bounded, structured launcher refusal separately from
+    // workload stderr. Preserve it just as handler/preparer launch does; the
+    // generic stderr placeholder is not an actionable isolation diagnosis.
+    EngineError::SubprocessSpawnFailed {
+        reason: match result.launcher_refusal {
+            Some(refusal) => format!("isolation adapter refused launch: {refusal}"),
+            None => format!("subprocess spawn failed: {}", result.stderr),
+        },
+        aborted_before_attachment: result.aborted_before_attachment,
     }
 }
 
 fn isolation_plan_request(
     spec: &PlanSubprocessSpec,
     item_ref: &str,
+    filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
     let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    let filesystem_authority_ceiling = ctx
+        .isolation_filesystem_authority_ceiling
+        .intersect(filesystem_authority_ceiling);
+    let node_filesystem = filesystem_authority_ceiling
+        == crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy;
     ctx.isolation.apply(
         request,
         crate::isolation::IsolationLaunchContext {
             project_path,
             project_authority: ctx.isolation_project_authority,
-            filesystem_authority_ceiling: ctx.isolation_filesystem_authority_ceiling,
-            network_authority_ceiling: ctx.isolation_network_authority_ceiling,
+            immutable_project: ctx.isolation_immutable_project.as_ref(),
+            workspace_view: ctx.isolation_workspace_view.as_ref(),
+            filesystem_authority_ceiling,
+            network_authority_ceiling: ctx
+                .isolation_network_authority_ceiling
+                .intersect(network_authority_ceiling),
             live_access: ctx.isolation_live_access_authority.as_ref(),
+            // This is one explicit daemon-admitted state root, not a node
+            // policy mount. Isolation pins and bounds it independently even
+            // under captured_execution (e.g. a session-private home).
             state_root: ctx.isolation_state_root.as_deref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
             checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
-            bundle_roots: &ctx.isolation_bundle_roots,
-            node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
+            bundle_roots: if node_filesystem {
+                &ctx.isolation_bundle_roots
+            } else {
+                &[]
+            },
+            node_trusted_keys_dir: ctx
+                .isolation_node_trusted_keys_dir
+                .as_deref()
+                .filter(|_| node_filesystem),
             verified_code: &verified_code,
             verified_command: ctx
                 .isolation_verified_command
@@ -531,7 +641,8 @@ fn isolation_plan_request(
                     })
                 }),
             external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
-            target_channel: ctx.isolation_target_channel.as_ref(),
+            writable_runtime_view_mounts: &ctx.isolation_writable_runtime_view_mounts,
+            target_channels: &ctx.isolation_target_channels,
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -541,39 +652,64 @@ fn isolation_plan_request(
 fn isolation_plan_request_awaiting_attachment(
     spec: &PlanSubprocessSpec,
     item_ref: &str,
+    filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
 ) -> Result<crate::isolation::IsolationRequestAwaitingAttachment, EngineError> {
     let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
-    ctx.isolation.apply_awaiting_attachment(
-        request,
-        crate::isolation::IsolationLaunchContext {
-            project_path,
-            project_authority: ctx.isolation_project_authority,
-            filesystem_authority_ceiling: ctx.isolation_filesystem_authority_ceiling,
-            network_authority_ceiling: ctx.isolation_network_authority_ceiling,
-            live_access: ctx.isolation_live_access_authority.as_ref(),
-            state_root: ctx.isolation_state_root.as_deref(),
-            checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
-            checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
-            daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
-            bundle_roots: &ctx.isolation_bundle_roots,
-            node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
-            verified_code: &verified_code,
-            verified_command: ctx
-                .isolation_verified_command
-                .as_ref()
-                .map(|command| command as &dyn crate::isolation::IsolationCommandAuthority)
-                .or_else(|| {
-                    spec.verified_command.as_ref().map(|command| {
-                        command.code() as &dyn crate::isolation::IsolationCommandAuthority
-                    })
-                }),
-            external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
-            target_channel: ctx.isolation_target_channel.as_ref(),
-            item_ref,
-            thread_id: &ctx.thread_id,
-        },
-    )
+    let filesystem_authority_ceiling = ctx
+        .isolation_filesystem_authority_ceiling
+        .intersect(filesystem_authority_ceiling);
+    let node_filesystem = filesystem_authority_ceiling
+        == crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy;
+    ctx.isolation
+        .apply_awaiting_attachment_in_scope_with_provenance(
+            request,
+            crate::isolation::IsolationLaunchContext {
+                project_path,
+                project_authority: ctx.isolation_project_authority,
+                immutable_project: ctx.isolation_immutable_project.as_ref(),
+                workspace_view: ctx.isolation_workspace_view.as_ref(),
+                filesystem_authority_ceiling,
+                network_authority_ceiling: ctx
+                    .isolation_network_authority_ceiling
+                    .intersect(network_authority_ceiling),
+                live_access: ctx.isolation_live_access_authority.as_ref(),
+                // Keep the exact launch-owned state authority on the held path
+                // too; only ambient node-policy mounts are removed by this ceiling.
+                state_root: ctx.isolation_state_root.as_deref(),
+                checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+                checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
+                daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+                bundle_roots: if node_filesystem {
+                    &ctx.isolation_bundle_roots
+                } else {
+                    &[]
+                },
+                node_trusted_keys_dir: ctx
+                    .isolation_node_trusted_keys_dir
+                    .as_deref()
+                    .filter(|_| node_filesystem),
+                verified_code: &verified_code,
+                verified_command: ctx
+                    .isolation_verified_command
+                    .as_ref()
+                    .map(|command| command as &dyn crate::isolation::IsolationCommandAuthority)
+                    .or_else(|| {
+                        spec.verified_command.as_ref().map(|command| {
+                            command.code() as &dyn crate::isolation::IsolationCommandAuthority
+                        })
+                    }),
+                external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
+                writable_runtime_view_mounts: &ctx.isolation_writable_runtime_view_mounts,
+                target_channels: &ctx.isolation_target_channels,
+                item_ref,
+                thread_id: &ctx.thread_id,
+            },
+            scope,
+        )
+        .map(|applied| applied.request)
 }
 
 fn isolation_plan_request_parts<'a>(
@@ -707,6 +843,8 @@ mod tests {
             app_root,
             isolation,
             isolation_project_authority: crate::isolation::IsolationProjectAuthority::External,
+            isolation_immutable_project: None,
+            isolation_workspace_view: None,
             isolation_filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             isolation_network_authority_ceiling:
@@ -725,7 +863,8 @@ mod tests {
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
             isolation_external_read_only_mounts: Vec::new(),
-            isolation_target_channel: None,
+            isolation_writable_runtime_view_mounts: Vec::new(),
+            isolation_target_channels: Vec::new(),
             isolation_workspace: None,
             subprocess_limits: None,
             inherited_fds: Vec::new(),
@@ -756,6 +895,10 @@ mod tests {
             entrypoint: PlanNodeId("entry:test".into()),
             capabilities: PlanCapabilities::default(),
             materialization_requirements: Vec::new(),
+            network_authority_ceiling:
+                crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             cache_key: "test".into(),
             executor_chain: vec!["@test".into()],
             executor_authorities: Vec::new(),
@@ -931,6 +1074,7 @@ mod tests {
             pid: 42,
             timed_out: false,
             launcher_refusal: None,
+            aborted_before_attachment: None,
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
@@ -945,6 +1089,62 @@ mod tests {
     }
 
     #[test]
+    fn spawn_failure_preserves_separate_launcher_refusal() {
+        for refusal in [Some("exact mount source changed".to_owned()), None] {
+            let error = subprocess_spawn_error(lillux::SubprocessResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "generic spawn failure".to_owned(),
+                exit_code: -1,
+                duration_ms: 1.0,
+                pid: 0,
+                timed_out: false,
+                launcher_refusal: refusal.clone(),
+                aborted_before_attachment: None,
+                output_limit_exceeded: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            });
+            let text = error.to_string();
+            match refusal {
+                Some(detail) => {
+                    assert!(text.contains(&detail));
+                    assert!(!text.contains("generic spawn failure"));
+                }
+                None => assert!(text.contains("generic spawn failure")),
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_failure_preserves_only_typed_held_cleanup_proof() {
+        for proof in [None, Some(lillux::AbortedProcess { pid: 42, pgid: 42 })] {
+            let error = subprocess_spawn_error(lillux::SubprocessResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "cleanup proved (untrusted diagnostic text)".into(),
+                exit_code: -1,
+                duration_ms: 1.0,
+                pid: 0,
+                timed_out: false,
+                launcher_refusal: Some("fixture refusal".into()),
+                aborted_before_attachment: proof,
+                output_limit_exceeded: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            });
+            let EngineError::SubprocessSpawnFailed {
+                aborted_before_attachment,
+                ..
+            } = error
+            else {
+                panic!("held spawn must preserve its typed failure");
+            };
+            assert_eq!(aborted_before_attachment, proof);
+        }
+    }
+
+    #[test]
     fn output_limit_maps_to_a_distinct_failed_outcome() {
         let completion = translate_result(lillux::SubprocessResult {
             success: false,
@@ -955,6 +1155,7 @@ mod tests {
             pid: 42,
             timed_out: false,
             launcher_refusal: None,
+            aborted_before_attachment: None,
             output_limit_exceeded: Some(lillux::OutputLimitExceeded::Stdout),
             stdout_truncated: true,
             stderr_truncated: false,

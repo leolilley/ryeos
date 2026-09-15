@@ -1,0 +1,149 @@
+version: "1.0.0"
+category: test
+description: Explicit produce compose verify qualify compose workflow with exact daemon child coordinates
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.test/dynamic-products
+      - ryeos.execute.config.test/dynamic-products
+      - ryeos.execute.tool.test/produce-dynamic
+      - ryeos.execute.tool.test/verify-dynamic-products
+      - ryeos.execute.service.threads/get
+      - ryeos.execute.service.external-content/compose-product
+      - ryeos.execute.service.external-content/qualify-product
+config:
+  start: self
+  max_steps: 9
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    self:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:threads/get
+        ref_bindings: {}
+        params:
+          thread_id: "${execution.thread_id}"
+      assign:
+        project_context:
+          snapshot_hash: "${result.thread.project_authority.snapshot_hash}"
+      next: {type: unconditional, to: produce}
+    produce:
+      node_type: action
+      effects: recorded
+      cache_result: false
+      action:
+        item_id: graph:test/dynamic-products
+        ref_bindings: {}
+        params: {}
+      assign:
+        products: "${result}"
+        selections:
+          - declaration_id: auxiliary
+            witness_hash: "${result.products[0].witness_hash}"
+            witness_source: {kind: local_capture}
+            qualification_hash: null
+          - declaration_id: subject
+            witness_hash: "${result.products[1].witness_hash}"
+            witness_source: {kind: local_capture}
+            qualification_hash: null
+      next: {type: unconditional, to: compose_verifier}
+    compose_verifier:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:external-content/compose-product
+        ref_bindings: {}
+        params:
+          consumer_ref: tool:test/verify-dynamic-products
+          project_context: "${state.project_context}"
+          selections: "${state.selections}"
+          maximum_bytes: 256
+      assign:
+        verifier_composition: "${result}"
+      next: {type: unconditional, to: verify}
+    verify:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/verify-dynamic-products
+        ref_bindings: {}
+        params: {}
+        thread: inline
+        product_selections:
+          - target: {kind: root}
+            selection: "${state.selections[0]}"
+          - target: {kind: root}
+            selection: "${state.selections[1]}"
+      assign:
+        verifier_result: "${result}"
+        verifier_thread_id: "${dispatch.child_thread_id}"
+      next: {type: unconditional, to: verifier_thread}
+    verifier_thread:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:threads/get
+        ref_bindings: {}
+        params:
+          thread_id: "${state.verifier_thread_id}"
+      assign:
+        verifier_chain_root_id: "${result.thread.chain_root_id}"
+        verifier_capsule_hash: "${result.thread.admitted_launch_capsule_hash}"
+      next: {type: unconditional, to: qualify}
+    qualify:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:external-content/qualify-product
+        ref_bindings: {}
+        params:
+          witness_hash: "${state.selections[1].witness_hash}"
+          witness_source: "${state.selections[1].witness_source}"
+          relationship_name: subject_to_consumer
+          verifier_chain_root_id: "${state.verifier_chain_root_id}"
+          verifier_thread_id: "${state.verifier_thread_id}"
+      assign:
+        qualification: "${result}"
+      next: {type: unconditional, to: compose_consumer}
+    compose_consumer:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: service:external-content/compose-product
+        ref_bindings: {}
+        params:
+          consumer_ref: config:test/dynamic-qualified-consumer
+          project_context: "${state.project_context}"
+          selections:
+            - declaration_id: subject
+              witness_hash: "${state.selections[1].witness_hash}"
+              witness_source: "${state.selections[1].witness_source}"
+              qualification_hash: "${state.qualification.qualification_hash}"
+          maximum_bytes: 128
+      assign:
+        consumer_composition: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output:
+        schema: ryeos.fixture.dynamic_qualification_workflow.v1
+        project_context: "${state.project_context}"
+        products: "${state.products}"
+        verifier_composition: "${state.verifier_composition}"
+        verifier_result: "${state.verifier_result}"
+        verifier_thread_id: "${state.verifier_thread_id}"
+        verifier_chain_root_id: "${state.verifier_chain_root_id}"
+        verifier_capsule_hash: "${state.verifier_capsule_hash}"
+        qualification: "${state.qualification}"
+        consumer_composition: "${state.consumer_composition}"

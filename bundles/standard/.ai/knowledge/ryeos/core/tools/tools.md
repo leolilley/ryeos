@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-18T22:04:52Z:8d2c6d4ceb099d4fb0bcfe623db19dbbf8acec0803027ce0fd14f80e2b3de227:zCGrmSATDIjK0vEbZRmdW8ad5Uxr0nQXBRwJpiVQY8l8n4+PqoOXKXVaxa5XNTLXH3RiM57gEpuLmmPmw/N8Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T01:55:13Z:f01d6ecdbf06712bc90efa638f3d5396b0e1c18f9e058614646ce8a189568b09:/cDnTapNlull0om1WfhCHORqMYvLko7yP9JZJCVmwOzVcnKOCOdhyL9fTrlpZe6mQn7tadAIDf/8g9iFb0IvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   How tools work — executable scripts, the subprocess model,
   executor chains, and runtime environments.
@@ -119,9 +119,10 @@ Same interpreter resolution as function runtime.
 
 ## Streaming Tools
 
-`streaming_tool` is a variant that emits length-prefixed JSON frames
-on stdout during execution. Used for long-running tools that need
-to report progress incrementally.
+Ordinary Tools select `execution_protocol: protocol:ryeos/core/tool_streaming`
+to emit length-prefixed JSON frames. Launch inputs remain plan-owned. The daemon
+atomically persists bounded frame pieces before publishing incremental progress;
+successful completion also requires the actual process to exit successfully.
 
 ## Environment Variables
 

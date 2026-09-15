@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-21T00:24:56Z:086427b6f697daa14f51fc072d4691382754004ca2258052c6582fdc2786807b:qYvfM3mdVdD9fIpMStdtB9U5ZmogZkEbh2yPfcxT+Skuu4KDBbhM3E+T3GmPBfwd8heBI8IAW3h1jtoJziiLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-04T09:10:36Z:f3598a848390f84b43181d8ca8f003aea52f1be0a31b34cd3bb44b9fe1a2a1f8:pj1ciGhfPMtfJMoLzxVL06OIBEQIzLQ24PFUQvJUcCYxTkb+z49xnlIW/8t9iphn5UQytRS9aZK/eag9UqxoDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: project-ai-surface-registry
 title: Project `.ai` Deployable Surface Registry
 description: Deferred signed registry for project-authored deployable AI surfaces
 entry_type: design
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Project `.ai` Deployable Surface Registry
@@ -19,8 +19,12 @@ cleanup.
 Already landed:
 
 - typed project sync surfaces in `ryeos-state`;
+- explicit `file` and `directory` surface shapes, including the exact root
+  `.ai/manifest.source.yaml` and `.ai/manifest.yaml` files;
 - `.ai/config/schedules`, `.ai/graphs`, `.ai/config/execution`, and
   `.ai/config/ryeos-runtime` as deployable project `.ai` surfaces;
+- the generic `.ai/config/development` namespace for source-local project
+  development intent, with project identity expressed below that surface;
 - `remote sync-project-ai` copying managed project `.ai` content;
 - project schedule declarations reconciled into node-owned schedule specs under
   `<system_space>/.ai/node/schedules`;
@@ -29,9 +33,10 @@ Already landed:
 
 ## Deferred work
 
-The deployable surface list is still encoded as Rust data. That is acceptable
-for the current implementation, but RyeOS should eventually expose a signed,
-discoverable registry for deployable `.ai` surfaces.
+The deployable surface list and each surface's shape are still encoded as Rust
+data. That is acceptable for the current implementation, but RyeOS should
+eventually expose a signed, discoverable registry for deployable `.ai`
+surfaces.
 
 Goals:
 

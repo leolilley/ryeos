@@ -87,14 +87,11 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 1. Create directory layout
     create_directory_layout(config)?;
 
-    // 2. Write default config file if missing (or force rewrite)
-    let config_path = config.app_root.join(".ai").join("node").join("config.yaml");
-    if options.force || !config_path.exists() {
-        write_default_config(&config_path, config)?;
-        tracing::info!(path = %config_path.display(), "wrote default config");
-    }
+    // Bootstrap configuration is created by the stopped-node `ryeos init`
+    // transaction. Daemon repair must never become a second configuration
+    // publisher or reinterpret `force` as endpoint mutation.
 
-    // 3. Create auth directory
+    // 2. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
 
     // Discover operator trust directory early — needed for stale-entry cleanup
@@ -176,7 +173,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 6. Write public identity document (node only)
     let identity_path = config
         .app_root
-        .join(".ai")
+        .join(AI_DIR)
         .join("node")
         .join("identity")
         .join("public-identity.json");
@@ -371,29 +368,29 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     // runtime state under .ai/state/.
     let dirs = [
         // Node identity
-        config.app_root.join(".ai").join("node").join("identity"),
+        config.app_root.join(AI_DIR).join("node").join("identity"),
         // Node auth
         config
             .app_root
-            .join(".ai")
+            .join(AI_DIR)
             .join("node")
             .join("auth")
             .join("authorized_keys"),
         // Node vault (sealed secrets)
-        config.app_root.join(".ai").join("node").join("vault"),
+        config.app_root.join(AI_DIR).join("node").join("vault"),
         // Node config (model routing, etc.)
-        config.app_root.join(".ai").join("node").join("config"),
+        config.app_root.join(AI_DIR).join("node").join("config"),
         // Node bundle registrations
-        config.app_root.join(".ai").join("node").join("bundles"),
+        config.app_root.join(AI_DIR).join("node").join("bundles"),
         // Node engine (merged kind schemas cache)
         config
             .app_root
-            .join(".ai")
+            .join(AI_DIR)
             .join("node")
             .join("engine")
             .join("kinds"),
         // Installed bundles
-        config.app_root.join(".ai").join("bundles"),
+        config.app_root.join(AI_DIR).join("bundles"),
         // CAS state
         config.runtime_state_dir().join("objects"),
         config.runtime_state_dir().join("locators"),
@@ -405,21 +402,18 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     }
     let runtime_state = lillux::PinnedDirectory::open_or_create(&config.runtime_state_dir())
         .context("pin initialized runtime-state directory")?;
+    runtime_state
+        .open_or_create_child(
+            std::ffi::OsStr::new(ryeos_engine::roots::DAEMON_STATE_DIR),
+            0o700,
+        )
+        .context("create daemon-state authority")?;
     let recovery = runtime_state
         .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
         .context("create initialized recovery authority")?;
     recovery
         .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
         .context("create initialized thread-projection recovery authority")?;
-    Ok(())
-}
-
-fn write_default_config(path: &Path, config: &Config) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let yaml = serde_yaml::to_string(config).context("failed to serialize default config")?;
-    fs::write(path, yaml.as_bytes())?;
     Ok(())
 }
 
@@ -521,15 +515,17 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     // ── 2. Daemon-local layout (idempotent) ──
     create_directory_layout(config)?;
 
-    // ── 3. Default daemon config file (daemon-local) ──
+    // ── 3. Bootstrap config is operator-init-owned ──
     let config_path = config
         .app_root
         .join(AI_DIR)
         .join("node")
         .join("config.yaml");
     if !config_path.exists() {
-        write_default_config(&config_path, config)?;
-        tracing::info!(path = %config_path.display(), "wrote default daemon config");
+        bail!(
+            "daemon bootstrap config missing at {} — run: ryeos init",
+            config_path.display()
+        );
     }
 
     // ── 4. Public identity (daemon-local; derives from node key) ──
@@ -612,12 +608,30 @@ pub fn load_node_config_two_phase(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path))
+    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), None)
+}
+
+/// Running-daemon bootstrap with one already selected protected host runtime.
+/// Native service and external-supervisor transports converge here; this layer
+/// never discovers a lifecycle provider or decodes an OS backend.
+pub fn load_node_config_two_phase_with_host_runtime(
+    config: &Config,
+    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+) -> Result<(
+    Arc<Engine>,
+    Arc<NodeConfigSnapshot>,
+    Arc<NodePolicySnapshot>,
+    Arc<ryeos_engine::isolation::IsolationRuntime>,
+)> {
+    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), host_runtime)
 }
 
 /// Standalone service execution has no daemon callback listener to capture.
 /// Its isolation snapshot must therefore omit callback-socket authority rather
 /// than attempting to pin the configured-but-unbound daemon socket path.
+/// It also does not own the supervised process-scope provider. Definition
+/// admission retains enforced isolation without claiming those capabilities;
+/// persistent worker execution belongs to the normal daemon bootstrap.
 pub fn load_node_config_two_phase_standalone(
     config: &Config,
 ) -> Result<(
@@ -626,12 +640,13 @@ pub fn load_node_config_two_phase_standalone(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, None)
+    load_node_config_two_phase_with_socket(config, None, None)
 }
 
 fn load_node_config_two_phase_with_socket(
     config: &Config,
     daemon_socket: Option<&Path>,
+    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
@@ -698,11 +713,12 @@ fn load_node_config_two_phase_with_socket(
         &policy_table,
     )
     .context("Phase 1: load exact node policy generation")?;
+    let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
     let node_policy = Arc::new(ryeos_app::node_policy::compile_generation(
         app_root,
         &policy_table,
         &policy_generation,
-        NodeIdentity::load(&config.node_signing_key_path)?.fingerprint(),
+        node_identity.fingerprint(),
     )?);
     let command_registration = node_policy.require::<
         ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
@@ -731,6 +747,31 @@ fn load_node_config_two_phase_with_socket(
             )
         })
         .context("Phase 1: resolve selected isolation backend")?;
+    // A stopped-node snapshot validates the signed contract only. It must not
+    // open a native controller or inspect host delegation. The running daemon
+    // alone receives the opaque provider after the association has bound both
+    // the exact app root and loaded node identity.
+    let process_scope_provider = if daemon_socket.is_some()
+        && matches!(
+            node_policy
+                .require::<ryeos_engine::isolation::IsolationPolicy>()?
+                .process_scopes,
+            ryeos_engine::isolation::IsolationProcessScopePolicy::Required { .. }
+        ) {
+        match host_runtime {
+            Some(runtime) => {
+                runtime.verify_loaded_node_identity(&node_identity)?;
+                Some(runtime.open_process_scope_provider()?)
+            }
+            // Direct nodes remain valid for non-scope-backed work. The
+            // isolation runtime records no capability, and dedicated workers
+            // fail admission rather than selecting a weaker host process
+            // boundary.
+            None => None,
+        }
+    } else {
+        None
+    };
     let isolation = match daemon_socket {
         Some(daemon_socket) => {
             ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
@@ -743,9 +784,14 @@ fn load_node_config_two_phase_with_socket(
                     .join("isolation.yaml"),
                 format!("sha256:{}", node_policy.generation_digest()),
                 isolation_backend,
+                process_scope_provider,
             )
         }
-        None => ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy(
+        // A stopped-node service owns its state operation, not the supervised
+        // worker controller. Preserve signed isolation/adapter checks without
+        // opening that controller's process scopes. Scope-requiring execution
+        // cannot be admitted from this snapshot; daemon startup above owns it.
+        None => ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation(
             app_root,
             node_policy
                 .require::<ryeos_engine::isolation::IsolationPolicy>()?
@@ -1093,6 +1139,12 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
         };
+        fs::create_dir_all(app_root.join(AI_DIR).join("node")).unwrap();
+        fs::write(
+            app_root.join(AI_DIR).join("node").join("config.yaml"),
+            serde_yaml::to_string(&config).unwrap(),
+        )
+        .unwrap();
 
         let err = repair_daemon_local(&config).expect_err("should refuse without user key");
         let msg = format!("{err:#}");

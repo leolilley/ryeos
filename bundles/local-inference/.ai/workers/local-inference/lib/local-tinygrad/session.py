@@ -523,7 +523,7 @@ def main() -> int:
         raise RuntimeError("RYEOS_SESSION_FD is not canonical")
     channel_fd = int(channel_text)
     # Enforced isolation relocates the daemon-owned duplex channel onto stdin
-    # because the pinned Bubblewrap backend preserves stdio but exposes no
+    # because an enforced backend preserves stdio but exposes no
     # arbitrary-FD mapping primitive. Disabled isolation retains the verified
     # source descriptor above stderr. Stdout/stderr are never channel authority.
     if channel_fd in (1, 2):

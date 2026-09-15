@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:3f2c1c0bcea312340da03c935bbb61e9ad7af9e0d1b4f9ab7d0e9a8e88a08ec6:rjOZrJJAbksY+SfaGp2Ki7xXYcYfgsl91+2QD/D3yyXCx2wI6uRHdgWBR7BGzC8UebBQsKWMZsvaowvoFrQ1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-05T01:24:34Z:e23aa5545bc52f187ebd1df1f67592780f2b7d0420f9be7b35e36dfd4eae8f9d:zVPMTrhc2yskWNOO1+HcU2gGLVPkUqBDarW9XaysrpWgdb/lJdHj7GVrA0rKObBEkLf1bT/jSPL8Sqyrv3e4Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -184,9 +184,10 @@ polling without inventing a separate cron shim.
 Node schedule spec shape:
 
 ```yaml
-spec_version: 1
+spec_version: 2
 schedule_id: ryeos-email.process-send-queue
 item_ref: tool:ryeos-email/system/process_send_queue
+ref_bindings: {}
 schedule_type: interval
 expression: "30"
 params: {}
@@ -197,9 +198,30 @@ lateness_grace_secs: 60
 enabled: true
 project_root: /path/to/project-or-bundle
 execution:
-  requester_fingerprint: fp:...
+  authority:
+    kind: node
+    principal_id: fp:<node-fingerprint>
+    effective_origin_site_id: site:<site-id>
   capabilities:
     - ryeos.execute.tool.ryeos-email/system/process_send_queue
+  policy:
+    schema_version: 2
+    ownership: daemon_owned
+    recovery: restart_recoverable
+    response: accepted
+    target:
+      kind: here
+    environment:
+      kind: project_overlay
+      include_operator_vault: true
+      name_policy:
+        kind: declared_required
+    project:
+      kind: live_direct
+      access: read_write
+      child_policy:
+        kind: inherit
+managed_by: null
 ```
 
 Project-managed declarations use the deploy/reconcile path rather than
@@ -222,11 +244,38 @@ schedules:
     overlap_policy: skip
     lateness_grace_secs: 60
     enabled: true
+    capabilities:
+      - ryeos.execute.tool.ryeos-email/system/process_send_queue
+    execution_policy:
+      schema_version: 2
+      ownership: daemon_owned
+      recovery: restart_recoverable
+      response: accepted
+      target:
+        kind: here
+      environment:
+        kind: project_overlay
+        include_operator_vault: true
+        name_policy:
+          kind: declared_required
+      project:
+        kind: pinned
+        source:
+          kind: current_head
+        realization:
+          kind: cow
+          terminal_publication:
+            kind: retain_current_head
+        child_policy:
+          kind: inherit
 ```
 
-Every field shown above except `project_root` is authored data. Registration,
-project deploy, node-config loading, and projection rebuild reject omissions;
-the runtime does not choose policy defaults based on schedule type.
+The execution policy is authored data. Registration, project deploy,
+node-config loading, and projection rebuild reject omissions; the runtime does
+not choose policy defaults based on schedule type. `live_direct` remains the
+explicit then-current-filesystem lane. `pinned` binds one durable current-head
+or explicit-snapshot authority per fire. Recurring schedules reject
+`capture_live` rather than silently turning capture into either lane.
 
 Use scheduler services for imperative operator control (`register`,
 `pause`, `resume`, `deregister`, `show_fires`). Use project deploy
@@ -312,3 +361,20 @@ Some services are primarily invoked by canonical ref through `/execute`
 or by internal code. They still need signed service descriptors and Rust
 `ServiceDescriptor` records, but they do not need a dedicated route or
 alias.
+
+Worker candidate disposition uses four such exact-coordinate services:
+
+- `service:worker-executions/start-candidate-evaluation` launches a trusted
+  base-resolved evaluator against a frozen candidate view.
+- `service:worker-executions/qualify-candidate` adopts only its exact successful
+  terminal testimony; closure validation alone grants no publication authority.
+- `service:worker-executions/start-candidate-integration` launches a signed,
+  namespace-bounded authoring wrapper in an isolated retained candidate CoW.
+- `service:worker-executions/publish` re-verifies the accepted evaluation and,
+  for bounded candidates, the integration plus final re-evaluation before a
+  serialized project-HEAD compare-and-swap.
+
+These services do not replace `live_direct` execution or ordinary live-project
+authoring. They provide the separate immutable-generation lane required when a
+worker must retain a proposal without receiving signing or publication
+authority.

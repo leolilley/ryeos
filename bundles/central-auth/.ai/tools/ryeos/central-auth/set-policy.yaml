@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:787f1f5e18d79986e56543da0d50f94bb47abd95c049b5dfb44b5ba802080e8e:/zjwoXMFJQ6Z6ZZEYqNVZ81xXPcK58s40pUQaoRxfk6LfUkaFhbwqTf1VjV+LC6i8pLas3ImU6JRmkq7oOn+AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:2f3b73d4ad88dca2e86144b90eb0655ef325787b70df1162408d38afd5e5f97b:7JYYleGE7iM9fhe85JQk+CI8AL7UIhkX1jpbsBSS52WgiOql/7icEOfARVDfxwaJlQX0Jew3BZI6UaE3kMLZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "set-policy"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.set-policy"]
 description: "Store the central-auth role/capability policy for a realm."
 

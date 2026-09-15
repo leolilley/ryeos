@@ -7,9 +7,10 @@
 //! kind / id from `LaunchEnvelope.resolution.root` directly.
 
 pub use ryeos_engine::launch_envelope_types::{
-    COST_BASIS_ROLLUP, EnvelopeAccountingScope, EnvelopeCallback, EnvelopePolicy, EnvelopeRequest,
-    EnvelopeRoots, HardLimits, ItemDescriptor, LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost,
-    RuntimeCostError, RuntimeResult, RuntimeResultStatus, UsdNanos,
+    AggregateExecutionLimits, COST_BASIS_ROLLUP, EnvelopeAccountingScope, EnvelopeCallback,
+    EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, ItemDescriptor, LaunchEnvelope,
+    LaunchEnvelopeBuilder, RuntimeCost, RuntimeCostError, RuntimeResult, RuntimeResultStatus,
+    UsdNanos,
 };
 
 /// Canonical managed-runtime result for the provider-neutral dedicated-session
@@ -20,10 +21,20 @@ pub fn dedicated_session_terminal_result(
     thread_id: String,
     session: serde_json::Value,
 ) -> RuntimeResult {
-    let status = match session
+    let persisted_reason = session
         .get("terminal_reason")
-        .and_then(serde_json::Value::as_str)
-    {
+        .and_then(serde_json::Value::as_str);
+    // The callback-owned controller returns the just-settled reason while the
+    // durable session projection uses `terminal_reason`. Accept the callback
+    // spelling only for a state that proves termination has begun; arbitrary
+    // live projections cannot declare themselves successful.
+    let callback_reason = matches!(
+        session.get("state").and_then(serde_json::Value::as_str),
+        Some("terminal" | "freezing")
+    )
+    .then(|| session.get("reason").and_then(serde_json::Value::as_str))
+    .flatten();
+    let status = match persisted_reason.or(callback_reason) {
         Some("completed") => RuntimeResultStatus::Completed,
         Some("cancelled") => RuntimeResultStatus::Cancelled,
         Some("credential_revoked") => RuntimeResultStatus::Failed,
@@ -633,6 +644,30 @@ pub fn follow_envelope_terminal_status(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dedicated_session_callback_settlement_requires_a_terminalizing_state() {
+        let completed = dedicated_session_terminal_result(
+            "T-completed".to_owned(),
+            json!({"state":"freezing", "reason":"completed"}),
+        );
+        assert_eq!(completed.status, RuntimeResultStatus::Completed);
+        assert!(completed.success);
+
+        let cancelled = dedicated_session_terminal_result(
+            "T-cancelled".to_owned(),
+            json!({"state":"terminal", "reason":"cancelled"}),
+        );
+        assert_eq!(cancelled.status, RuntimeResultStatus::Cancelled);
+        assert!(!cancelled.success);
+
+        let forged_live = dedicated_session_terminal_result(
+            "T-live".to_owned(),
+            json!({"state":"idle", "reason":"completed"}),
+        );
+        assert_eq!(forged_live.status, RuntimeResultStatus::Failed);
+        assert!(!forged_live.success);
+    }
 
     #[test]
     fn hook_observation_accepts_only_the_bounded_namespaced_leaf_envelope() {

@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "workspace.status"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "workspaceID": {
+          "type": "string",
+          "pattern": "^wrk"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "connected",
+            "connecting",
+            "disconnected",
+            "error"
+          ]
+        }
+      },
+      "required": [
+        "workspaceID",
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

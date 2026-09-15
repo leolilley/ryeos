@@ -22,8 +22,10 @@ pub(crate) struct LifecycleOwnerGuard {
     state: AppState,
     thread_id: String,
     disarmed: bool,
+    settled_owned_wait: bool,
     callback_token: Option<String>,
     thread_auth_token: Option<String>,
+    workspace_lifeline: Option<Arc<TempDirGuard>>,
 }
 
 impl LifecycleOwnerGuard {
@@ -32,8 +34,10 @@ impl LifecycleOwnerGuard {
             state: state.clone(),
             thread_id: thread_id.to_string(),
             disarmed: false,
+            settled_owned_wait: false,
             callback_token: None,
             thread_auth_token: None,
+            workspace_lifeline: None,
         }
     }
 
@@ -43,6 +47,43 @@ impl LifecycleOwnerGuard {
 
     pub(crate) fn track_thread_auth_token(&mut self, token: String) {
         self.thread_auth_token = Some(token);
+    }
+
+    /// Retain the original owned workspace before construction/contact. The
+    /// caller selects only its owned root, never a borrowed child lifeline.
+    pub(crate) fn track_owned_workspace_lifeline(
+        &mut self,
+        workspace: Arc<TempDirGuard>,
+    ) -> Result<()> {
+        if let Some(existing) = self.workspace_lifeline.as_ref() {
+            if !Arc::ptr_eq(existing, &workspace) {
+                anyhow::bail!("lifecycle owner cannot replace its original workspace lifeline");
+            }
+        } else {
+            self.workspace_lifeline = Some(workspace);
+        }
+        Ok(())
+    }
+
+    /// Record a `SpawnedRuntime::wait` result carrying its explicit settled
+    /// attached-wait proof. That proof is emitted only after the exact process
+    /// group was reaped and the attached workspace membership settled. Fallible
+    /// terminal capture still needs this guard's workspace cleanup owner, but
+    /// no later error may be reclassified as an owner-drop kill.
+    pub(crate) fn record_settled_owned_wait(&mut self) {
+        self.revoke_tokens();
+        self.settled_owned_wait = true;
+    }
+
+    /// A wait error does not prove that process or workspace descendants are
+    /// quiescent. Revoke callback authority, but retain the ordinary owner-drop
+    /// stop order.
+    pub(crate) fn revoke_tokens_after_unsettled_wait(&mut self) {
+        self.revoke_tokens();
+    }
+
+    pub(crate) fn has_settled_owned_wait(&self) -> bool {
+        self.settled_owned_wait
     }
 
     pub(crate) fn disarm(&mut self) {
@@ -72,8 +113,42 @@ impl Drop for LifecycleOwnerGuard {
         if self.disarmed {
             return;
         }
+        if self
+            .state
+            .state_store
+            .get_thread(&self.thread_id)
+            .is_ok_and(|thread| thread.is_some_and(|thread| is_terminal_status(&thread.status)))
+        {
+            // A committed terminalization gate cannot be acquired again.
+            // Finish original-owner closure directly; it independently checks
+            // every member and worker's death, so terminal history is not
+            // substituted for cleanup proof.
+            if let Err(error) = super::runner::close_aborted_owned_workspace(
+                &self.state,
+                self.workspace_lifeline.as_ref(),
+                &self.thread_id,
+            ) {
+                tracing::error!(thread_id = %self.thread_id, %error,
+                    "terminal lifecycle owner retained unresolved original workspace");
+            }
+            return;
+        }
         match super::runner::stop_owner_dropped_execution_tree(&self.state, &self.thread_id) {
-            Ok(super::runner::OwnerDropStopOutcome::Settled) => {}
+            Ok(super::runner::OwnerDropStopOutcome::Settled) => {
+                if let Some(workspace) = self.workspace_lifeline.as_ref()
+                    && let Err(error) = super::runner::close_aborted_owned_workspace(
+                        &self.state,
+                        Some(workspace),
+                        &self.thread_id,
+                    )
+                {
+                    tracing::error!(
+                        thread_id = %self.thread_id,
+                        error = %error,
+                        "stopped lifecycle owner retained an unresolved workspace journal"
+                    );
+                }
+            }
             Ok(super::runner::OwnerDropStopOutcome::PreservedForShutdown) => tracing::info!(
                 thread_id = %self.thread_id,
                 "waiting lifecycle owner preserved row for shutdown coordinator"
@@ -87,33 +162,90 @@ impl Drop for LifecycleOwnerGuard {
     }
 }
 
-struct AttachedProcessGuard<'a> {
-    state: &'a AppState,
-    thread_id: &'a str,
-    launch_owner: &'a str,
+/// Exact attached-process owner shared by callback and managed runtime waits.
+/// Drop is deliberately non-settling: it also runs after failed cleanup.
+pub(crate) struct AttachedProcessGuard {
+    state: AppState,
+    thread_id: String,
+    launch_owner: String,
     identity: ryeos_app::process::ExecutionProcessIdentity,
+    workspace_binding: Option<ryeos_app::runtime_db::RuntimeWorkspaceBinding>,
+    settled: bool,
 }
 
-impl Drop for AttachedProcessGuard<'_> {
-    fn drop(&mut self) {
-        match self
+impl AttachedProcessGuard {
+    pub(crate) fn new(
+        state: &AppState,
+        thread_id: &str,
+        launch_owner: &str,
+        identity: ryeos_app::process::ExecutionProcessIdentity,
+    ) -> Result<Self> {
+        let workspace_binding = state.state_store.thread_workspace_binding(thread_id)?;
+        Ok(Self {
+            state: state.clone(),
+            thread_id: thread_id.to_owned(),
+            launch_owner: launch_owner.to_owned(),
+            identity,
+            workspace_binding,
+            settled: false,
+        })
+    }
+
+    /// Call only after owned wait/reap. The existing group-absence check also
+    /// refuses wait/cleanup errors whose SubprocessResult carries no reap proof.
+    pub(crate) fn settle_after_reap(&mut self) -> Result<()> {
+        if self.settled {
+            return Ok(());
+        }
+        ryeos_app::process::assert_reaped_process_group_absent(&self.identity)?;
+        let current_binding = self
             .state
             .state_store
-            .clear_thread_process_if_matches_owned(
-                self.thread_id,
-                &self.identity,
-                self.launch_owner,
-            ) {
-            Ok(true) => {}
-            Ok(false) => tracing::warn!(
-                thread_id = self.thread_id,
-                "owned subprocess identity changed before compare-and-clear"
-            ),
-            Err(error) => tracing::error!(
-                thread_id = self.thread_id,
-                error = %error,
-                "failed to clear owned subprocess identity after wait"
-            ),
+            .thread_workspace_binding(&self.thread_id)?;
+        if let Some(original) = self.workspace_binding.as_ref() {
+            if current_binding.as_ref() != Some(original) {
+                anyhow::bail!("reaped subprocess workspace binding changed before settlement");
+            }
+        } else if let Some(binding) = current_binding.as_ref() {
+            // A projectless controller may create its first workspace through
+            // its authenticated callback. Only that same exact launch owner
+            // can add this membership while the controller is running.
+            let owner =
+                lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
+            if owner != self.launch_owner {
+                anyhow::bail!("reaped subprocess acquired a workspace under another launch owner");
+            }
+        }
+        let cleared = if let Some(binding) = current_binding.as_ref() {
+            self.state
+                .state_store
+                .settle_reaped_thread_workspace_owned(&self.thread_id, binding, &self.identity)?
+        } else {
+            self.state
+                .state_store
+                .clear_thread_process_if_matches_owned(
+                    &self.thread_id,
+                    &self.identity,
+                    &self.launch_owner,
+                )?
+        };
+        if !cleared {
+            anyhow::bail!(
+                "reaped subprocess retains changed authority or unsettled workspace descendants"
+            );
+        }
+        self.settled = true;
+        Ok(())
+    }
+}
+
+impl Drop for AttachedProcessGuard {
+    fn drop(&mut self) {
+        if !self.settled {
+            tracing::warn!(
+                thread_id = %self.thread_id,
+                "attached-process owner dropped without explicit reap settlement; retaining recovery authority"
+            );
         }
     }
 }
@@ -230,6 +362,11 @@ pub(crate) fn run_spawned_lillux_attached(
         launch_owner,
     ) {
         let cleanup = spawned.abort_and_reap().err();
+        if let Some(cleanup) = cleanup {
+            return Err(error.context(format!(
+                "pending-process cleanup failed; retaining authority: {cleanup}"
+            )));
+        }
         let stop_settlement = finalize_requested_stop_if_present(state, thread_id);
         let error = match stop_settlement {
             Ok(true) => error.context(
@@ -240,25 +377,25 @@ pub(crate) fn run_spawned_lillux_attached(
                 "attach held callback subprocess identity; stop settlement also failed: {stop_error:#}"
             )),
         };
-        return match cleanup {
-            Some(cleanup) => {
-                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
-            }
-            None => Err(error),
-        };
+        return Err(error);
     }
-    let _attachment = AttachedProcessGuard {
-        state,
-        thread_id,
-        launch_owner,
-        identity: identity.clone(),
-    };
+    let mut attachment =
+        AttachedProcessGuard::new(state, thread_id, launch_owner, identity.clone())?;
     if let Err(error) =
         state
             .threads
             .authorize_process_release_owned(thread_id, &identity, launch_owner)
     {
-        let cleanup = spawned.abort_and_reap().err();
+        let cleanup = spawned
+            .abort_and_reap()
+            .map_err(anyhow::Error::from)
+            .and_then(|_| attachment.settle_after_reap())
+            .err();
+        if let Some(cleanup) = cleanup {
+            return Err(error.context(format!(
+                "pending-process cleanup failed; retaining authority: {cleanup}"
+            )));
+        }
         let stop_settlement = finalize_requested_stop_if_present(state, thread_id);
         let error = match stop_settlement {
             Ok(true) => {
@@ -271,15 +408,24 @@ pub(crate) fn run_spawned_lillux_attached(
                 "authorize callback subprocess release after durable attachment; stop settlement also failed: {stop_error:#}"
             )),
         };
-        return match cleanup {
-            Some(cleanup) => {
-                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
-            }
-            None => Err(error),
-        };
+        return Err(error);
     }
-    let spawned = spawned
-        .release_after_attachment()
-        .context("release callback subprocess after durable attachment")?;
-    Ok(spawned.wait())
+    let spawned = match spawned.release_after_attachment() {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            // Lillux's release error retains a completed cleanup contract; we
+            // additionally verify group absence before clearing durable state.
+            let settlement = attachment.settle_after_reap();
+            return Err(match settlement {
+                Ok(()) => anyhow::Error::new(error)
+                    .context("release callback subprocess after durable attachment"),
+                Err(settlement) => anyhow::Error::new(error).context(format!(
+                    "release failed; exact attachment retained: {settlement:#}"
+                )),
+            });
+        }
+    };
+    let result = spawned.wait();
+    attachment.settle_after_reap()?;
+    Ok(result)
 }

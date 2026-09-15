@@ -343,122 +343,70 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
     trigger_reason: &str,
     skip_claim: bool,
 ) -> anyhow::Result<FireDispatchOutcome> {
-    // Fail-closed: never dispatch with empty capabilities.
-    // If capabilities are empty, the schedule is corrupted or misconfigured.
-    if spec.capabilities.is_empty() {
-        tracing::error!(
-            schedule_id = %spec.schedule_id,
-            fire_id = %fire_id,
-            "refusing to dispatch schedule with empty capabilities — \
-             corrupted or misconfigured schedule. Deregister and re-register."
-        );
-        let now = lillux::time::timestamp_millis();
-        let thread_id = types::thread_id_from_fire(fire_id);
-        let fail_rec = types::FireRecord {
+    types::validate_schedule_spec_record(spec)?;
+    let thread_id = types::thread_id_from_fire(fire_id);
+    let mut reserved = if skip_claim {
+        ctx.scheduler_db()
+            .get_fire(fire_id)?
+            .with_context(|| format!("recovery fire {fire_id} disappeared"))?
+    } else {
+        let reserved_at = lillux::time::timestamp_millis();
+        let record = FireRecord {
             fire_id: fire_id.to_string(),
             schedule_id: spec.schedule_id.clone(),
             scheduled_at,
-            fired_at: Some(now),
-            completed_at: Some(now),
-            thread_id: Some(thread_id),
-            status: "failed".to_string(),
+            reserved_at,
+            dispatched_at: None,
+            completed_at: None,
+            thread_id: Some(thread_id.clone()),
+            status: "reserved".to_string(),
             trigger_reason: trigger_reason.to_string(),
-            outcome: Some("dispatch_skipped".to_string()),
+            outcome: None,
             signer_fingerprint: spec.signer_fingerprint.clone(),
+            schedule_spec_hash: spec.spec_hash.clone(),
+            project_authority: None,
+            admitted_capsule_hash: None,
         };
-        let db = ctx.scheduler_db();
         let app_root = ctx.app_root().to_path_buf();
-        let fire_id_owned = fire_id.to_string();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            projection::persist_fire_snapshot(&app_root, &db, &fail_rec).with_context(|| {
-                format!("persist empty-capability failure for fire {fire_id_owned}")
-            })?;
-            Ok(())
-        })
-        .await
-        .context("empty-capability failure persistence task stopped")??;
-        return Ok(FireDispatchOutcome::ClassifiedFailure);
-    }
-
-    let thread_id = types::thread_id_from_fire(fire_id);
-    let recovery_record = if skip_claim {
-        Some(
-            ctx.scheduler_db()
-                .get_fire(fire_id)?
-                .with_context(|| format!("recovery fire {fire_id} disappeared"))?,
-        )
-    } else {
-        None
-    };
-    if recovery_record
-        .as_ref()
-        .and_then(|record| record.thread_id.as_deref())
-        .is_some_and(|persisted| persisted != thread_id.as_str())
-    {
-        anyhow::bail!("recovery fire {fire_id} has non-deterministic thread identity");
-    }
-    let dispatched_at = recovery_record
-        .as_ref()
-        .and_then(|record| record.fired_at)
-        .unwrap_or_else(lillux::time::timestamp_millis);
-    let trigger_reason = recovery_record.as_ref().map_or_else(
-        || trigger_reason.to_owned(),
-        |record| record.trigger_reason.clone(),
-    );
-
-    // ── Record dispatched through DB + durable outbox ─────────
-    let app_root = ctx.app_root().to_path_buf();
-    let rec = FireRecord {
-        fire_id: fire_id.to_string(),
-        schedule_id: spec.schedule_id.clone(),
-        scheduled_at,
-        fired_at: Some(dispatched_at),
-        completed_at: None,
-        thread_id: Some(thread_id.clone()),
-        status: "dispatched".to_string(),
-        trigger_reason: trigger_reason.clone(),
-        outcome: None,
-        signer_fingerprint: spec.signer_fingerprint.clone(),
-    };
-
-    if !skip_claim {
-        let app_root = app_root.clone();
         let db = ctx.scheduler_db();
-        let fire_id_owned = fire_id.to_string();
-        let claimed = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            // Atomic claim: only proceed if this fire_id doesn't exist yet.
-            // This prevents duplicate dispatch when recovery and timer race.
-            match projection::claim_fire_snapshot(&app_root, &db, &rec)? {
-                true => {
-                    Ok(true)
-                }
-                false => {
-                    tracing::debug!(fire_id = %fire_id_owned, "fire already claimed — skipping dispatch");
-                    Ok(false)
-                }
-            }
+        let claimed = tokio::task::spawn_blocking({
+            let record = record.clone();
+            move || projection::claim_fire_snapshot(&app_root, &db, &record)
         })
         .await
-        .context("scheduler dispatch-claim task stopped")??;
-
+        .context("scheduler fire reservation task stopped")??;
         if !claimed {
             return Ok(FireDispatchOutcome::AlreadyClaimed);
         }
-    } else {
-        // Recovery redispatch uses the already-durable immutable dispatch
-        // snapshot; it does not mint a second dispatch identity.
-        rec.validate()?;
+        record
+    };
+    if reserved.thread_id.as_deref() != Some(thread_id.as_str()) {
+        anyhow::bail!("recovery fire {fire_id} has non-deterministic thread identity");
     }
+    if reserved.schedule_spec_hash != spec.spec_hash {
+        let now = lillux::time::timestamp_millis();
+        reserved.status = "failed".to_string();
+        reserved.completed_at = Some(now.max(reserved.reserved_at));
+        reserved.outcome = Some("schedule_spec_changed_before_admission".to_string());
+        let db = ctx.scheduler_db();
+        let app_root = ctx.app_root().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            projection::persist_fire_snapshot(&app_root, &db, &reserved)
+        })
+        .await
+        .context("scheduler stale-spec settlement task stopped")??;
+        return Ok(FireDispatchOutcome::ClassifiedFailure);
+    }
+    reserved.validate()?;
+    let fire_context = ryeos_engine::contracts::ScheduledFireContext::new(
+        reserved.schedule_id.clone(),
+        reserved.fire_id.clone(),
+        reserved.scheduled_at,
+        reserved.reserved_at,
+        reserved.trigger_reason.clone(),
+        reserved.schedule_spec_hash.clone(),
+    )?;
 
-    // ── Dispatch via SchedulerContext (DETACHED) ─────────────
-    // The fire is claimed and recorded `dispatched`; the execution
-    // itself runs on its own task so the timer loop (and the runtime
-    // gate's read guard held by the caller) is released immediately.
-    // A long-running scheduled job must never stall evaluation of
-    // other schedules or block gate writers (scheduler/register,
-    // project apply-snapshot). Success/failure of the dispatch is
-    // recorded by the spawned task; completion of the thread itself is
-    // finalized by the completion hook or the repair sweep.
     let ctx = Arc::clone(ctx);
     let spec = spec.clone();
     let fire_id = fire_id.to_string();
@@ -471,47 +419,147 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
             );
             return;
         }
-        match ctx
-            .dispatch_scheduled_item(&spec, &fire_id, &thread_id, scheduled_at, &trigger_reason)
+        let mut current = reserved;
+        let outcome = async {
+            let project_authority = match current.project_authority.clone() {
+                Some(authority) => authority,
+                None => {
+                    let binding = ctx
+                        .bind_scheduled_project_authority(&spec, &fire_context, &thread_id)
+                        .await?;
+                    if matches!(
+                        &binding.authority,
+                        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+                    ) && binding.pending_publication.is_none()
+                    {
+                        anyhow::bail!("scheduled pinned selection has no staged CAS reachability");
+                    }
+                    let authority = binding.authority;
+                    let bound = FireRecord {
+                        project_authority: Some(authority.clone()),
+                        ..current.clone()
+                    };
+                    let app_root = ctx.app_root().to_path_buf();
+                    let db = ctx.scheduler_db();
+                    tokio::task::spawn_blocking(move || {
+                        projection::persist_fire_snapshot(&app_root, &db, &bound)?;
+                        // The fire is now an operational GC root. Keep the
+                        // selected generation's temporary roots until both
+                        // its projection and journal publication are durable.
+                        if let Some(publication) = binding.pending_publication {
+                            publication.publish()?;
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await
+                    .context("scheduler project-binding persistence task stopped")??;
+                    current.project_authority = Some(authority.clone());
+                    authority
+                }
+            };
+            let receipt = ctx
+                .dispatch_scheduled_item(&spec, &fire_context, &thread_id, &project_authority)
+                .await?;
+            if receipt.thread_id != thread_id {
+                anyhow::bail!("scheduler launch handoff changed deterministic thread identity");
+            }
+            let dispatched_at = lillux::time::timestamp_millis();
+            let dispatched = FireRecord {
+                status: "dispatched".to_string(),
+                dispatched_at: Some(dispatched_at),
+                admitted_capsule_hash: Some(receipt.admitted_capsule_hash),
+                ..current.clone()
+            };
+            let app_root = ctx.app_root().to_path_buf();
+            let db = ctx.scheduler_db();
+            let fire_id_for_handoff = fire_id.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let latest = db
+                    .get_fire(&fire_id_for_handoff)?
+                    .with_context(|| format!("scheduler fire {fire_id_for_handoff} disappeared"))?;
+                match latest.status.as_str() {
+                    "reserved" => {
+                        projection::persist_fire_snapshot(&app_root, &db, &dispatched)?;
+                    }
+                    "dispatched" => {
+                        if latest.project_authority != dispatched.project_authority
+                            || latest.admitted_capsule_hash != dispatched.admitted_capsule_hash
+                        {
+                            anyhow::bail!(
+                                "scheduler dispatch handoff disagrees with an already-recorded launch"
+                            );
+                        }
+                    }
+                    "completed" | "failed" | "cancelled" => {
+                        if latest.project_authority != dispatched.project_authority
+                            || latest.admitted_capsule_hash != dispatched.admitted_capsule_hash
+                        {
+                            anyhow::bail!(
+                                "scheduler terminal fire disagrees with its launch handoff"
+                            );
+                        }
+                    }
+                    status => anyhow::bail!(
+                        "scheduler dispatch handoff observed incompatible fire status {status}"
+                    ),
+                }
+                Ok(())
+            })
             .await
-        {
-            Ok(_) => {
+            .context("scheduler dispatch-handoff persistence task stopped")??;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        match outcome {
+            Ok(()) => {
                 tracing::info!(
                     fire_id = %fire_id,
                     thread_id = %thread_id,
-                    trigger = %trigger_reason,
+                    trigger = %fire_context.trigger_reason,
                     schedule_id = %spec.schedule_id,
-                    "schedule fired"
+                    "schedule root admitted and handed off"
                 );
             }
             Err(err) => {
-                let completed_at = lillux::time::timestamp_millis();
-                let fail_rec = FireRecord {
-                    fire_id: fire_id.to_string(),
-                    schedule_id: spec.schedule_id.clone(),
-                    scheduled_at,
-                    fired_at: Some(dispatched_at),
-                    completed_at: Some(completed_at),
-                    thread_id: Some(thread_id),
-                    status: "failed".to_string(),
-                    trigger_reason: trigger_reason.to_string(),
-                    outcome: Some("dispatch_failed".to_string()),
-                    signer_fingerprint: spec.signer_fingerprint.clone(),
-                };
                 {
                     let _runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
                     let db = ctx.scheduler_db();
                     let app_root = ctx.app_root().to_path_buf();
                     let fire_id_log = fire_id.clone();
+                    let join_fire_id = fire_id.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) =
+                        let latest = match db.get_fire(&fire_id_log) {
+                            Ok(Some(record)) => record,
+                            Ok(None) => current,
+                            Err(error) => {
+                                tracing::error!(fire_id = %fire_id_log, %error,
+                                    "dispatch failure: failed to reload fire record");
+                                return;
+                            }
+                        };
+                        if matches!(
+                            latest.status.as_str(),
+                            "completed" | "failed" | "cancelled" | "skipped"
+                        ) {
+                            return;
+                        }
+                        let completed_at = lillux::time::timestamp_millis();
+                        let settlement_anchor =
+                            latest.dispatched_at.unwrap_or(latest.reserved_at);
+                        let fail_rec = FireRecord {
+                            status: "failed".to_string(),
+                            completed_at: Some(completed_at.max(settlement_anchor)),
+                            outcome: Some("dispatch_failed".to_string()),
+                            ..latest
+                        };
+                        if let Err(error) =
                             projection::persist_fire_snapshot(&app_root, &db, &fail_rec)
                         {
-                            tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
-                                "dispatch failure: failed to upsert fire record");
+                            tracing::error!(fire_id = %fail_rec.fire_id, %error,
+                                "dispatch failure: failed to persist fire record");
                         }
                     }).await.unwrap_or_else(|e| {
-                        tracing::error!(fire_id = %fire_id_log, error = %e, "spawn_blocking task panicked or was cancelled (failure persist)");
+                        tracing::error!(fire_id = %join_fire_id, error = %e, "spawn_blocking task panicked or was cancelled (failure persist)");
                     });
                 }
 
@@ -620,13 +668,17 @@ async fn record_skip<Ctx: SchedulerContext>(
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
-        fired_at: Some(now),
+        reserved_at: now,
+        dispatched_at: None,
         completed_at: Some(now),
         thread_id: None,
         status: "skipped".to_string(),
         trigger_reason: reason.to_string(),
         outcome: Some(reason.to_string()),
         signer_fingerprint: spec.signer_fingerprint.clone(),
+        schedule_spec_hash: spec.spec_hash.clone(),
+        project_authority: None,
+        admitted_capsule_hash: None,
     };
     {
         let db = ctx.scheduler_db();
@@ -658,6 +710,9 @@ mod tests {
         trust: TrustStore,
         statuses: Mutex<HashMap<String, String>>,
         outcomes: Mutex<HashMap<String, ThreadResultOutcome>>,
+        selected_binding: Mutex<Option<crate::ScheduledProjectBinding>>,
+        binding_selected: tokio::sync::Notify,
+        binding_release: tokio::sync::Notify,
         /// When true, `dispatch_scheduled_item` signals `dispatch_started`
         /// then parks on `dispatch_release` — simulating a long-running
         /// scheduled job for detachment tests.
@@ -678,6 +733,9 @@ mod tests {
                 trust: TrustStore::empty(),
                 statuses: Mutex::new(HashMap::new()),
                 outcomes: Mutex::new(HashMap::new()),
+                selected_binding: Mutex::new(None),
+                binding_selected: tokio::sync::Notify::new(),
+                binding_release: tokio::sync::Notify::new(),
                 hang_dispatch: std::sync::atomic::AtomicBool::new(false),
                 dispatch_started: Arc::new(tokio::sync::Notify::new()),
                 dispatch_release: Arc::new(tokio::sync::Notify::new()),
@@ -717,19 +775,53 @@ mod tests {
             Ok(())
         }
 
+        async fn bind_scheduled_project_authority(
+            &self,
+            _spec: &ScheduleSpecRecord,
+            _fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
+            _thread_id: &str,
+        ) -> anyhow::Result<crate::ScheduledProjectBinding> {
+            let selected = self.selected_binding.lock().unwrap().take();
+            if let Some(binding) = selected {
+                self.binding_selected.notify_one();
+                self.binding_release.notified().await;
+                return Ok(binding);
+            }
+            Ok(crate::ScheduledProjectBinding {
+                authority: ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )?,
+                pending_publication: None,
+            })
+        }
+
         async fn dispatch_scheduled_item(
             &self,
             _spec: &ScheduleSpecRecord,
-            _fire_id: &str,
-            _thread_id: &str,
-            _scheduled_at: i64,
-            _trigger_reason: &str,
-        ) -> anyhow::Result<()> {
+            _fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
+            thread_id: &str,
+            _project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+        ) -> anyhow::Result<crate::ScheduledDispatchReceipt> {
             if self.hang_dispatch.load(std::sync::atomic::Ordering::SeqCst) {
                 self.dispatch_started.notify_one();
-                self.dispatch_release.notified().await;
             }
-            Ok(())
+            Ok(crate::ScheduledDispatchReceipt {
+                thread_id: thread_id.to_owned(),
+                admitted_capsule_hash: "44".repeat(32),
+            })
+        }
+    }
+
+    fn projectless_execution() -> crate::types::ScheduleExecution {
+        crate::types::ScheduleExecution {
+            authority: crate::types::ScheduleExecutionAuthority::Node {
+                principal_id: format!("fp:{}", "33".repeat(32)),
+                effective_origin_site_id: "site:test".to_string(),
+            },
+            capabilities: vec!["ryeos.execute.directive.test".to_string()],
+            policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
         }
     }
 
@@ -750,9 +842,124 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 0,
-            requester_fingerprint: "fp:test".to_string(),
-            capabilities: vec!["ryeos.execute.*".to_string()],
+            execution: projectless_execution(),
         }
+    }
+
+    #[tokio::test]
+    async fn selected_snapshot_stays_rooted_until_fire_binding_is_durable() {
+        let ctx = Arc::new(MockContext::new());
+        let state_root = ctx.app_root.path().join(ryeos_engine::AI_DIR).join("state");
+        let state_db =
+            ryeos_state::StateDb::open(&state_root, Arc::new(ryeos_state::TrustStore::new()))
+                .unwrap();
+        let state_authority = state_db.pinned_authority().unwrap();
+        let selected_hash = "55".repeat(32);
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:test".to_owned(),
+            Some(std::path::PathBuf::from("/project")),
+            selected_hash.clone(),
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let publication = {
+            let guard = state_authority.acquire_shared_guard().unwrap();
+            let mut roots = state_authority
+                .require_recovery()
+                .unwrap()
+                .begin_staged_cas_roots_admitted(&guard, "scheduled-project-binding-test")
+                .unwrap();
+            roots
+                .protect_object_hash_admitted(&guard, &selected_hash)
+                .unwrap();
+            ryeos_state::PendingCasPublication::new(state_authority.try_clone().unwrap(), roots)
+        };
+        *ctx.selected_binding.lock().unwrap() = Some(crate::ScheduledProjectBinding {
+            authority: project_authority.clone(),
+            pending_publication: Some(publication),
+        });
+        ctx.hang_dispatch
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut spec = make_spec("snapshot-handoff", "skip");
+        spec.project_root = Some("/project".to_owned());
+        spec.execution.policy.project =
+            ryeos_engine::execution_contract::ProjectExecutionPolicy::Pinned {
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                realization: ryeos_engine::execution_contract::PinnedRealization::ReadOnly,
+                child_policy: ryeos_engine::execution_contract::ChildProjectPolicy::Inherit,
+            };
+        ctx.db.upsert_spec(&spec).unwrap();
+        let fire_id = types::fire_id(&spec.schedule_id, 1000);
+        dispatch_fire(&ctx, &fire_id, &spec, 1000, "normal", false)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ctx.binding_selected.notified(),
+        )
+        .await
+        .expect("selection must reach the pre-persistence boundary");
+
+        // Model a HEAD move removing every other root for the selected hash:
+        // the fire is still unbound, so only its staged publication can retain
+        // this exact generation during a concurrent GC root-gathering pass.
+        assert!(ctx.db.operational_snapshot_roots().unwrap().is_empty());
+        {
+            let _gc_guard = state_authority.acquire_exclusive_guard(false).unwrap();
+            let active = state_authority
+                .require_recovery()
+                .unwrap()
+                .active_staged_cas_root_hashes()
+                .unwrap();
+            assert_eq!(active.object_hashes, vec![selected_hash.clone()]);
+        }
+
+        // Park the actual binding publisher at its journal boundary, after
+        // selection has returned to the scheduler. This catches dropping the
+        // temporary publication before persist_fire_snapshot has completed.
+        let journal = state_root
+            .join("schedules")
+            .join(&spec.schedule_id)
+            .join("fires.jsonl");
+        let journal_lock = lillux::ExclusiveFileLock::acquire_existing(&journal).unwrap();
+        ctx.binding_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if ctx.db.pending_fire_outbox().unwrap() != 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("authority binding must reach its blocked journal publication");
+        let active = state_authority
+            .require_recovery()
+            .unwrap()
+            .active_staged_cas_root_hashes()
+            .unwrap();
+        assert_eq!(active.object_hashes, vec![selected_hash.clone()]);
+        drop(journal_lock);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ctx.dispatch_started.notified(),
+        )
+        .await
+        .expect("dispatch must follow durable authority publication");
+        let fire = ctx.db.get_fire(&fire_id).unwrap().unwrap();
+        assert_eq!(fire.project_authority, Some(project_authority));
+        assert_eq!(
+            ctx.db.operational_snapshot_roots().unwrap(),
+            vec![selected_hash]
+        );
+        let active = state_authority
+            .require_recovery()
+            .unwrap()
+            .active_staged_cas_root_hashes()
+            .unwrap();
+        assert!(active.object_hashes.is_empty());
     }
 
     #[tokio::test]
@@ -772,10 +979,11 @@ mod tests {
         );
     }
 
-    /// A long-running scheduled job must not hold the timer or the
-    /// runtime gate: `dispatch_fire` returns once the fire is claimed,
-    /// the fire row is `dispatched`, and a gate WRITER (scheduler/register,
-    /// project apply-snapshot) can proceed while the job is still running.
+    /// A long-running scheduled job must not hold the timer or the runtime
+    /// gate: `dispatch_fire` returns once the fire is durably reserved, the
+    /// detached admission advances it to `dispatched`, and a gate WRITER
+    /// (scheduler/register, project apply-snapshot) can proceed while the job
+    /// is still running.
     #[tokio::test]
     async fn dispatch_fire_is_detached_and_releases_gate() {
         let ctx = Arc::new(MockContext::new());
@@ -806,8 +1014,19 @@ mod tests {
         .await
         .expect("spawned dispatch must start");
 
-        // Fire is recorded dispatched.
-        let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire claimed");
+        // Detached admission publishes the dispatched authority after the
+        // launch handoff. Reservation is intentionally visible before then.
+        let fire = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire claimed");
+                if fire.status == "dispatched" {
+                    break fire;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached admission must publish dispatched authority");
         assert_eq!(fire.status, "dispatched");
 
         // A gate writer must not block behind the running job. We only
@@ -834,13 +1053,22 @@ mod tests {
                 fire_id,
                 schedule_id: spec.schedule_id.clone(),
                 scheduled_at: 1000,
-                fired_at: Some(lillux::time::timestamp_millis()),
+                reserved_at: lillux::time::timestamp_millis(),
+                dispatched_at: Some(lillux::time::timestamp_millis()),
                 completed_at: None,
                 thread_id: Some(thread_id),
                 status: "dispatched".to_string(),
                 trigger_reason: "normal".to_string(),
                 outcome: None,
                 signer_fingerprint: "11".repeat(32),
+                schedule_spec_hash: spec.spec_hash.clone(),
+                project_authority: Some(
+                    ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                        ryeos_state::objects::EnvironmentAuthority::None,
+                    )
+                    .unwrap(),
+                ),
+                admitted_capsule_hash: Some("44".repeat(32)),
             };
             ctx.db.upsert_fire(&fire).unwrap();
             // No status entry for the deterministic thread → get_thread_status None.
@@ -859,13 +1087,22 @@ mod tests {
             fire_id: "sched@1000".to_string(),
             schedule_id: "sched".to_string(),
             scheduled_at: 1000,
-            fired_at: Some(lillux::time::timestamp_millis() - 60_000),
+            reserved_at: lillux::time::timestamp_millis() - 60_001,
+            dispatched_at: Some(lillux::time::timestamp_millis() - 60_000),
             completed_at: None,
             thread_id: Some(thread_id.clone()),
             status: "dispatched".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: None,
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: Some(
+                ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )
+                .unwrap(),
+            ),
+            admitted_capsule_hash: Some("44".repeat(32)),
         };
         ctx.db.upsert_fire(&fire).unwrap();
         ctx.statuses

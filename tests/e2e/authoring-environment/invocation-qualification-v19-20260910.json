@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "scope": "installed_two_node_loopback_nine_file_fixture",
+  "source_revision": "be91327f3bd5f0c17c38af97acee9deb2c083439",
+  "installed_daemon_sha256": "37694e37200bd28c63eece3047a096bda01a6f53e0ebb9992977b5959f362c05",
+  "root": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+  "launch": {
+    "remote": "target",
+    "outbound_principal": "configured_operator",
+    "project": "/tmp/ryeos-codex-placement.kiyBnLrn/development-worker-project.ZpxoeAHM",
+    "item_ref": "worker_execution:codex/session",
+    "ref_bindings": {
+      "environment": "config:development/ryeos/worker-environment"
+    },
+    "parameters": {
+      "credential_profile_id": "source-personal"
+    },
+    "launch_id": "L-20260910000000000000000000000019",
+    "execution_policy": {
+      "schema_version": 2,
+      "ownership": "daemon_owned",
+      "recovery": "restart_recoverable",
+      "response": "accepted",
+      "target": {
+        "kind": "here"
+      },
+      "environment": {
+        "kind": "project_overlay",
+        "include_operator_vault": false,
+        "name_policy": {
+          "kind": "declared_required"
+        }
+      },
+      "project": {
+        "kind": "pinned",
+        "source": {
+          "kind": "current_head"
+        },
+        "realization": {
+          "kind": "cow",
+          "terminal_publication": {
+            "kind": "retain_current_head"
+          }
+        },
+        "child_policy": {
+          "kind": "inherit"
+        }
+      }
+    }
+  },
+  "command_observation": {
+    "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+    "chain_root_id": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+    "command_kind": "route",
+    "command_sequence": 2,
+    "command_state": "completed",
+    "completion_fence": {
+      "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+      "command_sequence": 2,
+      "completion_operation_id": "0fc0cc9d8bad0b810828f27d167379ac1666f653717fa197e049238f541578b0",
+      "placement_thread_id": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+      "request_digest": "bd37c6fffa8e7d571ec5405423989692cd7725421a301a2f144bf87979cfe1f3",
+      "turn_id": "01a08667-b96c-7ac2-8160-45949680b013",
+      "worker_boot_epoch": 1
+    },
+    "idempotency_key": "invocation-v19-turn-start",
+    "operation": {
+      "completion_operation_id": "0fc0cc9d8bad0b810828f27d167379ac1666f653717fa197e049238f541578b0",
+      "completion_source": {
+        "batch_digest": "36c6cc123e9724679029f3ec2149c5a754c0d0f4c2813bade17438d982a2b428",
+        "batch_operation_id": "6b7b8c7cb3a7a765e058bd77defa61800dda86e258a42cce79888edc36834213",
+        "first_sequence": 15,
+        "kind": "pushed_observation_batch",
+        "through_sequence": 18
+      },
+      "id": "01a08667-b96c-7ac2-8160-45949680b013",
+      "kind": "turn",
+      "start_operation_id": "305cb5589c9ed4b9861cd3dc93c4564d82863d85441ae2b9b05e5642c86f0982",
+      "state": "completed"
+    },
+    "placement_thread_id": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+    "request_digest": "bd37c6fffa8e7d571ec5405423989692cd7725421a301a2f144bf87979cfe1f3",
+    "response_digest": "c00ee1c8236184210a215830f23e37e1e769e6ecc2ce29f691fd72c1b07cf09d",
+    "route_id": "turn.start",
+    "worker_boot_epoch": 1
+  },
+  "status_after_freeze": {
+    "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+    "bounded_outcome": null,
+    "candidate_disposition": "owner_decision",
+    "candidate_disposition_operation_id": null,
+    "candidate_disposition_root_id": null,
+    "candidate_evaluation": null,
+    "candidate_evaluation_hash": null,
+    "candidate_qualification": null,
+    "candidate_required": true,
+    "candidate_snapshot_hash": "bdddd0c0693614fe9722be7937a2adc98458f933d4d78dac30b82c9022187703",
+    "candidate_validation_hash": "85d7d3782c62d161098956ae859b48c4a800e8f15aa5f8a4aae33074fbd8de23",
+    "chain_root_id": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+    "completion_fence": {
+      "admitted_capsule_hash": "04205c0e8f8d44d091cf86d5358c4fdfecb77ba2881cb467ee9c87736da0cc00",
+      "command_sequence": 2,
+      "completion_operation_id": "0fc0cc9d8bad0b810828f27d167379ac1666f653717fa197e049238f541578b0",
+      "placement_thread_id": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+      "request_digest": "bd37c6fffa8e7d571ec5405423989692cd7725421a301a2f144bf87979cfe1f3",
+      "turn_id": "01a08667-b96c-7ac2-8160-45949680b013",
+      "worker_boot_epoch": 1
+    },
+    "created_at_ms": 1788961260863,
+    "credential_generation": 2,
+    "credential_profile_id": "source-personal",
+    "current_turn_id": null,
+    "handoff": null,
+    "owner_principal": "fp:187fab6cdcea75febdf44cda0874fd8da7dd67b70bb8592f90f93506c2393786",
+    "placement_thread_id": "T-0e33b153-4d4b-b843-cad8-f2b946a238e6",
+    "publication_result": "retained",
+    "remote_thread_id": "01a08667-285d-7cd1-b0d2-248cbe96962a",
+    "send_boundary": "settled",
+    "state": "frozen",
+    "terminal_reason": "completed",
+    "updated_at_ms": 1788961436701,
+    "worker_boot_epoch": 1,
+    "worker_instance_id": "T-f4242fac-c6a0-ec89-7207-4296fe918c73",
+    "workspace_id": "pre-1788961257947-617f09dd"
+  },
+  "children": [
+    {
+      "result": {
+        "error": {
+          "exit_code": 1,
+          "stderr": "",
+          "stdout": "Diff in /tmp/ryeos-codex-placement.kiyBnLrn/target-node/.ai/state/cache/snapshots/21bc55eeba6b3f2606b9ad907bc2d4b6b8a1349d30cd9a3b31d6490aa93063a3/crates/qualification/sample.rs:1:\n-pub fn value()->u32{2}\n+pub fn value() -> u32 {\n+    2\n+}\n \n"
+        },
+        "metadata": null,
+        "outcome_code": "exit:1",
+        "result": null
+      },
+      "thread": {
+        "thread_id": "T-c26c4bc8-2330-817a-b634-2db3ed235fe8",
+        "status": "failed",
+        "admitted_launch_capsule_hash": "cccbbcf171c9891e84b4af4991954ade7cea7d3223dc2c2e3ed0415209802dab",
+        "result_project_snapshot_hash": null
+      }
+    },
+    {
+      "result": {
+        "error": null,
+        "metadata": null,
+        "outcome_code": "exit:0",
+        "result": ""
+      },
+      "thread": {
+        "thread_id": "T-085c349c-5d24-522b-b5bd-f7a780eb16ef",
+        "status": "completed",
+        "admitted_launch_capsule_hash": "5f890ac6309918339f8d6f3013cb8c932fbd132397467208f702ac7c83debf65",
+        "result_project_snapshot_hash": null
+      }
+    },
+    {
+      "result": {
+        "error": null,
+        "metadata": null,
+        "outcome_code": "exit:0",
+        "result": ""
+      },
+      "thread": {
+        "thread_id": "T-54c7e436-6023-eebf-ec36-3298ddba85c9",
+        "status": "completed",
+        "admitted_launch_capsule_hash": "cccbbcf171c9891e84b4af4991954ade7cea7d3223dc2c2e3ed0415209802dab",
+        "result_project_snapshot_hash": null
+      }
+    }
+  ],
+  "independent_evaluator": {
+    "result": {
+      "error": null,
+      "metadata": null,
+      "outcome_code": "exit:0",
+      "result": {
+        "accepted": true,
+        "base_snapshot_hash": "d9feab6a4309464ffcdf31c9e57b37b80e0a842b226fffcd98ab0f79e5be0902",
+        "candidate_snapshot_hash": "bdddd0c0693614fe9722be7937a2adc98458f933d4d78dac30b82c9022187703",
+        "evidence": {
+          "fixture": "formatted-value-two",
+          "sample_bytes_match": true
+        },
+        "schema_version": 1
+      }
+    },
+    "thread": {
+      "thread_id": "T-698b2fcb-2f9d-4ccc-19c0-3b8fcb011b70",
+      "status": "completed",
+      "admitted_launch_capsule_hash": "2d0f73b141714e5dd9b90881a12b84b40df40a4db11e5944fb672e1dbe1e50ee",
+      "result_project_snapshot_hash": null
+    }
+  },
+  "qualification": {
+    "status": "refused",
+    "reason": "evaluator terminal does not prove exact successful owner-authorized completion",
+    "diagnosis": "handler requires literal success outcome, but a completed subprocess Tool records exit:0",
+    "source_fix": "in_progress"
+  },
+  "recovery": {
+    "previous_root": "T-afb1433c-8409-995d-7e09-b3b5e4716d98",
+    "node_ready": true,
+    "root_status": "killed",
+    "unknown_command_replayed": false,
+    "workspace": "retained with formatted value2, no frozen candidate",
+    "failure": "native recovery retained a fork-sensitive CAS guard across workspace creator spawn",
+    "source_fix": "guard scoped before rebind/Create; reviewed; focused cold reconstruction test passed; not installed"
+  },
+  "evidence_limits": [
+    "Independent evaluator accepted the candidate, but qualification adoption and source-fenced return remain blocked on source correction.",
+    "Node readiness does not prove worker restart/reattachment; cold-resume guard correction still needs installation.",
+    "Full repository development and native ingress remain open.",
+    "Railway and release deployment are excluded by the user's explicit local-remotes direction."
+  ]
+}

@@ -13,7 +13,7 @@
 //! and a hardcoded signature envelope (`#` prefix). Every kind schema must
 //! be signed by a trusted key. Unsigned or tampered schemas are rejected.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
@@ -775,7 +775,9 @@ pub struct MethodDecl {
 /// never to a consumer that happens to call it. A cache hit omits the child
 /// execution entirely, so the implementation owner must explicitly promise
 /// referential transparency and absence of per-invocation side effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AugmentationMethodCacheContract {
     /// The complete method execution may be omitted when the daemon has a
@@ -921,6 +923,9 @@ pub struct KindExternalContentDecl {
     pub realization_derived: String,
     /// Named-root classes this kind permits its items to declare.
     pub allowed_roots: Vec<String>,
+    /// Target namespaces admitted by this signed kind. Unlike named source
+    /// roots, these control where verified content appears in the sandbox.
+    pub allowed_mount_roots: Vec<crate::external_content::ExternalContentMountRoot>,
     /// Kind-local ceiling, additionally bounded by the substrate maximum.
     pub max_declarations: usize,
     /// Grant to pin large-tier realizations. Absent means refused: an item
@@ -973,7 +978,9 @@ pub enum SourceClosureLocationDecl {
     OwnerRelativeSource { path: Vec<String> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceClosureTestimonyDecl {
     OwnerSignedFiles,
@@ -996,6 +1003,51 @@ pub struct EffectiveValidatorDecl {
 #[serde(deny_unknown_fields)]
 pub struct EffectClassCeilingDecl {
     pub path: Vec<String>,
+}
+
+/// Workspace relationship selected by an exact signed child definition.
+///
+/// This is deliberately independent of durable-effect and network classes:
+/// neither whether a result is replayable nor whether a subprocess may use the
+/// network proves how it may observe or mutate its parent's live workspace.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAccess {
+    ImmutableCurrentGeneration,
+    SharedExclusive,
+}
+
+/// Kind-owned mechanical projection of [`WorkspaceAccess`]. The engine never
+/// names a tool, provider, worker, or authored field directly.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceAccessDecl {
+    pub path: Vec<String>,
+}
+
+/// Signed mechanical projection of a subject's per-execution network ceiling.
+/// Generic plan compilation follows only this kind-owned composed-value path;
+/// it never names a tool, worker, provider, or authored field directly.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkAuthorityCeilingDecl {
+    pub path: Vec<String>,
+    /// Deliberate result when the composed subject omits `path`. This is
+    /// authored in the kind schema so omission can never become a Rust
+    /// fallback that silently grants node-policy networking.
+    pub default: crate::isolation::IsolationNetworkAuthorityCeiling,
+}
+
+/// Signed mechanical projection of the subject's filesystem ceiling. The
+/// authored default belongs to the registered kind, just like networking;
+/// dispatch must never infer filesystem authority from an executable name.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemAuthorityCeilingDecl {
+    pub path: Vec<String>,
+    pub default: crate::isolation::IsolationFilesystemAuthorityCeiling,
 }
 
 /// Signed resource and lifecycle ceiling for a callback-free persistent
@@ -1111,6 +1163,20 @@ pub struct ExecutionSchema {
     /// Absence means the kind is ineligible for durable dispatch effects.
     #[serde(default)]
     pub effect_class_ceiling: Option<EffectClassCeilingDecl>,
+    /// Optional signed path to a child definition's workspace-access class.
+    /// Absence is ineligible for shared-workspace delegation; it is never a
+    /// Rust fallback to inherited write access.
+    #[serde(default)]
+    pub workspace_access: Option<WorkspaceAccessDecl>,
+    /// Optional signed path to the composed subject's launch network ceiling.
+    /// Absence means this kind cannot author a narrower per-execution ceiling.
+    #[serde(default)]
+    pub network_authority_ceiling: Option<NetworkAuthorityCeilingDecl>,
+    /// Optional signed projection of a per-execution filesystem ceiling.
+    /// A kind without this projection cannot author additional narrowing;
+    /// parent and node restrictions still apply independently.
+    #[serde(default)]
+    pub filesystem_authority_ceiling: Option<FilesystemAuthorityCeilingDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -1131,6 +1197,105 @@ pub struct ExecutionSchema {
     /// parent runtime spawn.
     #[serde(default)]
     pub launch_augmentations: Vec<LaunchAugmentationDecl>,
+}
+
+impl ExecutionSchema {
+    pub fn project_filesystem_authority_ceiling(
+        &self,
+        composed: &Value,
+    ) -> Result<crate::isolation::IsolationFilesystemAuthorityCeiling, EngineError> {
+        let Some(declaration) = self.filesystem_authority_ceiling.as_ref() else {
+            return Ok(crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(declaration.default);
+            };
+            value = next;
+        }
+        serde_json::from_value(value.clone()).map_err(|error| EngineError::SchemaLoaderError {
+            reason: format!(
+                "signed filesystem-authority projection `{}` is invalid: {error}",
+                declaration.path.join(".")
+            ),
+        })
+    }
+
+    /// Resolve the signed shared-workspace contract, when this kind owns one.
+    ///
+    /// Keep this projection here beside effect/network projection. Adding a
+    /// worker-specific switch in a dispatcher would create a second kind
+    /// system and allow the same composed item to mean different things at
+    /// different call sites.
+    pub fn project_workspace_access(
+        &self,
+        composed: &Value,
+    ) -> Result<Option<WorkspaceAccess>, EngineError> {
+        let Some(declaration) = self.workspace_access.as_ref() else {
+            return Ok(None);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(None);
+            };
+            value = next;
+        }
+        match value.as_str() {
+            Some("immutable_current_generation") => {
+                Ok(Some(WorkspaceAccess::ImmutableCurrentGeneration))
+            }
+            Some("shared_exclusive") => Ok(Some(WorkspaceAccess::SharedExclusive)),
+            Some(other) => Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "signed workspace-access projection contains unknown value `{other}`"
+                ),
+            }),
+            None => Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "signed workspace-access projection `{}` resolved to a non-string value",
+                    declaration.path.join(".")
+                ),
+            }),
+        }
+    }
+
+    /// Project the complete composed subject into the closed launch-network
+    /// vocabulary declared by this kind. A kind without a declaration cannot
+    /// author a narrower ceiling and therefore yields `node_policy`.
+    pub fn project_network_authority_ceiling(
+        &self,
+        composed: &Value,
+    ) -> Result<crate::isolation::IsolationNetworkAuthorityCeiling, EngineError> {
+        let Some(declaration) = self.network_authority_ceiling.as_ref() else {
+            return Ok(crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(declaration.default);
+            };
+            value = next;
+        }
+        match value.as_str() {
+            Some("node_policy") => {
+                Ok(crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy)
+            }
+            Some("isolated") => Ok(crate::isolation::IsolationNetworkAuthorityCeiling::Isolated),
+            Some(other) => Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "signed network-authority projection contains unknown value `{other}`"
+                ),
+            }),
+            None => Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "signed network-authority projection `{}` resolved to a non-string value",
+                    declaration.path.join(".")
+                ),
+            }),
+        }
+    }
 }
 
 fn default_alias_depth() -> usize {
@@ -2471,6 +2636,9 @@ fn parse_execution_schema(
         "persistent_session",
         "effective_validator",
         "effect_class_ceiling",
+        "workspace_access",
+        "network_authority_ceiling",
+        "filesystem_authority_ceiling",
         "method_dispatch",
         "methods",
         "augmentation_methods",
@@ -2722,6 +2890,84 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let workspace_access = match execution_value.get("workspace_access") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<WorkspaceAccessDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.workspace_access declaration: {error}"
+                    ),
+                })?;
+            if declaration.path.is_empty()
+                || declaration
+                    .path
+                    .iter()
+                    .any(|segment| segment.trim().is_empty() || segment.contains('.'))
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.workspace_access.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let network_authority_ceiling = match execution_value.get("network_authority_ceiling") {
+        Some(value) => {
+            let declaration =
+                serde_yaml::from_value::<NetworkAuthorityCeilingDecl>(value.clone()).map_err(
+                    |error| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: invalid execution.network_authority_ceiling declaration: {error}"
+                        ),
+                    },
+                )?;
+            if declaration.path.is_empty()
+                || declaration
+                    .path
+                    .iter()
+                    .any(|segment| segment.trim().is_empty() || segment.contains('.'))
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.network_authority_ceiling.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let filesystem_authority_ceiling = match execution_value.get("filesystem_authority_ceiling") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<FilesystemAuthorityCeilingDecl>(
+                value.clone(),
+            )
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: invalid execution.filesystem_authority_ceiling declaration: {error}"
+                ),
+            })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty() || segment.trim() != segment || segment.contains('.')
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.filesystem_authority_ceiling.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
     // Parse method_dispatch (route + default method).
     let method_dispatch = if let Some(md_value) = execution_value.get("method_dispatch") {
         Some(
@@ -2931,6 +3177,9 @@ fn parse_execution_schema(
         persistent_session,
         effective_validator,
         effect_class_ceiling,
+        workspace_access,
+        network_authority_ceiling,
+        filesystem_authority_ceiling,
         method_dispatch,
         methods,
         augmentation_methods,
@@ -2987,6 +3236,15 @@ fn validate_execution_external_content_decl(
     display: &str,
     field: &str,
 ) -> Result<(), EngineError> {
+    let mount_roots = declaration
+        .allowed_mount_roots
+        .iter()
+        .collect::<BTreeSet<_>>();
+    if mount_roots.is_empty() || mount_roots.len() != declaration.allowed_mount_roots.len() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!("{display}: {field}.allowed_mount_roots must be nonempty and unique"),
+        });
+    }
     if declaration.realization_derived != crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
     {
         return Err(EngineError::SchemaLoaderError {
@@ -4341,6 +4599,86 @@ execution:
     fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {
         let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         parse_execution_schema(&v, "test.yaml")
+    }
+
+    #[test]
+    fn network_authority_projection_is_closed_and_has_a_signed_default() {
+        let yaml = "\
+execution:
+  network_authority_ceiling:
+    path: [network_authority]
+    default: node_policy
+  delegate:
+    via: runtime_registry
+";
+        let execution = parse_exec(yaml).unwrap().unwrap();
+        assert_eq!(
+            execution
+                .project_network_authority_ceiling(&serde_json::json!({}))
+                .unwrap(),
+            crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy
+        );
+        assert_eq!(
+            execution
+                .project_network_authority_ceiling(&serde_json::json!({
+                    "network_authority": "isolated"
+                }))
+                .unwrap(),
+            crate::isolation::IsolationNetworkAuthorityCeiling::Isolated
+        );
+        assert!(
+            execution
+                .project_network_authority_ceiling(&serde_json::json!({
+                    "network_authority": "host"
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("unknown value")
+        );
+    }
+
+    #[test]
+    fn filesystem_projection_uses_only_signed_defaults_and_closed_values() {
+        use crate::isolation::IsolationFilesystemAuthorityCeiling::{
+            CapturedExecution, NodePolicy,
+        };
+        for (default, expected) in [
+            ("node_policy", NodePolicy),
+            ("captured_execution", CapturedExecution),
+        ] {
+            let yaml = format!(
+                "execution:\n  filesystem_authority_ceiling:\n    path: [filesystem_authority]\n    default: {default}\n  delegate:\n    via: runtime_registry\n"
+            );
+            let execution = parse_exec(&yaml).unwrap().unwrap();
+            assert_eq!(
+                execution
+                    .project_filesystem_authority_ceiling(&serde_json::json!({}))
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                execution
+                    .project_filesystem_authority_ceiling(&serde_json::json!({
+                        "filesystem_authority": "captured_execution"
+                    }))
+                    .unwrap(),
+                CapturedExecution
+            );
+            for invalid in [
+                serde_json::json!("host"),
+                serde_json::json!(null),
+                serde_json::json!({}),
+            ] {
+                assert!(
+                    execution
+                        .project_filesystem_authority_ceiling(&serde_json::json!({
+                            "filesystem_authority": invalid
+                        }))
+                        .is_err()
+                );
+            }
+            assert!(parse_exec(&yaml.replace(&format!("    default: {default}\n"), "")).is_err());
+        }
     }
 
     #[test]
@@ -5775,6 +6113,7 @@ metadata:
     fn external_content_contract_loads_from_a_signed_schema() {
         let registry = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
+            "allowed_mount_roots: [project]",
             "allowed_roots: [\"project_files\", \"bundle:own\"]",
             "max_declarations: 4",
         ])
@@ -5795,6 +6134,7 @@ metadata:
     fn external_content_contract_rejects_a_foreign_derived_slot() {
         let error = load_external_content_schema(&[
             "realization_derived: some_other_slot",
+            "allowed_mount_roots: [project]",
             "allowed_roots: [\"project_files\"]",
             "max_declarations: 4",
         ])
@@ -5810,6 +6150,7 @@ metadata:
         for bad in ["max_declarations: 0", "max_declarations: 9"] {
             let error = load_external_content_schema(&[
                 "realization_derived: effective_external_realizations",
+                "allowed_mount_roots: [project]",
                 "allowed_roots: [\"project_files\"]",
                 bad,
             ])
@@ -5827,6 +6168,7 @@ metadata:
     fn external_content_contract_permits_locator_free_content() {
         let registry = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
+            "allowed_mount_roots: [project]",
             "allowed_roots: []",
             "max_declarations: 4",
         ])
@@ -5842,6 +6184,7 @@ metadata:
     fn external_content_contract_requires_supported_root_classes() {
         let error = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
+            "allowed_mount_roots: [project]",
             "allowed_roots: [\"host_path\"]",
             "max_declarations: 4",
         ])
@@ -5860,6 +6203,7 @@ location:
 content:
   external_content:
     realization_derived: effective_external_realizations
+    allowed_mount_roots: [project]
     allowed_roots: []
     max_declarations: 8
     large_content:
@@ -5901,6 +6245,7 @@ metadata:
     fn external_content_contract_refuses_unknown_fields() {
         let error = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
+            "allowed_mount_roots: [project]",
             "allowed_roots: [\"project_files\"]",
             "max_declarations: 4",
             "surprise: true",

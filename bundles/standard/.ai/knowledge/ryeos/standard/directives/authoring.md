@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:02f4161e4b1726b2129b077028b81ea70fb09ebf35fd682cf3a251d082f41bda:TUCUg1qIm9qmDGTco5Q3fF7f9MRFEdnfhyeCYto/mDM4igiisf9NSd1vIHinBe1j7ryUnVehRvw+ik/xP0YDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-10T02:15:39Z:c878fcdb8dd85b10b7ce4d50f2fb01210a416b75d1cdadcbc02931a241900abd:oIDMe2g7c1yq2p46VYddNx6/EJlkKSaFTLMLYyedhzox7b2uvQRKic1dCK7VmfrQnOWrwu3d4os82kCkZv5ZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
-version: "1.1.0"
+version: "1.2.0"
 description: How to author directive markdown files.
 ---
 
@@ -10,7 +10,23 @@ description: How to author directive markdown files.
 
 Invariant: a directive file is signed markdown whose YAML metadata is composed and whose body is the prompt executed by directive-runtime.
 
+## Design the work first
+
+Name the judgment or workflow to perform, its inputs, bounded operations and
+expected result. A directive is executable intent for a model, not a required
+persona or persistent identity. Optional role instructions do not grant
+authority. See [Directives](directives.md) for the conceptual distinction.
+
+Keep required checks and disposition explicit in the surrounding workflow when
+the project needs independent acceptance. A model declaring success is not a
+substitute for those checks. This does not prevent a directive from using tools
+or pursuing an exploratory task within its admitted limits.
+
 ## Minimal shape
+
+The body is free-form prompt text. Markdown headings, prose and lists are
+ordinary authoring choices; XML wrappers and role/task section ordering are
+not required. Prompt formatting is not a mechanically enforced workflow.
 
 ```markdown
 ---

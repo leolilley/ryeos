@@ -1,0 +1,39 @@
+# ryeos:signed:2026-09-10T10:42:57Z:a0b0d0ed3974e5b9b1d9ee3ae763f9102db1b37c0a33825c85fb2f8d2049a4dd:azECy3LZQKioEvbX3J9VxUd/xTVZXgnyxQp8g2mbQmWZb5WUYFL7YGceS2QUXFrt0O6KcAHjq04tqaEm8MsLAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "opencode"
+version: "0.1.0"
+executor_id: "@subprocess"
+description: opencode server profile for one RyeOS session-bound worker execution.
+execution_protocol: protocol:ryeos/core/structured_session
+supported_target:
+  os: linux
+  arch: x86_64
+
+# RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
+# process tree. The kind-owned compiler caps and freezes this signed override;
+# RyeOS separately limits session groups and total dedicated workers.
+session_resources:
+  real_uid_process_limit: 4096
+
+source:
+  root: "lib/hosted"
+  entry: "structured-session.profile.json"
+  digest: "ee8f3f60063859bad67fad5ba537b9b7cd650d1a8084b2cf1e678c3e5a4233e9"
+
+external_content:
+  # Runtime dependencies must never create mountpoints in the project CoW.
+  - id: opencode
+    kind: file
+    mode: pinned
+    digest: "87bd160e053af86b5b409daabf71f8dc05bbc3a2a3a5f563f36011cdf706a999"
+    metadata_hint: "anomaly-opencode-linux-x64-v1.18.30-glibc"
+    mount_root: execution_runtime
+    mount: opencode
+
+config:
+  command: "bin:core/ryeos-structured-session-bridge"
+  args: ["${source.entry}"]
+  env:
+    PATH: ""
+    LANG: "C"
+    LC_ALL: "C"
+  timeout_secs: 0

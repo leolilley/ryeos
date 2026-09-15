@@ -15,6 +15,9 @@ use crate::{
 
 const DEFAULT_ADMISSION_CLAIM: &str = "accepted";
 
+/// Canonical policy exposed by the existing local admission/submit owner.
+pub const LOCAL_ADMISSION_POLICY: &str = "local-node-v2";
+
 #[derive(Debug, Clone)]
 pub struct AdmissionRequest {
     pub subject_hash: String,

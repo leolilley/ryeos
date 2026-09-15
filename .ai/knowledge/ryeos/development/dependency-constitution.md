@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:55Z:d00aad6730438b4aa98020a3f15cb005393aa3639fd35a332b5c759ab4aa59f2:uXAdcqN20W0XPxtqdKveVSjpz0u2wW4Fx3hSmsIF5dt+iZ+LXuq9D/rvNERTYsRQW38fjZA2ZM2GL1bUtjREAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-07T06:05:34Z:c377b84b83efbabc68e34f2f3b2f16084ed40b3f2ff4b386886af6c6237ddc4e:PtXrbGxJC+OIyXTBLZDE3tNEg3vyK/kkkaJa3xEXa/wi6bc2xmBRxjgxBYdVDtfAvkNTGXG144+H/TK+VxS8DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: dependency-constitution
@@ -48,7 +48,7 @@ Rules:
 - Shared types move downward only when they genuinely belong to the lower
   layer; forwarding modules and circular compatibility crates are forbidden.
 
-`scripts/lint-dependency-layers.py` enforces the cycle and forbidden-edge
+`tool:ryeos/development/repository-validation/dependency-layers` enforces the cycle and forbidden-edge
 portions directly from workspace manifests without invoking Cargo.
 
 “Durable I/O” is defined by the platform-specific

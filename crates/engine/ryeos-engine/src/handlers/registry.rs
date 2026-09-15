@@ -28,10 +28,14 @@ pub enum VerifiedHandler {
         trust_class: TrustClass,
         bundle_root: PathBuf,
         descriptor_path: PathBuf,
+        descriptor_content_digest: String,
+        descriptor_signer_fingerprint: String,
         resolved_binary_path: PathBuf,
         /// Raw SHA-256 of the exact executable bytes authorized by the
         /// bundle's signed executor manifest.
         resolved_binary_hash: String,
+        resolved_binary_manifest_hash: String,
+        resolved_binary_signer_fingerprint: String,
     },
     /// Binary not found on this node. Registered but not invocable.
     /// This is expected for user-tier handler descriptors pushed from
@@ -42,8 +46,23 @@ pub enum VerifiedHandler {
         trust_class: TrustClass,
         bundle_root: PathBuf,
         descriptor_path: PathBuf,
+        descriptor_content_digest: String,
+        descriptor_signer_fingerprint: String,
         reason: String,
     },
+}
+
+/// Compact exact identity of one signed and executable handler. Paths are
+/// deliberately absent: they are installation coordinates, not retained
+/// execution evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedExecutionEvidenceProjectorIdentity {
+    pub canonical_ref: String,
+    pub descriptor_content_digest: String,
+    pub descriptor_signer_fingerprint: String,
+    pub binary_content_digest: String,
+    pub binary_manifest_digest: String,
+    pub binary_signer_fingerprint: String,
 }
 
 impl VerifiedHandler {
@@ -76,6 +95,32 @@ impl VerifiedHandler {
             Self::Unresolved {
                 descriptor_path, ..
             } => descriptor_path,
+        }
+    }
+
+    pub fn execution_evidence_projector_identity(
+        &self,
+    ) -> Result<VerifiedExecutionEvidenceProjectorIdentity, HandlerError> {
+        match self {
+            Self::Resolved {
+                canonical_ref,
+                descriptor_content_digest,
+                descriptor_signer_fingerprint,
+                resolved_binary_hash,
+                resolved_binary_manifest_hash,
+                resolved_binary_signer_fingerprint,
+                ..
+            } => Ok(VerifiedExecutionEvidenceProjectorIdentity {
+                canonical_ref: canonical_ref.clone(),
+                descriptor_content_digest: descriptor_content_digest.clone(),
+                descriptor_signer_fingerprint: descriptor_signer_fingerprint.clone(),
+                binary_content_digest: resolved_binary_hash.clone(),
+                binary_manifest_digest: resolved_binary_manifest_hash.clone(),
+                binary_signer_fingerprint: resolved_binary_signer_fingerprint.clone(),
+            }),
+            Self::Unresolved { canonical_ref, .. } => Err(HandlerError::NotExecutable {
+                canonical_ref: canonical_ref.clone(),
+            }),
         }
     }
 }
@@ -135,6 +180,8 @@ pub enum HandlerError {
     },
     #[error("handler `{canonical_ref}` not registered")]
     NotRegistered { canonical_ref: String },
+    #[error("handler `{canonical_ref}` has no verified executable identity")]
+    NotExecutable { canonical_ref: String },
 }
 
 impl HandlerRegistry {
@@ -173,20 +220,32 @@ impl HandlerRegistry {
                     });
                 }
 
-                let binary_identity = match &verified {
+                let source_identity = match &verified {
                     VerifiedHandler::Resolved {
+                        descriptor_content_digest,
+                        descriptor_signer_fingerprint,
                         resolved_binary_hash,
+                        resolved_binary_manifest_hash,
+                        resolved_binary_signer_fingerprint,
                         ..
-                    } => format!("sha256:{resolved_binary_hash}"),
-                    VerifiedHandler::Unresolved { descriptor, .. } => {
-                        format!("unresolved:{}", descriptor.binary_ref)
-                    }
+                    } => format!(
+                        "{descriptor_content_digest}|{descriptor_signer_fingerprint}|{resolved_binary_hash}|{resolved_binary_manifest_hash}|{resolved_binary_signer_fingerprint}"
+                    ),
+                    VerifiedHandler::Unresolved {
+                        descriptor,
+                        descriptor_content_digest,
+                        descriptor_signer_fingerprint,
+                        ..
+                    } => format!(
+                        "{descriptor_content_digest}|{descriptor_signer_fingerprint}|unresolved:{}",
+                        descriptor.binary_ref
+                    ),
                 };
                 fingerprint_parts.push(format!(
                     "{}|{}|{}",
                     verified.canonical_ref(),
                     verified.descriptor().abi_version,
-                    binary_identity,
+                    source_identity,
                 ));
                 entries.insert(verified.canonical_ref().to_owned(), verified);
             }
@@ -384,8 +443,12 @@ fn load_and_verify_handler(
             trust_class,
             bundle_root: bundle_root.to_owned(),
             descriptor_path: yaml_path.to_owned(),
+            descriptor_content_digest: actual_hash,
+            descriptor_signer_fingerprint: sig_header.signer_fingerprint.clone(),
             resolved_binary_path: res.absolute_path,
             resolved_binary_hash: res.content_hash,
+            resolved_binary_manifest_hash: res.manifest_hash,
+            resolved_binary_signer_fingerprint: res.signer_fingerprint,
         }),
         Err(e)
             if trust_class == TrustClass::TrustedProject && is_unresolved_handler_absence(&e) =>
@@ -403,6 +466,8 @@ fn load_and_verify_handler(
                 trust_class,
                 bundle_root: bundle_root.to_owned(),
                 descriptor_path: yaml_path.to_owned(),
+                descriptor_content_digest: actual_hash,
+                descriptor_signer_fingerprint: sig_header.signer_fingerprint.clone(),
                 reason,
             })
         }
@@ -554,16 +619,31 @@ mod tests {
             trust_class: TrustClass::TrustedBundle,
             bundle_root: PathBuf::from("/tmp/bundle"),
             descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/my_handler.yaml"),
+            descriptor_content_digest: "11".repeat(32),
+            descriptor_signer_fingerprint: "22".repeat(32),
             resolved_binary_path: PathBuf::from(
                 "/tmp/bundle/.ai/bin/x86_64-unknown-linux-gnu/my_handler",
             ),
             resolved_binary_hash: "00".repeat(32),
+            resolved_binary_manifest_hash: "33".repeat(32),
+            resolved_binary_signer_fingerprint: "44".repeat(32),
         };
 
         assert_eq!(handler.canonical_ref(), "handler:test/my_handler");
         assert_eq!(handler.descriptor().name, "my_handler");
         assert_eq!(handler.trust_class(), TrustClass::TrustedBundle);
         assert!(handler.descriptor_path().ends_with("my_handler.yaml"));
+        assert_eq!(
+            handler.execution_evidence_projector_identity().unwrap(),
+            VerifiedExecutionEvidenceProjectorIdentity {
+                canonical_ref: "handler:test/my_handler".to_owned(),
+                descriptor_content_digest: "11".repeat(32),
+                descriptor_signer_fingerprint: "22".repeat(32),
+                binary_content_digest: "00".repeat(32),
+                binary_manifest_digest: "33".repeat(32),
+                binary_signer_fingerprint: "44".repeat(32),
+            }
+        );
     }
 
     #[test]
@@ -583,6 +663,8 @@ mod tests {
             trust_class: TrustClass::TrustedProject,
             bundle_root: PathBuf::from("/tmp/bundle"),
             descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/missing.yaml"),
+            descriptor_content_digest: "11".repeat(32),
+            descriptor_signer_fingerprint: "22".repeat(32),
             reason: "binary not found".to_owned(),
         };
 
@@ -590,5 +672,17 @@ mod tests {
         assert_eq!(handler.descriptor().name, "missing");
         assert_eq!(handler.trust_class(), TrustClass::TrustedProject);
         assert!(handler.descriptor_path().ends_with("missing.yaml"));
+
+        let mut registry = HandlerRegistry::empty();
+        registry
+            .entries
+            .insert(handler.canonical_ref().to_owned(), handler);
+        assert!(matches!(
+            registry.ensure_serves(
+                "handler:test/missing",
+                HandlerServes::ExecutionEvidenceProjector
+            ),
+            Err(HandlerError::ServesMismatch { .. })
+        ));
     }
 }

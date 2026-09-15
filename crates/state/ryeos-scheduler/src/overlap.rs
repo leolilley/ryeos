@@ -141,8 +141,16 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 0,
-            requester_fingerprint: "fp:test".to_string(),
-            capabilities: vec!["ryeos.execute.*".to_string()],
+            execution: crate::types::ScheduleExecution {
+                authority: crate::types::ScheduleExecutionAuthority::Node {
+                    principal_id: format!("fp:{}", "33".repeat(32)),
+                    effective_origin_site_id: "site:test".to_string(),
+                },
+                capabilities: vec!["ryeos.execute.*".to_string()],
+                policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                    ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+                ),
+            },
         }
     }
 

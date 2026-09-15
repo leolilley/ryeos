@@ -1,0 +1,50 @@
+# ryeos:signed:2026-09-08T10:36:33Z:2903bca1202bbac0cebf7f695b06302eae2c3c611258a0b80e6cc79b2461ee3b:K6R5rB9BC+nhAOXaO3kcXUjBfkB17G8UMW/HhGaIgx+YRzqPNZ3e8+XjAgovcoHu/PKH2LKUIZZ2kq5kqJLeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained output from the exact authoring build-support recipe
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: build_support
+      path: products/authoring-build-support
+      storage: large_content
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+  products:
+    - name: build_support
+      source: {kind: workspace_output, root: build_support}
+      path: products/authoring-build-support
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: build_support_to_utility_production
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-build-support-production
+        recipe_binding: product_recipe
+        product_name: build_support
+        parameters: {}
+      consumer:
+        canonical_ref: graph:ryeos/development/authoring-built-utilities-production
+        declaration_id: authoring-build-support
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []

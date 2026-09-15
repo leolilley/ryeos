@@ -56,7 +56,6 @@ use ryeos_engine::kind_registry::{
     DelegationVia, ExecutionSchema, InProcessRegistryKind, MethodDecl,
     MethodRuntimeConfigRequirement, MethodScope, TerminatorDecl,
 };
-use ryeos_engine::protocol_vocabulary::CallbackChannel;
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
@@ -81,7 +80,9 @@ use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 
 mod subprocess_execution;
 mod subprocess_policy;
-pub(crate) use subprocess_execution::{dispatch_subprocess, validate_ordinary_protocol_contract};
+pub(crate) use subprocess_execution::{
+    dispatch_subprocess, validate_direct_result_retention, validate_ordinary_protocol_contract,
+};
 pub use subprocess_policy::PreparedManagedLaunch;
 pub(crate) use subprocess_policy::strip_binary_ref_prefix;
 use subprocess_policy::{
@@ -303,6 +304,10 @@ pub struct DispatchRequest<'a> {
     pub params: Value,
     /// Complete canonical secondary execution identities for this request.
     pub ref_bindings: BTreeMap<String, String>,
+    /// Invocation-time product selectors keyed by environment dependency
+    /// binding. Kept outside workload parameters and ref identity.
+    pub product_selections:
+        ryeos_state::external_content::products::composition::ProductSelectionInputs,
     pub acting_principal: &'a str,
     /// Effective project root used for resolution (matches
     /// `ResolvedProjectContext.effective_path`).
@@ -1886,42 +1891,6 @@ pub(crate) async fn dispatch_method(
         }
     }
 
-    // 7. validate_only: run the full pre-spawn path (args validation, runtime
-    //    lookup, launch-mode check — already done — plus payload projection
-    //    incl. resolution/trust/corpus) and report the call as valid without
-    //    minting a thread or spawning the runtime. Mirrors the
-    //    subprocess/service validate paths.
-    if request.validate_only {
-        project_method_payload(
-            method_decl,
-            canonical_ref,
-            hop_verified.as_ref(),
-            kind,
-            &engine_roots,
-            ctx,
-            request,
-            request.root_admission.as_ref(),
-        )?;
-        method_runtime_config_snapshot_off_thread(
-            kind,
-            &method_decl.runtime_config,
-            &engine_roots,
-            &ctx.engine,
-            state,
-            request.launch_timings.clone(),
-            request.root_admission.as_ref(),
-            &ctx.plan_ctx.subject_resolution_authority,
-        )
-        .await?;
-        return Ok(json!({
-            "validated": true,
-            "item_ref": canonical_ref.to_string(),
-            "kind": kind,
-            "method": method_name,
-            "executor_ref": executor_ref,
-        }));
-    }
-
     // A method invocation is a real executable root. Reuse the exact public
     // admission when present; otherwise admit this already-verified subject
     // once. Method/runtime identity must never stand in for the invoked item.
@@ -1938,6 +1907,11 @@ pub(crate) async fn dispatch_method(
         if admission.ref_bindings() != &request.ref_bindings {
             return Err(DispatchError::Internal(anyhow::anyhow!(
                 "method root admission ref bindings differ from the dispatch request"
+            )));
+        }
+        if admission.product_selections() != &request.product_selections {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "method root admission product selectors differ from the dispatch request"
             )));
         }
         admission.clone()
@@ -1980,6 +1954,7 @@ pub(crate) async fn dispatch_method(
                 .map_err(DispatchError::Internal)?,
             thread_profile_str.to_string(),
             request.ref_bindings.clone(),
+            request.product_selections.clone(),
             request.usage_subject.clone(),
             request.usage_subject_asserted_by.clone(),
             request.launch_timings.as_ref(),
@@ -1996,6 +1971,62 @@ pub(crate) async fn dispatch_method(
             )
         })?
     };
+
+    let (filesystem_authority_ceiling, network_authority_ceiling) =
+        crate::execution::execution_realization::project_launch_isolation_ceilings(
+            state,
+            &ctx.engine,
+            kind,
+            Some(root_admission.resolution_output()),
+            request
+                .parent_execution_context
+                .as_ref()
+                .map(|parent| parent.parent_thread_id.as_str()),
+        )
+        .map_err(DispatchError::Internal)?;
+    if filesystem_authority_ceiling
+        == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+    {
+        return Err(DispatchError::CapabilityRejected {
+            reason:
+                "captured execution cannot grant the method runtime's daemon callback authority"
+                    .to_owned(),
+        });
+    }
+
+    // Validation shares the exact admitted subject and isolation ceilings.
+    // Resolve payload/config under that admission without minting a thread
+    // or spawning a runtime; do not validate against weaker request defaults.
+    if request.validate_only {
+        project_method_payload(
+            method_decl,
+            canonical_ref,
+            hop_verified.as_ref(),
+            kind,
+            &engine_roots,
+            ctx,
+            request,
+            Some(&root_admission),
+        )?;
+        method_runtime_config_snapshot_off_thread(
+            kind,
+            &method_decl.runtime_config,
+            &engine_roots,
+            &ctx.engine,
+            state,
+            request.launch_timings.clone(),
+            Some(&root_admission),
+            &ctx.plan_ctx.subject_resolution_authority,
+        )
+        .await?;
+        return Ok(json!({
+            "validated": true,
+            "item_ref": canonical_ref.to_string(),
+            "kind": kind,
+            "method": method_name,
+            "executor_ref": executor_ref,
+        }));
+    }
 
     // Accepted launch is an admission acknowledgement, so every rejection
     // that depends only on the invoked root must be settled before a durable
@@ -2167,6 +2198,21 @@ pub(crate) async fn dispatch_method(
             )));
         }
     }
+
+    if !request.provenance.is_borrowed_child()
+        && let Some(lifeline) = request.provenance.workspace_lifeline()
+    {
+        lifecycle_owner
+            .track_owned_workspace_lifeline(lifeline)
+            .map_err(DispatchError::Internal)?;
+    }
+    crate::execution::runner::bind_owned_workspace_after_thread_birth(
+        state,
+        &request.provenance,
+        &thread_id,
+        &launch_owner,
+    )
+    .map_err(DispatchError::Internal)?;
 
     // The row is durable and the daemon-owned dispatch task now holds its
     // lifecycle guard. Every remaining preparation/spawn failure passes through
@@ -2503,6 +2549,7 @@ pub(crate) async fn dispatch_method(
             timeout: METHOD_RUNTIME_TIMEOUT_SECS as f64,
             limits: None,
             inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
         let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
@@ -2520,16 +2567,32 @@ pub(crate) async fn dispatch_method(
                 "method thread {thread_id} was stopped before isolation"
             )));
         }
+        // Retaining a dependent worker lifeline does not grant this method
+        // access to its view. Select only the method's admitted filesystem
+        // authority, as ordinary direct/managed launch already does.
+        let workspace_view = if request.provenance.isolation_project_authority()
+            == ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
+        {
+            crate::execution::runner::borrow_bound_workspace_view(
+                state,
+                request.provenance.workspace_lifeline().as_ref(),
+                &thread_id,
+            )
+            .map_err(DispatchError::Internal)?
+        } else {
+            None
+        };
         let applied = state
             .isolation
             .apply_awaiting_attachment_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: workspace_view.as_ref(),
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
-                    filesystem_authority_ceiling:
-                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
-                network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                    filesystem_authority_ceiling,
+                    network_authority_ceiling,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
@@ -2541,7 +2604,8 @@ pub(crate) async fn dispatch_method(
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
-                    target_channel: None,
+                    writable_runtime_view_mounts: &[],
+                    target_channels: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
                 },
@@ -3262,6 +3326,7 @@ async fn dispatch_via_method_executor(
         validate_only: request.validate_only,
         params: args,
         ref_bindings: request.ref_bindings.clone(),
+        product_selections: request.product_selections.clone(),
         acting_principal: request.acting_principal,
         project_path: request.project_path,
         provenance: request.provenance.clone(),
@@ -3316,315 +3381,7 @@ async fn dispatch_via_method_executor(
 ///    requesting a cap the installed bundle or live project does not declare
 ///    fails launch.
 /// 3. Exactly the requested (manifest-backed) subset is minted.
-pub(crate) fn mint_runtime_capability_caps(
-    requires_value: Option<&Value>,
-    resolved_item: &ResolvedItem,
-    effective_trust_class: ryeos_engine::resolution::TrustClass,
-    engine: &ryeos_engine::engine::Engine,
-) -> Result<Vec<String>, String> {
-    // (1) Requirement contract. No `requires:` → no runtime callback authority.
-    let Some(requires_value) = requires_value else {
-        return Ok(Vec::new());
-    };
-    let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
-        .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
-    if reqs.manifest.runtime_authority.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Single source of truth for the bundle identity: the resolved canonical
-    // ref. The callback token's `effective_bundle_id` is stamped from this same
-    // value (see `effective_bundle_id_for_request`), so the caps minted here and
-    // the token that carries them can never claim different bundles.
-    let effective_bundle_id = ryeos_app::callback_token::effective_bundle_id_from_item_ref(
-        &resolved_item.canonical_ref.to_string(),
-    )
-    .ok_or_else(|| {
-        "runtime capability requirements need a bundle-qualified item ref".to_string()
-    })?;
-    ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
-        .map_err(|err| err.to_string())?;
-
-    // Deep, segment-grammar validation of each requested resource. The static
-    // shape (known keys, valid ops, non-empty arrays) was already enforced by
-    // `parse_runtime_requires`; this checks the bundle-id segment grammar that
-    // the cap-string scheme depends on.
-    let requested_authority = &reqs.manifest.runtime_authority;
-    for req in &requested_authority.bundle_events {
-        ryeos_state::objects::validate_bundle_identifier("event_kind", &req.event_kind)
-            .map_err(|err| err.to_string())?;
-    }
-    for req in &requested_authority.runtime_vault {
-        ryeos_app::vault::validate_runtime_vault_segment("namespace", &req.namespace)
-            .map_err(|err| err.to_string())?;
-    }
-    for req in &requested_authority.item_authoring {
-        ryeos_bundle::runtime_authority::validate_item_author_pattern(&req.kind, &req.namespace)?;
-    }
-
-    // (2) Authority upper bound comes from the signed manifest at the exact
-    // provenance boundary that supplied the item. Installed bundle authority
-    // remains node-trusted. A live project may use its own signed manifest,
-    // but only for a TrustedProject item physically below that exact project's
-    // `.ai/` root and only with the request engine's effective project trust
-    // store. Mixed-trust composition of an installed item therefore remains
-    // unable to acquire project authority.
-    let manifest = match resolved_item.source_space {
-        ryeos_engine::contracts::ItemSpace::Bundle => {
-            if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle {
-                return Err(format!(
-                    "installed runtime capability requirements need TrustedBundle provenance; \
-                     effective trust class is {effective_trust_class:?}"
-                ));
-            }
-            let ai_dir = authoritative_runtime_authority_ai_dir(
-                resolved_item,
-                &effective_bundle_id,
-                engine,
-                &engine.node_trust_store,
-            )?;
-            ryeos_bundle::manifest::load_verified_manifest(
-                &ai_dir,
-                &effective_bundle_id,
-                &engine.node_trust_store,
-            )
-            .map_err(|err| err.to_string())?
-            .manifest
-        }
-        ryeos_engine::contracts::ItemSpace::Project => {
-            if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedProject {
-                return Err(format!(
-                    "project runtime capability requirements need TrustedProject provenance; \
-                     effective trust class is {effective_trust_class:?}"
-                ));
-            }
-            let project_root = resolved_item
-                .materialized_project_root
-                .as_deref()
-                .ok_or_else(|| {
-                    "project runtime capability item has no materialized project root".to_string()
-                })?;
-            let ai_dir =
-                authoritative_project_runtime_authority_ai_dir(resolved_item, project_root)?;
-            let project_trust = engine
-                .trust_store
-                .with_project_keys(project_root)
-                .map_err(|err| err.to_string())?;
-            ryeos_bundle::manifest::load_verified_manifest(
-                &ai_dir,
-                &effective_bundle_id,
-                project_trust.as_ref(),
-            )
-            .map_err(|err| err.to_string())?
-            .manifest
-        }
-        ryeos_engine::contracts::ItemSpace::Node => {
-            return Err(
-                "node-local configuration cannot supply runtime capability authority".to_string(),
-            );
-        }
-    };
-    manifest.runtime_authority.validate()?;
-
-    // Manifest-declared caps form the upper bound. Cap strings come from the
-    // manifest declarations' own constructors (`runtime_authority`), so the
-    // minter and the daemon callback services share one definition.
-    let manifest_caps = manifest
-        .runtime_authority
-        .declared_caps(&effective_bundle_id);
-
-    // (3) Subset check + mint exactly the requested subset. A wildcard-carrying
-    // request must be backed by an identical manifest declaration, not merely
-    // glob-matched — see `manifest_backs_requested_cap`.
-    let requested =
-        ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, &effective_bundle_id);
-    let missing: Vec<String> = requested
-        .iter()
-        .filter(|requested_cap| {
-            !ryeos_bundle::runtime_authority::manifest_backs_requested_cap(
-                &manifest_caps,
-                requested_cap,
-            )
-        })
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "requested runtime capabilities are not declared in the signed manifest \
-             (authority upper bound): {}",
-            missing.join(", ")
-        ));
-    }
-
-    Ok(requested.into_iter().collect())
-}
-
-/// Bind project runtime authority to the exact live project resolution root.
-/// This deliberately does not walk upward looking for a convenient manifest.
-fn authoritative_project_runtime_authority_ai_dir(
-    resolved_item: &ResolvedItem,
-    project_root: &Path,
-) -> Result<PathBuf, String> {
-    if resolved_item.source_space != ryeos_engine::contracts::ItemSpace::Project
-        || resolved_item.source_root != ryeos_engine::contracts::ItemSourceRoot::Project
-    {
-        return Err(format!(
-            "project runtime capability requirements need exact Project source provenance; \
-             found {:?} in {} space",
-            resolved_item.source_root,
-            resolved_item.source_space.as_str()
-        ));
-    }
-    let canonical_project = std::fs::canonicalize(project_root).map_err(|err| {
-        format!(
-            "canonicalize runtime-authority project {}: {err}",
-            project_root.display()
-        )
-    })?;
-    let ai_dir = canonical_project.join(ryeos_engine::AI_DIR);
-    let canonical_source = std::fs::canonicalize(&resolved_item.source_path).map_err(|err| {
-        format!(
-            "canonicalize resolved project runtime-authority item {}: {err}",
-            resolved_item.source_path.display()
-        )
-    })?;
-    let source_metadata = std::fs::symlink_metadata(&resolved_item.source_path).map_err(|err| {
-        format!(
-            "stat resolved project runtime-authority item {}: {err}",
-            resolved_item.source_path.display()
-        )
-    })?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_file() {
-        return Err(format!(
-            "project runtime-authority item {} must be a regular file (symlinks rejected)",
-            resolved_item.source_path.display()
-        ));
-    }
-    if !canonical_source.starts_with(&ai_dir) {
-        return Err(format!(
-            "project runtime-authority item {} is outside the exact project .ai root {}",
-            canonical_source.display(),
-            ai_dir.display()
-        ));
-    }
-    Ok(ai_dir)
-}
-
-/// Establish the only provenance permitted to mint daemon callback authority:
-/// a regular, content-pinned, node-signed item below exactly one registered
-/// installed bundle's `.ai/` directory. Returns that authoritative `.ai/`
-/// directory for manifest loading.
-fn authoritative_runtime_authority_ai_dir(
-    resolved_item: &ResolvedItem,
-    expected_bundle_id: &str,
-    engine: &ryeos_engine::engine::Engine,
-    node_trust_store: &ryeos_engine::trust::TrustStore,
-) -> Result<PathBuf, String> {
-    if resolved_item.source_space != ryeos_engine::contracts::ItemSpace::Bundle {
-        return Err(format!(
-            "runtime capability requirements require installed TrustedBundle provenance; \
-             item resolved from {} space",
-            resolved_item.source_space.as_str()
-        ));
-    }
-
-    let ryeos_engine::contracts::ItemSourceRoot::Bundle { name } = &resolved_item.source_root
-    else {
-        return Err(format!(
-            "runtime capability requirements need exact Bundle source provenance; found {:?}",
-            resolved_item.source_root
-        ));
-    };
-    if name != expected_bundle_id {
-        return Err(format!(
-            "runtime-authority item ref names bundle {expected_bundle_id}, but typed source \
-             provenance names bundle {name}"
-        ));
-    }
-    let bundle_root = engine.registered_bundle_root(name).ok_or_else(|| {
-        format!("typed runtime-authority bundle {name} is absent from the admitted generation")
-    })?;
-    let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
-    let canonical_ai_dir = std::fs::canonicalize(&ai_dir).map_err(|err| {
-        format!(
-            "canonicalize typed runtime-authority bundle root {}: {err}",
-            ai_dir.display()
-        )
-    })?;
-
-    let source_metadata = std::fs::symlink_metadata(&resolved_item.source_path).map_err(|err| {
-        format!(
-            "stat resolved runtime-authority item {}: {err}",
-            resolved_item.source_path.display()
-        )
-    })?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_file() {
-        return Err(format!(
-            "runtime-authority item {} must be a regular installed file (symlinks rejected)",
-            resolved_item.source_path.display()
-        ));
-    }
-
-    let canonical_source = std::fs::canonicalize(&resolved_item.source_path).map_err(|err| {
-        format!(
-            "canonicalize resolved runtime-authority item {}: {err}",
-            resolved_item.source_path.display()
-        )
-    })?;
-    if !canonical_source.starts_with(&canonical_ai_dir) {
-        return Err(format!(
-            "runtime-authority item {} contradicts typed bundle root {}",
-            resolved_item.source_path.display(),
-            canonical_ai_dir.display()
-        ));
-    }
-
-    // Re-read once, pin it to the bytes that produced ResolvedItem metadata,
-    // and verify the signature solely with persistent node trust. This keeps a
-    // project key/caller overlay from turning an installed-path item into node
-    // callback authority and detects a source replacement after resolution.
-    let source = std::fs::read_to_string(&canonical_source).map_err(|err| {
-        format!(
-            "read resolved runtime-authority item {}: {err}",
-            resolved_item.source_path.display()
-        )
-    })?;
-    let live_content_hash = ryeos_engine::item_resolution::content_hash(&source);
-    if live_content_hash != resolved_item.content_hash {
-        return Err(format!(
-            "runtime-authority item {} changed after resolution (expected {}, found {})",
-            resolved_item.source_path.display(),
-            resolved_item.content_hash,
-            live_content_hash
-        ));
-    }
-    let signature_header = resolved_item.signature_header.as_ref().ok_or_else(|| {
-        format!(
-            "runtime-authority item {} is unsigned; installed TrustedBundle provenance is required",
-            resolved_item.source_path.display()
-        )
-    })?;
-    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
-        &source,
-        signature_header,
-        &resolved_item.source_format.signature,
-        node_trust_store,
-    )
-    .map_err(|err| {
-        format!(
-            "node verification failed for runtime-authority item {}: {err}",
-            resolved_item.source_path.display()
-        )
-    })?;
-    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-        return Err(format!(
-            "runtime-authority item {} is not signed by a node-trusted publisher",
-            resolved_item.source_path.display()
-        ));
-    }
-
-    Ok(canonical_ai_dir)
-}
+pub(crate) use ryeos_app::runtime_capability_admission::mint_runtime_capability_caps;
 
 /// Tool-path entry point: source the `requires` block from the resolved item's
 /// extracted metadata. Graph/directive mint from the composed/narrowed view at
@@ -3842,6 +3599,7 @@ fn dispatch_daemon_owned_inner(
     let validate_only = request.validate_only;
     let params = request.params.clone();
     let ref_bindings = request.ref_bindings.clone();
+    let product_selections = request.product_selections.clone();
     let acting_principal = request.acting_principal.to_owned();
     let project_path = request.project_path.to_path_buf();
     let provenance = request.provenance.clone();
@@ -3873,6 +3631,7 @@ fn dispatch_daemon_owned_inner(
             validate_only,
             params,
             ref_bindings,
+            product_selections,
             acting_principal: &acting_principal,
             project_path: &project_path,
             provenance,
@@ -4199,7 +3958,7 @@ async fn dispatch_inner(
         let admitted_hop_authority = request.root_admission.as_ref().and_then(|admission| {
             admission.admitted_request_snapshot().and_then(|snapshot| {
                 admission
-                    .execution_workspace()
+                    .resolution_workspace()
                     .map(|root| (root, snapshot.as_ref()))
             })
         });
@@ -4289,21 +4048,16 @@ async fn dispatch_inner(
 /// whether accepted/background launch can honor a pre-minted thread id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootDispatchClass {
-    /// Terminal subprocess (DetachedOk lifecycle), e.g. a wrapper tool.
+    /// Ordinary executor-plan subprocess: terminal output or managed framed
+    /// output. The latter remains non-detachable under its signed protocol.
     /// Honors a pre-minted thread id; requires an `executor_id` on the
     /// resolved root item (checked during classification).
     TerminalSubprocess,
     /// Managed subprocess — directive/graph via runtime-registry delegate,
     /// or a runtime invoked directly. Honors a pre-minted thread id.
     ManagedSubprocess,
-    /// Managed lifecycle protocol that bypasses LaunchEnvelope construction.
-    ManagedNonEnvelope,
     /// Method dispatch (e.g. `knowledge`). Honors a pre-minted thread id.
     MethodDispatch,
-    /// Managed protocol execution with no callback channel. It returns protocol
-    /// frames directly and never creates a lifecycle row, so it cannot honor a
-    /// pre-minted thread id.
-    UnthreadedStreamingSubprocess,
     /// In-process execution (services). Runs synchronously and does NOT
     /// thread a pre-minted id — not eligible for accepted/background launch.
     InProcess,
@@ -4313,6 +4067,20 @@ pub enum RootDispatchClass {
 pub enum LaunchContractApplicability {
     ManagedEnvelope { runtime: Box<VerifiedRuntime> },
     NonEnvelope { class: RootDispatchClass },
+}
+
+fn direct_root_product_selection_supported(
+    class: &RootDispatchClass,
+    external_content_contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
+    inputs: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+) -> bool {
+    // Eligibility comes from the exact registered signed kind, not its name.
+    // This routing check grants neither a selection nor a realization: the
+    // ordinary admission owners still prove each declared slot and binding.
+    matches!(class, RootDispatchClass::TerminalSubprocess) && external_content_contract.is_some()
+        && inputs.iter().all(|input| matches!(
+            &input.target, ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+        ))
 }
 
 /// Process-local proof that launch-contract applicability was classified by
@@ -4370,6 +4138,11 @@ impl RootDispatchEvidence {
                 "root dispatch request ref bindings differ from exact preflight admission"
             )));
         }
+        if admission.product_selections() != &request.product_selections {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch request product selectors differ from exact preflight admission"
+            )));
+        }
         let requested_ref = CanonicalRef::parse(item_ref)
             .map_err(|error| DispatchError::InvalidRef(item_ref.to_owned(), error.to_string()))?;
         if requested_ref != self.requested_subject.resolved.canonical_ref
@@ -4406,7 +4179,7 @@ fn can_reuse_root_dispatch_evidence(
 ) -> bool {
     use ryeos_engine::contracts::SubjectResolutionAuthority;
 
-    match &admission.plan_context().subject_resolution_authority {
+    match admission.resolution_subject_authority() {
         SubjectResolutionAuthority::Projectless
         | SubjectResolutionAuthority::PinnedGeneration { .. } => true,
         SubjectResolutionAuthority::CowWorkspace { .. } => {
@@ -4440,7 +4213,7 @@ pub fn launch_contract_applicability_from_admission(
         .admitted_request_snapshot()
         .and_then(|snapshot| {
             root_admission
-                .execution_workspace()
+                .resolution_workspace()
                 .map(|root| (root, snapshot.as_ref()))
         });
     launch_contract_applicability_with_evidence(
@@ -4511,15 +4284,12 @@ fn launch_contract_applicability_with_evidence(
                     ctx.engine.protocols.require(protocol_ref).map_err(|_| {
                         DispatchError::ProtocolNotRegistered(protocol_ref.to_owned())
                     })?;
-                use ryeos_engine::protocol_vocabulary::LifecycleMode;
-                if protocol.descriptor.lifecycle.mode != LifecycleMode::Managed {
+                // Applicability, preflight and live dispatch must classify
+                // from the same protocol mechanics, not lifecycle alone.
+                if subprocess_execution::uses_direct_subprocess_plan(protocol) {
+                    validate_ordinary_protocol_contract(protocol, &current.kind)?;
                     return Ok(LaunchContractApplicability::NonEnvelope {
                         class: RootDispatchClass::TerminalSubprocess,
-                    });
-                }
-                if protocol.descriptor.callback_channel == CallbackChannel::None {
-                    return Ok(LaunchContractApplicability::NonEnvelope {
-                        class: RootDispatchClass::ManagedNonEnvelope,
                     });
                 }
                 let runtime = selected_runtime
@@ -4569,6 +4339,9 @@ pub async fn admit_launch_contract(
     )
     .await?;
     if let Some(prepared) = prepared.as_ref() {
+        crate::execution::launch_preparation::require_prepared_project_result(
+            prepared, provenance,
+        )?;
         require_prepared_launch_secret_availability(
             root_admission,
             prepared,
@@ -4599,8 +4372,26 @@ pub async fn prepare_admitted_launch_contract(
 ) -> Result<Option<crate::execution::launch_preparation::PreparedRuntimeLaunch>, DispatchError> {
     let runtime = match applicability {
         LaunchContractApplicability::NonEnvelope { class } => {
-            if ref_bindings.is_empty() {
+            if ref_bindings.is_empty()
+                && (root_admission.product_selections().is_empty()
+                    || direct_root_product_selection_supported(
+                        class,
+                        ctx.engine
+                            .kinds
+                            .get(&root_admission.verified_subject().resolved.kind)
+                            .and_then(|schema| schema.external_content_contract()),
+                        root_admission.product_selections(),
+                    ))
+            {
                 return Ok(None);
+            }
+            if !root_admission.product_selections().is_empty() {
+                return Err(DispatchError::CapabilityRejected {
+                    reason: format!(
+                        "product selectors are not supported by {} execution",
+                        class.as_str()
+                    ),
+                });
             }
             return Err(DispatchError::RefBindingNotApplicable {
                 class: class.as_str().to_owned(),
@@ -4610,12 +4401,14 @@ pub async fn prepare_admitted_launch_contract(
     };
     let protocol =
         require_callback_runtime_protocol(&ctx.engine, runtime, "threadless admission")?.clone();
-    let subject_authority = root_admission
-        .plan_context()
-        .subject_resolution_authority
-        .clone();
-    let resolution_project_root =
-        resolution_project_root(&subject_authority, provenance.effective_path());
+    let subject_authority = root_admission.resolution_subject_authority().clone();
+    // A workload-delegated immutable child may execute against a later
+    // captured read-only generation, but launch-contract resolution remains
+    // bound to the already-admitted subject generation. Candidate evaluators
+    // likewise retain their separately admitted base binding. Neither an
+    // execution input generation nor a projectless workspace may become a
+    // project-definition overlay.
+    let resolution_project_root = root_admission.resolution_workspace();
     let roots = ctx
         .engine
         .resolution_roots(resolution_project_root.map(Path::to_path_buf));
@@ -4695,6 +4488,7 @@ pub async fn prepare_admitted_launch_contract(
             runtime,
             primary: root_admission.resolution_output(),
             ref_bindings,
+            product_selections: root_admission.product_selections(),
             roots: &roots,
             parsers: &request_snapshot.parser_dispatcher,
             trust_store: &request_snapshot.trust_store,
@@ -4846,12 +4640,15 @@ pub fn prepare_launch_contract(
         binding: None,
         details: Box::new(BTreeMap::new()),
     })?;
+    let product_selections =
+        ryeos_state::external_content::products::composition::ProductSelectionInputs::new();
     crate::execution::launch_preparation::prepare_runtime_launch(
         crate::execution::launch_preparation::PrepareRuntimeLaunchRequest {
             engine: &ctx.engine,
             runtime,
             primary: &resolution,
             ref_bindings,
+            product_selections: &product_selections,
             roots: &roots,
             parsers: &request_snapshot.parser_dispatcher,
             trust_store: &request_snapshot.trust_store,
@@ -4869,9 +4666,7 @@ impl RootDispatchClass {
         match self {
             Self::TerminalSubprocess => "terminal_subprocess",
             Self::ManagedSubprocess => "managed_subprocess",
-            Self::ManagedNonEnvelope => "managed_non_envelope",
             Self::MethodDispatch => "method_dispatch",
-            Self::UnthreadedStreamingSubprocess => "unthreaded_streaming_subprocess",
             Self::InProcess => "in_process",
         }
     }
@@ -4885,6 +4680,15 @@ impl RootDispatchClass {
             self,
             Self::TerminalSubprocess | Self::ManagedSubprocess | Self::MethodDispatch
         )
+    }
+
+    /// Whether dispatch produces the admitted launch capsule required to bind
+    /// a recovered execution to its exact program and project authorities.
+    ///
+    /// Method dispatch can persist a pre-minted root, but it does not cross the
+    /// launch-envelope boundary and therefore cannot carry capsule authority.
+    pub fn produces_admitted_launch_capsule(self) -> bool {
+        matches!(self, Self::TerminalSubprocess | Self::ManagedSubprocess)
     }
 }
 
@@ -4902,6 +4706,10 @@ pub struct RootDispatchPreflight {
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     pub root_dispatch_evidence: RootDispatchEvidence,
     pub effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
+    /// Kind-owned signed shared-workspace relationship. `None` is deny-all for
+    /// workload-delegated workspace access; ordinary dispatch does not infer a
+    /// relationship from this field.
+    pub workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
 }
 
 /// Enforce the caller's durable-effect claim against the exact composed
@@ -4981,6 +4789,26 @@ fn effect_class_ceiling_for_admission(
     }
 }
 
+fn workspace_access_for_admission(
+    engine: &ryeos_engine::engine::Engine,
+    admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+) -> Result<Option<ryeos_engine::kind_registry::WorkspaceAccess>, DispatchError> {
+    let kind = &admission.verified_subject().resolved.canonical_ref.kind;
+    let Some(execution) = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+    else {
+        return Ok(None);
+    };
+    execution
+        .project_workspace_access(&admission.resolution_output().composed.composed)
+        .map_err(|error| DispatchError::SchemaMisconfigured {
+            kind: kind.clone(),
+            detail: error.to_string(),
+        })
+}
+
 impl RootDispatchPreflight {
     fn rebind_requested_subject(&mut self, requested_subject: VerifiedItem) {
         self.root_dispatch_evidence
@@ -5000,6 +4828,8 @@ fn finish_root_dispatch_preflight(
     root_subject: VerifiedItem,
     thread_profile: String,
     ref_bindings: &BTreeMap<String, String>,
+    product_selections:
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
     project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
@@ -5019,6 +4849,24 @@ fn finish_root_dispatch_preflight(
     {
         return Err(DispatchError::RefBindingNotApplicable {
             class: class.as_str().to_owned(),
+        });
+    }
+    if !product_selections.is_empty()
+        && let LaunchContractApplicability::NonEnvelope { class } = &applicability
+        && !direct_root_product_selection_supported(
+            class,
+            ctx.engine
+                .kinds
+                .get(&root_subject.resolved.kind)
+                .and_then(|schema| schema.external_content_contract()),
+            product_selections,
+        )
+    {
+        return Err(DispatchError::CapabilityRejected {
+            reason: format!(
+                "product selectors are not supported by {} execution",
+                class.as_str()
+            ),
         });
     }
     let admitted_root_ref = root_subject.resolved.canonical_ref.to_string();
@@ -5069,6 +4917,7 @@ fn finish_root_dispatch_preflight(
             .map_err(DispatchError::Internal)?,
         thread_profile,
         ref_bindings.clone(),
+        product_selections.clone(),
         usage_subject.cloned(),
         usage_subject_asserted_by.map(str::to_string),
         launch_timings,
@@ -5087,13 +4936,47 @@ fn finish_root_dispatch_preflight(
     };
     let root_dispatch_evidence =
         RootDispatchEvidence::new(applicability, &requested_subject, &root_admission);
+    if class == RootDispatchClass::TerminalSubprocess {
+        let kind = &root_admission.verified_subject().resolved.kind;
+        let schema =
+            ctx.engine
+                .kinds
+                .get(kind)
+                .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                    kind: kind.clone(),
+                    detail: "direct admission kind is unavailable".into(),
+                })?;
+        if let Some(TerminatorDecl::Subprocess { protocol }) = schema
+            .execution()
+            .and_then(|execution| execution.terminator.as_ref())
+        {
+            let protocol_ref = protocol
+                .resolve(&root_admission.resolution_output().composed.composed)
+                .map_err(|detail| DispatchError::SchemaMisconfigured {
+                    kind: kind.clone(),
+                    detail,
+                })?;
+            let selected = ctx
+                .engine
+                .protocols
+                .require(&protocol_ref)
+                .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref))?;
+            validate_direct_result_retention(
+                selected,
+                root_admission.resolved_result_policy().retention,
+                kind,
+            )?;
+        }
+    }
     let effect_class_ceiling = effect_class_ceiling_for_admission(&ctx.engine, &root_admission)?;
+    let workspace_access = workspace_access_for_admission(&ctx.engine, &root_admission)?;
     Ok(RootDispatchPreflight {
         class,
         requested_subject,
         root_admission: Some(root_admission),
         root_dispatch_evidence,
         effect_class_ceiling,
+        workspace_access,
     })
 }
 
@@ -5455,6 +5338,97 @@ pub fn preflight_root_resolution(
         .map(|validated| validated.subject)
 }
 
+/// Present one finite workload operation from the same admitted resolution
+/// closure dispatch will consume. This is a projection, not a route registry
+/// or execution probe: no synthetic arguments and no mutable workspace read.
+pub fn present_workload_execution(
+    ceiling: &ryeos_runtime::workload_client::WorkloadClientExecutionCeiling,
+    product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
+    use ryeos_runtime::workload_client::WorkloadClientCallCeiling;
+    let canonical = CanonicalRef::parse(&ceiling.item_ref)
+        .map_err(|error| DispatchError::InvalidRef(ceiling.item_ref.clone(), error.to_string()))?;
+    let validated = validate_root_resolution_inner(&canonical, project_binding, ctx, state, None)?;
+    let schema = ctx.engine.kinds.get(&canonical.kind).ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "admitted workload item lost its kind schema"
+        ))
+    })?;
+    let execution = schema.execution().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "admitted workload item has no execution contract"
+        ))
+    })?;
+    let output = validated.closure.output();
+    let product_slots = ryeos_engine::external_content::authored_external_content_shape(
+        &output.composed.composed,
+        schema.external_content_contract(),
+        ryeos_engine::external_content::declaring_authority(output)
+            .map_err(DispatchError::Internal)?,
+    )
+    .map_err(DispatchError::Internal)?
+    .map(|shape| shape.product_slots)
+    .unwrap_or_default();
+    if product_slots.len() != product_selections.len()
+        || product_slots.iter().any(|slot| {
+            !product_selections.iter().any(|input| {
+                matches!(
+                    input.target,
+                    ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+                ) && input.selection.declaration_id == slot.id
+            })
+        })
+    {
+        return Err(DispatchError::CapabilityRejected {
+            reason: format!(
+                "workload execution `{}` does not have one exact selection for every signed product slot",
+                ceiling.item_ref
+            ),
+        });
+    }
+    let mut descriptor = ryeos_engine::inventory::descriptor_from_parsed_item(
+        &canonical,
+        schema,
+        &output.composed.composed,
+        &output.root.source_path,
+    );
+    // Presentation includes public invocation inputs, not runtime metadata or
+    // secret requirements. Existing inventory owns schema/description selection.
+    descriptor.extra.clear();
+    let calls = ceiling
+        .calls
+        .iter()
+        .map(|call| {
+            let selected = match call {
+                WorkloadClientCallCeiling::Default => None,
+                WorkloadClientCallCeiling::Method { name } => Some(name.as_str()),
+            };
+            if execution.methods.is_empty() && selected.is_none() {
+                return Ok(
+                    serde_json::json!({"call":null,"resolved_method":null,"call_args_schema":null}),
+                );
+            }
+            let (name, method) = resolve_requested_method(selected, execution, &canonical.kind)?;
+            let request_call = selected.map(|_| serde_json::json!({"method":name}));
+            Ok(serde_json::json!({
+                "call": request_call,
+                "resolved_method": name,
+                "call_args_schema": method.args,
+            }))
+        })
+        .collect::<Result<Vec<_>, DispatchError>>()?;
+    Ok(serde_json::json!({
+        "item":descriptor,
+        "authority":ryeos_runtime::workload_client::execution_ceiling_presentation(ceiling),
+        "calls":calls,
+        "source_digest":output.root.source_content_digest,
+        "effective_definition_digest":ryeos_state::objects::canonical_value_digest(&output.composed.composed)
+            .map_err(DispatchError::Internal)?}))
+}
+
 /// Preflight the dispatch route for accepted/background launch.
 ///
 /// Walks the same hop chain as [`dispatch`] (via `resolve_dispatch_hop`)
@@ -5482,6 +5456,8 @@ pub fn preflight_root_dispatch(
     original_root_kind: &str,
     params: &Value,
     ref_bindings: &BTreeMap<String, String>,
+    product_selections:
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
     project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
@@ -5667,6 +5643,7 @@ pub fn preflight_root_dispatch(
                         subject,
                         profile,
                         ref_bindings,
+                        product_selections,
                         usage_subject,
                         usage_subject_asserted_by,
                         project_binding,
@@ -5686,9 +5663,8 @@ pub fn preflight_root_dispatch(
                     let protocol = ctx.engine.protocols.require(protocol_ref).map_err(|_| {
                         DispatchError::ProtocolNotRegistered(protocol_ref.to_owned())
                     })?;
-                    use ryeos_engine::protocol_vocabulary::LifecycleMode;
-                    match protocol.descriptor.lifecycle.mode {
-                        LifecycleMode::DetachedOk => {
+                    match subprocess_execution::uses_direct_subprocess_plan(protocol) {
+                        true => {
                             validate_ordinary_protocol_contract(protocol, &hop_ref.kind)?;
                             require_terminal_executor_id(verified.as_ref(), &hop_ref.to_string())?;
                             // Mirror dispatch_tool_subprocess's FULL pre-thread
@@ -5729,6 +5705,12 @@ pub fn preflight_root_dispatch(
                                     if terminal.kind
                                         == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch
                                     {
+                                        if protocol.descriptor.stdout.mode == ryeos_engine::protocol_vocabulary::StdoutMode::Streaming {
+                                            return Err(DispatchError::SchemaMisconfigured {
+                                                kind: hop_ref.kind.clone(),
+                                                detail: "framed subprocess stdout cannot be supplied by a method-dispatch terminal".into(),
+                                            });
+                                        }
                                         // Preflight a method-dispatch wrapper by
                                         // resolving its target and recursing as a
                                         // method call. This reuses the
@@ -5771,6 +5753,7 @@ pub fn preflight_root_dispatch(
                                             target_canonical.kind.as_str(),
                                             &inner_params,
                                             ref_bindings,
+                                            product_selections,
                                             usage_subject,
                                             usage_subject_asserted_by,
                                             project_binding,
@@ -5802,6 +5785,7 @@ pub fn preflight_root_dispatch(
                                 })?,
                                 hop_profile,
                                 ref_bindings,
+                                product_selections,
                                 usage_subject,
                                 usage_subject_asserted_by,
                                 project_binding,
@@ -5813,7 +5797,7 @@ pub fn preflight_root_dispatch(
                                 launch_timings,
                             );
                         }
-                        LifecycleMode::Managed => {
+                        false => {
                             let managed_route = if let Some(verified_runtime) = &hop_runtime {
                                 // Keep accepted-launch admission identical to
                                 // live runtime launch for both direct runtime
@@ -5850,29 +5834,18 @@ pub fn preflight_root_dispatch(
                                     "managed root did not resolve and verify".to_string(),
                                 )
                             })?;
-                            let class =
-                                if protocol.descriptor.callback_channel == CallbackChannel::None {
-                                    RootDispatchClass::ManagedNonEnvelope
-                                } else {
-                                    RootDispatchClass::ManagedSubprocess
-                                };
-                            let applicability = if class == RootDispatchClass::ManagedNonEnvelope {
-                                LaunchContractApplicability::NonEnvelope { class }
-                            } else {
-                                let runtime = hop_runtime
-                                        .clone()
-                                        .or_else(|| {
-                                            ctx.engine.runtimes.lookup_by_ref(&hop_ref).cloned()
-                                        })
-                                        .ok_or_else(|| DispatchError::SchemaMisconfigured {
-                                            kind: hop_ref.kind.clone(),
-                                            detail: format!(
-                                                "managed envelope path `{hop_ref}` has no selected runtime"
-                                            ),
-                                        })?;
-                                LaunchContractApplicability::ManagedEnvelope {
-                                    runtime: Box::new(runtime),
-                                }
+                            let class = RootDispatchClass::ManagedSubprocess;
+                            let runtime = hop_runtime
+                                .clone()
+                                .or_else(|| ctx.engine.runtimes.lookup_by_ref(&hop_ref).cloned())
+                                .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                                    kind: hop_ref.kind.clone(),
+                                    detail: format!(
+                                        "managed envelope path `{hop_ref}` has no selected runtime"
+                                    ),
+                                })?;
+                            let applicability = LaunchContractApplicability::ManagedEnvelope {
+                                runtime: Box::new(runtime),
                             };
                             let executor_route = match hop_runtime.as_ref() {
                                 Some(runtime) if subject.resolved.canonical_ref == runtime.canonical_ref => {
@@ -5895,6 +5868,7 @@ pub fn preflight_root_dispatch(
                                 subject,
                                 profile,
                                 ref_bindings,
+                                product_selections,
                                 usage_subject,
                                 usage_subject_asserted_by,
                                 project_binding,
@@ -5964,6 +5938,7 @@ pub fn preflight_root_dispatch(
                         detail: "method root has no execution thread profile".to_string(),
                     })?,
                     ref_bindings,
+                    product_selections,
                     usage_subject,
                     usage_subject_asserted_by,
                     project_binding,
@@ -5977,6 +5952,76 @@ pub fn preflight_root_dispatch(
             }
         }
     }
+}
+
+/// Admit an independently trusted evaluator without creating a general
+/// dual-project execution mode. The evaluator closure is resolved from the
+/// exact immutable base binding retained in the candidate-evaluation scope;
+/// only after that admission succeeds is execution rebound to the separately
+/// verified frozen-candidate workspace.
+#[allow(clippy::too_many_arguments)]
+pub fn preflight_root_dispatch_for_provenance(
+    item_ref: &str,
+    original_root_kind: &str,
+    params: &Value,
+    ref_bindings: &BTreeMap<String, String>,
+    product_selections:
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    usage_subject: Option<&ryeos_state::UsageSubject>,
+    usage_subject_asserted_by: Option<&str>,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    ctx: &ExecutionContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<RootDispatchPreflight, DispatchError> {
+    let Some(scope) = provenance.candidate_evaluation_scope() else {
+        return preflight_root_dispatch(
+            item_ref,
+            original_root_kind,
+            params,
+            ref_bindings,
+            product_selections,
+            usage_subject,
+            usage_subject_asserted_by,
+            project_binding,
+            ctx,
+            state,
+            launch_timings,
+        );
+    };
+    let resolution_ctx = ExecutionContext {
+        principal_fingerprint: ctx.principal_fingerprint.clone(),
+        caller_scopes: ctx.caller_scopes.clone(),
+        engine: scope.request_engine().clone(),
+        plan_ctx: scope
+            .resolution_plan_context_for(&ctx.plan_ctx)
+            .map_err(DispatchError::Internal)?,
+        requested_call: ctx.requested_call.clone(),
+    };
+    let mut admitted = preflight_root_dispatch(
+        item_ref,
+        original_root_kind,
+        params,
+        ref_bindings,
+        product_selections,
+        usage_subject,
+        usage_subject_asserted_by,
+        scope.base_project_binding(),
+        &resolution_ctx,
+        state,
+        launch_timings,
+    )?;
+    let root = admitted.root_admission.take().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "candidate evaluator dispatch did not produce a root admission"
+        ))
+    })?;
+    admitted.root_admission = Some(
+        root.for_candidate_evaluation(provenance, scope.clone())
+            .map_err(DispatchError::Internal)?,
+    );
+    Ok(admitted)
 }
 
 /// Resolve an executor chain under the executable subject's exact resolution
@@ -6110,6 +6155,64 @@ async fn dispatch_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_product_selection_requires_kind_contract_and_direct_root_targets() {
+        use ryeos_state::external_content::products::composition::{
+            ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+        };
+        let root = vec![ProductSelectionInput {
+            target: ProductSelectionTarget::Root {},
+            selection: ProductSelection {
+                declaration_id: "subject".to_owned(),
+                witness_hash: "a".repeat(64),
+                witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                qualification_hash: None,
+            },
+        }];
+        // The registered kind supplies this contract. No kind-name argument
+        // exists: custom direct kinds use the same signed capability gate.
+        let contract = ryeos_engine::kind_registry::KindExternalContentDecl {
+            realization_derived: ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                .to_owned(),
+            allowed_roots: vec!["project_files".to_owned()],
+            allowed_mount_roots: vec![
+                ryeos_engine::external_content::ExternalContentMountRoot::Project,
+            ],
+            max_declarations: 4,
+            large_content: None,
+        };
+        assert!(direct_root_product_selection_supported(
+            &RootDispatchClass::TerminalSubprocess,
+            Some(&contract),
+            &root,
+        ));
+        for class in [
+            RootDispatchClass::ManagedSubprocess,
+            RootDispatchClass::MethodDispatch,
+            RootDispatchClass::InProcess,
+        ] {
+            assert!(!direct_root_product_selection_supported(
+                &class,
+                Some(&contract),
+                &root
+            ));
+        }
+        assert!(!direct_root_product_selection_supported(
+            &RootDispatchClass::TerminalSubprocess,
+            None,
+            &root,
+        ));
+        let mut dependency = root;
+        dependency[0].target = ProductSelectionTarget::ContentDependency {
+            binding: "environment".to_owned(),
+        };
+        assert!(!direct_root_product_selection_supported(
+            &RootDispatchClass::TerminalSubprocess,
+            Some(&contract),
+            &dependency,
+        ));
+    }
     use std::fs;
     use std::path::PathBuf;
 
@@ -6393,6 +6496,7 @@ metadata:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: Default::default(),
+            scheduled_fire: None,
             validate_only: false,
         }
     }
@@ -6449,6 +6553,7 @@ metadata:
                 current_site_id: "site:test".into(),
                 origin_site_id: "site:test".into(),
                 execution_hints: Default::default(),
+                scheduled_fire: None,
                 validate_only: false,
             },
             requested_call: None,
@@ -6521,6 +6626,7 @@ metadata:
                 admitted_subject_digest: admitted.resolved.raw_content_digest.clone(),
             },
             effect_class_ceiling: None,
+            workspace_access: None,
         };
 
         preflight.rebind_requested_subject(wrapper.clone());
@@ -6698,6 +6804,7 @@ metadata:
             parameters: serde_json::Value::Null,
             root_raw_content_digest: resolved_item.raw_content_digest.clone(),
             ref_bindings: std::collections::BTreeMap::new(),
+            product_selections: Vec::new(),
             root_admission: None,
             resolved_item,
             plan_context: test_plan_context(source_root.to_path_buf()),
@@ -7740,6 +7847,7 @@ requires:
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: Default::default(),
+            scheduled_fire: None,
             validate_only: false,
         };
         let ctx = ExecutionContext {
@@ -7818,6 +7926,9 @@ requires:
             persistent_session: None,
             effective_validator: None,
             effect_class_ceiling: None,
+            workspace_access: None,
+            network_authority_ceiling: None,
+            filesystem_authority_ceiling: None,
         }
     }
 

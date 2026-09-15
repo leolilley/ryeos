@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#
+# Transparent Stage-0 publisher for the source-local development toolchain
+# payload. No package manager runs here. The signed contract selects upstream
+# archives and exact members of this pinned image; it never mines an execution
+# host. Target-local import, binding and isolation qualification remain gates.
+
+FROM --platform=linux/amd64 docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c AS stage0-platform-publisher
+
+WORKDIR /publisher
+ENV RYEOS_STAGE0_PUBLISHER_IMAGE=docker.io/library/rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c
+COPY .ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml /publisher/inputs.yaml
+COPY scripts/release/acquire-development-toolchain-stage0.sh /publisher/scripts/release/acquire-development-toolchain-stage0.sh
+COPY .ai/tools/ryeos/development/stage0-platform-production/produce.sh /publisher/.ai/tools/ryeos/development/stage0-platform-production/produce.sh
+COPY .ai/tools/ryeos/development/stage0-platform-production/lib/contract.sh /publisher/.ai/tools/ryeos/development/stage0-platform-production/lib/contract.sh
+COPY .ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh /publisher/.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh
+
+RUN --mount=type=cache,id=ryeos-development-stage0-downloads,target=/publisher/downloads,sharing=locked \
+    mkdir /publisher/out && \
+    /publisher/scripts/release/acquire-development-toolchain-stage0.sh \
+      --inputs /publisher/inputs.yaml \
+      --cache /publisher/downloads \
+      --output /publisher/acquired && \
+    /publisher/.ai/tools/ryeos/development/stage0-platform-production/produce.sh \
+      --inputs /publisher/inputs.yaml \
+      --input-root /publisher/acquired \
+      --output /publisher/out/ryeos-development-toolchain-stage0-rust-1.95.0-zig-0.15.2-x86_64-unknown-linux-gnu.tar.gz
+
+FROM scratch AS development-toolchain-stage0-artifact
+COPY --from=stage0-platform-publisher /publisher/out/ /

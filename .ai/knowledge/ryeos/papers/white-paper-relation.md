@@ -1,8 +1,7 @@
-<!-- ryeos:signed:2026-07-23T10:04:47Z:c31d47ce278deb12c0b37f616892c30fa4518b8e5977d4616a5bf2b78b307704:aIl1J7r99ChYxEzg0H4QqQFMtMNdIc017euDgKwE1E6Lqv8Hlp5MdX8A7gF6iqq9fppHVGAT7gizLN9lnrK3DQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, white-paper, scope, contract]
-version: "0.1.0"
+version: "0.2.0"
 description: >
   The contract between the four-paper series and the white paper thesis:
   scope boundaries, the v0.3.0 insertions applied when the thesis moved
@@ -40,7 +39,10 @@ The thesis document lived at
 to v0.3.0; the move and edits invalidated its signature, which was
 stripped pending re-sign.
 
-## The v0.3.0 insertions
+## Historical v0.3.0 insertions (superseded claims)
+
+The following records why the earlier text was added, not current endorsement.
+The September 2026 alignment supersedes its theorem and impossibility claims.
 
 Three additions from the series work, applied directly to the thesis doc:
 
@@ -79,3 +81,22 @@ legitimately, because the series has upstream results (papers 1-2) for the
 agent paper to inherit from, which the white paper, as a standalone
 document, does not. The agent paper adds no primitives; that is the
 condition under which the divergence stays honest.
+
+## September 2026 alignment
+
+The white paper is now v0.4.0. The papers retain the capability/consequence
+thesis while separating design motivation from proof and release qualification.
+
+- Portable evidence and continued execution have different prerequisites.
+- Recomputation, attributable testimony and task evaluation can coexist.
+- Other systems can adopt equivalent contracts; no architectural impossibility
+  is asserted merely from their starting point.
+- Recovery, effect reconciliation and custody require concrete mechanisms.
+- Cryptographic identity does not prove human identity, truthful observation,
+  complete history or unconditional permanence.
+- Governance complements confinement; retention may intentionally limit later
+  verification and continuation.
+
+The series map and individual papers use these boundaries. Mathematical claims
+in the sincerity companion remain explicitly limited to its toy models; this
+editorial alignment is not a new proof or empirical qualification.

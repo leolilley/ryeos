@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-03T11:56:16Z:d7cfc24888833c08c4a31719abdb42cc77237908f2f6819ca49784a3938981e4:GETlUw6if3LWLr784oHMlIs3ks+nxsGRdcDY814xsaZn3aOV1FqUxPFHmnKJPrbtY+CuR+OtyfwIp/V1YeBMDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-13T00:23:34Z:263ae924f573997e57707b55da3ebec977195d3a8b89d9409346fb0c7fcc572f:r5y4lVkOVWqojZDedhwwJ/eqj0k05XU5LNiY9/Ht6KhlvVCjxbVdYFo3POBkhX6r72XVfq1jACbgDtKC/9vmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.command-observation
 required_caps: ["ryeos.execute.service.worker-executions/command-observation"]
 state_access: read_only_existing
 ui_read_only: true
 schema: {chain_root_id: string, placement_thread_id: string, command_sequence: integer}
-description: Read one authoritatively settled command and its asynchronous turn observation for an exact hosted-worker placement.
+description: Read one authoritatively settled command, its asynchronous turn observation, and every retained workload-client child execution of that exact command-started turn.

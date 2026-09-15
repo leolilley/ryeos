@@ -1,0 +1,19 @@
+# ryeos:signed:2026-09-06T05:22:05Z:7b8d24431882157e21abca499c6c011c0ce333b0138430d2618e774f25bc5a4e:Fb3YxNhG0wheCitlJ/cGjPouDJ2v4FtiLpL5uUFooRIlqytimQyWDLoDDxdTjEHfRXDjM7nhsS57WxI1nNRfCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Explicit publisher/operator input acquisition, not a node egress grant or a
+# worker operation. Cargo itself runs only after import/binding, without network.
+category: development/ryeos
+name: registry-acquisition
+version: "1.0.0"
+schema: ryeos.development.registry-acquisition.v1
+registry_source: registry+https://github.com/rust-lang/crates.io-index
+index_base: https://index.crates.io
+archive_template: https://static.crates.io/crates/{name}/{name}-{version}.crate
+allowed_https_hosts: [index.crates.io, static.crates.io]
+limits:
+  max_packages: 2048
+  max_input_file_bytes: 2097152
+  max_index_bytes: 16777216
+  max_archive_bytes: 67108864
+  max_total_download_bytes: 2147483648
+  request_timeout_seconds: 60
+  total_timeout_seconds: 1800

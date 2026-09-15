@@ -1,0 +1,74 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session.diff"
+      ]
+    },
+    "properties": {
+      "type": "object",
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "pattern": "^ses"
+        },
+        "diff": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SnapshotFileDiff"
+          }
+        }
+      },
+      "required": [
+        "sessionID",
+        "diff"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "properties"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SnapshotFileDiff": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "patch": {
+          "type": "string"
+        },
+        "additions": {
+          "type": "number"
+        },
+        "deletions": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "added",
+            "deleted",
+            "modified"
+          ]
+        }
+      },
+      "required": [
+        "additions",
+        "deletions"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

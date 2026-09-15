@@ -136,6 +136,13 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                 let thread_status = ctx.get_thread_status(thread_id);
                 match thread_status {
                     Ok(Some(status)) if crate::thread_status_is_terminal(&status) => {
+                        let fire = ensure_dispatched_fire(ctx, fire, thread_id)
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "terminal scheduler thread {thread_id} has no admitted launch capsule"
+                                )
+                            })?;
                         let result_outcome = if status == "completed" {
                             let thread_result = ctx.get_thread_result_outcome(thread_id);
                             match thread_result {
@@ -159,7 +166,7 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                             result_outcome.as_ref(),
                             None,
                         );
-                        update_fire_completed(ctx, fire, thread_id, fire_status, &outcome).await?;
+                        update_fire_completed(ctx, &fire, thread_id, fire_status, &outcome).await?;
                         tracing::info!(
                             fire_id = %fire.fire_id,
                             thread_id = %thread_id,
@@ -170,6 +177,9 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                         );
                     }
                     Ok(Some(status)) => {
+                        if fire.status == "reserved" {
+                            let _ = ensure_dispatched_fire(ctx, fire, thread_id).await?;
+                        }
                         tracing::warn!(
                             fire_id = %fire.fire_id,
                             thread_id = %thread_id,
@@ -246,6 +256,46 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
     Ok(intents)
 }
 
+/// Recover the dispatch-handoff persistence window from the root's exact
+/// admitted capsule. `None` means the root has not reached admission yet; it
+/// never licenses a fabricated handoff or a new thread identity.
+async fn ensure_dispatched_fire<Ctx: SchedulerContext>(
+    ctx: &Ctx,
+    fire: &FireRecord,
+    thread_id: &str,
+) -> Result<Option<FireRecord>> {
+    if fire.status == "dispatched" {
+        return Ok(Some(fire.clone()));
+    }
+    if fire.status != "reserved" {
+        return Ok(None);
+    }
+    let Some(capsule_hash) = ctx.get_admitted_capsule_hash(thread_id)? else {
+        return Ok(None);
+    };
+    if fire.project_authority.is_none() {
+        anyhow::bail!(
+            "scheduler fire {} has an admitted capsule but no bound project authority",
+            fire.fire_id
+        );
+    }
+    let dispatched = FireRecord {
+        status: "dispatched".to_string(),
+        dispatched_at: Some(lillux::time::timestamp_millis().max(fire.reserved_at)),
+        admitted_capsule_hash: Some(capsule_hash),
+        ..fire.clone()
+    };
+    let app_root = ctx.app_root().to_path_buf();
+    let db = ctx.scheduler_db();
+    let persisted = dispatched.clone();
+    tokio::task::spawn_blocking(move || {
+        projection::persist_fire_snapshot(&app_root, &db, &persisted)
+    })
+    .await
+    .context("scheduler recovered-handoff persistence task stopped")??;
+    Ok(Some(dispatched))
+}
+
 async fn update_fire_completed<Ctx: SchedulerContext>(
     ctx: &Ctx,
     fire: &FireRecord,
@@ -269,13 +319,12 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
     {
         anyhow::bail!("terminal fire update changed deterministic thread identity");
     }
-    let fired_at = fire.fired_at.context("dispatched fire has no fired_at")?;
+    let settlement_anchor = fire.dispatched_at.unwrap_or(fire.reserved_at);
 
     let rec = FireRecord {
         status: status.to_string(),
         outcome: Some(outcome.to_string()),
-        fired_at: Some(fired_at),
-        completed_at: Some(now.max(fired_at)),
+        completed_at: Some(now.max(settlement_anchor)),
         ..fire.clone()
     };
 
@@ -359,15 +408,31 @@ mod tests {
             Ok(())
         }
 
+        async fn bind_scheduled_project_authority(
+            &self,
+            _spec: &ScheduleSpecRecord,
+            _fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
+            _thread_id: &str,
+        ) -> anyhow::Result<crate::ScheduledProjectBinding> {
+            Ok(crate::ScheduledProjectBinding {
+                authority: ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )?,
+                pending_publication: None,
+            })
+        }
+
         async fn dispatch_scheduled_item(
             &self,
             _spec: &ScheduleSpecRecord,
-            _fire_id: &str,
+            _fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
             _thread_id: &str,
-            _scheduled_at: i64,
-            _trigger_reason: &str,
-        ) -> anyhow::Result<()> {
-            Ok(())
+            _project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+        ) -> anyhow::Result<crate::ScheduledDispatchReceipt> {
+            Ok(crate::ScheduledDispatchReceipt {
+                thread_id: _thread_id.to_string(),
+                admitted_capsule_hash: "44".repeat(32),
+            })
         }
     }
 
@@ -379,13 +444,22 @@ mod tests {
             fire_id: "sched@1000".to_string(),
             schedule_id: "sched".to_string(),
             scheduled_at: 1000,
-            fired_at: Some(1001),
+            reserved_at: 1000,
+            dispatched_at: Some(1001),
             completed_at: None,
             thread_id: Some(thread_id.clone()),
             status: "dispatched".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: None,
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: Some(
+                ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )
+                .unwrap(),
+            ),
+            admitted_capsule_hash: Some("44".repeat(32)),
         };
         ctx.db.upsert_fire(&fire).unwrap();
         ctx.statuses
@@ -417,13 +491,22 @@ mod tests {
             fire_id: "persisted@1000".to_string(),
             schedule_id: "persisted".to_string(),
             scheduled_at: 1_000,
-            fired_at: Some(1_001),
+            reserved_at: 1_000,
+            dispatched_at: Some(1_001),
             completed_at: Some(1_002),
             thread_id: Some(crate::types::thread_id_from_fire("persisted@1000")),
             status: "completed".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: Some("success".to_string()),
             signer_fingerprint: "11".repeat(32),
+            schedule_spec_hash: "22".repeat(32),
+            project_authority: Some(
+                ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                )
+                .unwrap(),
+            ),
+            admitted_capsule_hash: Some("44".repeat(32)),
         };
         ctx.db.upsert_fire(&retained).unwrap();
 

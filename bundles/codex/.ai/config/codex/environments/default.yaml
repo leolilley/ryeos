@@ -1,6 +1,7 @@
-# ryeos:signed:2026-09-04T05:54:47Z:0cbf67dfdaf9747aa5c98c6e30bb50c17f6aded5ee1f7d3cddff5e8322983d2e:ah8ihdUKXIEKFR7uv2W9qFR8Qm9NoTJ5MLbk7dFPzPpcvK9SYvgi6ujJSsCGkkd6Len6GcStwT+dQFJmZPE0Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-09T18:08:16Z:d1862d44fe8298e640ca5c41fcbe397478bd50aa678864c50c05703cfe6672fe:Xo1TpfGpeH+5K7/JXRkuYY6So+g2ISvOwVbgaVd9D3jkdU19NIE4pJ9uRzxY98qFewRbl+jtSDDhFJUL20nQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/environments
-schema: ryeos.worker_environment.v3
+schema: ryeos.worker_environment.v6
+external_product_slots: []
 worker_ref: worker:codex/hosted
 external_content:
   - id: command-tools
@@ -8,6 +9,7 @@ external_content:
     mode: pinned
     digest: f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5
     metadata_hint: openai-codex-command-tools-v0.147.0-x86_64-unknown-linux-musl
+    mount_root: execution_runtime
     mount: environment/command-tools
 configuration:
   executable_search:
@@ -19,3 +21,4 @@ credential_requirement:
   required_state: active
   subject_projection_contract: codex.account.v1
 portable_state_contract: ryeos.worker_session.restore.v1
+workload_client: null

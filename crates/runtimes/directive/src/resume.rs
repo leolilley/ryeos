@@ -1400,7 +1400,7 @@ mod tests {
         async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
@@ -2677,7 +2677,7 @@ mod tests {
         async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {

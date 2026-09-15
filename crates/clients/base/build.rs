@@ -1,19 +1,12 @@
-use std::process::Command;
-
 fn main() {
-    println!("cargo:rerun-if-changed=../../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../../.git/refs");
-    let version = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().trim_start_matches("ryeosd-").to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string())
-        });
-
-    println!("cargo:rustc-env=RYEOS_BUILD_VERSION={version}");
+    // Git is a review/export projection, not a build input. Official builds
+    // inject the release version explicitly; source-local builds carry no
+    // fabricated release identity and the UI labels that state honestly.
+    println!("cargo:rerun-if-env-changed=RYEOS_BUILD_VERSION");
+    if let Ok(version) = std::env::var("RYEOS_BUILD_VERSION") {
+        if version.is_empty() || version.bytes().any(|byte| byte.is_ascii_control()) {
+            panic!("RYEOS_BUILD_VERSION is not canonical");
+        }
+        println!("cargo:rustc-env=RYEOS_BUILD_VERSION={version}");
+    }
 }

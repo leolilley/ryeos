@@ -138,27 +138,37 @@ async fn pull_results_staged(
     local_project_root: Option<&Path>,
     base_tree: &ProjectTree,
 ) -> Result<PullResult, PullResultsError> {
-    // 1. Fetch remote snapshot object
-    let snapshot_objs = client
-        .objects_get(&[remote_snapshot_hash.to_string()], &[])
-        .await
-        .map_err(PullResultsError::Other)?;
-
-    let snapshot_val = snapshot_objs
-        .find_object(remote_snapshot_hash)
-        .ok_or_else(|| {
-            PullResultsError::InvalidRemoteSnapshot(format!(
-                "snapshot {} not found in objects_get response",
-                remote_snapshot_hash
-            ))
-        })?;
-    store_remote_object(
-        authority,
-        staged_roots,
-        local_cas,
-        remote_snapshot_hash,
-        &snapshot_val,
-    )?;
+    // 1. Resolve the exact snapshot object. Durable recovery may already
+    // have imported the complete result before crashing after workspace
+    // application, so verified local CAS content is authoritative and avoids
+    // introducing a fresh target-availability dependency.
+    let mut fetched_count = 0usize;
+    let snapshot_val = match local_cas.get_object(remote_snapshot_hash)? {
+        Some(value) => value,
+        None => {
+            let snapshot_objs = client
+                .objects_get(&[remote_snapshot_hash.to_string()], &[])
+                .await
+                .map_err(PullResultsError::Other)?;
+            let value = snapshot_objs
+                .find_object(remote_snapshot_hash)
+                .ok_or_else(|| {
+                    PullResultsError::InvalidRemoteSnapshot(format!(
+                        "snapshot {} not found in objects_get response",
+                        remote_snapshot_hash
+                    ))
+                })?;
+            store_remote_object(
+                authority,
+                staged_roots,
+                local_cas,
+                remote_snapshot_hash,
+                &value,
+            )?;
+            fetched_count += 1;
+            value
+        }
+    };
 
     // 1a. Lineage check. Runs in every mode — including --no-project —
     //     so a misconfigured / hostile remote can't slip an unrelated
@@ -170,7 +180,6 @@ async fn pull_results_staged(
     // local mutation. This includes unchanged ProjectFile objects and the
     // exact stored policy; a destination cannot reinterpret the tree using
     // its current ignore configuration.
-    let mut fetched_count = 1usize;
     let snapshot = ProjectSnapshot::from_value(&snapshot_val)
         .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
     let pushed_snapshot_value = local_cas.get_object(pushed_snapshot_hash)?.ok_or_else(|| {
@@ -190,41 +199,40 @@ async fn pull_results_staged(
         snapshot.project_tree_hash.clone(),
         snapshot.effective_policy_hash.clone(),
     ];
-    let roots_response = client
-        .objects_get(&roots, &[])
-        .await
-        .map_err(PullResultsError::Other)?;
-    let tree_val = roots_response
-        .find_object(&snapshot.project_tree_hash)
-        .ok_or_else(|| {
-            PullResultsError::InvalidRemoteSnapshot(format!(
-                "project tree {} is absent",
-                snapshot.project_tree_hash
-            ))
-        })?;
-    let policy_val = roots_response
-        .find_object(&snapshot.effective_policy_hash)
-        .ok_or_else(|| {
-            PullResultsError::InvalidRemoteSnapshot(format!(
-                "project policy {} is absent",
-                snapshot.effective_policy_hash
-            ))
-        })?;
-    store_remote_object(
-        authority,
-        staged_roots,
-        local_cas,
-        &snapshot.project_tree_hash,
-        &tree_val,
-    )?;
-    store_remote_object(
-        authority,
-        staged_roots,
-        local_cas,
-        &snapshot.effective_policy_hash,
-        &policy_val,
-    )?;
-    fetched_count += 2;
+    let missing_roots = roots
+        .iter()
+        .filter_map(|hash| match local_cas.has_object(hash) {
+            Ok(false) => Some(Ok(hash.clone())),
+            Ok(true) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let roots_response = if missing_roots.is_empty() {
+        None
+    } else {
+        Some(
+            client
+                .objects_get(&missing_roots, &[])
+                .await
+                .map_err(PullResultsError::Other)?,
+        )
+    };
+    let mut resolve_root = |label: &str, hash: &str| -> Result<Value, PullResultsError> {
+        if let Some(value) = local_cas.get_object(hash)? {
+            return Ok(value);
+        }
+        let value = roots_response
+            .as_ref()
+            .and_then(|response| response.find_object(hash))
+            .ok_or_else(|| {
+                PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} is absent"))
+            })?;
+        store_remote_object(authority, staged_roots, local_cas, hash, &value)?;
+        fetched_count += 1;
+        Ok(value)
+    };
+    let tree_val = resolve_root("project tree", &snapshot.project_tree_hash)?;
+    let policy_val = resolve_root("project policy", &snapshot.effective_policy_hash)?;
     let remote_tree = ProjectTree::from_value(&tree_val)
         .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
     let policy = ProjectSnapshotPolicy::from_value(&policy_val)
@@ -286,10 +294,8 @@ async fn pull_results_staged(
 
     let (files_updated, files_deleted) = match local_project_root {
         Some(root) => {
-            let journal_auth_key = authority
-                .require_recovery()?
-                .remote_pull_journal_auth_key()?;
-            apply_tree_diff(local_cas, root, base_tree, &remote_tree, &journal_auth_key)?
+            let journal_auth_key = authority.require_recovery()?.workspace_journal_auth_key()?;
+            apply_tree_diff(local_cas, root, base_tree, &remote_tree, &journal_auth_key).await?
         }
         None => (0, 0),
     };
@@ -485,7 +491,7 @@ impl PullRecoveryJournal {
 /// them into place (Phase C). If any swap operation fails, all previously
 /// applied changes are rolled back from the backup, restoring the workspace
 /// to its pre-apply state. The workspace is never left in a partial state.
-fn apply_tree_diff(
+async fn apply_tree_diff(
     local_cas: &CasStore,
     local_project_root: &Path,
     base_tree: &ProjectTree,
@@ -494,13 +500,26 @@ fn apply_tree_diff(
 ) -> Result<(usize, usize), PullResultsError> {
     let project_root = lillux::PinnedDirectory::open(local_project_root)?
         .ok_or_else(|| anyhow::anyhow!("local project root disappeared"))?;
-    let _pull_lock = acquire_pull_apply_lock(&project_root)?;
+    let _pull_lock = acquire_pull_apply_lock(&project_root).await?;
     if let Some(report) =
         recover_interrupted_pull_apply(&project_root, local_cas, journal_auth_key)?
     {
         return Err(PullResultsError::RecoveryRequired(report));
     }
     ensure_no_pull_recovery_artifacts(&project_root)?;
+
+    // A durable caller can crash after the atomic workspace apply but before
+    // it settles its sync-job attempt. In that case the admitted base no
+    // longer matches, but repeating the exact result is already complete.
+    // Recognize only the complete result tree (content and normalized modes,
+    // including exact absence of base-only paths) before performing the
+    // clean-base check. This is not a loose "looks changed" shortcut: every
+    // path in the immutable base/result union is proven against the exact
+    // result generation.
+    if workspace_matches_result_tree(&project_root, local_cas, base_tree, remote_tree)? {
+        return Ok((0, 0));
+    }
+
     // Collect all paths from base + remote trees.
     let mut all_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in base_tree.files.keys() {
@@ -731,6 +750,40 @@ fn apply_tree_diff(
         backup.preserve();
     }
     apply_result
+}
+
+fn workspace_matches_result_tree(
+    project_root: &lillux::PinnedDirectory,
+    local_cas: &CasStore,
+    base_tree: &ProjectTree,
+    result_tree: &ProjectTree,
+) -> Result<bool, PullResultsError> {
+    let mut all_paths = base_tree.files.keys().collect::<Vec<_>>();
+    all_paths.extend(result_tree.files.keys());
+    all_paths.sort();
+    all_paths.dedup();
+    for path in all_paths {
+        ryeos_state::project_sync::validate_safe_relative_path(path)
+            .map_err(PullResultsError::Other)?;
+        let live = open_relative_regular(project_root, path)?;
+        let Some(result_hash) = result_tree.files.get(path) else {
+            if live.is_some() {
+                return Ok(false);
+            }
+            continue;
+        };
+        let Some(live) = live else {
+            return Ok(false);
+        };
+        let result_file = load_project_file(local_cas, result_hash)?;
+        if hash_open_regular(live.try_clone().map_err(anyhow::Error::from)?)?
+            != result_file.blob_hash
+            || normalized_open_mode(&live)? != result_file.normalized_mode
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Apply planned writes and deletes with rollback on failure.
@@ -974,31 +1027,8 @@ fn pinned_relative_parent(
     relative: &str,
     create: bool,
 ) -> Result<Option<(lillux::PinnedDirectory, std::ffi::OsString)>, PullResultsError> {
-    use std::path::Component;
-
-    ryeos_state::project_sync::validate_safe_relative_path(relative)
-        .map_err(PullResultsError::Other)?;
-    let mut parent = root.try_clone()?;
-    let mut components = Path::new(relative).components().peekable();
-    while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            return Err(PullResultsError::Other(anyhow::anyhow!(
-                "remote project path is not normalized: {relative}"
-            )));
-        };
-        if components.peek().is_none() {
-            return Ok(Some((parent, name.to_os_string())));
-        }
-        parent = if create {
-            parent.open_or_create_child(name, 0o700)?
-        } else {
-            let Some(child) = parent.open_child_directory(name)? else {
-                return Ok(None);
-            };
-            child
-        };
-    }
-    Ok(None)
+    crate::project_namespace::relative_parent(root, relative, create)
+        .map_err(PullResultsError::Other)
 }
 
 fn open_relative_regular(
@@ -1561,19 +1591,16 @@ fn is_pull_transaction_artifact_name(name: &str) -> bool {
         || name.starts_with(".ryeos-quarantine.")
 }
 
-fn acquire_pull_apply_lock(
+async fn acquire_pull_apply_lock(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<lillux::PinnedDirectoryLock, PullResultsError> {
-    project_root.ensure_path_binding()?;
-    let lock = project_root
-        .lock_exclusive_with_timeout(lillux::time::Duration::from_secs(5))
+    crate::project_namespace::acquire_project_mutation_lock(project_root)
+        .await
         .map_err(|error| {
             PullResultsError::RecoveryRequired(format!(
                 "could not acquire the project pull/apply lock: {error:#}"
             ))
-        })?;
-    project_root.ensure_path_binding()?;
-    Ok(lock)
+        })
 }
 
 fn recover_interrupted_pull_apply(
@@ -2148,8 +2175,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_detects_local_conflict_on_tracked_file() {
+    #[tokio::test]
+    async fn apply_detects_local_conflict_on_tracked_file() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
 
@@ -2163,7 +2190,7 @@ mod tests {
         let base = make_tree(&[("file.txt", &base_file)]);
         let remote = make_tree(&[("file.txt", &remote_file)]);
 
-        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]);
+        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).await;
         match result {
             Err(PullResultsError::LocalConflict(path)) => {
                 assert_eq!(path, "file.txt");
@@ -2178,8 +2205,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_detects_new_remote_file_overwrites_local() {
+    #[tokio::test]
+    async fn apply_detects_new_remote_file_overwrites_local() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
 
@@ -2192,7 +2219,7 @@ mod tests {
         let base = make_tree(&[]); // empty base — file wasn't tracked
         let remote = make_tree(&[("new.txt", &remote_file)]);
 
-        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]);
+        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).await;
         match result {
             Err(PullResultsError::LocalConflict(msg)) => {
                 assert!(msg.contains("new.txt"), "got: {msg}");
@@ -2207,8 +2234,8 @@ mod tests {
 
     // ── R3-3a: rollback on missing CAS content ──
 
-    #[test]
-    fn apply_rollback_on_missing_cas_leaves_workspace_untouched() {
+    #[tokio::test]
+    async fn apply_rollback_on_missing_cas_leaves_workspace_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
 
@@ -2243,7 +2270,7 @@ mod tests {
         let base = make_tree(&[("a.txt", &hash_a_old), ("b.txt", &hash_b_old)]);
         let remote = make_tree(&[("a.txt", &hash_a), ("b.txt", &missing)]);
 
-        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]);
+        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).await;
         assert!(result.is_err(), "should fail on missing CAS content");
 
         // Workspace should be completely untouched — no partial apply
@@ -2259,8 +2286,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_happy_path_writes_and_deletes() {
+    #[tokio::test]
+    async fn apply_happy_path_writes_and_deletes() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
 
@@ -2294,8 +2321,9 @@ mod tests {
             ("d.txt", &hash_d),
         ]);
 
-        let (updated, deleted) =
-            apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).unwrap();
+        let (updated, deleted) = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32])
+            .await
+            .unwrap();
         assert_eq!(updated, 2); // a.txt + d.txt
         assert_eq!(deleted, 1); // b.txt
 
@@ -2315,6 +2343,14 @@ mod tests {
             std::fs::read_to_string(project_root.join("d.txt")).unwrap(),
             "brand new D"
         );
+
+        // Simulate a durable caller crashing after the atomic apply but
+        // before settling its sync-job attempt. The admitted base no longer
+        // matches, yet replay of the exact result must settle as a no-op.
+        let replay = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32])
+            .await
+            .unwrap();
+        assert_eq!(replay, (0, 0));
     }
 
     // ── extract_snapshot_hash coverage ──

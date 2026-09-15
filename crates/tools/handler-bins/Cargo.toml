@@ -10,6 +10,8 @@ ryeos-effect-contract = { workspace = true }
 ryeos-directive-definition = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-graph-definition = { workspace = true }
+ryeos-runtime = { workspace = true }
+ryeos-state = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -44,6 +46,18 @@ path = "src/bin/directive_launch_preparer.rs"
 [[bin]]
 name = "ryeos-graph-effective-validator"
 path = "src/bin/graph_effective_validator.rs"
+
+[[bin]]
+name = "ryeos-graph-launch-preparer"
+path = "src/bin/graph_launch_preparer.rs"
+
+[[bin]]
+name = "ryeos-graph-execution-evidence"
+path = "src/bin/graph_execution_evidence.rs"
+
+[[bin]]
+name = "ryeos-direct-execution-evidence"
+path = "src/bin/direct_execution_evidence.rs"
 
 [lib]
 path = "src/lib.rs"

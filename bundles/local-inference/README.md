@@ -25,14 +25,14 @@ assets. Disabled-isolation activation and replay are functional/recovery
 conformance evidence over bytes the RyeOS publisher has already chosen to
 trust; same-UID observations are not evidence that adversarial code is safe.
 
-Local inference does not require Bubblewrap. On the default trusted single-user
-node, RyeOS delivers the exact signed source and external realizations through a
-daemon-owned private workspace and runs the persistent worker under disabled
-OS isolation. An installed isolation backend is optional hardening; RyeOS
-records whether confinement and isolated networking were actually enforced.
+On the default trusted single-user node, RyeOS delivers the exact signed source
+and external realizations through a daemon-owned private workspace and runs the
+persistent worker under disabled OS isolation. Explicit node policy may select
+Core's native Lillux backend for stronger confinement; RyeOS records whether
+confinement and isolated networking were actually enforced.
 
 Installing bundle bytes does not acquire model/runtime content. A fresh
-`full` or `full-sandbox` initialization explicitly publishes the bounded
+`full` initialization explicitly publishes the bounded
 publisher-authored acquisition and persistent-session baseline needed by the
 two exact fixture profiles. Activate either profile with the same generic
 operation:

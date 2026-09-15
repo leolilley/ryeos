@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-09",
+  "status": "incomplete",
+  "scope": "installed_two_node_loopback_eight_file_fixture",
+  "model": {
+    "id": "gpt-5.3-codex-spark",
+    "effort": "low",
+    "authentication": "existing_approved_chatgpt_subscription"
+  },
+  "primary_node_mutated": false,
+  "commits": [
+    "872d0ec16",
+    "e72e0bb69",
+    "a23cab5ba",
+    "91f2db5da"
+  ],
+  "qualified": {
+    "native_minimal_devices": true,
+    "native_nested_guest_dev_setup": true,
+    "native_preserved_launch_group": true,
+    "installed_supervised_target_start": true,
+    "configured_operator_remote_launch": true,
+    "worker_read_and_edit": true,
+    "exact_turn_completion_fence": true,
+    "fenced_candidate_capture": true,
+    "frozen_candidate_restart_retention": true,
+    "failed_candidate_owner_discard": true,
+    "worker_child_format_check": false,
+    "worker_child_shared_format": false,
+    "independent_candidate_evaluation": false,
+    "successful_candidate_remote_return": false,
+    "railway_development": false
+  },
+  "attempts": [
+    {
+      "name": "v11",
+      "root": "T-31c84de6-855b-0911-d5c8-b06f2c545fd0",
+      "outcome": "pre_turn_attachment_refused",
+      "reason": "setup-time setsid changed retained launcher PGID; corrected by e72e0bb69"
+    },
+    {
+      "name": "v12",
+      "root": "T-1c85addd-7b3f-1beb-1f0c-58e0286bd865",
+      "command_sequence": 2,
+      "turn_id": "01a08394-bb4c-7661-9c3d-eee3533c956a",
+      "completion_fence": {
+        "admitted_capsule_hash": "bbdb271f60bdd039e7ec56b2c84fca6724ee04c3f7add8bab4bbeadf54c2014b",
+        "command_sequence": 2,
+        "completion_operation_id": "ab521195f94b2e9dc2f72eb3a8b7a541a9ae4f60b8e82ec84e6f31e06de98cb3",
+        "placement_thread_id": "T-1c85addd-7b3f-1beb-1f0c-58e0286bd865",
+        "request_digest": "8d788efc81ec7ac4fe592a16fe9b7ecd0a82d556eb346b387b60881ce91f6977",
+        "turn_id": "01a08394-bb4c-7661-9c3d-eee3533c956a",
+        "worker_boot_epoch": 1
+      },
+      "candidate_snapshot_hash": "4cfc5d11dd9c5928d8a1ff1bf35bf2b183df464762dfd23d81fca9d973f50262",
+      "candidate_validation_hash": "200ae02e9e67165c8167b240c7d0b2bfd66f51cd987269e597ddbf2f5a755abf",
+      "outcome": "completed_turn_failed_task",
+      "failure": "restricted endpoint environment omitted; here-document scratch also refused",
+      "restart": "same frozen candidate and fence",
+      "disposition": "discarded_without_publication"
+    },
+    {
+      "name": "v13",
+      "root": "T-acb976af-3116-aa9d-6a5e-219c5df3da17",
+      "command_sequence": 2,
+      "turn_id": "01a083a2-12ee-7be3-b662-76f094a8dc97",
+      "completion_fence": {
+        "admitted_capsule_hash": "9810371c5181c98fd31572dca2b5144d5d71167007b47a9bd4c9af67873da97d",
+        "command_sequence": 2,
+        "completion_operation_id": "13fd34d90779fdd2b0241215ac3a6aea442df4e8d3ebad3c0919b20bfec316da",
+        "placement_thread_id": "T-acb976af-3116-aa9d-6a5e-219c5df3da17",
+        "request_digest": "80bbba251726b1be7449a17567b2771bee4eef62a55c9927b38c1315c5785236",
+        "turn_id": "01a083a2-12ee-7be3-b662-76f094a8dc97",
+        "worker_boot_epoch": 1
+      },
+      "outcome": "completed_turn_failed_task",
+      "failure": "restricted broker socket connect EPERM in nested command sandbox",
+      "candidate_snapshot_hash": "49ef09795fc4f6a5a038bcccb6d138176c98a12ed4384a6fec32cecd36cbae96",
+      "candidate_validation_hash": "df62099df68da14d0ce067322c8e09f4a78bd800827cdc8a89c38493d9f9226c",
+      "disposition": "discarded_without_publication"
+    }
+  ],
+  "offline_transport_diagnostic": {
+    "date": "2026-09-09",
+    "probe": "probe_pinned_codex_broker.py",
+    "codex_sha256": "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40",
+    "model_calls": 0,
+    "node_mutations": 0,
+    "direct_unix_connect_errno": 1,
+    "exact_allowlisted_unix_proxy_status": 501,
+    "exact_allowlisted_unix_proxy_body": "unix sockets unsupported",
+    "unallowed_address_proxy_status": 403,
+    "broker_contacted": false,
+    "production_transport_changed": false,
+    "nested_broker_authentication_qualified": false
+  },
+  "remaining": [
+    "Resolve the pinned Linux artifact's unsupported Unix-socket proxy before choosing any new transport or vendor pin.",
+    "Admit only the exact restricted broker transport through the nested command sandbox without external destinations.",
+    "Qualify authenticated broker identity across nested PID namespaces; no PID-zero or UID-only fallback.",
+    "Provide explicitly scoped shell scratch through existing environment and filesystem owners.",
+    "Complete worker child negative/positive verification, candidate evaluation and remote return.",
+    "Qualify real remote deployment separately."
+  ]
+}

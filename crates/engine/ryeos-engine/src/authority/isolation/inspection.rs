@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationMode,
-    IsolationNetworkPolicy,
+    IsolationNetworkPolicy, IsolationProcessScopePolicy,
 };
 
 /// Backend resolution facts and the exact policy snapshot used by a runtime.
@@ -24,6 +24,10 @@ pub struct IsolationInspection {
     pub mode: IsolationMode,
     pub digest: Option<String>,
     pub backend: IsolationBackendInspection,
+    pub process_scopes: IsolationProcessScopePolicy,
+    /// Populated only after the retained provider's actual placement/barrier/
+    /// termination probe succeeded, never from a list of implemented features.
+    pub process_scope_capabilities: BTreeSet<lillux::ProcessScopeCapability>,
     pub filesystem: IsolationFilesystemPolicy,
     pub network: IsolationNetworkPolicy,
     pub environment: IsolationEnvironmentPolicy,

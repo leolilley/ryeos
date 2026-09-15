@@ -3050,7 +3050,7 @@ fn ryeos_version(core: &RyeOsCore) -> String {
         .map(normalize_version_label)
         .unwrap_or_else(|| {
             option_env!("RYEOS_BUILD_VERSION")
-                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .unwrap_or("unqualified")
                 .to_string()
         })
 }

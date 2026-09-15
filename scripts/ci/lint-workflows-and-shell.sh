@@ -18,7 +18,6 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/lint-workflows-and-shell.sh \
     scripts/ci/test-daemon-image-init-policy.sh \
     scripts/ci/test-publisher-trust-policy.sh \
-    scripts/lint-cli-presentation.sh \
     scripts/release/resolve-version.sh \
     scripts/release/test-resolve-version.sh \
     scripts/release/official-publisher-fingerprint.sh \
@@ -27,17 +26,17 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/release/verify-bundle-artifact.sh \
     scripts/release/prepare-aur.sh \
     scripts/release/test-prepare-aur.sh \
-    scripts/release/qualify-container-image.sh \
+    tests/e2e/container-image/qualify.sh \
     scripts/pkg/bundle-sets.sh \
     scripts/pkg/install-local-direct.sh \
     scripts/pkg/test-ryeos-terminal.sh \
     scripts/lib/ryeos-terminal.sh \
     scripts/gate.sh \
-    scripts/dev/qualify-configured-remote.sh \
-    scripts/dev/test-qualify-configured-remote.sh \
+    tests/e2e/configured-remote/qualify.sh \
+    tests/e2e/configured-remote/test_qualification.sh \
     scripts/dev-tui.sh \
     scripts/dev-ui-assets.sh \
-    scripts/smoke-execute-stream.sh \
-    scripts/smoke-installed-resume.sh \
+    tests/e2e/execute-stream/smoke.sh \
+    tests/e2e/installed-resume/smoke.sh \
     scripts/populate-bundles.sh \
     deploy/entrypoint.sh

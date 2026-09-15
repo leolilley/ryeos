@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:25f85d0317758baba773fd92be4c63c0f4d24cb5b8dc59ea297f015f93a77259:w5CJfMYC5PWYjvCx6Aub9ZlI2kXzbD3rJVTvOyjacCG7IxJm+b3XXuVMpeSVAoiCfcra9csA+QtW1Ace2F7oCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:4030220baeccc23033b33f8f480ab4a26a422f9116aabc335483d6d7e5c82448:/nuBos574mkiAdw/uG/ReMzw8zPfxjeFhLXX7SsNQyU6zPTt8zBnu8CcXm/z/GtjZa1hNEzYp77fPwEaecS6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "list-principals"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.list-principals"]
 description: "Read-only roster of the realm's accounts: id, display_name, roles, disabled. Never returns passphrases or secrets. For operator tooling that needs the full user list (e.g. per-user assistant assignment)."
 

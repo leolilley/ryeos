@@ -4156,6 +4156,11 @@ pub fn build_remote_project_rebind(
         EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
     };
     source.validate()?;
+    if source.workspace_outputs().is_some() {
+        bail!(
+            "remote worker handoff does not yet support pair-aware workspace output candidate disposition"
+        );
+    }
     hash("source candidate snapshot", source_candidate_snapshot_hash)?;
     hash("target expected project head", target_expected_head_hash)?;
     hash("target project hash", target_project_hash)?;
@@ -4215,6 +4220,7 @@ pub fn build_remote_project_rebind(
         environment: target_environment,
         capability_ceiling: capability_ceiling.clone(),
         child_policy: child_policy.clone(),
+        workspace_outputs: None,
     };
     let rebind = ProjectAuthorityRebind {
         route_digest: route_digest.to_owned(),
@@ -5117,6 +5123,7 @@ mod tests {
             environment: EnvironmentAuthority::None,
             capability_ceiling: vec!["project.read".into(), "project.write".into()],
             child_policy: ChildProjectAuthorityPolicy::Inherit,
+            workspace_outputs: None,
         }
     }
 
@@ -5127,6 +5134,7 @@ mod tests {
             kind: "worker_execution".into(),
             item_ref: "worker_execution:test/session".into(),
             ref_bindings: BTreeMap::new(),
+            product_selections: Vec::new(),
             launch_mode: "detached".into(),
             parameters: serde_json::json!({"credential_profile_id":"source-profile"}),
             project_context: ProjectContext::SnapshotHash { hash: base.clone() },
@@ -5149,6 +5157,7 @@ mod tests {
                 scopes: vec!["execute".into()],
             }),
             execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
             effective_caps: vec!["project.read".into(), "project.write".into()],
             parent_delegation_caps: None,
             executor_ref: Some("native:worker-execution".into()),

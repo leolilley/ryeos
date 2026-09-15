@@ -4,7 +4,7 @@ category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.7.0"
+version: "0.8.0"
 description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around typed signed backends.
 tags:
   - hosted-node
@@ -36,10 +36,13 @@ still receive exact admitted inputs through a daemon-owned private workspace;
 RyeOS reports honestly that kernel confinement was not enforced.
 
 It is not yet a hostile multi-tenant boundary. The current policy is node-wide,
-not principal-specific; CPU, memory, and process-count cgroup quotas are
-deferred; host PIDs remain visible to syscalls; and same-UID signal isolation is
-not claimed. A deployment that runs hostile
-workloads must still add cgroups plus a VM, microVM, or dedicated outer worker.
+not principal-specific, and CPU, memory, and process-count cgroup quotas remain
+deferred. The signed native Lillux backend now gives an enforced target a fresh
+PID namespace and removes namespace-escape syscalls, but that protection is not
+present when isolation is disabled and does not become a hostile-tenant/kernel
+boundary merely because both modes share the same application substrate. A
+deployment that runs hostile workloads must still add delegated cgroups plus a
+VM, microVM, or dedicated outer worker.
 
 Attachment-before-execution now closes the local creation-to-publication crash
 window. Direct targets remain held until their exact identity is durable and

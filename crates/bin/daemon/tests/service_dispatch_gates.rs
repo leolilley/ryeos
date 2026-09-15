@@ -69,11 +69,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
+    ryeos_engine::test_support::workspace_root()
 }
 
 /// Build an engine-like fixture using the live bundle + trusted signers.
@@ -129,6 +125,7 @@ fn local_plan_ctx() -> PlanContext {
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+        scheduled_fire: None,
         validate_only: true,
     }
 }

@@ -1,0 +1,25 @@
+category: fixture
+version: "1.0.0"
+executor_id: "@subprocess"
+description: Offline structured-session adapter for the selected runtime fixture
+execution_protocol: protocol:ryeos/core/structured_session
+session_resources:
+  real_uid_process_limit: 4096
+supported_target:
+  os: linux
+  arch: x86_64
+source:
+  root: lib/hosted
+  entry: profile.json
+  digest: FIXTURE_SOURCE_DIGEST
+external_content: []
+config:
+  # This is the existing generic bridge payload. No Codex Worker, credential,
+  # profile, provider route or private state is selected by this fixture.
+  command: bin:core/ryeos-structured-session-bridge
+  args: ["${source.entry}"]
+  env:
+    PATH: ""
+    LANG: C
+    LC_ALL: C
+  timeout_secs: 0

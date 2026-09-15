@@ -1,0 +1,44 @@
+# ryeos:signed:2026-09-13T08:55:14Z:2f92f3d5d4b7d81d398dcfe1cebabb23179afd7a106ebf938aca89f5b13060ca:M0rIZCSe0+16k7Vi2ECuaZUZsbHtwuYiRxu9QsSfWaj2gTCiW0tI0i1pLCQlxCuaYtIuDXIAo9G71c9zZkwBDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/runtimes/bash"
+version: "1.0.0"
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
+description: "Bash script runtime for owner-signed shell Tools"
+
+env_config:
+  interpreter:
+    type: local_binary
+    binary: bash
+    candidates: [bash]
+    search_paths: []
+    var: RYE_BASH
+    path_candidates: [bash]
+  env:
+    BASH_ENV: ""
+    ENV: ""
+
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory, namespace_root, namespace_lib]
+  materialization: read_only
+
+config_resolve:
+  type: single
+  spec:
+    path: "execution/execution.yaml"
+    mode: "deep_merge"
+
+config:
+  command: "${interpreter}"
+  args:
+    - "--noprofile"
+    - "--norc"
+    - "${tool_path}"
+    - "--project-path"
+    - "${project_path}"
+  input_data: "${params_json}"
+  timeout_secs: 300
+
+config_schema:
+  type: object
+  additionalProperties: true

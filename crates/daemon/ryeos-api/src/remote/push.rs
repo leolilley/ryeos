@@ -65,6 +65,25 @@ pub async fn push_snapshot_generation(
     };
 
     let operation = async {
+        // A lost acknowledgement may leave the exact generation already
+        // published. Check the owner-bound HEAD before opening a staging
+        // session so idempotent recovery cannot leak upload reservations.
+        let status = client.project_status_bounded(project_path_for_ref).await?;
+        if status.get("deployed").and_then(serde_json::Value::as_bool) == Some(true)
+            && status
+                .get("deployed_snapshot_hash")
+                .and_then(serde_json::Value::as_str)
+                == Some(snapshot_hash)
+        {
+            return Ok(PushResult {
+                snapshot_hash: snapshot_hash.to_string(),
+                tree_hash: snapshot.project_tree_hash,
+                tree_entries: tree.files.len(),
+                tree,
+                blobs_uploaded: 0,
+                blobs_skipped: 0,
+            });
+        }
         let upload_session = client
             .objects_put(None, project_path_for_ref, &[], &[])
             .await?;
@@ -221,7 +240,8 @@ pub async fn push_descendant_snapshot_with_session(
 /// than a full-project tree. It still emits the current typed project snapshot
 /// closure; excluded ordinary project paths are absent from that tree.
 ///
-/// `remote_ignore`, when supplied, is applied to every candidate path
+/// The union of the source node's current policy and `remote_ignore` is
+/// applied to every candidate path
 /// under the allow-list so files the remote would later reject (e.g.
 /// `__pycache__/`, `*.pyc`) are dropped client-side instead of
 /// blowing up at `/push-head`.
@@ -231,11 +251,12 @@ pub async fn push_project_ai_only(
     authority: &PinnedStateAuthority,
     local_project_path: &Path,
     remote_project_path_for_ref: &str,
-    remote_ignore: Option<&IgnoreMatcher>,
+    remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult> {
     let app_root = &state.config.app_root;
     refuse_walking_root(local_project_path, app_root)?;
 
+    let transfer_ignore = state.ignore_matcher.union(remote_ignore)?;
     let local_cas = authority.cas_store()?;
     let recovery = authority.require_recovery()?;
     let project_root = lillux::PinnedDirectory::open(local_project_path)?.ok_or_else(|| {
@@ -250,19 +271,9 @@ pub async fn push_project_ai_only(
     };
 
     let operation = async {
-        let empty;
-        let matcher = match remote_ignore {
-            Some(matcher) => matcher,
-            None => {
-                empty = IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-                    patterns: Vec::new(),
-                })?;
-                &empty
-            }
-        };
         let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
             &project_root,
-            matcher,
+            &transfer_ignore,
             ProjectSyncScope::AiOnly,
         )?;
         let tree = {
@@ -277,7 +288,7 @@ pub async fn push_project_ai_only(
         ryeos_state::project_sync::validate_captured_policy_source(&local_cas, &tree, &policy)?;
         if ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
             &project_root,
-            matcher,
+            &transfer_ignore,
             ProjectSyncScope::AiOnly,
         )? != policy
         {
@@ -324,6 +335,7 @@ pub async fn push_project_ai_only(
             )?;
             (snapshot_hash, upload_closure)
         };
+
         let upload = upload_missing(
             client,
             &local_cas,
@@ -360,17 +372,18 @@ pub async fn push_project_ai_only(
 
 /// Push a project directory to a remote node.
 ///
-/// 1. Apply the remote's ingest ignore rules to build the manifest
+/// 1. Apply the union of source and remote ingest-ignore rules
 /// 2. Ingest locally into CAS
 /// 3. Build manifest + snapshot
 /// 4. Check which typed objects and blobs the remote already has
 /// 5. Upload missing blobs and objects, including manifest + snapshot
 /// 6. Call push-head to write the HEAD ref
 ///
-/// The `remote_ignore` matcher is the **only** ignore policy used: the
-/// manifest is built using the remote's rules so that the pushed content
-/// matches what the remote would accept during ingest. Callers must
-/// resolve ignore rules before calling this function.
+/// Both policies are independently authoritative. Their exclusion union keeps
+/// source-forbidden content out of local CAS/upload and target-forbidden
+/// content out of the transferred generation. The target still rechecks its
+/// current policy at admission. Callers must resolve the target rules before
+/// calling this function.
 pub async fn push_project(
     client: &RemoteClient,
     state: &Arc<AppState>,
@@ -391,6 +404,7 @@ pub async fn push_project(
     refuse_walking_root(project_path, app_root)?;
 
     // 1. Ingest project directory into local CAS using remote's ignore rules.
+    let transfer_ignore = state.ignore_matcher.union(remote_ignore)?;
     let local_cas = authority.cas_store()?;
     let recovery = authority.require_recovery()?;
     let project_root = lillux::PinnedDirectory::open(project_path)?.ok_or_else(|| {
@@ -404,7 +418,7 @@ pub async fn push_project(
     let operation = async {
         let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
             &project_root,
-            remote_ignore,
+            &transfer_ignore,
             ProjectSyncScope::FullProject,
         )?;
         let tree = {
@@ -419,7 +433,7 @@ pub async fn push_project(
         ryeos_state::project_sync::validate_captured_policy_source(&local_cas, &tree, &policy)?;
         if ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
             &project_root,
-            remote_ignore,
+            &transfer_ignore,
             ProjectSyncScope::FullProject,
         )? != policy
         {
@@ -466,7 +480,6 @@ pub async fn push_project(
             )?;
             (snapshot_hash, upload_closure)
         };
-
         let upload = upload_missing(
             client,
             &local_cas,
@@ -619,11 +632,17 @@ pub(crate) async fn upload_missing(
     validate_upload_response(&upload_session.blob_hashes, &[], "initial blob")?;
     validate_upload_response(&upload_session.object_hashes, &[], "initial object")?;
 
-    // Stream each immutable blob through bounded, sequential, retry-idempotent
-    // chunks. Peak memory is independent of both blob size and generation
-    // size; the remote verifies the complete digest before admitting the blob
-    // to this publication capability.
-    for hash in &missing_blobs {
+    // Pack adjacent small immutable blobs into bounded requests. Sending every
+    // source file through an individual signed request makes ordinary project
+    // pushes scale with network round trips rather than bytes. Large blobs
+    // remain bounded, sequential and retry-idempotent chunks. Peak memory is
+    // independent of generation size, and the remote still verifies every
+    // complete digest before admitting it to this publication capability.
+    const INLINE_BLOB_BATCH_MAX_ENTRIES: usize = 128;
+
+    let mut blob_index = 0;
+    while blob_index < missing_blobs.len() {
+        let hash = &missing_blobs[blob_index];
         let (mut source, total_size) = local_cas
             .open_blob(hash)?
             .ok_or_else(|| anyhow::anyhow!("local CAS blob {hash} disappeared before upload"))?;
@@ -633,22 +652,57 @@ pub(crate) async fn upload_missing(
                 limits.max_blob_bytes
             );
         }
-        if total_size == 0 {
+
+        if inline_blob_request_size(total_size)? <= OBJECTS_PUT_BODY_BUDGET_BYTES {
+            let mut batch = Vec::new();
+            let mut expected = Vec::new();
+            let mut request_size = 256_usize;
+            while blob_index < missing_blobs.len() {
+                if batch.len() == INLINE_BLOB_BATCH_MAX_ENTRIES {
+                    break;
+                }
+                let candidate_hash = &missing_blobs[blob_index];
+                let (mut candidate, candidate_size) =
+                    local_cas.open_blob(candidate_hash)?.ok_or_else(|| {
+                        anyhow::anyhow!("local CAS blob {candidate_hash} disappeared before upload")
+                    })?;
+                if candidate_size > limits.max_blob_bytes {
+                    anyhow::bail!(
+                        "project blob {candidate_hash} exceeds transport limit: {candidate_size} > {}",
+                        limits.max_blob_bytes
+                    );
+                }
+                let encoded_size = inline_blob_request_size(candidate_size)?;
+                if encoded_size > OBJECTS_PUT_BODY_BUDGET_BYTES
+                    || (!batch.is_empty()
+                        && request_size.saturating_add(encoded_size)
+                            > OBJECTS_PUT_BODY_BUDGET_BYTES)
+                {
+                    break;
+                }
+                let candidate_size = usize::try_from(candidate_size)?;
+                let mut bytes = vec![0_u8; candidate_size];
+                candidate.read_exact(&mut bytes)?;
+                let mut trailing = [0_u8; 1];
+                if candidate.read(&mut trailing)? != 0 {
+                    anyhow::bail!("local CAS blob {candidate_hash} exceeds its declared size");
+                }
+                batch.push(BlobUpload {
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+                expected.push(candidate_hash.clone());
+                request_size = request_size.saturating_add(encoded_size);
+                blob_index += 1;
+            }
             let response = client
-                .objects_put(
-                    Some(&staging_id),
-                    project_path_for_ref,
-                    &[BlobUpload {
-                        data: String::new(),
-                    }],
-                    &[],
-                )
+                .objects_put(Some(&staging_id), project_path_for_ref, &batch, &[])
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
-            validate_upload_response(&response.blob_hashes, std::slice::from_ref(hash), "blob")?;
+            validate_upload_response(&response.blob_hashes, &expected, "blob")?;
             validate_upload_response(&response.object_hashes, &[], "object")?;
             continue;
         }
+
         let mut offset = 0_u64;
         let mut buffer = vec![0_u8; crate::handlers::objects_put::MAX_BLOB_CHUNK_BYTES];
         while offset < total_size {
@@ -678,6 +732,7 @@ pub(crate) async fn upload_missing(
             validate_upload_response(&response.object_hashes, &[], "object")?;
             offset = next;
         }
+        blob_index += 1;
     }
     for batch in chunk_object_uploads(&objects)? {
         let expected = batch
@@ -702,6 +757,16 @@ pub(crate) async fn upload_missing(
         uploaded,
         skipped,
     })
+}
+
+fn inline_blob_request_size(blob_size: u64) -> Result<usize> {
+    let blob_size = usize::try_from(blob_size)?;
+    Ok(blob_size
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4)
+        .saturating_add(64))
 }
 
 fn chunk_object_uploads(
@@ -928,6 +993,36 @@ mod refuse_walking_root_tests {
         assert!(
             msg.contains("filebundle root") || msg.contains("'/'"),
             "error must mention filebundle root, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod upload_batch_tests {
+    use super::{OBJECTS_PUT_BODY_BUDGET_BYTES, inline_blob_request_size};
+
+    #[test]
+    fn inline_blob_request_size_accounts_for_base64_and_entry_overhead() {
+        assert_eq!(inline_blob_request_size(0).unwrap(), 64);
+        assert_eq!(inline_blob_request_size(1).unwrap(), 68);
+        assert_eq!(inline_blob_request_size(3).unwrap(), 68);
+        assert_eq!(inline_blob_request_size(4).unwrap(), 72);
+    }
+
+    #[test]
+    fn inline_blob_batch_boundary_stays_below_route_budget() {
+        let largest_raw = (0..=OBJECTS_PUT_BODY_BUDGET_BYTES)
+            .rev()
+            .find(|size| {
+                inline_blob_request_size(*size as u64).unwrap() <= OBJECTS_PUT_BODY_BUDGET_BYTES
+            })
+            .unwrap();
+        assert!(
+            inline_blob_request_size(largest_raw as u64).unwrap() <= OBJECTS_PUT_BODY_BUDGET_BYTES
+        );
+        assert!(
+            inline_blob_request_size((largest_raw + 1) as u64).unwrap()
+                > OBJECTS_PUT_BODY_BUDGET_BYTES
         );
     }
 }

@@ -3,6 +3,7 @@ version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "author-directive"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Re-author a signed tv-tracker chat directive via the daemon runtime.author_item callback — either the shared base (apps/tv-tracker/ai_chat_base) or an operator agent (apps/tv-tracker/agents/<slug>). Generic over content; the daemon signs (this wrapper never holds a key). Authority is bounded to the base directive + the agents/* subtree — nothing else."
 
 # Requests authoring authority for the base directive AND the agents/* subtree.

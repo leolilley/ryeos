@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:40Z:83fd94710f232641f596e09467fadfaf8ba7bb511aebc87b23b62b76dad2c785:BDsZrae3Jjs47iaQXOQjRYxcEUykTRmYQuxrb11ivudoGnQKjfvB3j/1YJJvTvOQFIobaeZigBGBnte6oidtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-06T07:38:25Z:2ce4281435fae73a602f00d8fb39eed25d1e85ad51ae5770c9346b7e86f35d43:B1B62rZLjO4szRdfqi3pSdIctrkEM35YxcYilpixGFRQBIl6mQK+NQMsAAacT/blBUvF2kwft/r7o7xrcywlCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, threads, execution, lifecycle]
 version: "1.0.0"
@@ -67,6 +67,24 @@ Threads can have parent-child relationships:
 | `ryeos thread chain <id>` | Get full parent chain                |
 | `ryeos events replay <id>` | Replay persisted events             |
 | `ryeos events chain-replay <id>` | Replay chain events        |
+
+### Retained project results
+
+`ryeos thread get <exact-thread-id>` exposes
+`thread.result_project_snapshot_hash` alongside the thread's admitted
+`project_authority`. It is the retained generation recorded by that exact
+thread's immutable snapshot, or JSON null when no result was retained.
+
+The query does not follow a continuation, select a later execution, advance
+project HEAD, or infer a result from snapshot history. Retain-result execution
+can therefore leave ordinary `snapshot log` unchanged while its private
+result remains available. Thread reads retain their existing owner check.
+Thread-list fields remain rebuildable display projections; use the exact
+thread-detail query before selecting a retained result for qualification.
+
+This coordinate is a locator, not publication or import permission. A retained
+result import still verifies the exact chain/thread, successful terminal
+authority, caller ownership, retained-result policy and requested snapshot.
 
 ## HTTP Routes
 

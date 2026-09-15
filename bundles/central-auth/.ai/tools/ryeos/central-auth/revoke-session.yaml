@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-27T09:00:06Z:96aa4bd0ace61d27c5c18b5f3d3a3073f6cba0f4f345e5bcf03be6ea250a01b9:nnamqeoSixZ6MpXJffzQIQHtXH4ftcUkQSkpCRfqWHti1gY8DyJacTkpBonS5Oy6fSDBKViIdg9uhk83XutGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-05T00:45:23Z:d234257392a3fd3af3acc10d3882a06526d039b1ddba613c999d165985b2bcc1:3EjWeP/gQzKNM32O+wkOqP0U3ZR46CzVSoKwvWd5tdAJHyV/eXFqVwfyexiq9DpJmaMXqldiJ5MFSGSqfLrzBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "revoke-session"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.revoke-session"]
 description: "Revoke one session token."
 

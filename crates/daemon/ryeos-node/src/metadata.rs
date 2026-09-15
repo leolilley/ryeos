@@ -75,6 +75,20 @@ impl DaemonMetadata {
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
     }
+
+    /// Remove only the exact pinned discovery hint observed at this point.
+    /// Lifecycle callers use this after independently proving no live daemon
+    /// peer exists; `daemon.json` itself never grants process authority.
+    pub fn remove_hint(app_root: &Path) -> Result<()> {
+        let directory = lillux::PinnedDirectory::open(app_root)?
+            .ok_or_else(|| anyhow::anyhow!("app root is absent"))?;
+        let Some(metadata) =
+            directory.open_pinned_regular(std::ffi::OsStr::new("daemon.json"), false)?
+        else {
+            return Ok(());
+        };
+        directory.remove_pinned_regular_if_same(&metadata)
+    }
 }
 
 #[cfg(test)]

@@ -3,9 +3,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
 use crate::status::LifecycleStatus;
 use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
@@ -34,18 +31,106 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
     stop_with_progress(env, opts, None).await
 }
 
+/// Inhibit an already configured native service when complete bootstrap
+/// configuration is unreadable. Without endpoints, only the protected host
+/// association owns a safe process transition; a direct node must be repaired
+/// before it can be authenticated and stopped.
+pub async fn stop_supervised_with_invalid_config(
+    app_root: &std::path::Path,
+    timeout: Duration,
+) -> Result<StopReport> {
+    crate::init_check::require_initialized(app_root)?;
+    let deadline = Instant::now() + timeout;
+    let _lifecycle_lock = loop {
+        match crate::LifecycleStartLock::try_acquire(app_root)? {
+            Some(lock) => break lock,
+            None if Instant::now() >= deadline => {
+                bail!("timed out waiting for the active node lifecycle operation")
+            }
+            None => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    };
+    let service = crate::supervision::InstalledService::discover_app_root(app_root)?.context(
+        "node configuration is invalid and no protected host association exists; refusing to guess a direct daemon endpoint",
+    )?;
+    service.check_supervisor()?;
+    service.request_down()?;
+    Ok(StopReport {
+        status: LifecycleStatus::Stopped {
+            app_root: app_root.to_path_buf(),
+        },
+        already_stopped: false,
+    })
+}
+
 pub async fn stop_with_progress(
     env: &LocalLifecycleEnv,
     opts: StopOptions,
     mut observer: Option<&mut dyn LifecycleProgressObserver>,
 ) -> Result<StopReport> {
+    crate::init_check::require_initialized(&env.config().app_root)?;
+    // Serialize start and stop through the existing node lifecycle lock. A
+    // native supervisor still needs durable down intent before daemon exit;
+    // this lock alone cannot inhibit its independent restart machinery.
+    let lock_deadline = Instant::now() + opts.timeout;
+    let _lifecycle_lock = loop {
+        match env.try_acquire_start_lock()? {
+            Some(lock) => break lock,
+            None => {
+                if Instant::now() >= lock_deadline {
+                    bail!("timed out waiting for the active node lifecycle operation");
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let service = crate::supervision::InstalledService::discover(env.config())?;
+    if let Some(service) = &service {
+        service.check_supervisor()?;
+    }
     let initial = crate::status::status(env).await?;
     observe(&mut observer, &initial);
+    let pre_pinned_target = if matches!(initial, LifecycleStatus::Failed { .. }) {
+        if let Some(service) = &service {
+            service.request_down()?;
+        }
+        // A pre-control failure has already exited and therefore has no peer
+        // to pin. Down intent is sufficient to inhibit another supervisor
+        // attempt; retained failure testimony remains available for diagnosis.
+        match pin_live_daemon(env).await {
+            Ok(target) => Some(target),
+            Err(_) => {
+                // `Failed` is retained exited-process testimony. The CLI tells
+                // the operator to inspect it and run `ryeos stop`; that
+                // explicit acknowledgement must make the node observably
+                // stopped. Remove the non-authoritative discovery hint first,
+                // then compare-and-remove only the exact failed marker. A
+                // concurrent replacement marker is never removed.
+                crate::DaemonMetadata::remove_hint(&env.config().app_root)?;
+                let runtime_state_dir =
+                    ryeos_engine::roots::RuntimeRoot::new(env.config().app_root.clone()).state();
+                crate::lifecycle_marker::acknowledge_startup_failure(&runtime_state_dir)?;
+                let settled = crate::status::status(env).await?;
+                if !matches!(settled, LifecycleStatus::Stopped { .. }) {
+                    bail!("startup failure acknowledgement did not settle the node offline");
+                }
+                return Ok(StopReport {
+                    status: settled,
+                    already_stopped: false,
+                });
+            }
+        }
+    } else {
+        None
+    };
     match initial {
         LifecycleStatus::NotInitialized { .. } => {
             bail!("RyeOS is not initialized. Run: ryeos init")
         }
         status @ LifecycleStatus::Stopped { .. } => {
+            if let Some(service) = &service {
+                service.request_down()?;
+            }
             return Ok(StopReport {
                 status,
                 already_stopped: true,
@@ -65,13 +150,27 @@ pub async fn stop_with_progress(
         }
         | LifecycleStatus::Failed { .. } => {}
         LifecycleStatus::Starting { ref metadata, .. } => {
-            // No authenticated daemon socket exists yet, so the signal path
-            // cannot pin and verify the live peer. Booting clears on its own.
-            bail!(
-                "a daemon (pid {}) is starting but its control socket is not available yet; \
-                 wait briefly, then retry stop",
-                metadata.pid.unwrap_or_default(),
-            )
+            let Some(service) = &service else {
+                // A directly launched pre-control daemon has no authenticated
+                // peer and no native supervisor authority. Its diagnostic PID
+                // must never be promoted into signal authority.
+                bail!(
+                    "a directly launched daemon (pid {}) is starting but its control socket is not available yet; wait briefly, then retry stop",
+                    metadata.pid.unwrap_or_default(),
+                )
+            };
+            // The configured native controller owns this exact service
+            // process and its restart disposition. Its successful Down
+            // transition is sufficient to cancel pre-control startup without
+            // trusting a marker PID. Worker-tree settlement remains a
+            // separate retained scope-recovery obligation.
+            service.request_down()?;
+            return Ok(StopReport {
+                status: LifecycleStatus::Stopped {
+                    app_root: env.config().app_root.clone(),
+                },
+                already_stopped: false,
+            });
         }
     }
 
@@ -79,8 +178,16 @@ pub async fn stop_with_progress(
     // control must never be routed over that socket. Signal the positively
     // identified local daemon instead; SIGTERM enters the same graceful
     // shutdown coordinator as Ctrl-C.
-    let target = pin_live_daemon(env).await?;
-    target.signal(libc::SIGTERM)?;
+    let target = match pre_pinned_target {
+        Some(target) => target,
+        None => pin_live_daemon(env).await?,
+    };
+    if let Some(service) = &service {
+        // Pin first: native down may make the authenticated socket disappear.
+        // Its durable intent prevents a later service restart from launching.
+        service.request_down()?;
+    }
+    target.request_termination()?;
 
     let mut deadline = Instant::now() + opts.timeout;
     let mut forced = false;
@@ -94,6 +201,16 @@ pub async fn stop_with_progress(
         if target.has_exited()? {
             let status = crate::status::status(env).await?;
             observe(&mut observer, &status);
+            if !matches!(
+                status,
+                LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. }
+            ) {
+                bail!(
+                    "the pinned daemon exited but another node process is visible; refusing successful stop"
+                );
+            }
+            // This is daemon-exit evidence, not worker-tree settlement. Forced
+            // shutdown must leave existing scope recovery obligations intact.
             return Ok(StopReport {
                 status,
                 already_stopped: false,
@@ -105,7 +222,7 @@ pub async fn stop_with_progress(
                 // The daemon normally removes its socket early in graceful
                 // shutdown. Escalate through the pidfd captured before SIGTERM
                 // so this can neither miss the old process nor hit a replacement.
-                target.signal(libc::SIGKILL)?;
+                target.force_termination()?;
                 forced = true;
                 // SIGKILL is definitive process authority, but a task leaving
                 // uninterruptible filesystem I/O may not become pidfd-readable
@@ -133,148 +250,62 @@ fn observe(observer: &mut Option<&mut dyn LifecycleProgressObserver>, status: &L
 /// Connect to the configured live control/callback socket, take the kernel's
 /// peer PID (rather than trusting daemon.json or an RPC field), pin that exact
 /// incarnation with a pidfd, verify it is ryeosd, and signal through the pidfd.
-struct LiveDaemonTarget {
+pub(crate) struct LiveDaemonTarget {
     pid: u32,
-    #[cfg(target_os = "linux")]
-    pidfd: OwnedFd,
+    peer: lillux::local_ipc::AuthenticatedUnixPeer,
 }
 
 impl LiveDaemonTarget {
-    fn signal(&self, signal: libc::c_int) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            let rc = unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    self.pidfd.as_raw_fd(),
-                    signal,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0u32,
-                )
-            };
-            if rc != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error)
-                        .with_context(|| format!("signal pinned ryeosd pid {}", self.pid));
-                }
-            }
-            Ok(())
-        }
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
 
-        #[cfg(not(target_os = "linux"))]
-        bail!("pidfd lifecycle stop is not supported on this platform")
+    fn request_termination(&self) -> Result<()> {
+        self.peer
+            .request_termination()
+            .with_context(|| format!("terminate pinned ryeosd pid {}", self.pid))
+    }
+
+    fn force_termination(&self) -> Result<()> {
+        self.peer
+            .force_termination()
+            .with_context(|| format!("force terminate pinned ryeosd pid {}", self.pid))
     }
 
     fn has_exited(&self) -> Result<bool> {
-        #[cfg(target_os = "linux")]
-        {
-            let mut pollfd = libc::pollfd {
-                fd: self.pidfd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
-            if result < 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("poll pinned ryeosd pid {}", self.pid));
-            }
-            Ok(result > 0)
-        }
+        self.peer.has_exited()
+    }
 
-        #[cfg(not(target_os = "linux"))]
-        bail!("pidfd lifecycle stop is not supported on this platform")
+    pub(crate) fn executable_digest_exact(&self, expected_bytes: u64) -> Result<String> {
+        self.peer.executable_digest_exact(expected_bytes)
     }
 }
-
-async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemonTarget> {
+pub(crate) async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemonTarget> {
     let timeout = env.rpc_timeout();
     for candidate in env.uds_candidates() {
-        let stream = match tokio::time::timeout(
+        let pinned = tokio::time::timeout(
             timeout,
-            tokio::net::UnixStream::connect(&candidate),
+            tokio::task::spawn_blocking(move || {
+                let stream = lillux::LocalDuplexStream::connect(&candidate)?;
+                pin_verified_ryeosd_peer(&stream)
+            }),
         )
         .await
-        {
-            Ok(Ok(stream)) => stream,
-            _ => continue,
-        };
-        let Some(pid) = stream
-            .peer_cred()
-            .context("read daemon socket peer credentials")?
-            .pid()
-        else {
+        .ok()
+        .and_then(Result::ok);
+        let Some(pinned) = pinned else {
             continue;
         };
-        let pinned = pin_verified_ryeosd_peer(&stream, pid as u32);
-        if let Ok(target) = pinned {
-            return Ok(target);
-        }
+        return Ok(pinned?);
     }
     Err(anyhow::anyhow!(
         "cannot stop: no configured socket had a verifiable live ryeosd peer"
     ))
 }
 
-fn pin_verified_ryeosd_peer(stream: &tokio::net::UnixStream, pid: u32) -> Result<LiveDaemonTarget> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut raw_pidfd: libc::c_int = -1;
-        let mut value_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let result = unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_PEERPIDFD,
-                (&mut raw_pidfd as *mut libc::c_int).cast(),
-                &mut value_len,
-            )
-        };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("capture daemon socket peer with SO_PEERPIDFD");
-        }
-        if value_len as usize != std::mem::size_of::<libc::c_int>() || raw_pidfd < 0 {
-            bail!("SO_PEERPIDFD returned an invalid daemon descriptor");
-        }
-        // SAFETY: successful SO_PEERPIDFD installed a new owned descriptor.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
-        verify_expected_ryeosd_pid(pid)?;
-        Ok(LiveDaemonTarget { pid, pidfd })
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (stream, pid);
-        bail!("pidfd lifecycle stop is not supported on this platform")
-    }
-}
-
-#[cfg(unix)]
-fn verify_expected_ryeosd_pid(pid: u32) -> Result<()> {
-    let comm_path = std::path::PathBuf::from(format!("/proc/{pid}/comm"));
-    if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-        let comm = comm.trim();
-        if comm != "ryeosd" {
-            bail!("refusing force stop: pid {pid} is '{comm}', not ryeosd")
-        }
-        return Ok(());
-    }
-
-    let exe_path = std::path::PathBuf::from(format!("/proc/{pid}/exe"));
-    match std::fs::read_link(&exe_path) {
-        Ok(exe) => {
-            if exe.file_name().and_then(|name| name.to_str()) != Some("ryeosd") {
-                bail!(
-                    "refusing force stop: pid {pid} executable is {}, not ryeosd",
-                    exe.display()
-                )
-            }
-            Ok(())
-        }
-        Err(err) => bail!(
-            "refusing force stop: cannot verify pid {pid} is ryeosd ({err}); \
-             /proc/<pid>/comm and /proc/<pid>/exe both unavailable"
-        ),
-    }
+fn pin_verified_ryeosd_peer(stream: &lillux::LocalDuplexStream) -> Result<LiveDaemonTarget> {
+    let peer = stream.authenticated_peer()?;
+    let pid = u32::try_from(peer.pid()).context("invalid daemon peer PID")?;
+    peer.require_executable_name(std::ffi::OsStr::new("ryeosd"))?;
+    Ok(LiveDaemonTarget { pid, peer })
 }
