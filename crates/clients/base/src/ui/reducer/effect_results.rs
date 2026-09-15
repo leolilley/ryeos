@@ -46,7 +46,21 @@ impl RyeOsCore {
             }
             self.record_effect_failure(result.id, error.clone());
             self.notice(effect_failure_notice(&expected, &error), RyeOsTone::Danger);
-            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
+            // A refused, stale, or outcome-unknown mutation is never retried.
+            // Re-observe subscribed sources so a concurrent settlement or
+            // expired fence does not leave an actionable stale row rendered.
+            // Which sources refresh remains signed view data (`on_hint`), not
+            // a product/action branch in this reducer.
+            let effects = matches!(
+                expected,
+                RyeOsEffectKind::InvokeBinding {
+                    intent: super::effect::InvokeIntent::Service,
+                    ..
+                }
+            )
+            .then(|| self.effects_for_hint("thread"))
+            .unwrap_or_default();
+            return self.finish_source_effect(completed_source_key.as_deref(), effects);
         }
 
         if result.kind == RyeOsEffectResultKind::BindingInvoked {
