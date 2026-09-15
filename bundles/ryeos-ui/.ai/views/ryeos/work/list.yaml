@@ -1,25 +1,25 @@
-# ryeos:signed:2026-09-15T00:05:35Z:2bffc3082ae20fa88ee2032c60a364db180eda924dae3f3aabb9bf16fc80c6b0:P3bwuDOgHBlF7Ohi5unZ99H/t7ZGIzijk+OSyIiMjROmgtsxlkJQAXs9AetJXDqBgzsu8EahbSHrm6TCDXxeDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:08:56Z:e156f34246d3b8b2486eb2be1b69bc4b706b58e7c8f7599858664d68f3a4084c:PXYp86BtGfgGGQwHvXnmVqY4g1QrY5VyKWIUWYJ4NDNC/8lLKMJho8/WiqjFoN+tYVMlJxzkJCcpmV496DrPBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work
 title: Work
 version: "1.0.0"
-description: Bounded execution-thread history; logical work aggregation is not yet available
+description: Principal-scoped logical work grouped by durable chain root
 
 widget: table
 sources:
   default:
-    ref: service:ui/ryeos-ui/threads/list
-    params: { limit: 200, sort: watch }
-    collection: threads
+    ref: service:ui/ryeos-ui/work/list
+    params: { limit: 200 }
+    collection: work
 projections:
   columns:
-    - { label: status, field: status, present: words }
+    - { label: status, field: phase.state_code, present: words }
     - { label: work, field: item_ref, present: leaf }
     - { label: project, field: project.name, fallback: node }
-    - { label: updated, field: updated_at, present: time_date }
+    - { label: updated, field: observed_at, present: time_date }
   expand:
-    fields: [thread_id, chain_root_id, item_ref, status, project.name, project.path, requested_by, created_at, updated_at, error]
+    fields: [coordinate.chain_root_id, placement.thread_id, placement.origin_site_id, placement.current_site_id, placement_count, item_ref, kind, phase.category, phase.state_code, project.name, project.path, owner_principal_id, observed_at]
   tone:
-    field: status
+    field: phase.state_code
     map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
     default: neutral
 selection:
@@ -31,8 +31,8 @@ affordances:
       plane: ui
       facet: input.route
       merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
+        thread: "{record.placement.thread_id}"
+        chain_root: "{record.coordinate.chain_root_id}"
       open_view: view:ryeos/thread/transcript
       drill: true
 refresh:

@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-15T00:08:56Z:1086e6b07d4745dc055c030dcacd49a50780d4b9ee54d4aee2fe3a789575bd98:RR+BQUhGheP7BRKPzbYX/QkdZ/2Io4L3x901oyoM7kOYKBZ9Y4QwV5jgdeAFogdx4U302/Ls9+om8Nnq3djGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/work/list
+version: "1.0.0"
+description: Principal-scoped logical work summaries grouped by durable chain root.
+endpoint: ui.ryeos.work.list
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

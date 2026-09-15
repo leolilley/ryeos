@@ -36,6 +36,16 @@ pub enum SeatCaller {
 }
 
 impl SeatCaller {
+    /// Durable principal already authenticated by signed execution or retained
+    /// in the compiled UI binding. Read projections use this as their owner
+    /// filter; browser-session transport never broadens it to node-wide data.
+    pub fn principal_id(&self) -> &str {
+        match self {
+            Self::Session(session) => &session.compiled_binding.binding.principal_id,
+            Self::Operator { fingerprint } => fingerprint,
+        }
+    }
+
     /// Exact project path derived from the retained directory descriptor.
     /// UI handlers must use this for project-aware work; the session's
     /// `project_root` string is a display projection and must not be reopened
