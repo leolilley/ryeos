@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-15T00:05:35Z:836cfc115cd46d653e30b4b992fd0c85980a8198724e46eb7def948aef745b49:DHEKxdAqpEQkcBjJI+fzLEy75AR/QK0vV61JWhQY0LNFNUDVVnehGxl/NQqCWeJbkPaEeyAxkeZ0Eo33zI5oDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-15T01:02:42Z:c7bed617ca7c4191b10b7c98d251ceb1a319c536a1cace52aa09ccc22910dbf3:05uoJXmmHr/Ayn7EVjOwFwl7Lwp2FTsRXg9xSyaCftIdDDEcbtN/ZqqYZepo1uoMNpL2f1U9+56dj4K9RzhIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -18,11 +18,48 @@ against this tree.
 The core rule is:
 
 ```text
-RyeOS UI is an assistant workspace over durable execution threads.
-Threads are the execution objects.
-Chat, transcript, artifacts, files, and inspectors are lenses.
+RyeOS UI is an assistant workspace over durable logical work.
+A chain root is the stable work address; placement threads are execution bodies.
+Conversation, activity, evidence, files, and inspectors are lenses.
 Project and node are scopes.
 ```
+
+A worker process, provider thread, placement thread, or worker boot epoch is
+not an agent identity. RyeOS agent identity remains the signing principal.
+Continuation and handoff therefore update the current placement of one work
+chain rather than creating a new assistant in the product model.
+
+## Assistant Work Contract
+
+`surface:ryeos/ui/assistant` composes these signed top-level lenses:
+
+- Home: exact operator attention, active executions, recent movement, and
+  projects;
+- Work: principal-scoped chains grouped by durable chain root;
+- Review: pending approvals and redacted decision history;
+- Sites: the current node and configured remotes, without inferred readiness;
+- Programs: an explicit unavailable state until project-owned programme and
+  readiness discovery exists.
+
+Selecting work retains both `input.route.chain_root` and the current
+`input.route.thread`. Drafts key on the stable logical-work address, while
+observation and evidence use the exact current placement. A restart, new worker
+epoch, or cross-site continuation must therefore read as movement within the
+same work, not a new agent or unrelated conversation.
+
+All sources and affordances come from the daemon-compiled effective signed
+surface/view closure. Browser and terminal clients send only a binding digest,
+an exact compiled coordinate, and its typed producer payload. Presentation
+eligibility (`visible_when`, `enabled_when`, and `disabled_reason`) can make an
+affordance understandable, but it never grants authority; the invoked domain
+service revalidates ownership, frontier, epoch, and operation fences.
+
+Approval listing and candidate inspection are read-only projections. Approval
+resolution uses the existing exact hosted-worker resolver. Candidate evidence
+shows retained hashes, completion coordinates, evaluator identity and outcome
+without treating model completion as task success. Candidate return,
+publication, and discard must remain absent until an existing signed operation
+is addressable from the exact source-work coordinate.
 
 ## Tree
 
@@ -342,26 +379,22 @@ input:
 A thread is the object. Chat, transcript, artifacts, tool calls, graph state,
 and receipts are lenses over the same durable event braid.
 
-`view:ryeos/thread/chat` is the planned driving lens. It groups turns, keeps
-tool calls collapsed, shows artifact chips, and exposes steer/interrupt/continue
-intents. It should feel close to a chat interface while staying explicitly
-routed to a thread. Do not surface this ref until its widget/source contract
-exists.
+`view:ryeos/thread/transcript` is the current conversation/activity lens. Its
+signed projection maps cognition, paired tool operations, worker turns,
+recovery, approval delivery, candidate milestones, and terminal outcome while
+retaining expandable raw event fields. Shared client semantics provide bounded
+render windows, turn folding, stable tail behaviour, and target-scoped drafts;
+web and terminal render those same semantics.
 
-`view:ryeos/thread/transcript` is the truth lens. It shows the full tail with
-sections, folds, line numbers, cognition in/out, provider stream, tool args,
-stdout/stderr, results, artifacts, receipts, cost, and raw event JSON. It is
-the right place for forensic detail, diffs, and replay inspection.
-
-Both lenses read the same route coordinates:
+The lens reads both route coordinates:
 
 ```text
 input.route.thread
 input.route.chain_root
 ```
 
-The chat lens may summarize events. The transcript lens must preserve the
-operator's ability to inspect the full event stream.
+Any later compact conversation lens may summarize events, but it must read the
+same work route and preserve a path to exact activity/evidence.
 
 ## Surface Roles
 
@@ -485,6 +518,6 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 - `bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml`
-- `crates/clients/base/src/ryeos-ui/model.rs`
-- `crates/clients/base/src/ryeos-ui/view_model.rs`
+- `crates/clients/base/src/ui/model.rs`
+- `crates/clients/base/src/ui/view_model.rs`
 - `crates/clients/web/docs/web-parity.md`
