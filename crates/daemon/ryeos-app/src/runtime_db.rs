@@ -8801,6 +8801,7 @@ impl RuntimeDb {
                JOIN dedicated_session s
                  ON s.placement_thread_id = a.placement_thread_id
               WHERE s.owner_principal=?1
+                AND s.state='awaiting_approval'
                 AND a.state='pending'
                 AND s.worker_instance_id=a.worker_instance_id
                 AND s.worker_boot_epoch=a.worker_boot_epoch
