@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:12:47Z:530cb8d3e05f108f2ffdcc843a1abd70803715a4b04ebd0463df4ae3f654d8d7:4gTq7L9SgzYZeVisBeFOevEvkNryyCsxD8CVfHidS5Qr0PsQPCbD4hpRGFEKKTR/XuhJlzui0eQbPdnDosV2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:55:34Z:9e64da38b36d3715024744b181a3243fde2548a11b65e11f0342774b3bf58558:qRe0XmeMhtTNO+ZBym9LxDUw80Eq/7cavj3qeb+Q2s2cUSpofCpAB96e/T2FlH9UsA2PDa/539n4qRrfZdo7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -33,6 +33,18 @@ projections:
       - payload.truncated_reason
       - payload.uri
       - payload.content_hash
+      - payload.turn_id
+      - payload.approval_id
+      - payload.observation.operation_class
+      - payload.decision
+      - payload.worker_boot_epoch
+      - payload.source_placement_thread_id
+      - payload.successor_placement_thread_id
+      - payload.candidate_snapshot_hash
+      - payload.candidate_evaluation.candidate_snapshot_hash
+      - payload.base_snapshot_hash
+      - payload.outcome.kind
+      - payload.terminal_reason
   event_kinds:
     seat.facet:
       primary: payload.payload.key
@@ -91,6 +103,130 @@ projections:
       primary: payload.node
       meta: payload.item_id
       role: boundary
+    hosted_session.turn_started:
+      primary: payload.turn_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.turn_started: accent
+        default: accent
+    hosted_session.turn_completed:
+      primary: payload.turn_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.turn_completed: good
+        default: good
+    hosted_session.approval_requested:
+      primary: payload.observation.operation_class
+      meta: payload.approval_id
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.approval_requested: warn
+        default: warn
+    hosted_approval.decision_reserved:
+      primary: payload.decision
+      meta: payload.approval_id
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.decision_reserved: accent
+        default: accent
+    hosted_approval.delivery_contacting:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+    hosted_approval.delivery_unknown:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.delivery_unknown: danger
+        default: danger
+    hosted_approval.delivery_settled:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.delivery_settled: good
+        default: good
+    worker_session.restored:
+      primary: payload.successor_placement_thread_id
+      meta: payload.source_placement_thread_id
+      role: line
+      tone:
+        field: event_type
+        map:
+          worker_session.restored: accent
+        default: accent
+    hosted_candidate.captured:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.captured: accent
+        default: accent
+    hosted_candidate.qualified:
+      primary: payload.candidate_evaluation.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.qualified: good
+        default: good
+    hosted_candidate.publication_reserved:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+    hosted_candidate.published:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.published: good
+        default: good
+    hosted_candidate.publication_not_applied:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.publication_not_applied: warn
+        default: warn
+    hosted_candidate.publication_unknown:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.publication_unknown: danger
+        default: danger
+    hosted_candidate.discarded:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+    hosted_bounded_execution.terminal_outcome:
+      primary: payload.outcome.kind
+      meta: payload.terminal_reason
+      role: line
     milestone:
       primary: payload.kind
       meta: payload.node
