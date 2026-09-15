@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:24:00Z:6428a6a4d7b77c7748e4686fdf9cda2fa961b263f09608989594e1711e10f312:ZZkroNAitDabgpcEWDV4lAONubm7ki2bOl01o9htbOC2ZGgcXtWSGX6Acfqyl4jFbZWQxGR7CyEoeKsBuNamDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:24:38Z:60799e3678c043daae4622c4a328e1d256ab4d66711e17f68d71980dc7e16c87:5/FukXYqew/lYANQ1htA4R9WPq6f+EV57aYHa/0mhYSrdViIVfWYW/N3CAIb9JGkoZAYuAU2TXdqMVpsBrM8Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-approvals
 title: Approvals
 version: "1.0.0"
@@ -19,6 +19,7 @@ projections:
     - { label: expires, field: expires_at_ms }
   expand:
     fields:
+      - chain_root_id
       - approval_id
       - placement_thread_id
       - worker_boot_epoch

@@ -6043,7 +6043,18 @@ async fn approvals(
         .map_err(internal)?
         .into_iter()
         .filter(|approval| approval.state == "pending")
-        .collect::<Vec<_>>();
+        .map(|approval| {
+            let mut value = serde_json::to_value(approval).map_err(internal)?;
+            value
+                .as_object_mut()
+                .ok_or_else(|| internal("approval projection is not an object"))?
+                .insert(
+                    "chain_root_id".to_string(),
+                    Value::String(session.chain_root_id.clone()),
+                );
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, HandlerError>>()?;
     Ok(json!({
         "chain_root_id":session.chain_root_id,
         "placement_thread_id":session.placement_thread_id,
