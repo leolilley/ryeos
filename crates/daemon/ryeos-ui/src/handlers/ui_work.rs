@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -20,6 +20,8 @@ use ryeos_executor::executor::ServiceAvailability;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
 const MAX_SOURCE_THREADS: usize = 2_000;
+const MAX_CANDIDATE_CHANGES: usize = 2_000;
+const MAX_CANDIDATE_CHANGE_BYTES: usize = 160 * 1024;
 
 #[derive(Debug, Serialize)]
 struct WorkCoordinate {
@@ -377,6 +379,20 @@ pub async fn handle_candidate(
         }));
     };
     let evaluation = session.candidate_evaluation.as_ref();
+    let changes = candidate_changes(
+        &state,
+        base_snapshot_hash,
+        candidate_snapshot_hash,
+        MAX_CANDIDATE_CHANGES,
+    )?;
+    let change_files = changes
+        .get("files")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let mut change_summary = changes;
+    if let Some(summary) = change_summary.as_object_mut() {
+        summary.remove("files");
+    }
     let completion = session.completion_fence.as_ref().map(|fence| {
         serde_json::json!({
             "placement_thread_id":fence.placement_thread_id,
@@ -409,7 +425,126 @@ pub async fn handle_candidate(
     Ok(serde_json::json!({
         "schema_version":"ryeos.ui.work_candidate.v1",
         "candidates":[candidate],
+        "change_summary":change_summary,
+        "changes":change_files,
     }))
+}
+
+fn candidate_changes(
+    state: &AppState,
+    base_snapshot_hash: Option<&str>,
+    candidate_snapshot_hash: &str,
+    limit: usize,
+) -> Result<Value> {
+    let Some(base_snapshot_hash) = base_snapshot_hash else {
+        return Ok(serde_json::json!({
+            "schema_version":"ryeos.ui.candidate_changes.v1",
+            "state":"unavailable",
+            "reason":"base_snapshot_unavailable",
+            "files":[],
+        }));
+    };
+    let cas_read = state.acquire_cas_read()?;
+    let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        cas_read.cas(),
+        base_snapshot_hash,
+    )?
+    .context("retained candidate base snapshot is missing")?;
+    let candidate = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        cas_read.cas(),
+        candidate_snapshot_hash,
+    )?
+    .context("retained candidate snapshot is missing")?;
+    let base_tree = ryeos_state::project_materialization::load_project_tree_bounded(
+        cas_read.cas(),
+        &base.project_tree_hash,
+    )?
+    .context("retained candidate base tree is missing")?;
+    let candidate_tree = ryeos_state::project_materialization::load_project_tree_bounded(
+        cas_read.cas(),
+        &candidate.project_tree_hash,
+    )?
+    .context("retained candidate tree is missing")?;
+
+    candidate_tree_changes(&base_tree, &candidate_tree, limit)
+}
+
+fn candidate_tree_changes(
+    base_tree: &ryeos_state::objects::ProjectTree,
+    candidate_tree: &ryeos_state::objects::ProjectTree,
+    limit: usize,
+) -> Result<Value> {
+    let paths = base_tree
+        .files
+        .keys()
+        .chain(candidate_tree.files.keys())
+        .collect::<BTreeSet<_>>();
+    let mut total = 0usize;
+    let mut files = Vec::new();
+    let mut retained_bytes = 0usize;
+    for path in paths {
+        let base_file_hash = base_tree.files.get(path);
+        let candidate_file_hash = candidate_tree.files.get(path);
+        let change = match (base_file_hash, candidate_file_hash) {
+            (None, Some(_)) => "added",
+            (Some(_), None) => "deleted",
+            (Some(base), Some(candidate)) if base != candidate => "modified",
+            _ => continue,
+        };
+        total += 1;
+        let entry = serde_json::json!({
+            "path":path,
+            "change":change,
+            "base_file_hash":base_file_hash,
+            "candidate_file_hash":candidate_file_hash,
+        });
+        let entry_bytes = lillux::canonical_json(&entry)?.len();
+        if files.len() < limit
+            && retained_bytes.saturating_add(entry_bytes) <= MAX_CANDIDATE_CHANGE_BYTES
+        {
+            retained_bytes += entry_bytes;
+            files.push(entry);
+        }
+    }
+    Ok(serde_json::json!({
+        "schema_version":"ryeos.ui.candidate_changes.v1",
+        "state":"available",
+        "total":total,
+        "truncated":total > files.len(),
+        "files":files,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_tree_changes_are_sorted_bounded_and_exact() {
+        let base_tree = ryeos_state::objects::ProjectTree {
+            files: BTreeMap::from([
+                ("deleted.txt".to_owned(), "1".repeat(64)),
+                ("modified.txt".to_owned(), "2".repeat(64)),
+                ("same.txt".to_owned(), "3".repeat(64)),
+            ]),
+        };
+        let candidate_tree = ryeos_state::objects::ProjectTree {
+            files: BTreeMap::from([
+                ("added.txt".to_owned(), "4".repeat(64)),
+                ("modified.txt".to_owned(), "5".repeat(64)),
+                ("same.txt".to_owned(), "3".repeat(64)),
+            ]),
+        };
+
+        let changes = candidate_tree_changes(&base_tree, &candidate_tree, 2).unwrap();
+        assert_eq!(changes["state"], "available");
+        assert_eq!(changes["total"], 3);
+        assert_eq!(changes["truncated"], true);
+        assert_eq!(changes["files"][0]["path"], "added.txt");
+        assert_eq!(changes["files"][0]["change"], "added");
+        assert_eq!(changes["files"][1]["path"], "deleted.txt");
+        assert_eq!(changes["files"][1]["change"], "deleted");
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-15T00:58:49Z:e58f49361d8348230d509e410997b595ca596b0194139fc5e1cb0e532b7022e8:2w8/DIkfZM9NN6TyBP7c45bkR8XQ4Owm29GbHMxo2aNHzwExzZX0sVCU2ai7H+JkI+7mp5cJvw941ueV7kp+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:16:49Z:a0f7f29663bf9b06a5e6a8f57ec6c461f86338c0d5539702e5879ac8a41d5d5f:8aipUv2llcsvnysQHbkDfFjwyeeBUO+cYDr1GDj1RCYxMEZs3XUey39R02WNFejtp6uRvk90rjdDoouBUJ/WDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/work/candidate
 version: "1.0.0"
-description: Bounded candidate and evaluation evidence for one exact hosted-work placement.
+description: Bounded candidate, changed-file, completion, and evaluation evidence for one exact hosted-work placement.
 endpoint: ui.ryeos.work.candidate
 ui_read_only: true
 state_access: read_only_existing
