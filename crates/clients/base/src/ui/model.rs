@@ -243,6 +243,12 @@ pub struct InputBufferKey {
     pub view_instance_key: RyeOsViewInstanceKey,
     pub view_ref: String,
     pub input_id: String,
+    /// Route identity for a conversation composer. This is absent for filters
+    /// and ordinary form inputs. A chain scope deliberately excludes its
+    /// moving head thread, so the same draft follows that logical work across
+    /// continuation ratchets without leaking to another work item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_scope: Option<String>,
 }
 
 impl InputBufferKey {
@@ -255,17 +261,49 @@ impl InputBufferKey {
             view_instance_key,
             view_ref: view_ref.into(),
             input_id: input_id.into(),
+            target_scope: None,
         }
+    }
+
+    pub fn scoped_for_input(
+        mut self,
+        input: &super::content::InputBlock,
+        route: &super::seat::InputRoute,
+    ) -> Self {
+        if input.submits_to_route() {
+            self.target_scope = Some(route_draft_scope(route));
+        }
+        self
     }
 
     /// Stable string key for the buffer map (JSON map keys must be
     /// strings). The three components are NUL-joined so they never collide.
     pub fn storage_key(&self) -> String {
-        format!(
+        let base = format!(
             "{}\u{1f}{}\u{1f}{}",
             self.view_instance_key, self.view_ref, self.input_id
-        )
+        );
+        match &self.target_scope {
+            Some(scope) => format!("{base}\u{1f}{scope}"),
+            None => base,
+        }
     }
+}
+
+fn route_draft_scope(route: &super::seat::InputRoute) -> String {
+    if let Some(chain_root) = route.chain_root.as_deref() {
+        return format!("chain:{chain_root}");
+    }
+    if let Some(thread) = route.thread.as_deref() {
+        return format!("thread:{thread}");
+    }
+    // Before a chain exists, the complete signed-route projection is the
+    // target. Serialization cannot fail for InputRoute's closed value shape;
+    // keeping it readable also makes accidental target drift reviewable.
+    format!(
+        "fresh:{}",
+        serde_json::to_string(route).expect("InputRoute serializes")
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1928,7 +1966,8 @@ impl RyeOsCore {
                         dock_view_instance_key(edge),
                         view_ref.clone(),
                         input.id.clone(),
-                    ),
+                    )
+                    .scoped_for_input(input, &self.seat.fold().input_route()),
                     view_ref,
                 ));
             }
@@ -1945,7 +1984,8 @@ impl RyeOsCore {
                     self.workspace.tiles.get(&focused)?.instance_key.clone(),
                     view_ref.clone(),
                     input.id.clone(),
-                ),
+                )
+                .scoped_for_input(input, &self.seat.fold().input_route()),
                 view_ref.clone(),
             ));
         }
@@ -2906,6 +2946,43 @@ mod tests {
         // Hiding the slot removes the instance: focus falls through.
         core.ui.docks.bottom.as_mut().unwrap().visible = false;
         assert!(!core.has_focused_input());
+    }
+
+    #[test]
+    fn conversation_drafts_follow_chain_roots_without_crossing_targets() {
+        let input: super::super::content::InputBlock = serde_json::from_value(serde_json::json!({
+            "id": "line",
+            "submit": "route"
+        }))
+        .unwrap();
+        let base = || {
+            InputBufferKey::new(
+                dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "view:ryeos/input",
+                "line",
+            )
+        };
+        let first_head = super::super::seat::InputRoute {
+            thread: Some("T-head-1".to_string()),
+            chain_root: Some("T-root-1".to_string()),
+            ..Default::default()
+        };
+        let next_head = super::super::seat::InputRoute {
+            thread: Some("T-head-2".to_string()),
+            chain_root: Some("T-root-1".to_string()),
+            ..Default::default()
+        };
+        let other_work = super::super::seat::InputRoute {
+            thread: Some("T-head-3".to_string()),
+            chain_root: Some("T-root-2".to_string()),
+            ..Default::default()
+        };
+
+        let first = base().scoped_for_input(&input, &first_head).storage_key();
+        let continued = base().scoped_for_input(&input, &next_head).storage_key();
+        let other = base().scoped_for_input(&input, &other_work).storage_key();
+        assert_eq!(first, continued, "a head ratchet retains the work draft");
+        assert_ne!(first, other, "another chain cannot inherit that draft");
     }
 
     #[test]

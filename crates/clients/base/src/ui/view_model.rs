@@ -1146,7 +1146,8 @@ fn instance_input_vm(
 ) -> Option<RyeOsInputVm> {
     let binding = core.views.get(view_ref)?;
     let input = binding.input.as_ref()?;
-    let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone());
+    let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone())
+        .scoped_for_input(input, &core.seat.fold().input_route());
     Some(input_vm(core, &key, view_ref, input))
 }
 
@@ -4363,19 +4364,13 @@ mod tests {
                 ]
             }),
         );
-        core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
-                "view:ryeos/input",
-                "line",
-            )
-            .storage_key(),
-            crate::ui::model::RyeOsInputState {
-                text: "/thread ".to_string(),
-                cursor: "/thread ".len(),
-                ..Default::default()
-            },
-        );
+        *core
+            .focused_input_buffer_mut()
+            .expect("input buffer exists") = crate::ui::model::RyeOsInputState {
+            text: "/thread ".to_string(),
+            cursor: "/thread ".len(),
+            ..Default::default()
+        };
         let vm = build_view_model(&core);
         let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
         assert!(
@@ -4404,19 +4399,13 @@ mod tests {
                 { "invocable": true, "tokens": ["thread", "list"] }
             ] }),
         );
-        core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
-                "view:ryeos/input",
-                "line",
-            )
-            .storage_key(),
-            crate::ui::model::RyeOsInputState {
-                text: "/thr".to_string(),
-                cursor: 4,
-                ..Default::default()
-            },
-        );
+        *core
+            .focused_input_buffer_mut()
+            .expect("input buffer exists") = crate::ui::model::RyeOsInputState {
+            text: "/thr".to_string(),
+            cursor: 4,
+            ..Default::default()
+        };
         let vm = build_view_model(&core);
         let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
         assert!(
@@ -4451,19 +4440,13 @@ mod tests {
                 { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
             ]}),
         );
-        core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
-                "view:ryeos/input",
-                "line",
-            )
-            .storage_key(),
-            crate::ui::model::RyeOsInputState {
-                text: "ping @directive".to_string(),
-                cursor: "ping @directive".len(),
-                ..Default::default()
-            },
-        );
+        *core
+            .focused_input_buffer_mut()
+            .expect("input buffer exists") = crate::ui::model::RyeOsInputState {
+            text: "ping @directive".to_string(),
+            cursor: "ping @directive".len(),
+            ..Default::default()
+        };
         let vm = build_view_model(&core);
         let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
         assert!(
