@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:58:49Z:82f4983311487775762e3447fe47ef917b97b3495f923a8f38f6e18062995dab:qFGkv/6Ic4UvFRwOtZaDgNj3AGmtAEfLLpkZxnrjx7NY2Zn9vKDIi2nyPppTeu3v/FUNGojbh57mFgnCYOJoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:3782f23ff87bc440d03aa9715b93bb144bf5df13255c8196aea312a0fb912a7b:MSN4ndqOAV8D17aSuLcp5sOC1iTWmtH6rsmdXB4cBqa+pjTTFlwBV2rHEF3LD9a7Izq3L6PNJt6zxqhjZSCaCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "1.0.0"
 description: Assistant-oriented RyeOS surface with signed, data-driven navigation
@@ -26,6 +26,7 @@ library:
       - view:ryeos/work/overview
       - view:ryeos/thread/transcript
       - view:ryeos/thread/tree
+      - view:ryeos/work/children
       - view:ryeos/work/evidence
       - view:ryeos/work/approvals
       - view:ryeos/work/candidate

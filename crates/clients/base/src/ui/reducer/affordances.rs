@@ -149,12 +149,15 @@ impl RyeOsCore {
             value.unwrap_or(serde_json::Value::Null)
         };
         self.seat.append_facet(facet.clone(), next);
-        // A drill descends one level: default the new level's breadcrumb label
-        // to the thread it stepped onto (the route just written). A caller with
-        // a nicer label — e.g. DrillThread carrying the graph node `study` —
-        // overrides this afterward.
+        // Only the input-route contract gives the shared client a typed thread
+        // label. Other signed facets (including inspection selection) are
+        // intentionally opaque: deriving their breadcrumb from input.route
+        // would falsely label inspection as a composer retarget, while
+        // interpreting their authored value would hard-code product schemas.
         if drill {
-            self.workspace.lens_label = self.seat.fold().input_route().thread;
+            self.workspace.lens_label = (facet == super::seat::KEY_INPUT_ROUTE)
+                .then(|| self.seat.fold().input_route().thread)
+                .flatten();
         }
         self.bump_generation();
         let mut effects = self.effects_for_facet(&facet);
@@ -982,6 +985,48 @@ mod tests {
         let route = fold.get(crate::ui::seat::KEY_INPUT_ROUTE).unwrap();
         assert_eq!(route["directive"], "directive:demo/base");
         assert_eq!(route["thread"], "T-route");
+    }
+
+    #[test]
+    fn inspection_drill_does_not_borrow_the_composer_route_label() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::ui::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-composer" }),
+        );
+        seed_view_value(
+            &mut core,
+            "view:test/work",
+            serde_json::json!({
+                "widget": "rows",
+                "sources": { "default": { "ref": "service:test/work", "params": {}, "collection": "rows" } },
+                "affordances": [{
+                    "id": "inspect",
+                    "invoke": {
+                        "plane": "ui",
+                        "facet": "selection",
+                        "merge": { "work": { "thread": "{record.thread_id}" } },
+                        "drill": true
+                    }
+                }]
+            }),
+        );
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    view_ref: "view:test/work".to_string(),
+                    affordance_id: "inspect".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-inspected" }),
+                },
+            },
+        });
+
+        assert_eq!(
+            core.seat.fold().get("selection").unwrap()["work"]["thread"],
+            "T-inspected"
+        );
+        assert_eq!(core.workspace.lens_label, None);
     }
 
     #[test]

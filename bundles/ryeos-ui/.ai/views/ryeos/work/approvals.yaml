@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:29:56Z:4417068ed4ee5f334e2329ce19173732f6519f03285867a5f1b21a60686a0d43:nILaKKoRhp2JKaEF+JYJB0HTXxR2yODCZrHsKYRZ2TsQ8s6XsCHXnbZcyRFmOMtgDKJY+x+UvM+2zdtdYGGGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:16a0b4f0ec161dfca400dc65484d8f483db09778077ed55241588cee4baf626a:tRP4eN37aTpOgYMdjTdwio4tCel49teBR9NL7C31sW1EsyiVJw18kIWbHpCtuZZ4ofzM2tpI8QRHkwBifPjIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-approvals
 title: Approvals
 version: "1.0.0"
@@ -9,7 +9,7 @@ sources:
   default:
     ref: service:worker-executions/approvals
     params:
-      chain_root_id: "@facet:input.route.chain_root"
+      chain_root_id: "@facet:selection.work.chain_root"
     collection: approvals
 
 projections:
@@ -65,5 +65,5 @@ affordances:
       notice: Approval declined
 
 refresh:
-  on_facet: input.route
+  on_facet: selection
   on_hint: [thread, activity]

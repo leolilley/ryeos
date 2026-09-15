@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-15T01:02:42Z:c7bed617ca7c4191b10b7c98d251ceb1a319c536a1cace52aa09ccc22910dbf3:05uoJXmmHr/Ayn7EVjOwFwl7Lwp2FTsRXg9xSyaCftIdDDEcbtN/ZqqYZepo1uoMNpL2f1U9+56dj4K9RzhIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-15T01:11:43Z:d6204f07a0e22b9bef27075f534a25b579e7ba0191b17d08fe4a8677745a3771:dTI52USe0arTD3rWhgvmH80xgnc2hlW9XPtJvfegB4K23DRd0XLqj6PV0G10mC4K7eVQf4c2MN969DgWk9pTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -41,11 +41,12 @@ chain rather than creating a new assistant in the product model.
 - Programs: an explicit unavailable state until project-owned programme and
   readiness discovery exists.
 
-Selecting work retains both `input.route.chain_root` and the current
-`input.route.thread`. Drafts key on the stable logical-work address, while
-observation and evidence use the exact current placement. A restart, new worker
-epoch, or cross-site continuation must therefore read as movement within the
-same work, not a new agent or unrelated conversation.
+Inspecting work retains its stable chain and current placement under
+`selection.work`; it does not change the composer. The explicit “Talk to work”
+affordance copies those coordinates into `input.route`, where drafts key on the
+stable logical-work address. A restart, new worker epoch, or cross-site
+continuation must therefore read as movement within the same work, not a new
+agent or unrelated conversation.
 
 All sources and affordances come from the daemon-compiled effective signed
 surface/view closure. Browser and terminal clients send only a binding digest,

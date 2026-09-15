@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:00:50Z:a97dfc141893b7c7bac09060a19f33ebd92162680eeb5df73afe311b158dbf00:ul+lmd9rFqvQ1RCLrOGtp5O8W9N9fkyDxHjcv+AbHZwZrMkG+2PNCIqPkO1VX6wxAiWQxCBho7dmoZSkW5xpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:5b38bf89bd70311aadc2b1f77648e0435bfe5aa63af7ee667c0758c63ddaab30:D2fvBvQGnkrkxXhvR08NkTF7OtArSMwgiN/jNf6Yf20BZfKypjtw4ACbw3b02a1IKJ1SeV02nPFADKZ3dqa4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -25,7 +25,7 @@ sources:
     collection: projects
 affordances:
   - id: watch-thread
-    label: Watch thread
+    label: Talk to work
     invoke:
       plane: ui
       facet: input.route
@@ -38,20 +38,22 @@ affordances:
     label: Review request
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement_thread_id}"
-        chain_root: "{record.chain_root_id}"
+        work:
+          thread: "{record.placement_thread_id}"
+          chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/work/approvals
       drill: true
   - id: review-candidate
     label: Review candidate
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement_thread_id}"
-        chain_root: "{record.chain_root_id}"
+        work:
+          thread: "{record.placement_thread_id}"
+          chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/work/candidate
       drill: true
 sections:

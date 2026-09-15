@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:12:47Z:bca4d98c0e50d7bde42cf6b4c28e60483a158de963da234fc4228958287d4477:MwUcQj6RbqhzsRTDfz4sU4KoDZzd5RmusCRt2YlhknEZOjSNQoHkv04HvZYgx5Z/s3zxVIEBz3qCa0japKuWBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:d53e5445a96048c06f1f75231951cc0bfe8bca6ce6acc96bf91896e285839ea4:NPdc/BFR6dYOtsvnzFWwZT8wWkvqo97coN/ql4KdcaMslIzp0ufHh0mJLYsW1zdTYRISURUw9Bm31rYm64UnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-overview
 title: Overview
 version: "1.0.0"
@@ -9,7 +9,7 @@ sources:
   detail:
     ref: service:ui/ryeos-ui/thread/inspect
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.work.thread"
 
 sections:
   - title: Work
@@ -59,5 +59,5 @@ sections:
         default: neutral
 
 refresh:
-  on_facet: input.route
+  on_facet: selection
   on_hint: [thread, activity]

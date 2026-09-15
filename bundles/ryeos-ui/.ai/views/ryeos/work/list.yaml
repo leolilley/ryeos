@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:58:49Z:10c9ef9d49b2bd7a91be2628c07d9a24a1ce3c60d34cdde990152c274f387811:CLx3Asnbly86c0JfbixeBoEHm7M4+37LfacKP5j4DMUP51yJvU9rxF8p37aVy06W+RYwyVIr7jwn7gW4OqS4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:088ab21cdc0ba3f87507e88baa5179dad47749907fcc1913b25a766b5000d14d:VLrs3ubtPG3QdEShHB2jc6o2PGVPE/PmmNEydwT05qwJW3KzztkHMLyp5NkD2axqh+lngMfugtQ2jn2rHGmdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work
 title: Work
 version: "1.0.0"
@@ -23,10 +23,10 @@ projections:
     map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
     default: neutral
 selection:
-  activate: activity
+  activate: overview
 affordances:
-  - id: activity
-    label: Activity
+  - id: talk
+    label: Talk to work
     invoke:
       plane: ui
       facet: input.route
@@ -39,50 +39,55 @@ affordances:
     label: Overview
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement.thread_id}"
-        chain_root: "{record.coordinate.chain_root_id}"
+        work:
+          thread: "{record.placement.thread_id}"
+          chain_root: "{record.coordinate.chain_root_id}"
       open_view: view:ryeos/work/overview
       drill: true
   - id: children
     label: Children
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement.thread_id}"
-        chain_root: "{record.coordinate.chain_root_id}"
-      open_view: view:ryeos/thread/tree
+        work:
+          thread: "{record.placement.thread_id}"
+          chain_root: "{record.coordinate.chain_root_id}"
+      open_view: view:ryeos/work/children
       drill: true
   - id: evidence
     label: Evidence
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement.thread_id}"
-        chain_root: "{record.coordinate.chain_root_id}"
+        work:
+          thread: "{record.placement.thread_id}"
+          chain_root: "{record.coordinate.chain_root_id}"
       open_view: view:ryeos/work/evidence
       drill: true
   - id: approvals
     label: Approvals
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement.thread_id}"
-        chain_root: "{record.coordinate.chain_root_id}"
+        work:
+          thread: "{record.placement.thread_id}"
+          chain_root: "{record.coordinate.chain_root_id}"
       open_view: view:ryeos/work/approvals
       drill: true
   - id: candidate
     label: Candidate
     invoke:
       plane: ui
-      facet: input.route
+      facet: selection
       merge:
-        thread: "{record.placement.thread_id}"
-        chain_root: "{record.coordinate.chain_root_id}"
+        work:
+          thread: "{record.placement.thread_id}"
+          chain_root: "{record.coordinate.chain_root_id}"
       open_view: view:ryeos/work/candidate
       drill: true
 refresh:

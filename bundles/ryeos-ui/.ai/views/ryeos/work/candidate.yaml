@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:59:13Z:f699bb61452fd6212d26b06b0c0671726b0e46c8486ee3c863342261ac2c0cda:7cQyb3flv0tGKHgPwEc39jXahha5RYN2c0/uB25tGePipl6ToVqddgXZeL6w3vlqWDHR6YsGnSvHaroI4lp+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:4a42df5fde860122fb79dae9d990750a6d964e841e98567bd1c5bc0a2074416c:Z9HT72tEazdbUkSMaaUzuMdpttp/mDID9dirkUdXl+2HTJaCChfANnPUZ+ar5U0oGM47xPaosZqHXqg0aHdvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-candidate
 title: Candidate
 version: "1.0.0"
@@ -9,7 +9,7 @@ sources:
   default:
     ref: service:ui/ryeos-ui/work/candidate
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.work.thread"
     collection: candidates
 
 projections:
@@ -39,5 +39,5 @@ projections:
     default: neutral
 
 refresh:
-  on_facet: input.route
+  on_facet: selection
   on_hint: [thread, activity]

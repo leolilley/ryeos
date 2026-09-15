@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:12:47Z:1504443ae0540c484969cbf565fe36beba19cf7fe4fe02b79d5385a3c009632b:4frqiYAkE2LFeRCNs3/XFOhkVXUErZFNm3OHIxiu1ZlEBQma+nK29mHiF0AZBG6mAdw9dhMnLeSFCK6yqc64BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:11:43Z:521e2d6fe5cd60890f4a80eed558d03003e8a25dccd866ee1fe352f6b34bc6de:sRb3LBJZ9+eINn4/+C89nGfYTI7DIruc9ncYAATLrU/DoXfCIe+9f3WDUeuZ1v0WwL4E0jESGlRgXMKt1b1ACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-evidence
 title: Evidence
 version: "1.0.0"
@@ -9,7 +9,7 @@ sources:
   detail:
     ref: service:ui/ryeos-ui/thread/inspect
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.work.thread"
 
 sections:
   - title: Execution
@@ -59,5 +59,5 @@ sections:
         default: neutral
 
 refresh:
-  on_facet: input.route
+  on_facet: selection
   on_hint: [thread, activity]
