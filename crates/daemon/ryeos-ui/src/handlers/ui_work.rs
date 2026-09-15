@@ -356,7 +356,7 @@ pub async fn handle_candidate(
         &caller,
         &[placement_thread_id],
     )?;
-    let base_snapshot_hash = match &subjects[0].project_authority {
+    let authorized_base_snapshot_hash = match &subjects[0].project_authority {
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
             base_snapshot_hash,
             ..
@@ -378,6 +378,14 @@ pub async fn handle_candidate(
             "candidates":[],
         }));
     };
+    let workspace = state
+        .state_store
+        .execution_workspace(&session.workspace_id)?
+        .context("retained candidate workspace journal is missing")?;
+    if authorized_base_snapshot_hash != Some(workspace.base_snapshot.as_str()) {
+        anyhow::bail!("retained candidate workspace base contradicts thread authority");
+    }
+    let base_snapshot_hash = workspace.base_snapshot.as_str();
     let evaluation = session.candidate_evaluation.as_ref();
     let changes = candidate_changes(
         &state,
@@ -432,18 +440,10 @@ pub async fn handle_candidate(
 
 fn candidate_changes(
     state: &AppState,
-    base_snapshot_hash: Option<&str>,
+    base_snapshot_hash: &str,
     candidate_snapshot_hash: &str,
     limit: usize,
 ) -> Result<Value> {
-    let Some(base_snapshot_hash) = base_snapshot_hash else {
-        return Ok(serde_json::json!({
-            "schema_version":"ryeos.ui.candidate_changes.v1",
-            "state":"unavailable",
-            "reason":"base_snapshot_unavailable",
-            "files":[],
-        }));
-    };
     let cas_read = state.acquire_cas_read()?;
     let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
         cas_read.cas(),
