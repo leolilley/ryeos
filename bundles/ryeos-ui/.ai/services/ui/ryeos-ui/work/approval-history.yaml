@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-15T00:50:41Z:0d37424871f98ebb18b1552de5ea25807cfbad47f2b2ef3d707026cdc2af7ff5:WNA8+lk7N8fzSL6CnoKg6qsyY+/P32dFzmjFgG01F2mv4yb8csMehtDukbBYF4FdVH0G3pOBaLksYX0kmLHvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/work/approval-history
+version: "1.0.0"
+description: Bounded principal/project history of terminal hosted-worker approval projections.
+endpoint: ui.ryeos.work.approval-history
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

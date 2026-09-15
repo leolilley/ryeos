@@ -233,6 +233,79 @@ pub async fn handle_attention(
     }))
 }
 
+pub async fn handle_approval_history(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_LIMIT)
+        .clamp(1, MAX_LIMIT);
+    let project_root = match params.get("project").and_then(Value::as_str) {
+        Some("current") => caller.project_path()?,
+        _ => None,
+    };
+    let allowed_placements = if project_root.is_some() {
+        Some(
+            state
+                .threads
+                .list_thread_views_query(
+                    MAX_SOURCE_THREADS,
+                    &ryeos_app::thread_lifecycle::ThreadListFilter {
+                        principal: Some(caller.principal_id().to_string()),
+                        project_root,
+                        ..Default::default()
+                    },
+                    ryeos_app::thread_lifecycle::ThreadSort::Newest,
+                )?
+                .into_iter()
+                .map(|thread| thread.item.thread_id)
+                .collect::<BTreeSet<_>>(),
+        )
+    } else {
+        None
+    };
+    let history = state
+        .state_store
+        .dedicated_session_approval_history(caller.principal_id(), MAX_LIMIT)?
+        .into_iter()
+        .filter(|entry| {
+            allowed_placements
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&entry.placement_thread_id))
+        })
+        .take(limit)
+        .map(|entry| {
+            serde_json::json!({
+                "schema_version":"ryeos.ui.approval_history_item.v1",
+                "kind":"worker_approval",
+                "chain_root_id":entry.chain_root_id,
+                "placement_thread_id":entry.placement_thread_id,
+                "approval_id":entry.approval_id,
+                "worker_boot_epoch":entry.worker_boot_epoch,
+                "request_digest":entry.request_digest,
+                "operation_class":entry.operation_class,
+                "requested_authority":entry.requested_authority,
+                "state":entry.state,
+                "decision":entry.decision,
+                "decision_principal":entry.decision_principal,
+                "created_at_ms":entry.created_at_ms,
+                "resolved_at_ms":entry.resolved_at_ms,
+                "delivery_settled_at_ms":entry.delivery_settled_at_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "schema_version":"ryeos.ui.approval_history.v1",
+        "history":history,
+        "next_cursor":null,
+    }))
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/ryeos-ui/work/list",
     endpoint: "ui.ryeos.work.list",
@@ -248,5 +321,15 @@ pub const ATTENTION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[],
     handler: |params, ctx, state| {
         Box::pin(async move { handle_attention(params, ctx, state).await })
+    },
+};
+
+pub const APPROVAL_HISTORY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/approval-history",
+    endpoint: "ui.ryeos.work.approval-history",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_approval_history(params, ctx, state).await })
     },
 };

@@ -5745,10 +5745,20 @@ impl StateStore {
         &self,
         owner_principal: &str,
         limit: usize,
-    ) -> Result<Vec<runtime_db::DedicatedSessionApprovalAttention>> {
+    ) -> Result<Vec<runtime_db::DedicatedSessionApprovalProjection>> {
         let g = self.lock()?;
         g.runtime_db
             .pending_dedicated_session_approval_attention(owner_principal, limit)
+    }
+
+    pub fn dedicated_session_approval_history(
+        &self,
+        owner_principal: &str,
+        limit: usize,
+    ) -> Result<Vec<runtime_db::DedicatedSessionApprovalHistory>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .dedicated_session_approval_history(owner_principal, limit)
     }
 
     pub fn dedicated_session_approval(

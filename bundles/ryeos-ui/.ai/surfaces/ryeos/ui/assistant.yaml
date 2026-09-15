@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:24:00Z:7489d32a472a6c8d043c594738c374cffec683f562ab0a309b22455a92872fb3:9CiWnRfZ9NDjgvnKkx1gqOhIccG5pKJMT+YlSNDR8zn40LoS2Sla4DBrE7FY0EgsjbzztcOqrjNG9UHSTaZ9Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:49:45Z:af7b2443c24040035de79de00adf921661d5d807ebc80b86e1191dc94e1c1057:73rurZaoma/h32PokV6qA2ock02oPqU2HEM/UjJq/BzZ/Q0AXXbb2SPsc2i/gUDN4VrRl3Mk2tDw8Pr9Fjj/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "1.0.0"
 description: Assistant-oriented RyeOS surface with signed, data-driven navigation
@@ -29,6 +29,7 @@ library:
       - view:ryeos/work/evidence
       - view:ryeos/work/approvals
       - view:ryeos/review/pending
+      - view:ryeos/review/history
       - view:ryeos/sites/list
       - view:ryeos/programs/list
   - group: Threads
