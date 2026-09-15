@@ -233,7 +233,15 @@ function captureTileScroll(container) {
   container?.querySelectorAll(".ryeos-tile").forEach((tile) => {
     const id = tile.dataset.tileId;
     const body = tile.querySelector(".ryeos-tile-body");
-    if (id && body) state.set(id, { top: body.scrollTop, left: body.scrollLeft });
+    if (id && body) {
+      const timeline = body.querySelector(".ryeos-timeline-entries");
+      state.set(id, {
+        top: body.scrollTop,
+        left: body.scrollLeft,
+        atTail: timeline ? scrollIsAtTail(body) : false,
+        timelineEntries: timeline?.childElementCount ?? null,
+      });
+    }
   });
   container?.querySelectorAll("[data-scroll-key]").forEach((node) => {
     state.set(`scroll:${node.dataset.scrollKey}`, { top: node.scrollTop, left: node.scrollLeft });
@@ -245,8 +253,21 @@ function restoreTileScroll(container, state) {
   for (const [id, pos] of state || []) {
     const body = container.querySelector(`.ryeos-tile[data-tile-id="${cssEscape(id)}"] .ryeos-tile-body`);
     if (!body) continue;
-    body.scrollTop = pos.top;
+    const timeline = body.querySelector(".ryeos-timeline-entries");
+    if (timeline && pos.atTail) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = pos.top;
+    }
     body.scrollLeft = pos.left;
+    if (
+      timeline &&
+      !pos.atTail &&
+      pos.timelineEntries !== null &&
+      timeline.childElementCount > pos.timelineEntries
+    ) {
+      appendNewActivityMarker(body, timeline.childElementCount - pos.timelineEntries);
+    }
   }
   container?.querySelectorAll("[data-scroll-key]").forEach((node) => {
     const pos = state.get(`scroll:${node.dataset.scrollKey}`);
@@ -254,6 +275,22 @@ function restoreTileScroll(container, state) {
     node.scrollTop = pos.top;
     node.scrollLeft = pos.left;
   });
+}
+
+function scrollIsAtTail(node) {
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= 24;
+}
+
+function appendNewActivityMarker(body, count) {
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.className = "ryeos-new-activity";
+  marker.textContent = count === 1 ? "1 new activity" : `${count} new activities`;
+  marker.addEventListener("click", () => {
+    body.scrollTop = body.scrollHeight;
+    marker.remove();
+  });
+  body.append(marker);
 }
 
 function revealSelectedRows(container) {
