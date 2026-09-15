@@ -1,11 +1,12 @@
-# ryeos:signed:2026-08-04T10:21:25Z:0995c74f3d72fbc8e5d6c99100550be405470086e40df12331b1bb5150f64f94:/htMFFn/5MxmQY/RENvN5LfzaaWLPBezfT1dISbPwkD/Ckb4K3LeUSft47Spla00/S7G6jr4YEdNR8BTyIoUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:12:47Z:530cb8d3e05f108f2ffdcc843a1abd70803715a4b04ebd0463df4ae3f654d8d7:4gTq7L9SgzYZeVisBeFOevEvkNryyCsxD8CVfHidS5Qr0PsQPCbD4hpRGFEKKTR/XuhJlzui0eQbPdnDosV2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
-title: Transcript
+title: Activity
 version: "1.0.0"
 description: >-
-  Full event braid transcript for the input route's conversation chain. This is
-  the truth lens over a thread: cognition, provider stream, tool calls,
-  artifacts, receipts, and raw event detail.
+  Coherent activity feed for the input route's durable work chain. It preserves
+  the exact event braid while presenting operator intent, cognition, tool
+  operations, children, placement boundaries, artifacts, receipts, and raw
+  event detail through the shared semantic timeline.
 
 widget: timeline
 sources:

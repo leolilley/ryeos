@@ -1,0 +1,63 @@
+# ryeos:signed:2026-09-15T00:12:47Z:bca4d98c0e50d7bde42cf6b4c28e60483a158de963da234fc4228958287d4477:MwUcQj6RbqhzsRTDfz4sU4KoDZzd5RmusCRt2YlhknEZOjSNQoHkv04HvZYgx5Z/s3zxVIEBz3qCa0japKuWBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work-overview
+title: Overview
+version: "1.0.0"
+description: Current placement and retained execution summary for the selected durable work
+
+widget: sections
+sources:
+  detail:
+    ref: service:ui/ryeos-ui/thread/inspect
+    params:
+      thread_id: "@facet:input.route.thread"
+
+sections:
+  - title: Work
+    source_channel: detail
+    collection: thread
+    projection:
+      primary: item_ref
+      meta: status
+      tone:
+        field: status
+        map:
+          running: accent
+          created: accent
+          failed: danger
+          killed: danger
+          timed_out: danger
+          cancelled: warn
+          completed: good
+        default: neutral
+  - title: Project
+    source_channel: detail
+    collection: thread
+    projection:
+      primary: project.name
+      meta: project.path
+  - title: Placement
+    source_channel: detail
+    collection: thread
+    projection:
+      primary: current_site_id
+      meta: origin_site_id
+  - title: Usage
+    source_channel: detail
+    collection: usage
+    projection:
+      primary: value
+      meta: label
+  - title: Outcome
+    source_channel: detail
+    collection: result
+    projection:
+      primary: outcome_code
+      meta: error
+      tone:
+        field: outcome_code
+        map: { ok: good, error: danger }
+        default: neutral
+
+refresh:
+  on_facet: input.route
+  on_hint: [thread, activity]
