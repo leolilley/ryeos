@@ -892,6 +892,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shipped_standard_producer_python_activation_matches_native_authoring_consumer() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("ryeos-app lives below the repository root");
+        let activation_path = repository
+            .join("bundles/standard/.ai/config/development/ryeos/producer-python-activation.yaml");
+        let activation_value: Value =
+            serde_yaml::from_str(&lillux::signature::strip_signature_lines(
+                &std::fs::read_to_string(&activation_path).expect("read shipped activation"),
+            ))
+            .expect("parse shipped activation");
+        let activation = ManagedExternalContentActivation::from_value(&activation_value)
+            .expect("shipped activation must satisfy the portable contract");
+
+        assert_eq!(
+            activation.consumer_ref,
+            "tool:ryeos/environments/qualification/native-authoring/verify"
+        );
+        assert_eq!(activation.components.len(), 1);
+        let component = &activation.components[0];
+        assert_eq!(component.id, "producer-python");
+        assert_eq!(
+            component.whole_archive_tree().map(|(_, prefix, _)| prefix),
+            Some("ryeos-local-inference-qwen3-0.6b-runtime-v1")
+        );
+
+        let consumer_path = repository.join(
+            "bundles/standard/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py",
+        );
+        let consumer = std::fs::read_to_string(consumer_path).expect("read shipped consumer");
+        assert!(consumer.contains("#     - id: producer-python\n"));
+        assert!(consumer.contains(
+            "#       digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf\n"
+        ));
+    }
+
+    #[test]
     fn shipped_local_inference_activation_is_admitted_by_full_profiles() {
         let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
