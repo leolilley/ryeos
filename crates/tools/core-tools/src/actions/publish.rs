@@ -9,10 +9,11 @@
 //!             Idempotent: skips files already validly signed.
 //!   Phase 2:  Rebuild CAS manifest (objects, refs, item_source sidecars)
 //!             when the bundle owns `.ai/bin` binaries.
-//!   Phase 3:  Sign every other signable item (full engine validation).
+//!   Phase 3:  Generate + sign bundle manifest (.ai/manifest.yaml).
+//!             Source-unit validation resolves bundle runtime authority, so
+//!             the candidate manifest must belong to the current publisher.
+//!   Phase 4:  Sign every other signable item (full engine validation).
 //!             Idempotent: validates existing signatures, re-signs only when needed.
-//!   Phase 4:  Generate + sign bundle manifest (.ai/manifest.yaml).
-//!             Idempotent: skips write when existing signed manifest matches.
 //!   Phase 5:  Emit publisher trust doc (PUBLISHER_TRUST.toml).
 //!             Idempotent: skips write when existing doc matches.
 //!
@@ -174,7 +175,21 @@ fn run_publish_in_place(
     let binary_rebuild_skipped = false;
     let binary_rebuild_skip_reason = None;
 
-    // ── Phase 3: sign every other signable item ──
+    // ── Phase 3: publish the candidate bundle identity ──
+    // Owner-signed source units resolve their executor through the bundle and
+    // require its manifest signer to be node-trusted. During an authorized
+    // publisher-key rotation, the checked-out manifest still belongs to the
+    // predecessor. Sign the deterministic candidate manifest with the current
+    // author before validating those source units; the surrounding staged
+    // transaction keeps this identity private until every later phase passes.
+    let (manifest_generated, manifest_changed) = generate_and_sign_manifest_in_place(
+        bundle_source,
+        effective_bundle_name,
+        &opts.signing_key,
+    )
+    .context("manifest generation phase failed")?;
+
+    // ── Phase 4: sign every other signable item ──
     let mut sign_report = sign_bundle::sign_bundle_items_with_trust_in_place(
         bundle_source,
         registry_roots,
@@ -267,14 +282,6 @@ fn run_publish_in_place(
             );
         }
     }
-
-    // ── Phase 4: generate + sign bundle manifest (idempotent) ──
-    let (manifest_generated, manifest_changed) = generate_and_sign_manifest_in_place(
-        bundle_source,
-        effective_bundle_name,
-        &opts.signing_key,
-    )
-    .context("manifest generation phase failed")?;
 
     // ── Phase 5: emit publisher trust doc (idempotent) ──
     // Suppressed on a partial publish: a trust doc is a clean-release artifact
