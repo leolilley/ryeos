@@ -112,41 +112,62 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
-fn target_debug_dir() -> PathBuf {
+fn target_release_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        PathBuf::from(dir).join("debug")
+        PathBuf::from(dir).join("release")
     } else {
-        workspace_root().join("target").join("debug")
+        workspace_root().join("target").join("release")
     }
 }
 
 fn ensure_handler_bins_built() -> PathBuf {
-    let debug_dir = target_debug_dir();
+    let release_dir = target_release_dir();
     let required = [
         "rye-parser-yaml-document",
         "rye-parser-yaml-header-document",
         "rye-parser-regex-kv",
         "rye-composer-identity",
+        "ryeos-direct-execution-evidence",
+        "ryeos-core-tools",
+        "ryeos-session-exec",
+        "ryeos-worker-execution-launch-preparer",
+        "ryeos-worker-execution-runtime",
+        "ryeos-structured-session-bridge",
+        "ryeos-lillux-isolation-adapter",
     ];
 
-    if required.iter().all(|name| debug_dir.join(name).is_file()) {
-        return debug_dir;
+    if required.iter().all(|name| release_dir.join(name).is_file()) {
+        return release_dir;
     }
 
     HANDLER_BINS_BUILD.get_or_init(|| {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = std::process::Command::new(cargo)
-            .args(["build", "-p", "ryeos-handler-bins", "--bins"])
+            .args([
+                "build",
+                "--release",
+                "-p",
+                "ryeos-handler-bins",
+                "--bins",
+                "-p",
+                "ryeos-core-tools",
+                "-p",
+                "ryeos-session-exec",
+                "-p",
+                "ryeos-structured-session",
+                "-p",
+                "ryeos-lillux-isolation-adapter",
+            ])
             .current_dir(workspace_root())
             .status()
-            .expect("spawn cargo build for ryeos-handler-bins");
+            .expect("spawn release build for core bundle binaries");
         assert!(
             status.success(),
-            "cargo build -p ryeos-handler-bins --bins failed"
+            "release build for core bundle binaries failed"
         );
     });
 
-    debug_dir
+    release_dir
 }
 
 fn copy_executable(src: &Path, dst: &Path) {
@@ -180,20 +201,40 @@ fn stage_real_core_binaries(bundle: &Path) {
     let _ = std::fs::remove_dir_all(&bin_root);
     std::fs::create_dir_all(&bin_dir).unwrap();
 
-    let debug_dir = ensure_handler_bins_built();
+    // Preserve the complete checked-in executable closure. The focused
+    // handler build below refreshes the binaries it owns, while handlers from
+    // other packages (for example the worker launch preparer) remain available
+    // to registry validation.
+    let source_bin_dir = source_bundle()
+        .join(ryeos_engine::AI_DIR)
+        .join("bin")
+        .join(&triple);
+    for entry in std::fs::read_dir(&source_bin_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            copy_executable(&path, &bin_dir.join(entry.file_name()));
+        }
+    }
+
+    let release_dir = ensure_handler_bins_built();
     for name in [
         "rye-parser-yaml-document",
         "rye-parser-yaml-header-document",
         "rye-parser-regex-kv",
         "rye-composer-identity",
+        "ryeos-direct-execution-evidence",
+        "ryeos-core-tools",
+        "ryeos-session-exec",
+        "ryeos-worker-execution-launch-preparer",
+        "ryeos-worker-execution-runtime",
+        "ryeos-structured-session-bridge",
+        "ryeos-lillux-isolation-adapter",
     ] {
-        copy_executable(&debug_dir.join(name), &bin_dir.join(name));
+        copy_executable(&release_dir.join(name), &bin_dir.join(name));
     }
-
-    copy_executable(
-        &PathBuf::from(env!("CARGO_BIN_EXE_ryeos-core-tools")),
-        &bin_dir.join("ryeos-core-tools"),
-    );
 }
 
 fn run_publish_once(
@@ -282,5 +323,45 @@ fn publish_twice_produces_zero_diff() {
     assert!(
         report2.bootstrap_validated + report2.sign_report.validated.len() > 0,
         "second run should have validated existing items"
+    );
+}
+
+#[test]
+fn publish_rotates_bundle_manifest_before_source_unit_validation() {
+    let source = source_bundle();
+    if !source.join(ryeos_engine::AI_DIR).is_dir() {
+        eprintln!("skipping: bundles/core not found");
+        return;
+    }
+
+    // The checked-in core generation belongs to the development publisher.
+    // A distinct key models the official release publisher without admitting
+    // the predecessor into its node trust.
+    let replacement_key = SigningKey::from_bytes(&[99u8; 32]);
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("core");
+    copy_dir_recursive(&source, &bundle);
+    stage_real_core_binaries(&bundle);
+
+    let report = run_publish_once(&bundle, &replacement_key);
+
+    assert!(
+        report.sign_report.failed.is_empty(),
+        "publisher rotation retained predecessor manifest authority: {:?}",
+        report.sign_report.failed
+    );
+    assert!(report.manifest_changed);
+
+    let manifest =
+        std::fs::read_to_string(bundle.join(ryeos_engine::AI_DIR).join("manifest.yaml")).unwrap();
+    let signature = lillux::signature::parse_signature_line(
+        manifest.lines().next().unwrap_or_default(),
+        "#",
+        None,
+    )
+    .expect("published manifest signature");
+    assert_eq!(
+        signature.signer_fingerprint,
+        lillux::signature::compute_fingerprint(&replacement_key.verifying_key())
     );
 }
