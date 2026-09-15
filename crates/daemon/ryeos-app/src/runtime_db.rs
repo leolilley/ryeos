@@ -4560,6 +4560,21 @@ pub struct DedicatedSessionApprovalProjection {
     pub approval: DedicatedSessionApprovalRecord,
 }
 
+/// Minimal owner-indexed projection for a captured candidate that still has
+/// no disposition operation. It is attention evidence, not a second candidate
+/// lifecycle state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedSessionCandidateAttention {
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub state: String,
+    pub candidate_snapshot_hash: String,
+    pub candidate_validation_hash: Option<String>,
+    pub candidate_evaluation_hash: Option<String>,
+    pub publication_result: String,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedicatedSessionApprovalHistory {
     pub chain_root_id: String,
@@ -8875,6 +8890,41 @@ impl RuntimeDb {
             })
         })
         .collect()
+    }
+
+    pub fn dedicated_session_candidate_attention(
+        &self,
+        owner_principal: &str,
+        limit: usize,
+    ) -> Result<Vec<DedicatedSessionCandidateAttention>> {
+        validate_bounded_runtime_text("candidate owner principal", owner_principal, 512)?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let mut statement = self.conn.prepare(
+            "SELECT chain_root_id, placement_thread_id, state,
+                    candidate_snapshot_hash, candidate_validation_hash,
+                    candidate_evaluation_hash, publication_result, updated_at_ms
+               FROM dedicated_session
+              WHERE owner_principal=?1
+                AND candidate_snapshot_hash IS NOT NULL
+                AND candidate_disposition_root_id IS NULL
+                AND publication_result IN ('retained','retained_for_review')
+              ORDER BY updated_at_ms DESC, placement_thread_id
+              LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![owner_principal, limit], |row| {
+            Ok(DedicatedSessionCandidateAttention {
+                chain_root_id: row.get(0)?,
+                placement_thread_id: row.get(1)?,
+                state: row.get(2)?,
+                candidate_snapshot_hash: row.get(3)?,
+                candidate_validation_hash: row.get(4)?,
+                candidate_evaluation_hash: row.get(5)?,
+                publication_result: row.get(6)?,
+                updated_at_ms: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn dedicated_session_approval_history(

@@ -226,9 +226,35 @@ pub async fn handle_attention(
                     .cmp(&right["approval_id"].as_str())
             })
     });
+    let candidates = state
+        .state_store
+        .dedicated_session_candidate_attention(caller.principal_id(), scan_limit)?
+        .into_iter()
+        .filter(|entry| {
+            allowed_placements
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&entry.placement_thread_id))
+        })
+        .take(limit)
+        .map(|entry| {
+            serde_json::json!({
+                "schema_version":"ryeos.ui.candidate_attention_item.v1",
+                "kind":"worker_candidate",
+                "chain_root_id":entry.chain_root_id,
+                "placement_thread_id":entry.placement_thread_id,
+                "state":entry.state,
+                "candidate_snapshot_hash":entry.candidate_snapshot_hash,
+                "candidate_validation_hash":entry.candidate_validation_hash,
+                "candidate_evaluation_hash":entry.candidate_evaluation_hash,
+                "publication_result":entry.publication_result,
+                "updated_at_ms":entry.updated_at_ms,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "schema_version":"ryeos.ui.attention.v1",
         "attention":attention,
+        "candidates":candidates,
         "next_cursor":null,
     }))
 }
@@ -322,12 +348,19 @@ pub async fn handle_candidate(
         .ok_or_else(|| {
             ryeos_app::handler_error::HandlerError::BadRequest("thread_id is required".into())
         })?;
-    crate::thread_authorization::authorize_exact_thread_subjects(
+    let subjects = crate::thread_authorization::authorize_exact_thread_subjects(
         &ctx,
         &state,
         &caller,
         &[placement_thread_id],
     )?;
+    let base_snapshot_hash = match &subjects[0].project_authority {
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            base_snapshot_hash,
+            ..
+        } => Some(base_snapshot_hash.as_str()),
+        _ => None,
+    };
     let Some(session) = state.state_store.dedicated_session(placement_thread_id)? else {
         return Ok(serde_json::json!({
             "schema_version":"ryeos.ui.work_candidate.v1",
@@ -362,7 +395,7 @@ pub async fn handle_candidate(
         "state":session.state,
         "candidate_disposition":session.candidate_disposition.as_str(),
         "candidate_snapshot_hash":candidate_snapshot_hash,
-        "base_snapshot_hash":evaluation.and_then(|value| value.pointer("/candidate/base_snapshot_hash")),
+        "base_snapshot_hash":base_snapshot_hash,
         "candidate_validation_hash":session.candidate_validation_hash,
         "candidate_evaluation_hash":session.candidate_evaluation_hash,
         "evaluation_accepted":evaluation.and_then(|value| value.pointer("/result/accepted")),

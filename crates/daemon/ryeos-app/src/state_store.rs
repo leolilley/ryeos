@@ -5751,6 +5751,16 @@ impl StateStore {
             .pending_dedicated_session_approval_attention(owner_principal, limit)
     }
 
+    pub fn dedicated_session_candidate_attention(
+        &self,
+        owner_principal: &str,
+        limit: usize,
+    ) -> Result<Vec<runtime_db::DedicatedSessionCandidateAttention>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .dedicated_session_candidate_attention(owner_principal, limit)
+    }
+
     pub fn dedicated_session_approval_history(
         &self,
         owner_principal: &str,

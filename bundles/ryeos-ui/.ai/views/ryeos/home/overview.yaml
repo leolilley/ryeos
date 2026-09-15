@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:36:58Z:2dd793ae9b275f4d8d6f42ddae3c1f067418f9232d1ec19687410b310c699f42:saGIYROSUWMRFZJAJCZ4Wa4Qaj0CJrRKFqv4qvIRBj5eQSG5NyN3Ap2WC1X/SzMfW/yt0JU7pH+/dbhBoMosBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:00:50Z:a97dfc141893b7c7bac09060a19f33ebd92162680eeb5df73afe311b158dbf00:ul+lmd9rFqvQ1RCLrOGtp5O8W9N9fkyDxHjcv+AbHZwZrMkG+2PNCIqPkO1VX6wxAiWQxCBho7dmoZSkW5xpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -44,6 +44,16 @@ affordances:
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/work/approvals
       drill: true
+  - id: review-candidate
+    label: Review candidate
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.placement_thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/work/candidate
+      drill: true
 sections:
   - title: Needs attention
     source_channel: attention
@@ -63,6 +73,17 @@ sections:
       primary: item_ref
       meta: status
     activate: watch-thread
+  - title: Candidates to review
+    source_channel: attention
+    collection: candidates
+    projection:
+      primary: candidate_snapshot_hash
+      meta: publication_result
+      tone:
+        field: publication_result
+        map: { retained: warn, retained_for_review: warn }
+        default: neutral
+    activate: review-candidate
   - title: Recent movement
     source_channel: movement
     collection: events
