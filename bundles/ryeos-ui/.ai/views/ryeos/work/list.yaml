@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:11:43Z:088ab21cdc0ba3f87507e88baa5179dad47749907fcc1913b25a766b5000d14d:VLrs3ubtPG3QdEShHB2jc6o2PGVPE/PmmNEydwT05qwJW3KzztkHMLyp5NkD2axqh+lngMfugtQ2jn2rHGmdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T01:20:57Z:ccb6b83c05aa0f5fed65e3f0ac594210c41e3d22672927b6bccdeb5bd13d4eef:seKu5M+heKQDDUzCo/G9DwGmob6Ve4C9UnbM769G9RTDk+64aSLoEg+DIOPdRz3yFMCvmfE7FOclF0qn07BgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work
 title: Work
 version: "1.0.0"
@@ -15,9 +15,10 @@ projections:
     - { label: status, field: phase.state_code, present: words }
     - { label: work, field: item_ref, present: leaf }
     - { label: project, field: project.name, fallback: node }
+    - { label: attention, field: attention_count }
     - { label: updated, field: observed_at, present: time_date }
   expand:
-    fields: [coordinate.chain_root_id, placement.thread_id, placement.origin_site_id, placement.current_site_id, placement_count, item_ref, kind, phase.category, phase.state_code, project.name, project.path, owner_principal_id, observed_at]
+    fields: [coordinate.chain_root_id, placement.thread_id, placement.origin_site_id, placement.current_site_id, placement_count, attention, item_ref, kind, phase.category, phase.state_code, project.name, project.path, owner_principal_id, observed_at]
   tone:
     field: phase.state_code
     map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }

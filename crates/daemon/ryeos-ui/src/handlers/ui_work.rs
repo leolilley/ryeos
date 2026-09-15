@@ -55,6 +55,8 @@ struct WorkSummary {
     phase: WorkPhase,
     observed_at: String,
     placement_count: usize,
+    attention: Vec<&'static str>,
+    attention_count: usize,
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -79,6 +81,25 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         &filter,
         ryeos_app::thread_lifecycle::ThreadSort::Newest,
     )?;
+    let mut attention_by_chain = BTreeMap::<String, BTreeSet<&'static str>>::new();
+    for entry in state
+        .state_store
+        .pending_dedicated_session_approval_attention(caller.principal_id(), MAX_SOURCE_THREADS)?
+    {
+        attention_by_chain
+            .entry(entry.chain_root_id)
+            .or_default()
+            .insert("approval_required");
+    }
+    for entry in state
+        .state_store
+        .dedicated_session_candidate_attention(caller.principal_id(), MAX_SOURCE_THREADS)?
+    {
+        attention_by_chain
+            .entry(entry.chain_root_id)
+            .or_default()
+            .insert("candidate_ready");
+    }
 
     let mut chains = BTreeMap::<String, Vec<ryeos_app::thread_lifecycle::ThreadListView>>::new();
     for thread in threads {
@@ -100,6 +121,12 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                         .max_by(|left, right| left.item.updated_at.cmp(&right.item.updated_at))
                 })?;
             let owner_principal_id = head.item.requested_by.clone()?;
+            let attention = attention_by_chain
+                .remove(&chain_root_id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let attention_count = attention.len();
             Some(WorkSummary {
                 schema_version: "ryeos.ui.work_summary.v1",
                 coordinate: WorkCoordinate { chain_root_id },
@@ -118,6 +145,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 },
                 observed_at: head.item.updated_at.clone(),
                 placement_count: placements.len(),
+                attention,
+                attention_count,
             })
         })
         .collect::<Vec<_>>();
