@@ -1,0 +1,38 @@
+# ryeos:signed:2026-09-15T00:24:00Z:6428a6a4d7b77c7748e4686fdf9cda2fa961b263f09608989594e1711e10f312:ZZkroNAitDabgpcEWDV4lAONubm7ki2bOl01o9htbOC2ZGgcXtWSGX6Acfqyl4jFbZWQxGR7CyEoeKsBuNamDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work-approvals
+title: Approvals
+version: "1.0.0"
+description: Exact pending approval requests owned by the selected hosted work
+
+widget: table
+sources:
+  default:
+    ref: service:worker-executions/approvals
+    params:
+      chain_root_id: "@facet:input.route.chain_root"
+    collection: approvals
+
+projections:
+  columns:
+    - { label: operation, field: operation_class, present: words }
+    - { label: state, field: state, present: words }
+    - { label: expires, field: expires_at_ms }
+  expand:
+    fields:
+      - approval_id
+      - placement_thread_id
+      - worker_boot_epoch
+      - request_digest
+      - operation_class
+      - requested_authority
+      - state
+      - expires_at_ms
+      - created_at_ms
+  tone:
+    field: state
+    map: { pending: warn }
+    default: neutral
+
+refresh:
+  on_facet: input.route
+  on_hint: [thread, activity]
