@@ -201,6 +201,7 @@ mod tests {
                 default: CommandProjectDefault::None,
                 no_project_flag: false,
                 request_project_path: true,
+                pin_at_admission: false,
                 bind_parameter: Some(bind_parameter.into()),
                 bind_no_project_parameter: None,
             }),
