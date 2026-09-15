@@ -261,11 +261,17 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
     policy_test_root="$(mktemp -d)"
     trap 'rm -rf "$policy_test_root"' EXIT
 
+    unset PORT
+    [[ "$(container_bind)" == '[::]:8000' ]]
+    PORT=18081
+    [[ "$(container_bind)" == '[::]:18081' ]]
+    unset PORT
+
     # Image metadata is mandatory even when a persisted generation exists.
     unset RYEOS_INIT_NODE_PROFILE
     unset RYEOS_RESET_NODE_POLICY_GENERATION
     mkdir -p "$policy_test_root/.ai/node/policies"
-    if build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null 2>&1; then
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
         echo "entrypoint accepted an absent node init profile" >&2
         exit 1
     fi
@@ -273,30 +279,35 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
     # A fresh root receives the exact mapped first-publication seed.
     RYEOS_INIT_NODE_PROFILE=hosted-workflow
     rm -rf "$policy_test_root/.ai"
-    build_ryeos_init_args /opt/ryeos "$policy_test_root"
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --node-profile hosted-workflow" ]]
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081'
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 --node-profile hosted-workflow" ]]
 
     # A present generation is preserved. Even a malformed occupant takes this
     # path so real RyeOS rejects it instead of silently falling back to seed.
     mkdir -p "$policy_test_root/.ai/node/policies"
-    build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos" ]]
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
 
     # Replacement is an explicit one-boot opt-in and remains part of the same
     # locked init transaction as exact bundle reconciliation.
     RYEOS_RESET_NODE_POLICY_GENERATION=1
-    build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
     RYEOS_RESET_NODE_POLICY_GENERATION=invalid
-    if build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null 2>&1; then
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
         echo "entrypoint accepted an invalid policy replacement opt-in" >&2
         exit 1
     fi
     unset RYEOS_RESET_NODE_POLICY_GENERATION
     rm -rf "$policy_test_root/.ai/node/policies"
     : > "$policy_test_root/.ai/node/policies"
-    build_ryeos_init_args /opt/ryeos "$policy_test_root" >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos" ]]
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
+
+    # The daemon consumes the create-once endpoint from config.yaml; ordinary
+    # container startup must not present a competing runtime override.
+    grep -Fq 'exec ryeosd --app-root /data/app' "$root/deploy/entrypoint.sh"
+    ! sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh" | grep -Fq -- '--bind'
 )
 
 # central-auth owns Python-authored support and every runtime set that includes
