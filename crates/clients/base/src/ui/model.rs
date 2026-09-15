@@ -749,17 +749,45 @@ pub(crate) struct DeferredSourceFetch {
 
 impl RyeOsCore {
     pub fn new(session: BrowserSession, viewport: BrowserViewport, now_ms: u64) -> Self {
-        let binding_contract_matches = session.session_id.is_empty()
+        let local_preview = session.session_id.is_empty();
+        let binding_contract_matches = local_preview
             || session.ui_binding_contract_revision == crate::UI_BINDING_CONTRACT_REVISION;
-        let surface = binding_contract_matches
+        let parsed_surface = binding_contract_matches
             .then_some(session.effective_surface.as_ref())
             .flatten()
-            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
-            .unwrap_or_else(builtin_default);
+            .map(|value| serde_json::from_value::<SurfaceSpec>(value.clone()));
+        let surface_failure = if local_preview {
+            None
+        } else if !binding_contract_matches {
+            Some(format!(
+                "UI binding contract {} is unsupported (expected {})",
+                session.ui_binding_contract_revision,
+                crate::UI_BINDING_CONTRACT_REVISION
+            ))
+        } else {
+            match &parsed_surface {
+                Some(Err(error)) => Some(format!("effective signed surface is invalid: {error}")),
+                None => Some("effective signed surface is missing".to_string()),
+                Some(Ok(_)) => None,
+            }
+        };
+        let surface = parsed_surface.and_then(Result::ok).unwrap_or_else(|| {
+            if local_preview {
+                builtin_default()
+            } else {
+                // A daemon-backed failure gets an intentionally empty
+                // mechanism surface plus a visible error notice. It must
+                // never inherit the built-in preview's views or actions.
+                serde_json::from_value(serde_json::json!({
+                    "name": "invalid-daemon-session"
+                }))
+                .expect("minimal fail-closed surface is valid")
+            }
+        });
         let input_route = super::seat::InputRoute::from_surface_input(surface.input.as_ref());
         let mut core = Self {
             surface_sources: surface.sources.clone(),
-            views: binding_contract_matches
+            views: (surface_failure.is_none() && binding_contract_matches)
                 .then(|| super::content::views_from_surface(session.effective_surface.as_ref()))
                 .unwrap_or_default(),
             ..Self::default()
@@ -787,6 +815,9 @@ impl RyeOsCore {
         core.workspaces = vec![blank; 9];
         core.workspaces[0] = core.workspace.clone();
         core.active_workspace = 0;
+        if let Some(reason) = surface_failure {
+            core.notice(reason, RyeOsTone::Danger);
+        }
         core
     }
 
@@ -3014,6 +3045,30 @@ mod tests {
         assert!(core.ui.docks.top.is_none());
         // Style flows from the surface, too.
         assert_eq!(core.style.border, crate::surface::BorderStyleSpec::Thick);
+    }
+
+    #[test]
+    fn daemon_session_with_invalid_surface_does_not_gain_preview_content() {
+        let session = BrowserSession {
+            session_id: "ui-session-1".to_string(),
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
+            effective_surface: Some(serde_json::json!({
+                "name": "broken",
+                "unknown_authority": { "execute": true }
+            })),
+            ..Default::default()
+        };
+        let core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+
+        assert!(core.views.is_empty());
+        assert!(core.surface_sources.is_empty());
+        assert!(core.workspace.tiles.is_empty());
+        assert!(core.ui.docks.bottom.is_none());
+        assert!(core.ui.notices.iter().any(|notice| {
+            notice
+                .message
+                .contains("effective signed surface is invalid")
+        }));
     }
 
     #[test]
