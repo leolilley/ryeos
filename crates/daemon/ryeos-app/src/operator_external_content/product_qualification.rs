@@ -67,6 +67,10 @@ enum CurrentVerifierContent<'a> {
 struct CurrentVerifierContext<'a> {
     content: CurrentVerifierContent<'a>,
     logical_project_root: Option<&'a std::path::Path>,
+    /// Binding identity belongs to the authority sealed at verifier admission.
+    /// A Bundle-owned executable can still have generation-scoped product
+    /// bindings when its relationship Configs came from a pinned project.
+    binding_subject_authority: Option<&'a ryeos_engine::contracts::SubjectResolutionAuthority>,
 }
 
 pub(super) mod execution_evidence;
@@ -301,6 +305,7 @@ fn prove_with_guard(
                 &capsule.execution_closure,
             )?
             .as_deref(),
+            binding_subject_authority: Some(sealed.resolution_subject_authority()),
         },
         Some(&admitted_resolution),
     )?;
@@ -616,6 +621,7 @@ pub(super) fn resolve_current_bundle_verifier_identity(
         CurrentVerifierContext {
             content: CurrentVerifierContent::Root(verifier_root_selections),
             logical_project_root,
+            binding_subject_authority: None,
         },
         None,
     )
@@ -645,6 +651,13 @@ fn current_root_selection_inputs(
     ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(
         inputs,
     )
+}
+
+fn current_verifier_binding_subject_authority<'a>(
+    admitted: Option<&'a SubjectResolutionAuthority>,
+    projectless: &'a SubjectResolutionAuthority,
+) -> &'a SubjectResolutionAuthority {
+    admitted.unwrap_or(projectless)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -694,6 +707,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         CurrentVerifierContent::Root(selections) => (selections, None),
         CurrentVerifierContent::Inherited(realizations) => (None, Some(realizations)),
     };
+    let projectless_binding_authority = SubjectResolutionAuthority::Projectless;
+    let binding_subject_authority = current_verifier_binding_subject_authority(
+        verifier_context.binding_subject_authority,
+        &projectless_binding_authority,
+    );
     let product_selections = current_root_selection_inputs(verifier_root_selections)?;
     let plan_context = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -874,7 +892,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 state,
                 &resolution,
                 &preview_policy,
-                &SubjectResolutionAuthority::Projectless,
+                binding_subject_authority,
             )?;
             if !preview.validation.ready_for_admission {
                 bail!("selected qualification verifier has no current exact content binding");
@@ -1677,6 +1695,22 @@ mod tests {
         let mut unrepresentable = contract;
         unrepresentable.max_declarations = usize::from(u16::MAX) + 1;
         assert!(selected_verifier_preview_policy(&unrepresentable).is_err());
+    }
+
+    #[test]
+    fn current_selected_verifier_preserves_its_admitted_binding_authority() {
+        let projectless = SubjectResolutionAuthority::Projectless;
+        let pinned = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        assert_eq!(
+            current_verifier_binding_subject_authority(Some(&pinned), &projectless),
+            &pinned
+        );
+        assert_eq!(
+            current_verifier_binding_subject_authority(None, &projectless),
+            &projectless
+        );
     }
 
     #[test]
