@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-15T00:05:35Z:50e056408b496e00d05abef3e0c96527502046a16acf162f11e0b3a6fe24174c:+EIvfQUbMp3jLa7MJjtgp6fnzwJXTChFxggdh2PqVaDRbade75H0cGqcBZn9jq+v60QzXHV7zFy+EmtyGue9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-ui-assistant-observe
+version: "1.0.0"
+description: Observation-only assistant surface for the default browser launch
+extends: surface:ryeos/ui/assistant
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: []

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-14T10:03:08Z:65361148aec2cc20bca28b786f50797313a92d48a5ed963a1e9029eee8285b43:yCxKtyvDwc9N6LCRjcNaR3ep0UvHsAnkb7BN4WCky+FEulDhG0yIAhEwAFxhQgzL2/n36HSNgUQnNrn+JTlNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-15T00:05:35Z:836cfc115cd46d653e30b4b992fd0c85980a8198724e46eb7def948aef745b49:DHEKxdAqpEQkcBjJI+fzLEy75AR/QK0vV61JWhQY0LNFNUDVVnehGxl/NQqCWeJbkPaEeyAxkeZ0Eo33zI5oDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -18,7 +18,7 @@ against this tree.
 The core rule is:
 
 ```text
-RyeOS UI is a project cockpit over durable threads.
+RyeOS UI is an assistant workspace over durable execution threads.
 Threads are the execution objects.
 Chat, transcript, artifacts, files, and inspectors are lenses.
 Project and node are scopes.
@@ -168,11 +168,11 @@ RyeOS UI
 |       |-- Pause / Resume
 |       `-- Fire History
 |-- Layouts / Surfaces
-|   |-- Cockpit
-|   |   |-- Left: Current Project Live Threads
-|   |   |-- Right: Selected Thread Lens
+|   |-- Assistant
+|   |   |-- Signed navigation: Home / Work / Review / Sites / Programs
+|   |   |-- Center: One selected lens
 |   |   |-- Bottom: Routed Input
-|   |   `-- Top: Node / Project Status
+|   |   `-- Optional context through signed views
 |   |-- Thread Chat
 |   |   |-- Center: Chat Lens
 |   |   |-- Bottom: Routed Input
@@ -226,7 +226,7 @@ Node
 `-- threads across project contexts on this node
 ```
 
-Project scope is the default for cockpit driving. Node scope is the broader
+Project scope is the default for project-bound work. Node scope is the broader
 operator view. Node-wide activity is not a separate object called "fleet" or
 "activity"; it is the same thread list with a wider scope.
 
@@ -366,10 +366,10 @@ operator's ability to inspect the full event stream.
 ## Surface Roles
 
 ```text
-surface:ryeos/ui/cockpit
-`-- project driving surface
-    |-- left: view:ryeos/threads/history
-    |-- right: selected thread lens, currently view:ryeos/thread/transcript
+surface:ryeos/ui/assistant
+`-- assistant workspace
+    |-- navigation: signed destination-to-view bindings
+    |-- center: selected lens
     |-- bottom: view:ryeos/input
     `-- top: node/project status
 
@@ -479,7 +479,7 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 ## References
 
 - `bundles/ryeos-ui/.ai/knowledge/ryeos/ryeos-ui/frame-v1.md`
-- `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/cockpit.yaml`
+- `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/assistant.yaml`
 - `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/thread.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/projects/list.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml`

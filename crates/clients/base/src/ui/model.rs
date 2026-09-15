@@ -839,6 +839,24 @@ impl RyeOsCore {
                 .is_some_and(|project| !project.path.is_empty())
     }
 
+    pub(crate) fn surface_navigation(&self) -> Vec<crate::surface::SurfaceNavigationSpec> {
+        self.data
+            .session
+            .as_ref()
+            .and_then(|session| session.effective_surface.as_ref())
+            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+            .map(|surface| {
+                surface
+                    .navigation
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.view.starts_with("view:") && self.views.contains_key(&entry.view)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn initial_effects(&mut self) -> Vec<RyeOsEffect> {
         if self.data.session.as_ref().is_some_and(|session| {
             !session.session_id.is_empty()

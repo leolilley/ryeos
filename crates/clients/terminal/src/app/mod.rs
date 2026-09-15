@@ -115,7 +115,8 @@ pub async fn run(
     // otherwise open one. The round trips run off the loop; the result
     // folds in on arrival. Local seat events mirror into the braid as
     // they append, and the thread settles on clean exit.
-    let (seat_tx, mut seat_rx) = tokio::sync::mpsc::unbounded_channel::<seat::SeatBootstrap>();
+    let (seat_tx, mut seat_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<seat::SeatBootstrap, String>>();
     {
         let client = client.clone();
         let surface_ref = surface_ref.clone();
@@ -450,16 +451,10 @@ pub async fn run(
             }
             Some(bootstrap) = seat_rx.recv() => {
                 seat_bootstrap_inflight = false;
-                let Some(bootstrap_thread_id) = bootstrap.thread_id else {
-                    seat_thread = None;
-                    seat_synced = 0;
-                    schedule_seat_reconnect(
-                        &mut seat_bootstrap_retry_at_ms,
-                        &mut seat_reconnect_delay_ms,
-                        now_ms(),
-                    );
-                    continue;
-                };
+                let bootstrap = bootstrap.map_err(|error| {
+                    std::io::Error::other(format!("RyeOS seat attach failed: {error}"))
+                })?;
+                let bootstrap_thread_id = bootstrap.thread_id;
                 seat_bootstrap_retry_at_ms = None;
                 seat_reconnect_delay_ms = SEAT_RECONNECT_MIN_MS;
                 if bootstrap.replayed.is_empty() {
@@ -475,9 +470,8 @@ pub async fn run(
                         &seat_write_tx,
                     );
                 } else if core.seat.events().len() == seeded_events {
-                    for event in bootstrap.replayed {
-                        core.seat.append_replayed(event);
-                    }
+                    let replay_effects = core.replay_seat_events(bootstrap.replayed);
+                    spawn_effects(&client, replay_effects, &effect_tx);
                     seat_thread = Some(bootstrap_thread_id);
                     seat_synced = core.seat.events().len();
                     dirty = true;
@@ -492,9 +486,13 @@ pub async fn run(
                     let seat_tx = seat_tx.clone();
                     seat_bootstrap_inflight = true;
                     tokio::spawn(async move {
-                        let thread_id =
-                            seat::open_seat_thread(&client, &surface_ref, &project_path).await;
-                        let _ = seat_tx.send(seat::SeatBootstrap { thread_id, replayed: Vec::new() });
+                        let result = seat::open_seat_thread(&client, &surface_ref, &project_path)
+                            .await
+                            .map(|thread_id| seat::SeatBootstrap {
+                                thread_id,
+                                replayed: Vec::new(),
+                            });
+                        let _ = seat_tx.send(result);
                     });
                 }
             }

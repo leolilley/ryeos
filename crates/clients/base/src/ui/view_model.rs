@@ -24,7 +24,7 @@ pub(crate) use execution::timeline_summary_entry;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
 pub use navigation::{
     RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
-    RyeOsSessionVm,
+    RyeOsNavigationItemVm, RyeOsNavigationVm, RyeOsSessionVm,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +40,7 @@ pub struct RyeOsViewModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
+    pub navigation: RyeOsNavigationVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
     pub workspace: RyeOsWorkspaceVm,
@@ -578,6 +579,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_url,
         presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
+        navigation: navigation_vm(core),
         chrome,
         workspace,
         overlays: overlays(core),
@@ -585,6 +587,36 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
     }
+}
+
+fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
+    let destination = core
+        .seat
+        .fold()
+        .get(super::seat::KEY_NAVIGATION_DESTINATION)
+        .and_then(serde_json::Value::as_str);
+    let focused = core
+        .workspace
+        .tiles
+        .get(&core.workspace.focused_tile)
+        .map(|tile| tile.view.view_ref.as_str());
+    let items = core
+        .surface_navigation()
+        .into_iter()
+        .map(|entry| {
+            let selected = destination == Some(entry.id.as_str())
+                || (destination.is_none() && focused == Some(entry.view.as_str()));
+            RyeOsNavigationItemVm {
+                id: entry.id,
+                label: entry.label,
+                selected,
+                intent: RyeOsUiIntent::OpenView {
+                    view: ViewSpec::bound(entry.view),
+                },
+            }
+        })
+        .collect();
+    RyeOsNavigationVm { items }
 }
 
 fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {

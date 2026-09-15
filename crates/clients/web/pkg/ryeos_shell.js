@@ -102,7 +102,7 @@ async function attachSeat(session, envelope) {
     // session. Renderer-authored seat selectors would be a parallel authority.
     const opened = await invokeSeatService("open", {});
     seatThreadId = opened?.thread_id || null;
-    if (!seatThreadId) return envelope;
+    if (!seatThreadId) throw new Error("seat/open returned no durable seat thread");
     if (seatHeartbeat) clearInterval(seatHeartbeat);
     seatHeartbeat = setInterval(() => {
       if (seatThreadId) {
@@ -125,12 +125,11 @@ async function attachSeat(session, envelope) {
     seatSynced = currentEvents > seededEvents ? currentEvents : 0;
     return replayedEnvelope;
   } catch (error) {
-    console.warn("RyeOS seat attach failed; continuing with local-only seat", error);
     seatThreadId = null;
     if (seatHeartbeat) clearInterval(seatHeartbeat);
     seatHeartbeat = null;
     seatSynced = 0;
-    return envelope;
+    throw new Error(`RyeOS seat attach failed: ${error?.message || String(error)}`);
   }
 }
 

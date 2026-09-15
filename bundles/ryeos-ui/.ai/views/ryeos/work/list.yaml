@@ -1,0 +1,39 @@
+# ryeos:signed:2026-09-15T00:05:35Z:2bffc3082ae20fa88ee2032c60a364db180eda924dae3f3aabb9bf16fc80c6b0:P3bwuDOgHBlF7Ohi5unZ99H/t7ZGIzijk+OSyIiMjROmgtsxlkJQAXs9AetJXDqBgzsu8EahbSHrm6TCDXxeDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work
+title: Work
+version: "1.0.0"
+description: Bounded execution-thread history; logical work aggregation is not yet available
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/threads/list
+    params: { limit: 200, sort: watch }
+    collection: threads
+projections:
+  columns:
+    - { label: status, field: status, present: words }
+    - { label: work, field: item_ref, present: leaf }
+    - { label: project, field: project.name, fallback: node }
+    - { label: updated, field: updated_at, present: time_date }
+  expand:
+    fields: [thread_id, chain_root_id, item_ref, status, project.name, project.path, requested_by, created_at, updated_at, error]
+  tone:
+    field: status
+    map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
+    default: neutral
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+refresh:
+  on_hint: [thread, activity]

@@ -12,30 +12,23 @@ use crate::transport::daemon::DaemonClient;
 /// folds it into the core when it arrives, so the daemon round trips
 /// never gate the first frame.
 pub struct SeatBootstrap {
-    pub thread_id: Option<String>,
+    pub thread_id: String,
     pub replayed: Vec<SeatEvent>,
 }
 
 /// Reattach to the freshest owned seat for this surface, or open a new
-/// one (best effort: an unreachable seat service degrades to a
-/// local-only seat, never a crash).
+/// one. A daemon-backed UI never degrades to an engine-local seat: doing so
+/// would silently discard the durable session authority the user requested.
 pub async fn bootstrap_seat(
     client: &DaemonClient,
     surface_ref: &str,
     project_path: &str,
-) -> SeatBootstrap {
-    if let Some((thread_id, replayed)) =
-        reattach_seat_thread(client, surface_ref, project_path).await
-    {
-        return SeatBootstrap {
-            thread_id: Some(thread_id),
-            replayed,
-        };
-    }
-    SeatBootstrap {
-        thread_id: open_seat_thread(client, surface_ref, project_path).await,
-        replayed: Vec::new(),
-    }
+) -> Result<SeatBootstrap, String> {
+    let (thread_id, replayed) = reattach_seat_thread(client, surface_ref, project_path).await?;
+    Ok(SeatBootstrap {
+        thread_id,
+        replayed,
+    })
 }
 
 /// Open the seat session thread.
@@ -43,24 +36,25 @@ pub async fn open_seat_thread(
     client: &DaemonClient,
     _surface_ref: &str,
     _project_path: &str,
-) -> Option<String> {
+) -> Result<String, String> {
     let body = serde_json::json!({});
     let envelope = client
         .signed_post("/ui/api/session/seat/open", &body)
         .await
-        .ok()?;
+        .map_err(|error| format!("open durable UI seat: {error}"))?;
     envelope
         .get("result")
         .and_then(|result| result.get("thread_id"))
         .and_then(|id| id.as_str())
         .map(str::to_string)
+        .ok_or_else(|| "open durable UI seat: response omitted thread_id".to_string())
 }
 
 async fn reattach_seat_thread(
     client: &DaemonClient,
     _surface_ref: &str,
     _project_path: &str,
-) -> Option<(String, Vec<SeatEvent>)> {
+) -> Result<(String, Vec<SeatEvent>), String> {
     // The session endpoint atomically reattaches the freshest owned seat or
     // creates one. Clients never enumerate seat-session threads or author the
     // execution policy that owns them.
@@ -68,32 +62,34 @@ async fn reattach_seat_thread(
     let envelope = client
         .signed_post("/ui/api/session/seat/open", &body)
         .await
-        .ok()?;
+        .map_err(|error| format!("reattach durable UI seat: {error}"))?;
     let thread_id = envelope
         .get("result")
         .and_then(|result| result.get("thread_id"))
-        .and_then(serde_json::Value::as_str)?
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "reattach durable UI seat: response omitted thread_id".to_string())?
         .to_string();
-    let replayed = replay_seat_thread(client, &thread_id).await;
-    Some((thread_id, replayed))
+    let replayed = replay_seat_thread(client, &thread_id).await?;
+    Ok((thread_id, replayed))
 }
 
-async fn replay_seat_thread(client: &DaemonClient, thread_id: &str) -> Vec<SeatEvent> {
+async fn replay_seat_thread(
+    client: &DaemonClient,
+    thread_id: &str,
+) -> Result<Vec<SeatEvent>, String> {
     let body = serde_json::json!({ "chain_root_id": thread_id });
-    let Ok(envelope) = client
+    let envelope = client
         .signed_post("/ui/api/session/seat/replay", &body)
         .await
-    else {
-        return Vec::new();
-    };
+        .map_err(|error| format!("replay durable UI seat: {error}"))?;
     let Some(events) = envelope
         .get("result")
         .and_then(|result| result.get("events"))
         .and_then(serde_json::Value::as_array)
     else {
-        return Vec::new();
+        return Err("replay durable UI seat: response omitted events".to_string());
     };
-    events.iter().filter_map(seat_event_from_replay).collect()
+    Ok(events.iter().filter_map(seat_event_from_replay).collect())
 }
 
 fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {

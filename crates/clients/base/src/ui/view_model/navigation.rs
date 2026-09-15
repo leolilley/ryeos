@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+use super::super::event::RyeOsUiIntent;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RyeOsNavigationVm {
+    pub items: Vec<RyeOsNavigationItemVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsNavigationItemVm {
+    pub id: String,
+    pub label: String,
+    pub selected: bool,
+    pub intent: RyeOsUiIntent,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RyeOsSessionVm {
     pub session_id: String,

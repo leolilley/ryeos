@@ -1231,7 +1231,8 @@ body,
   --ryeos-topbar-offset: 0px;
   --ryeos-bottombar-offset: var(--ryeos-status-h);
   --ryeos-edge: var(--ryeos-gap);
-  --ryeos-left-edge: var(--ryeos-gap);
+  --ryeos-nav-w: 128px;
+  --ryeos-left-edge: calc(var(--ryeos-gap) * 2 + var(--ryeos-nav-w));
   position: relative;
   display: block;
   width: 100vw;
@@ -1243,6 +1244,48 @@ body,
     radial-gradient(circle at 64% 45%, rgba(131, 165, 152, 0.16), transparent 28%),
     radial-gradient(circle at 80% 12%, rgba(var(--ryeos-accent-rgb), 0.12), transparent 25%),
     linear-gradient(135deg, var(--ryeos-bg) 0%, var(--ryeos-panel) 52%, var(--ryeos-bg) 100%);
+}
+
+.ryeos-navigation {
+  position: absolute;
+  z-index: 24;
+  top: calc(var(--ryeos-topbar-offset) + var(--ryeos-edge));
+  bottom: calc(var(--ryeos-bottombar-offset) + var(--ryeos-edge));
+  left: var(--ryeos-edge);
+  width: var(--ryeos-nav-w);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(var(--ryeos-accent-rgb), 0.18);
+  background: rgba(29, 32, 33, 0.82);
+  backdrop-filter: blur(14px);
+}
+
+.ryeos-navigation[hidden] { display: none; }
+
+.ryeos-navigation-item {
+  min-height: 38px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--ryeos-muted);
+  font: inherit;
+  text-align: left;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.ryeos-navigation-item:hover,
+.ryeos-navigation-item:focus-visible {
+  color: var(--ryeos-fg);
+  background: rgba(var(--ryeos-accent-rgb), 0.08);
+}
+
+.ryeos-navigation-item.selected {
+  color: var(--ryeos-fg);
+  border-left-color: var(--ryeos-accent);
+  background: rgba(var(--ryeos-accent-rgb), 0.12);
 }
 
 .ryeos-app.ryeos-os.topbar-visible {
@@ -2401,6 +2444,34 @@ body,
 }
 
 @media (max-width: 760px) {
+  .ryeos-app.ryeos-os {
+    --ryeos-left-edge: 24px;
+  }
+
+  .ryeos-navigation {
+    top: calc(var(--ryeos-topbar-offset) + 12px);
+    right: 12px;
+    bottom: auto;
+    left: 12px;
+    width: auto;
+    height: 44px;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 4px;
+  }
+
+  .ryeos-navigation-item {
+    flex: 0 0 auto;
+    min-height: 34px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0 12px;
+  }
+
+  .ryeos-navigation-item.selected {
+    border-bottom-color: var(--ryeos-accent);
+  }
+
   .ryeos-home-identity {
     min-width: 0;
     width: auto;

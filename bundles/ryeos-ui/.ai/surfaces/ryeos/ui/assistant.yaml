@@ -1,0 +1,46 @@
+# ryeos:signed:2026-09-15T00:05:35Z:3c75e47aae25fd680fc083aa1c98bf22fdb4a88fbfa9f0de7d73242674c85eaf:5bBaQ0Ur9qAAPBqReYAZdN8YaiAie3f0EsygYZz7sUTkfP1TUNn2Ed57FDlwRmIuYkp2PEZXctyAdt1TtHIQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-ui-assistant
+version: "1.0.0"
+description: Assistant-oriented RyeOS surface with signed, data-driven navigation
+
+extends: surface:ryeos/ui/lens
+
+tiling:
+  mode: single_lens
+
+tiles:
+  - view:ryeos/home/overview
+
+navigation:
+  - { id: home, label: Home, view: "view:ryeos/home/overview" }
+  - { id: work, label: Work, view: "view:ryeos/work/list" }
+  - { id: review, label: Review, view: "view:ryeos/review/pending" }
+  - { id: sites, label: Sites, view: "view:ryeos/sites/list" }
+  - { id: programs, label: Programs, view: "view:ryeos/programs/list" }
+
+library:
+  - group: Assistant
+    views:
+      - view:ryeos/home/overview
+      - view:ryeos/work/list
+      - view:ryeos/review/pending
+      - view:ryeos/sites/list
+      - view:ryeos/programs/list
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/thread/tree
+      - view:ryeos/thread/transcript
+      - view:ryeos/threads/detail
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc

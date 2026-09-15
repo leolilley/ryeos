@@ -72,6 +72,11 @@ pub struct SurfaceSpec {
     /// lensable views surface under path-derived groups).
     #[serde(default)]
     pub library: Vec<SurfaceLibraryGroupSpec>,
+    /// Ordered, signed shell destinations. Renderers receive these through
+    /// the semantic view model and dispatch their existing `OpenView` intent;
+    /// they do not own a page enum or infer navigation from view names.
+    #[serde(default)]
+    pub navigation: Vec<SurfaceNavigationSpec>,
     /// Transient overlays declared by the surface. Overlays are not workspace
     /// views: they sit over the layout, own query/selection ephemera, and
     /// dispatch actions into the workspace. Their content still comes from
@@ -95,6 +100,14 @@ pub struct SurfaceLibraryGroupSpec {
     pub group: String,
     #[serde(default)]
     pub views: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceNavigationSpec {
+    pub id: String,
+    pub label: String,
+    pub view: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -803,6 +816,7 @@ pub fn builtin_default() -> SurfaceSpec {
         views: None,
         backdrop: None,
         library: Vec::new(),
+        navigation: Vec::new(),
         overlays: BTreeMap::new(),
         ambient: None,
         affordances: Vec::new(),

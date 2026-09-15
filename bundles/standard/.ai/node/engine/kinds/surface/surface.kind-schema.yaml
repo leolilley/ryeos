@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T22:49:51Z:0ecaa2653ad6921aef6834719fa0cc57ae21fa3b3cce187ce02fffdad0bc9545:+zEkRumg5HtWMCk5utIYmuTz5esthpdqNN6BKJjsOztD124fXVC5TVMFhAz8D415zPM4G2TEVqUqEO9StaZkDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:05:35Z:1bfd684d0bfaf8659d9e2085b2ec6fc6fc899429fe3fa42863682c192753470f:RSKqbqmzjEf9gPzRN7R88VFFxSY8V4zPrjwZ0iHS7B5Pl/G38Jw9X2C3SGepf/fUohcAE3ubShw47kyIJYXxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -56,6 +56,10 @@ composer_config:
     # (legacy flat form) and the keyed merge silently drops keyless items.
     - name: library
       strategy: replace_root_last
+      expect_value_type: array
+    - name: navigation
+      strategy: keyed_seq_merge_root_last
+      key: id
       expect_value_type: array
     - name: backdrop
       strategy: replace_root_last
@@ -207,6 +211,19 @@ composed_value_contract:
       elements:
         type: union
         prims: [string, mapping]
+    navigation:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+            label: { type: single, prim: string }
+            view: { type: single, prim: string }
+          optional: {}
     backdrop:
       type: single
       prim: string

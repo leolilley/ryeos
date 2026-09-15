@@ -1,0 +1,17 @@
+# ryeos:signed:2026-09-15T00:05:35Z:8990394d6e7412b6716a4a68c4c8062949442a4c923371985397c80a1cd3e935:qFhmT5kRUw625EEm5DUBs1sYx5lf3yAVWckSu2gWVEEZmNfjbrR+Z7PDKmBbwJ5X/hWkgS4PDdA/hi+nhA1lDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-review
+title: Review
+version: "1.0.0"
+description: Honest boundary until RyeOS supplies a signed aggregate review projection
+
+widget: text
+presentation:
+  chrome: thin
+  background: transparent
+  position: { x: 0.5, y: 0.5 }
+body:
+  lines:
+    - { text: "REVIEW", tone: accent }
+    - ""
+    - { text: "Aggregate review evidence is not available yet.", tone: neutral }
+    - { text: "No approval or completion state is inferred here.", tone: neutral }

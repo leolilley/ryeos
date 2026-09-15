@@ -675,6 +675,16 @@ impl RyeOsCore {
                 Vec::new()
             }
             RyeOsUiIntent::OpenView { view } => {
+                if let Some(destination) = self
+                    .surface_navigation()
+                    .into_iter()
+                    .find(|entry| entry.view == view.view_ref)
+                {
+                    self.seat.append_facet(
+                        super::seat::KEY_NAVIGATION_DESTINATION,
+                        serde_json::Value::String(destination.id),
+                    );
+                }
                 let mut effects = self.open_view(view.clone());
                 if let Some(hash) = route_for_view(&view) {
                     effects.push(self.emit(RyeOsEffectKind::SetLocationHash {
@@ -932,6 +942,45 @@ impl RyeOsCore {
                 }
             }
         }
+    }
+
+    /// Fold durable seat history and restore only state named by the current
+    /// signed surface. Unknown or stale navigation destinations remain inert.
+    pub fn replay_seat_events(
+        &mut self,
+        events: impl IntoIterator<Item = super::seat::SeatEvent>,
+    ) -> Vec<RyeOsEffect> {
+        let before = self.seat.fold().snapshot();
+        for event in events {
+            self.seat.append_replayed(event);
+        }
+        let after = self.seat.fold().snapshot();
+        let changed = after
+            .iter()
+            .filter(|(key, value)| before.get(*key) != Some(*value))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+
+        let mut effects = Vec::new();
+        if changed
+            .iter()
+            .any(|key| key == super::seat::KEY_NAVIGATION_DESTINATION)
+            && let Some(destination) = after
+                .get(super::seat::KEY_NAVIGATION_DESTINATION)
+                .and_then(serde_json::Value::as_str)
+            && let Some(entry) = self
+                .surface_navigation()
+                .into_iter()
+                .find(|entry| entry.id == destination)
+        {
+            effects.extend(self.open_view(ViewSpec::bound(entry.view)));
+        }
+        for key in changed {
+            if key != super::seat::KEY_NAVIGATION_DESTINATION {
+                effects.extend(self.effects_for_facet(&key));
+            }
+        }
+        effects
     }
 
     fn toggle_backdrop_break(&mut self) {

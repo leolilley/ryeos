@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T22:49:51Z:74d8799afc21f612002f49cfb0ce296fe24b7b5a8fe1bd67b1cf88dfcb583a1b:8psQV4NOjNMEkiz9XU9rnW8YcuUuYegBtaL1hlBliWU/Z2nDoiAzIDcMn18t/lV6t8pI8k0v+5yNePaCq9BzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:05:35Z:8005ce426f21ce70bab9f46e32e85e453f626a90cb739766b765a96113373905:DTKjL5sFk+EAEHbie+Bpbm92R6hXW8PfeJZIZt1N+888b742Vei4xmjhx4oZo35jpnslJXrXaYNaJQpwW/6jCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -33,6 +33,20 @@ composer_config:
     - name: projections
       strategy: dict_merge_root_last
       expect_value_type: mapping
+    # Ordered section composition is an authored view body. Replacing the
+    # complete sequence keeps source-channel/projection/activation entries
+    # atomic instead of inheriting partial sections by position or title.
+    - name: sections
+      strategy: replace_root_last
+      expect_value_type: array
+    - name: body
+      strategy: replace_root_last
+    - name: presentation
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: facet
+      strategy: replace_root_last
+      expect_value_type: string
     - name: affordances
       strategy: keyed_seq_merge_root_last
       key: id
@@ -85,6 +99,43 @@ composed_value_contract:
     projections:
       type: single
       prim: mapping
+    sections:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            title: { type: single, prim: string }
+            source_channel: { type: single, prim: string }
+          optional:
+            collection: { type: single, prim: string }
+            projection: { type: single, prim: mapping }
+            activate: { type: single, prim: string }
+    body:
+      type: single
+      prim: any
+    presentation:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required: {}
+        optional:
+          chrome:
+            type: single
+            prim: string
+            enum: [none]
+          background:
+            type: single
+            prim: string
+            enum: [transparent]
+          position: { type: single, prim: mapping }
+    facet:
+      type: single
+      prim: string
     affordances:
       type: single
       prim: sequence

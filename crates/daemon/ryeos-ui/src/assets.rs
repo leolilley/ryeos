@@ -51,6 +51,8 @@ static RYEOS_UI_COMPONENTS_CHROME_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_components_chrome.js");
 static RYEOS_UI_COMPONENTS_HOME_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_components_home.js");
+static RYEOS_UI_COMPONENTS_NAVIGATION_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_components_navigation.js");
 static RYEOS_UI_COMPONENTS_PRIMITIVES_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_components_primitives.js");
 static RYEOS_UI_COMPONENTS_WORKSPACE_JS: &[u8] =
@@ -85,6 +87,9 @@ impl StaticAssetProvider for WebAssetProvider {
             }
             "ryeos_components_home.js" | "ui/assets/ryeos_components_home.js" => {
                 (RYEOS_UI_COMPONENTS_HOME_JS, "no-cache")
+            }
+            "ryeos_components_navigation.js" | "ui/assets/ryeos_components_navigation.js" => {
+                (RYEOS_UI_COMPONENTS_NAVIGATION_JS, "no-cache")
             }
             "ryeos_components_primitives.js" | "ui/assets/ryeos_components_primitives.js" => {
                 (RYEOS_UI_COMPONENTS_PRIMITIVES_JS, "no-cache")
