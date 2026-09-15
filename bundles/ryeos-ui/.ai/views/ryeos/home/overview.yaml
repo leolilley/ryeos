@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:05:35Z:edcaf0872c5df636c78597ac4bdb2f079abb2ca22c192bf138c77515034cd182:4rFjhZWcdULpJ41sD+Q4dl8DZSAvkOVW9ehseK7mMcz8H5Xvz45X0vZ2sF0Ql3D0oP/DC61WqRBDrvrrg7mUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:36:58Z:2dd793ae9b275f4d8d6f42ddae3c1f067418f9232d1ec19687410b310c699f42:saGIYROSUWMRFZJAJCZ4Wa4Qaj0CJrRKFqv4qvIRBj5eQSG5NyN3Ap2WC1X/SzMfW/yt0JU7pH+/dbhBoMosBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -16,6 +16,10 @@ sources:
       event_limit: 30
       exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
     collection: events
+  attention:
+    ref: service:ui/ryeos-ui/work/attention
+    params: { limit: 20, project: current }
+    collection: attention
   projects:
     ref: service:projects/list
     collection: projects
@@ -30,7 +34,28 @@ affordances:
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/thread/transcript
       drill: true
+  - id: review-attention
+    label: Review request
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.placement_thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/work/approvals
+      drill: true
 sections:
+  - title: Needs attention
+    source_channel: attention
+    collection: attention
+    projection:
+      primary: operation_class
+      meta: state
+      tone:
+        field: state
+        map: { pending: warn }
+        default: neutral
+    activate: review-attention
   - title: Active executions
     source_channel: active
     collection: threads
