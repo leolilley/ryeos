@@ -433,6 +433,7 @@ fn prove_participant(
         CurrentVerifierContext {
             content: CurrentVerifierContent::Inherited(inherited),
             logical_project_root: logical_root.as_deref(),
+            binding_subject_authority: Some(sealed.resolution_subject_authority()),
         },
         Some(resolution),
     )?;
@@ -558,6 +559,7 @@ pub(in crate::operator_external_content) fn verify_current(
             CurrentVerifierContext {
                 content: CurrentVerifierContent::Inherited(&current.realizations),
                 logical_project_root: retained.verifier.admitted_project_root.as_deref(),
+                binding_subject_authority: None,
             },
             None,
         )?;

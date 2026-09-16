@@ -67,6 +67,10 @@ enum CurrentVerifierContent<'a> {
 struct CurrentVerifierContext<'a> {
     content: CurrentVerifierContent<'a>,
     logical_project_root: Option<&'a std::path::Path>,
+    /// Binding identity belongs to the authority sealed at verifier admission.
+    /// A Bundle-owned executable can still have generation-scoped product
+    /// bindings when its relationship Configs came from a pinned project.
+    binding_subject_authority: Option<&'a ryeos_engine::contracts::SubjectResolutionAuthority>,
 }
 
 pub(super) mod execution_evidence;
@@ -301,6 +305,7 @@ fn prove_with_guard(
                 &capsule.execution_closure,
             )?
             .as_deref(),
+            binding_subject_authority: Some(sealed.resolution_subject_authority()),
         },
         Some(&admitted_resolution),
     )?;
@@ -596,16 +601,46 @@ pub(super) fn resolve_current_bundle_qualification_policy(
 /// Retained root selections are application-authenticated before this helper;
 /// this owner rechecks their common current D0, current binding heads and full
 /// manifest closures before deriving D1 and the realized D2 identity.
-pub(super) fn resolve_current_bundle_verifier_identity(
+pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
     context: &HandlerContext,
     verifier_ref: &str,
     verifier_parameters: &serde_json::Value,
-    verifier_root_selections: Option<&ResolvedExternalProductSelections>,
-    logical_project_root: Option<&std::path::Path>,
+    evidence: &ProductQualificationEvidence,
 ) -> anyhow::Result<CurrentBundleVerifierIdentity> {
+    evidence.validate()?;
+    let cas = authority.cas_store()?;
+    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &cas,
+            &evidence.verifier.admitted_launch_capsule_hash,
+            limits.max_object_bytes,
+        )?,
+    )?;
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &capsule,
+    )?;
+    let admitted_resolution = sealed.admitted_effective_resolution()?;
+    if sealed.item_ref() != evidence.verifier.canonical_ref
+        || sealed.effective_definition_digest().as_str()
+            != evidence.verifier.effective_definition_digest
+        || sealed.admitted_parameters_digest()? != evidence.verifier.admitted_parameters_digest
+        || capsule.launch_authority_digest()? != evidence.verifier.launch_authority_digest
+        || capsule.artifact_identity != evidence.verifier.artifact_identity
+    {
+        bail!("qualification evidence contradicts its admitted verifier capsule");
+    }
+    let (_, retained_selections) = retained_verifier_root_selections(
+        sealed.product_selections(),
+        &admitted_resolution,
+        &evidence.policy_source.policy.subject_declaration_id,
+    )?;
+    if retained_selections != evidence.verifier_root_selections {
+        bail!("qualification evidence changed its admitted verifier selections");
+    }
     resolve_current_bundle_verifier_identity_against_admitted(
         state,
         authority,
@@ -614,10 +649,11 @@ pub(super) fn resolve_current_bundle_verifier_identity(
         verifier_ref,
         verifier_parameters,
         CurrentVerifierContext {
-            content: CurrentVerifierContent::Root(verifier_root_selections),
-            logical_project_root,
+            content: CurrentVerifierContent::Root(retained_selections.as_ref()),
+            logical_project_root: evidence.verifier.admitted_project_root.as_deref(),
+            binding_subject_authority: Some(sealed.resolution_subject_authority()),
         },
-        None,
+        Some(&admitted_resolution),
     )
 }
 
@@ -645,6 +681,13 @@ fn current_root_selection_inputs(
     ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(
         inputs,
     )
+}
+
+fn current_verifier_binding_subject_authority<'a>(
+    admitted: Option<&'a SubjectResolutionAuthority>,
+    projectless: &'a SubjectResolutionAuthority,
+) -> &'a SubjectResolutionAuthority {
+    admitted.unwrap_or(projectless)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -694,6 +737,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         CurrentVerifierContent::Root(selections) => (selections, None),
         CurrentVerifierContent::Inherited(realizations) => (None, Some(realizations)),
     };
+    let projectless_binding_authority = SubjectResolutionAuthority::Projectless;
+    let binding_subject_authority = current_verifier_binding_subject_authority(
+        verifier_context.binding_subject_authority,
+        &projectless_binding_authority,
+    );
     let product_selections = current_root_selection_inputs(verifier_root_selections)?;
     let plan_context = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -874,7 +922,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 state,
                 &resolution,
                 &preview_policy,
-                &SubjectResolutionAuthority::Projectless,
+                binding_subject_authority,
             )?;
             if !preview.validation.ready_for_admission {
                 bail!("selected qualification verifier has no current exact content binding");
@@ -1677,6 +1725,22 @@ mod tests {
         let mut unrepresentable = contract;
         unrepresentable.max_declarations = usize::from(u16::MAX) + 1;
         assert!(selected_verifier_preview_policy(&unrepresentable).is_err());
+    }
+
+    #[test]
+    fn current_selected_verifier_preserves_its_admitted_binding_authority() {
+        let projectless = SubjectResolutionAuthority::Projectless;
+        let pinned = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        assert_eq!(
+            current_verifier_binding_subject_authority(Some(&pinned), &projectless),
+            &pinned
+        );
+        assert_eq!(
+            current_verifier_binding_subject_authority(None, &projectless),
+            &projectless
+        );
     }
 
     #[test]

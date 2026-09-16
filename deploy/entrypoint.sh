@@ -51,6 +51,10 @@ collect_baked_publisher_trust_args() {
   esac
 }
 
+container_bind() {
+  printf '[::]:%s' "${PORT:-8000}"
+}
+
 # Build the lifecycle argument vector without knowing any distribution or
 # provider name. Every image must set the one generic init-profile variable. It is
 # first-publication authority only: an absent generation receives the exact
@@ -60,13 +64,20 @@ collect_baked_publisher_trust_args() {
 build_ryeos_init_args() {
   local source_dir="$1"
   local app_root="$2"
+  local bind="$3"
   local policy_generation="$app_root/.ai/node/policies"
 
   [[ -n "${RYEOS_INIT_NODE_PROFILE:-}" ]] || {
     echo "[entrypoint] RYEOS_INIT_NODE_PROFILE is required" >&2
     return 1
   }
-  INIT_ARGS=(init --non-interactive --app-root "$app_root" --source "$source_dir")
+  INIT_ARGS=(
+    init
+    --non-interactive
+    --app-root "$app_root"
+    --source "$source_dir"
+    --bind "$bind"
+  )
   case "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" in
     0|"")
       if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
@@ -95,11 +106,14 @@ build_ryeos_init_args() {
 }
 
 main() {
+  local effective_bind
+  effective_bind="$(container_bind)"
+
   echo "[entrypoint] running ryeos init --non-interactive"
   mkdir -p /data
 
   collect_baked_publisher_trust_args /opt/ryeos
-  build_ryeos_init_args /opt/ryeos /data/app
+  build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
 
   ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
 
@@ -107,9 +121,7 @@ main() {
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce
   # (e.g. public-identity.json, vault keypair). Idempotent — no-op when
   # already written.
-  exec ryeosd \
-    --app-root /data/app \
-    --bind "[::]:${PORT:-8000}"
+  exec ryeosd --app-root /data/app
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
