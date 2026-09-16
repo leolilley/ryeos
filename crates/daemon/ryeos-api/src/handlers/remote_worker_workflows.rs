@@ -2838,6 +2838,17 @@ mod tests {
                 "config:development/ryeos/worker-environment".to_owned()
             ))
         );
+        let declared = graph_value
+            .pointer("/requires/capabilities/declared")
+            .and_then(Value::as_array)
+            .unwrap();
+        for capability in [
+            "ryeos.runtime.dedicated_session.start",
+            "ryeos.runtime.dedicated_session.command",
+            "ryeos.runtime.dedicated_session.terminate",
+        ] {
+            assert!(declared.contains(&Value::String(capability.to_owned())));
+        }
         assert_eq!(
             graph_value.pointer("/config/nodes/done/output/schema"),
             Some(&Value::String(WORKFLOW_GRAPH_RESULT_SCHEMA.to_owned()))
