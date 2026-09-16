@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T08:44:58Z:b73432c5a2ec6325cb4feb96b37f44952ae444fd72f5c619b11667656a6d48ac:n8hux2OQnJwSkoRaAG+cNV+slkAgy8uRxSEru69Nz9tG24qztxyd8ezr/dAi5z8HLu9O+y7C8F+UP3Oi8BwOCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T10:22:18Z:027b3c3ef2f3006df84af70e8dad0aeda2cc27d96d8b407abed976ef7a11c035:y6EiFDLfuceURxdJAjIhhTOpMitCYbno3yeD2xSJL0DOlODiE28teSf8hPADJttdpCkNBsy/BXfHY9qbPdFxBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification/native-authoring
 name: runtime
 version: "1.0.0"
@@ -53,12 +53,11 @@ config:
             raise SystemExit("production source digest mismatch")
         logical = Path(entry["logical_path"])
         sys.path.insert(0, str(logical.parent / "lib"))
-        sys.argv = [str(logical), "--project-path", sys.argv[2]]
+        sys.argv = [str(logical)]
         exec(compile(source, str(logical), "exec"), dict(
             __name__="__main__", __file__=str(logical), __package__=None,
             __cached__=None, __spec__=None))
     - "${tool_path}"
-    - "${project_path}"
   env:
     PYTHONHASHSEED: "0"
     PYTHONDONTWRITEBYTECODE: "1"
