@@ -3,6 +3,12 @@
 //! Renderers arrive through a `session:<id>` wrapper. Seat identity and its
 //! surface/project authority are derived from that exact immutable session;
 //! renderer parameters cannot select or reuse another session's seat.
+//!
+//! The signed services use ordinary verified dispatch, like session/current.
+//! Here "verified" selects descriptor verification and preservation of the
+//! route context; it does not promote a cookie to signing-key authority.
+//! Do not mark these lifecycle services session_local: that class is for
+//! compiled UI binding dispatch and generic node routes deliberately refuse it.
 
 use std::sync::Arc;
 

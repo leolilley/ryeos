@@ -282,6 +282,34 @@ mod tests {
     }
 
     #[test]
+    fn generated_wasm_glue_exports_every_shell_import() {
+        // wasm.rs and the checked-in wasm-bindgen outputs are one compiled
+        // browser contract. If Rust gains an export without regenerating the
+        // JS/WASM pair, static ES-module linking fails before bootstrap can
+        // enter the application. Derive the required names from the shell's
+        // authored import instead of maintaining a second export list here.
+        let shell = std::str::from_utf8(RYEOS_UI_SHELL_JS).expect("shell JS must be UTF-8");
+        let generated =
+            std::str::from_utf8(RYEOS_WEB_JS).expect("generated wasm glue must be UTF-8");
+        let named_imports = shell
+            .strip_prefix("import init, {")
+            .and_then(|rest| rest.split_once("} from \"/ui/assets/ryeos_web.js\";"))
+            .map(|(imports, _)| imports)
+            .expect("shell must begin with the generated WASM import");
+
+        for imported in named_imports
+            .lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .filter(|name| !name.is_empty())
+        {
+            assert!(
+                generated.contains(&format!("export function {imported}(")),
+                "generated wasm glue does not export shell import `{imported}`; regenerate ryeos_web.js and ryeos_web_bg.wasm"
+            );
+        }
+    }
+
+    #[test]
     fn get_asset_leading_slash_stripped() {
         let provider = WebAssetProvider;
         assert!(provider.get("/index.html").is_some());

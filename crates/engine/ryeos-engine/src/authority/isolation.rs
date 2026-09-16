@@ -41,7 +41,11 @@ pub use authority::{
     IsolationWritableRuntimeViewMountAuthority,
 };
 pub use backend::ResolvedIsolationBackend;
-pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
+pub use inspection::{
+    IsolationBackendInspection, IsolationBackendStatus, IsolationInspection,
+    ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
+    ProtocolProcessControlReadiness,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
 pub use policy::{
@@ -606,6 +610,9 @@ struct IsolationRuntimeResolution {
     /// selects only semantic scope requirements; it never transports native
     /// delegation configuration into the engine.
     process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
+    /// Digest of the complete protected host-runtime binding. Presence is
+    /// distinct from signed policy selecting and qualifying the provider.
+    process_scope_authority_digest: Option<String>,
     scope_admission: ProcessScopeAdmission,
 }
 
@@ -1409,6 +1416,7 @@ impl IsolationRuntime {
             None,
             backend,
             None,
+            None,
             ProcessScopeAdmission::Execution,
         )
     }
@@ -1433,6 +1441,7 @@ impl IsolationRuntime {
             None,
             backend,
             None,
+            None,
             ProcessScopeAdmission::DefinitionValidation,
         )
     }
@@ -1447,6 +1456,7 @@ impl IsolationRuntime {
         digest: String,
         backend: Option<Arc<ResolvedIsolationBackend>>,
         process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
+        process_scope_authority_digest: Option<String>,
     ) -> Result<Self, EngineError> {
         validate_namespace_destination("daemon socket", daemon_socket)?;
         let socket_parent = daemon_socket.parent().ok_or_else(|| {
@@ -1496,6 +1506,7 @@ impl IsolationRuntime {
             Some(socket),
             backend,
             process_scope_provider,
+            process_scope_authority_digest,
             ProcessScopeAdmission::Execution,
         )
     }
@@ -1508,6 +1519,7 @@ impl IsolationRuntime {
         daemon_socket: Option<PinnedDaemonSocket>,
         backend: Option<Arc<ResolvedIsolationBackend>>,
         process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
+        process_scope_authority_digest: Option<String>,
         scope_admission: ProcessScopeAdmission,
     ) -> Result<Self, EngineError> {
         Self::validate_policy(&policy)?;
@@ -1526,6 +1538,7 @@ impl IsolationRuntime {
             daemon_socket,
             backend,
             process_scope_provider,
+            process_scope_authority_digest,
             scope_admission,
         })
     }
@@ -1547,6 +1560,7 @@ impl IsolationRuntime {
             daemon_socket,
             backend,
             process_scope_provider: None,
+            process_scope_authority_digest: None,
             scope_admission: ProcessScopeAdmission::Execution,
         })
     }
@@ -4222,6 +4236,7 @@ impl IsolationRuntime {
             daemon_socket,
             backend,
             process_scope_provider,
+            process_scope_authority_digest,
             scope_admission,
         } = resolution;
         if policy.version != ISOLATION_POLICY_VERSION {
@@ -4352,6 +4367,11 @@ impl IsolationRuntime {
                     None => (None, BTreeSet::new()),
                 },
             };
+        let process_scope_readiness = ProcessScopeReadiness::classify(
+            policy.process_scopes.clone(),
+            process_scope_authority_digest,
+            process_scope_capabilities.clone(),
+        );
         Ok(Self {
             inspection: IsolationInspection {
                 source,
@@ -4360,6 +4380,7 @@ impl IsolationRuntime {
                 digest,
                 process_scopes: policy.process_scopes,
                 process_scope_capabilities,
+                process_scope_readiness,
                 backend: IsolationBackendInspection {
                     selection: policy.backend,
                     status: if state == IsolationRuntimeState::Enforced {
@@ -4867,6 +4888,7 @@ impl IsolationRuntime {
             daemon_socket: None,
             backend: None,
             process_scope_provider: None,
+            process_scope_authority_digest: None,
             scope_admission: ProcessScopeAdmission::DefinitionValidation,
         })
         .expect("compiled disabled isolation fixture policy is valid")

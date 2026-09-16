@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-08T01:19:50Z:8a0f0e0384100b5d465756d8fef8bed6424b01c6be61539d6bfe7cde4e7891e3:wtcpzJI60a8YudURQPbuR/aD4mMeL/9AxVcgJXawIqIQXYzp4JmPVAk8b7dLgDAWq6sx63QvDkIsg08uwdfZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T03:00:17Z:ab8979fa6f86044f6618fc197a5ab87a0b9ce01eb8ed92f0bd0f02b5aabd2e02:HMZruTCEZaCBfHj2tNcVzgZcr4h7108L0cU30AM2W1RzgOzD5pfdb1AlYp5x8y/Nwgc4Ot3c5SBoLzuqtG8VDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -230,9 +230,15 @@ The CLI exposes these as:
 ```
 ryeos external-content import <named-root> <path> <file|tree> <content|large_content> <maximum-bytes>
 ryeos external-content import-result <chain-root> <thread> <result-snapshot> <path> <file|tree> <content|large_content> <maximum-bytes>
-ryeos external-content import-binding <exact-active-binding-hash> <maximum-bytes>
+ryeos external-content import-binding <exact-active-binding-hash> <maximum-bytes> [binding-owner-principal]
 ryeos external-content import-product <exact-product-witness-hash> <maximum-bytes>
 ```
+
+The optional binding owner is required when the active source binding belongs
+to an admitted remote operator. Only the configured local operator may perform
+the import. The node revalidates the named owner's current grant and the exact
+grant generation retained by the binding before issuing a new locally owned
+stage; naming an owner does not delegate import or bind authority.
 
 Use exact returned execution coordinates, not thread discovery or a mutable
 workspace path. Retained import shares verified CAS file blobs and derives the

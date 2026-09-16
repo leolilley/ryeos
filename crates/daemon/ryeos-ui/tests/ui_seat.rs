@@ -5,6 +5,68 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 
+// Exercise the same verifier + canonical service invoker used by the signed
+// HTTP routes. Calling the handler alone misses dispatch-class mismatches.
+async fn invoke_seat_route(
+    descriptor: &ryeos_api::registry::ServiceDescriptor,
+    input: serde_json::Value,
+    context: HandlerContext,
+    state: Arc<ryeos_app::state::AppState>,
+) -> anyhow::Result<serde_json::Value> {
+    use ryeos_api::routes::invocation::{
+        CompiledRouteInvocation, RouteInvocationContext, RouteInvocationResult,
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    let session_id = context.fingerprint.strip_prefix("session:").unwrap();
+    headers.insert("cookie", format!("ryeos_session={session_id}").parse()?);
+    let mut invocation = RouteInvocationContext {
+        route_id: descriptor.service_ref.into(),
+        method: axum::http::Method::POST,
+        uri: "/ui/api/session/seat/open".parse()?,
+        captures: Default::default(),
+        headers,
+        body_raw: Vec::new(),
+        input,
+        principal: None,
+        workspace_lifeline: None,
+        launch_timings: None,
+        state: state.as_ref().clone(),
+        webhook_dedupe: Arc::new(Default::default()),
+    };
+    let verifier = ryeos_ui::invokers::browser_session_invocation::CompiledBrowserSessionVerifier {
+        ui: get_ui_state(&state).unwrap().clone(),
+    };
+    // Auth ignores the input; retain it for the service invocation.
+    let input = invocation.input.clone();
+    let auth = verifier.invoke(invocation).await?;
+    let RouteInvocationResult::Principal(principal) = auth else {
+        panic!("auth verifier must return a principal");
+    };
+    invocation = RouteInvocationContext {
+        route_id: descriptor.service_ref.into(),
+        method: axum::http::Method::POST,
+        uri: "/ui/api/session/seat/open".parse()?,
+        captures: Default::default(),
+        headers: Default::default(),
+        body_raw: Vec::new(),
+        input,
+        principal: Some(principal),
+        workspace_lifeline: None,
+        launch_timings: None,
+        state: state.as_ref().clone(),
+        webhook_dedupe: Arc::new(Default::default()),
+    };
+    let invoker = ryeos_api::routes::invokers::service_invocation::CompiledServiceInvocation {
+        service_ref: descriptor.service_ref.into(),
+        subject_kind: "service".into(),
+        endpoint: descriptor.endpoint.into(),
+    };
+    match invoker.invoke(invocation).await? {
+        RouteInvocationResult::Json { value, .. } => Ok(value),
+        _ => panic!("seat route must return JSON"),
+    }
+}
+
 fn session_context(user_principal_id: Option<String>) -> ryeos_ui::browser_session::LaunchContext {
     launch_context(
         "surface:ryeos/ui/base",
@@ -38,14 +100,16 @@ async fn ui_seat_open_reattaches_running_session_seat() {
     );
     let ctx = handler_context(&session_id);
 
-    let first = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let first = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
         serde_json::json!({}),
         ctx.clone(),
         Arc::new(state.clone()),
     )
     .await
     .expect("open seat");
-    let second = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let second = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
         serde_json::json!({}),
         ctx,
         Arc::new(state.clone()),
@@ -84,14 +148,16 @@ async fn same_principal_sessions_cannot_reattach_each_others_seats() {
         Some(second_id.clone())
     );
 
-    let first = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let first = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
         serde_json::json!({}),
         handler_context(&first_id),
         Arc::new(state.clone()),
     )
     .await
     .expect("open first session seat");
-    let second = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let second = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
         serde_json::json!({}),
         handler_context(&second_id),
         Arc::new(state.clone()),
@@ -120,7 +186,8 @@ async fn ui_seat_append_replay_and_close_round_trip() {
     let ctx = handler_context(&session_id);
     let state = Arc::new(state);
 
-    let opened = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+    let opened = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
         serde_json::json!({}),
         ctx.clone(),
         state.clone(),
@@ -129,7 +196,36 @@ async fn ui_seat_append_replay_and_close_round_trip() {
     .expect("open seat");
     let thread_id = opened["thread_id"].as_str().unwrap();
 
-    let appended = (ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.handler)(
+    let touched = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::TOUCH_DESCRIPTOR,
+        serde_json::json!({ "thread_id": thread_id }),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("touch seat through authenticated route");
+    assert_eq!(touched["touched"], true);
+
+    let project_action = ryeos_ui::handlers::ALL
+        .iter()
+        .find(|descriptor| descriptor.service_ref == "service:projects/open")
+        .unwrap();
+    let denied = invoke_seat_route(
+        project_action,
+        serde_json::json!({}),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect_err("a cookie must not bypass compiled-binding dispatch for project actions");
+    assert!(
+        denied
+            .to_string()
+            .contains("cannot invoke session-local service")
+    );
+
+    let appended = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
         serde_json::json!({
             "thread_id": thread_id,
             "events": [{
@@ -144,7 +240,8 @@ async fn ui_seat_append_replay_and_close_round_trip() {
     .expect("append seat event");
     assert_eq!(appended["appended"], 1);
 
-    let replay = (ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR.handler)(
+    let replay = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR,
         serde_json::json!({ "chain_root_id": thread_id }),
         ctx.clone(),
         state.clone(),
@@ -158,7 +255,8 @@ async fn ui_seat_append_replay_and_close_round_trip() {
         "selection"
     );
 
-    let closed = (ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR.handler)(
+    let closed = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR,
         serde_json::json!({ "thread_id": thread_id }),
         ctx,
         state.clone(),

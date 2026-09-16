@@ -772,6 +772,10 @@ fn load_node_config_two_phase_with_socket(
     } else {
         None
     };
+    let process_scope_authority_digest = host_runtime
+        .map(|runtime| runtime.identity_digest())
+        .transpose()
+        .context("Phase 1: identify protected host-runtime authority")?;
     let isolation = match daemon_socket {
         Some(daemon_socket) => {
             ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
@@ -785,6 +789,7 @@ fn load_node_config_two_phase_with_socket(
                 format!("sha256:{}", node_policy.generation_digest()),
                 isolation_backend,
                 process_scope_provider,
+                process_scope_authority_digest,
             )
         }
         // A stopped-node service owns its state operation, not the supervised

@@ -94,6 +94,18 @@ impl HostRuntimeBinding {
         Ok(())
     }
 
+    /// Stable, non-secret identity of this complete protected binding. Status
+    /// surfaces may publish the digest, never its host paths or native control
+    /// configuration.
+    pub fn identity_digest(&self) -> Result<String> {
+        let value = serde_json::to_value(self).context("serialize host-runtime identity")?;
+        let canonical = lillux::canonical_json(&value).map_err(anyhow::Error::msg)?;
+        Ok(format!(
+            "sha256:{}",
+            lillux::sha256_hex(canonical.as_bytes())
+        ))
+    }
+
     pub fn open_process_scope_provider(
         &self,
     ) -> Result<std::sync::Arc<lillux::ProcessScopeProvider>> {
@@ -208,6 +220,8 @@ pub fn exec_external_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
 
     fn binding_value() -> serde_json::Value {
         serde_json::json!({
@@ -242,5 +256,61 @@ mod tests {
         let mut unknown = binding_value();
         unknown["scope_path"] = "/ambient".into();
         assert!(serde_json::from_value::<HostRuntimeBinding>(unknown).is_err());
+    }
+
+    #[test]
+    fn host_runtime_identity_covers_the_complete_binding() {
+        let first: HostRuntimeBinding = serde_json::from_value(binding_value()).unwrap();
+        let mut changed = binding_value();
+        changed["app_root_identity"]["inode"] = 3.into();
+        let changed: HostRuntimeBinding = serde_json::from_value(changed).unwrap();
+        assert_ne!(
+            first.identity_digest().unwrap(),
+            changed.identity_digest().unwrap()
+        );
+        assert_eq!(first.identity_digest().unwrap().len(), "sha256:".len() + 64);
+    }
+
+    #[cfg(unix)]
+    fn binding_for_directory(path: &Path, uid: u32, gid: u32) -> HostRuntimeBinding {
+        let directory = PinnedDirectory::open(path).unwrap().unwrap();
+        serde_json::from_value(serde_json::json!({
+            "schema_version": HOST_RUNTIME_BINDING_SCHEMA_VERSION,
+            "app_root": path,
+            "app_root_identity": directory.identity().unwrap(),
+            "node_fingerprint": "a".repeat(64),
+            "account": {"implementation": "unix", "uid": uid, "gid": gid},
+            "process_scopes": {
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_app_root_is_not_the_bound_runtime_generation() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("node");
+        std::fs::create_dir(&root).unwrap();
+        let metadata = std::fs::metadata(&root).unwrap();
+        let binding = binding_for_directory(&root, metadata.uid(), metadata.gid());
+        std::fs::rename(&root, parent.path().join("old-node")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        let error = binding.validate(&root).unwrap_err();
+        assert!(format!("{error:#}").contains("app root has been replaced"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootless_uid_mapping_mismatch_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("node");
+        std::fs::create_dir(&root).unwrap();
+        let metadata = std::fs::metadata(&root).unwrap();
+        let binding = binding_for_directory(&root, metadata.uid().wrapping_add(1), metadata.gid());
+        let error = binding.validate(&root).unwrap_err();
+        assert!(format!("{error:#}").contains("owner"));
     }
 }

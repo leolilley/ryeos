@@ -188,37 +188,56 @@ pub fn admitted_operator_authority_for_principal(
     state: &AppState,
     operator_principal: &str,
 ) -> anyhow::Result<AdmittedOperatorAuthority> {
+    admitted_operator_authority_for_named_role(state, operator_principal, "product owner")
+}
+
+/// Resolve the current grant for an explicitly named retained-binding owner.
+/// This proves source ownership only; it does not authorize the caller to
+/// perform the target-local import.
+pub fn admitted_binding_owner_authority_for_principal(
+    state: &AppState,
+    operator_principal: &str,
+) -> anyhow::Result<AdmittedOperatorAuthority> {
+    admitted_operator_authority_for_named_role(state, operator_principal, "binding owner")
+}
+
+fn admitted_operator_authority_for_named_role(
+    state: &AppState,
+    operator_principal: &str,
+    role: &str,
+) -> anyhow::Result<AdmittedOperatorAuthority> {
     let operator_fingerprint = operator_principal
         .strip_prefix("fp:")
-        .ok_or_else(|| anyhow::anyhow!("product owner principal is not canonical"))?;
+        .ok_or_else(|| anyhow::anyhow!("{role} principal is not canonical"))?;
     if !lillux::valid_hash(operator_fingerprint)
         || operator_fingerprint
             .bytes()
             .any(|byte| byte.is_ascii_uppercase())
     {
-        bail!("product owner principal is not canonical");
+        bail!("{role} principal is not canonical");
     }
     let grant = crate::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
     )?
-    .ok_or_else(|| anyhow::anyhow!("product owner operator grant was revoked"))?;
+    .ok_or_else(|| anyhow::anyhow!("{role} operator grant was revoked"))?;
     let origin_site_id = match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
             let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
-                bail!("product owner local_client is not the configured operator");
+                bail!("{role} local_client is not the configured operator");
             }
             state.threads.site_id().to_owned()
         }
-        AuthorizedKeyPrincipalClass::RemoteOperator => grant
-            .configured_origin_site_id
-            .clone()
-            .context("product owner remote_operator grant has no configured origin site")?,
+        AuthorizedKeyPrincipalClass::RemoteOperator => {
+            grant.configured_origin_site_id.clone().with_context(|| {
+                format!("{role} remote_operator grant has no configured origin site")
+            })?
+        }
         AuthorizedKeyPrincipalClass::RemoteNode => {
-            bail!("product owner grant cannot be remote_node")
+            bail!("{role} grant cannot be remote_node")
         }
     };
     let mut scopes = grant.scopes;

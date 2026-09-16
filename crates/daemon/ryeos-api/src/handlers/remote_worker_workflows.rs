@@ -33,14 +33,14 @@ use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
 const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v5";
-const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v3";
-const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v3";
-const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v1";
+const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v4";
+const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v4";
+const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v2";
 const DRIVE_INTENT_EVENT: &str = "remote_worker_workflow.drive_intent";
 const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
 const LAUNCH_ACCEPTED_EVENT: &str = "remote_worker_workflow.launch_accepted";
 const DRIVE_FACT_SCHEMA: &str = "ryeos.remote_worker_workflow_drive_fact.v1";
-const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v1";
+const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v2";
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 const LAUNCH_CONTACT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
@@ -125,6 +125,7 @@ struct Progress {
     pushed: bool,
     workflow_digest: Option<String>,
     target_request_digest: Option<String>,
+    target_readiness: Option<TargetReadinessEvidence>,
     target_chain_root_id: Option<String>,
     target_admission: Option<TargetAdmissionEvidence>,
     launch_acceptance_drive_root_id: Option<String>,
@@ -142,6 +143,7 @@ struct Receipt {
     workflow_ref: String,
     workflow_digest: String,
     target_launch_id: String,
+    target_readiness: TargetReadinessEvidence,
     launch_acceptance_drive_root_id: String,
     target_chain_root_id: String,
     target_admission: TargetAdmissionEvidence,
@@ -170,6 +172,7 @@ struct LaunchAcceptance {
     workflow_digest: String,
     target_request_digest: String,
     target_launch_id: String,
+    target_readiness: TargetReadinessEvidence,
     target_chain_root_id: String,
     target_admission: TargetAdmissionEvidence,
     launch_acceptance_drive_root_id: String,
@@ -194,8 +197,10 @@ enum DriveOutcome {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkflowConfig {
+    category: String,
     schema: String,
     driver: String,
+    target_requirements: TargetRuntimeRequirements,
     #[serde(default)]
     ref_bindings: BTreeMap<String, String>,
     /// Signed mapping from generic workflow inputs to the driver's exact
@@ -207,9 +212,49 @@ struct CompiledWorkflow {
     driver: String,
     ref_bindings: BTreeMap<String, String>,
     parameters: Value,
+    target_requirements: TargetRuntimeRequirements,
     digest: String,
     effective_definition_digest: String,
     source_definition_derived: HashMap<String, Value>,
+}
+
+/// Exact target runtime semantics selected by the signed workflow Config.
+/// These are checked remotely before project transfer or a new launch, then
+/// the target executor independently performs final admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetRuntimeRequirements {
+    process_control: TargetProcessControl,
+    filesystem_mode: ryeos_engine::isolation::IsolationMode,
+    network_mode: ryeos_engine::isolation::IsolationNetworkMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetProcessControl {
+    OrdinarySubprocess,
+    PooledRequests,
+    ExclusiveSession,
+}
+
+impl TargetProcessControl {
+    const fn status_field(self) -> &'static str {
+        match self {
+            Self::OrdinarySubprocess => "ordinary_subprocess",
+            Self::PooledRequests => "pooled_requests",
+            Self::ExclusiveSession => "exclusive_session",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetReadinessEvidence {
+    requirements: TargetRuntimeRequirements,
+    daemon_revision: String,
+    isolation_policy_digest: String,
+    process_scope_authority_digest: Option<String>,
+    process_control_reason: String,
 }
 
 impl Progress {
@@ -457,6 +502,7 @@ async fn drive_operation(
             &operation_digest,
             &compiled.digest,
             &request_digest,
+            &compiled.target_requirements,
             &mut progress,
         )?;
         progress.drive_root_id = Some(drive_root_id.to_owned());
@@ -486,6 +532,10 @@ async fn drive_operation(
                     &compiled,
                     target_chain_root_id,
                     target_admission,
+                    progress
+                        .target_readiness
+                        .as_ref()
+                        .context("accepted target launch omitted readiness evidence")?,
                     progress
                         .launch_acceptance_drive_root_id
                         .as_deref()
@@ -517,7 +567,36 @@ async fn drive_operation(
             _ => bail!("remote-worker workflow launch acceptance is incomplete"),
         }
 
-        if !progress.pushed {
+        // An interrupted contact must be reconciled before inspecting current
+        // readiness. A launch already accepted under the retained request is
+        // authoritative even if target capabilities later change.
+        let adopted = if had_launch_contact {
+            adopt_contacted_launch(&client, &operation).await?
+        } else {
+            None
+        };
+
+        if adopted.is_none() {
+            let readiness =
+                inspect_target_readiness(&client, &compiled.target_requirements).await?;
+            if progress
+                .target_readiness
+                .as_ref()
+                .is_some_and(|retained| retained != &readiness)
+            {
+                bail!("target runtime readiness changed before launch acceptance");
+            }
+            progress.target_readiness = Some(readiness);
+            update_progress(
+                &state,
+                &job_id,
+                "target_ready",
+                &progress,
+                vec![snapshot_hash.to_owned()],
+            )?;
+        }
+
+        if adopted.is_none() && !progress.pushed {
             update_progress(
                 &state,
                 &job_id,
@@ -549,11 +628,6 @@ async fn drive_operation(
             &progress,
             vec![snapshot_hash.to_owned()],
         )?;
-        let adopted = if had_launch_contact {
-            adopt_contacted_launch(&client, &operation).await?
-        } else {
-            None
-        };
         let target_chain_root_id = if let Some(thread_id) = adopted {
             thread_id
         } else {
@@ -591,6 +665,10 @@ async fn drive_operation(
             workflow_digest: compiled.digest.clone(),
             target_request_digest: request_digest,
             target_launch_id: operation.target_launch_id.clone(),
+            target_readiness: progress
+                .target_readiness
+                .clone()
+                .context("target launch omitted retained readiness evidence")?,
             launch_acceptance_drive_root_id: drive_root_id.to_owned(),
             target_chain_root_id: target_chain_root_id.clone(),
             target_admission: target_admission.clone(),
@@ -744,6 +822,9 @@ fn compile_workflow(
     if config.schema != WORKFLOW_SCHEMA {
         bail!("remote-worker workflow Config schema is not current");
     }
+    if config.category.trim().is_empty() || config.category.chars().any(char::is_control) {
+        bail!("remote-worker workflow Config category is invalid");
+    }
     let driver = CanonicalRef::parse(&config.driver)?;
     if driver.kind != "graph" || driver.suffix.is_some() {
         bail!("remote-worker workflow driver must be an unsuffixed graph reference");
@@ -786,6 +867,7 @@ fn compile_workflow(
         driver: config.driver,
         ref_bindings: config.ref_bindings,
         parameters,
+        target_requirements: config.target_requirements,
         digest: ryeos_state::objects::canonical_value_digest(&resolved.value)?,
         effective_definition_digest,
         source_definition_derived,
@@ -820,6 +902,119 @@ fn render_driver_parameters(
         bail!("remote-worker workflow rendered parameters must be a bounded object");
     }
     Ok(rendered)
+}
+
+async fn inspect_target_readiness(
+    client: &RemoteClient,
+    requirements: &TargetRuntimeRequirements,
+) -> Result<TargetReadinessEvidence> {
+    let status = client
+        .execute_service_result_with_total_timeout(
+            "service:node/status",
+            &BTreeMap::new(),
+            None,
+            &serde_json::json!({}),
+            &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            STATUS_TIMEOUT,
+        )
+        .await
+        .context("inspect target runtime readiness")?;
+    target_readiness_evidence(&status, requirements)
+}
+
+fn target_readiness_evidence(
+    status: &Value,
+    requirements: &TargetRuntimeRequirements,
+) -> Result<TargetReadinessEvidence> {
+    let revision = status
+        .get("revision")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("target node status omitted daemon revision")?;
+    let isolation = status
+        .get("isolation")
+        .and_then(Value::as_object)
+        .context("target node status omitted isolation readiness")?;
+    let filesystem_mode: ryeos_engine::isolation::IsolationMode = serde_json::from_value(
+        isolation
+            .get("filesystem_mode")
+            .cloned()
+            .context("target node status omitted filesystem mode")?,
+    )
+    .context("target node status has invalid filesystem mode")?;
+    let network_mode: ryeos_engine::isolation::IsolationNetworkMode = serde_json::from_value(
+        isolation
+            .get("network_mode")
+            .cloned()
+            .context("target node status omitted network mode")?,
+    )
+    .context("target node status has invalid network mode")?;
+    if filesystem_mode != requirements.filesystem_mode {
+        bail!(
+            "target filesystem mode is not workflow-ready: required {:?}, observed {:?}",
+            requirements.filesystem_mode,
+            filesystem_mode
+        );
+    }
+    if network_mode != requirements.network_mode {
+        bail!(
+            "target network mode is not workflow-ready: required {:?}, observed {:?}",
+            requirements.network_mode,
+            network_mode
+        );
+    }
+    let process_scopes = isolation
+        .get("process_scopes")
+        .and_then(Value::as_object)
+        .context("target node status omitted process-control readiness")?;
+    let selected = process_scopes
+        .get(requirements.process_control.status_field())
+        .and_then(Value::as_object)
+        .context("target node status omitted selected process-control mode")?;
+    let ready = selected
+        .get("ready")
+        .and_then(Value::as_bool)
+        .context("target node status omitted selected process-control readiness")?;
+    let reason = selected
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("target node status omitted process-control reason")?;
+    if !ready {
+        bail!(
+            "target process-control mode {} is not workflow-ready: {reason}",
+            requirements.process_control.status_field()
+        );
+    }
+    let policy_digest = isolation
+        .get("policy_digest")
+        .and_then(Value::as_str)
+        .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
+        .context("target node status omitted a valid isolation policy identity")?;
+    let authority_digest = process_scopes
+        .get("authority_digest")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
+                .map(str::to_owned)
+                .context("target node status has an invalid process-scope authority identity")
+        })
+        .transpose()?;
+    if requirements.process_control == TargetProcessControl::ExclusiveSession
+        && authority_digest.is_none()
+    {
+        bail!("exclusive target readiness omitted protected process-scope authority identity");
+    }
+    Ok(TargetReadinessEvidence {
+        requirements: requirements.clone(),
+        daemon_revision: revision.to_owned(),
+        isolation_policy_digest: policy_digest.to_owned(),
+        process_scope_authority_digest: authority_digest,
+        process_control_reason: reason.to_owned(),
+    })
 }
 
 /// Resolve an interrupted target contact without replaying an accepted launch.
@@ -1039,6 +1234,7 @@ async fn observe_target_completion(
     compiled: &CompiledWorkflow,
     target_chain_root_id: &str,
     target_admission: &TargetAdmissionEvidence,
+    target_readiness: &TargetReadinessEvidence,
     launch_acceptance_drive_root_id: &str,
     target_signing_key: &lillux::crypto::VerifyingKey,
     settlement_drive_root_id: &str,
@@ -1124,6 +1320,7 @@ async fn observe_target_completion(
         workflow_ref: operation.workflow_ref.clone(),
         workflow_digest: compiled.digest.clone(),
         target_launch_id: operation.target_launch_id.clone(),
+        target_readiness: target_readiness.clone(),
         target_chain_root_id: target_chain_root_id.to_owned(),
         target_admission: target_admission.clone(),
         launch_acceptance_drive_root_id: launch_acceptance_drive_root_id.to_owned(),
@@ -1393,6 +1590,7 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
         || !lillux::valid_hash(&receipt.target_admission.admitted_capsule_hash)
         || !lillux::valid_hash(&receipt.target_admission.exact_program_hash)
         || !lillux::valid_hash(&receipt.target_workflow_result_digest)
+        || validate_target_readiness_evidence(&receipt.target_readiness).is_err()
         || ryeos_engine::resolution::EffectiveDefinitionDigest::parse(
             receipt.target_admission.effective_definition_digest.clone(),
         )
@@ -1428,6 +1626,35 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
         || receipt.candidate_result.evidence.target_project_path != operation.target_project_path
     {
         bail!("remote-worker workflow candidate receipt contradicts retained authority");
+    }
+    Ok(())
+}
+
+fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Result<()> {
+    let expected_reason = match evidence.requirements.process_control {
+        TargetProcessControl::ExclusiveSession => "ready",
+        TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests => {
+            "not_required"
+        }
+    };
+    if evidence.daemon_revision.is_empty()
+        || !lillux::valid_hash(
+            evidence
+                .isolation_policy_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&evidence.isolation_policy_digest),
+        )
+        || evidence.process_control_reason != expected_reason
+        || evidence
+            .process_scope_authority_digest
+            .as_deref()
+            .is_some_and(|digest| {
+                !lillux::valid_hash(digest.strip_prefix("sha256:").unwrap_or(digest))
+            })
+        || (evidence.requirements.process_control == TargetProcessControl::ExclusiveSession
+            && evidence.process_scope_authority_digest.is_none())
+    {
+        bail!("remote-worker target readiness evidence is invalid");
     }
     Ok(())
 }
@@ -1581,6 +1808,7 @@ fn validate_launch_acceptance(
         || !lillux::valid_hash(&acceptance.target_request_digest)
         || !lillux::valid_hash(&acceptance.target_admission.admitted_capsule_hash)
         || !lillux::valid_hash(&acceptance.target_admission.exact_program_hash)
+        || validate_target_readiness_evidence(&acceptance.target_readiness).is_err()
         || ryeos_engine::resolution::EffectiveDefinitionDigest::parse(
             acceptance
                 .target_admission
@@ -1604,6 +1832,7 @@ fn reconcile_launch_acceptance(
     operation_digest: &str,
     workflow_digest: &str,
     target_request_digest: &str,
+    target_requirements: &TargetRuntimeRequirements,
     progress: &mut Progress,
 ) -> Result<()> {
     let acceptance_root = progress
@@ -1622,7 +1851,12 @@ fn reconcile_launch_acceptance(
     };
     if acceptance.workflow_digest != workflow_digest
         || acceptance.target_request_digest != target_request_digest
+        || &acceptance.target_readiness.requirements != target_requirements
         || acceptance_root != Some(acceptance.launch_acceptance_drive_root_id.as_str())
+        || progress
+            .target_readiness
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_readiness)
         || progress
             .target_chain_root_id
             .as_ref()
@@ -1636,6 +1870,7 @@ fn reconcile_launch_acceptance(
     }
     progress.workflow_digest = Some(acceptance.workflow_digest);
     progress.target_request_digest = Some(acceptance.target_request_digest);
+    progress.target_readiness = Some(acceptance.target_readiness);
     progress.launch_acceptance_drive_root_id = Some(acceptance.launch_acceptance_drive_root_id);
     progress.target_chain_root_id = Some(acceptance.target_chain_root_id);
     progress.target_admission = Some(acceptance.target_admission);
@@ -1667,6 +1902,10 @@ fn reconcile_launch_acceptance_for_query(
         .as_ref()
         .is_some_and(|value| value != &acceptance.workflow_digest)
         || progress
+            .target_readiness
+            .as_ref()
+            .is_some_and(|value| value != &acceptance.target_readiness)
+        || progress
             .target_request_digest
             .as_ref()
             .is_some_and(|value| value != &acceptance.target_request_digest)
@@ -1684,6 +1923,7 @@ fn reconcile_launch_acceptance_for_query(
     }
     progress.workflow_digest = Some(acceptance.workflow_digest);
     progress.target_request_digest = Some(acceptance.target_request_digest);
+    progress.target_readiness = Some(acceptance.target_readiness);
     progress.launch_acceptance_drive_root_id = Some(acceptance.launch_acceptance_drive_root_id);
     progress.target_chain_root_id = Some(acceptance.target_chain_root_id);
     progress.target_admission = Some(acceptance.target_admission);
@@ -1879,6 +2119,7 @@ fn authoritative_receipt(
     if acceptance.workflow_digest != receipt.workflow_digest
         || acceptance.target_chain_root_id != receipt.target_chain_root_id
         || acceptance.target_admission != receipt.target_admission
+        || acceptance.target_readiness != receipt.target_readiness
     {
         bail!("completed workflow receipt contradicts launch acceptance");
     }
@@ -2102,6 +2343,7 @@ fn in_progress_response(operation: &Operation, job: &SyncJobRecord, progress: &P
         "target_launch_id": operation.target_launch_id,
         "target_chain_root_id": progress.target_chain_root_id,
         "target_admission": progress.target_admission,
+        "target_readiness": progress.target_readiness,
         "allowed_next_action": allowed_next_action,
         "error": job.last_error,
         "receipt": Value::Null,
@@ -2131,6 +2373,7 @@ fn launch_accepted_response(operation: &Operation, progress: &Progress) -> Value
         "target_launch_id": operation.target_launch_id,
         "target_chain_root_id": progress.target_chain_root_id,
         "target_admission": progress.target_admission,
+        "target_readiness": progress.target_readiness,
         "allowed_next_action": "resume",
         "receipt": Value::Null,
     })
@@ -2148,6 +2391,7 @@ fn completion_pending_response(operation: &Operation, progress: &Progress) -> Va
         "target_launch_id": operation.target_launch_id,
         "target_chain_root_id": progress.target_chain_root_id,
         "target_admission": progress.target_admission,
+        "target_readiness": progress.target_readiness,
         "allowed_next_action": "resume",
         "receipt": Value::Null,
     })
@@ -2441,8 +2685,14 @@ mod tests {
     #[test]
     fn workflow_config_is_closed_and_provider_neutral() {
         let config: WorkflowConfig = serde_json::from_value(serde_json::json!({
+            "category": "provider",
             "schema": WORKFLOW_SCHEMA,
             "driver": "graph:provider/bounded-task",
+            "target_requirements": {
+                "process_control": "exclusive_session",
+                "filesystem_mode": "enforce",
+                "network_mode": "host",
+            },
             "ref_bindings": {"environment": "config:development/environment"},
             "parameters": {"request": "${inputs.task}", "profile": "${inputs.credential_profile_id}"},
         }))
@@ -2460,13 +2710,95 @@ mod tests {
         );
         assert!(
             serde_json::from_value::<WorkflowConfig>(serde_json::json!({
+                "category": "provider",
                 "schema": WORKFLOW_SCHEMA,
                 "driver": "graph:provider/bounded-task",
+                "target_requirements": {
+                    "process_control": "exclusive_session",
+                    "filesystem_mode": "enforce",
+                    "network_mode": "host",
+                },
                 "parameters": {},
                 "target_project_path": "/wrong-owner",
             }))
             .is_err()
         );
+    }
+
+    fn target_status(
+        process_ready: bool,
+        process_reason: &str,
+        filesystem_mode: &str,
+        network_mode: &str,
+    ) -> Value {
+        let mut status = serde_json::json!({
+            "revision": "target-revision",
+            "isolation": {
+                "filesystem_mode": filesystem_mode,
+                "network_mode": network_mode,
+                "policy_digest": "a".repeat(64),
+                "process_scopes": {
+                    "authority": if process_ready { "qualified" } else { "absent" },
+                    "authority_digest": format!("sha256:{}", "b".repeat(64)),
+                    "ordinary_subprocess": {"ready": true, "reason": "not_required"},
+                    "pooled_requests": {"ready": true, "reason": "not_required"},
+                    "exclusive_session": {
+                        "ready": process_ready,
+                        "reason": process_reason,
+                    },
+                },
+            },
+        });
+        if !process_ready {
+            status["isolation"]["process_scopes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("authority_digest");
+        }
+        status
+    }
+
+    #[test]
+    fn target_readiness_requires_the_exact_signed_runtime_contract() {
+        let requirements = readiness_fixture().requirements;
+        let evidence = target_readiness_evidence(
+            &target_status(true, "ready", "enforce", "host"),
+            &requirements,
+        )
+        .unwrap();
+        assert_eq!(evidence.requirements, requirements);
+        assert_eq!(evidence.process_control_reason, "ready");
+        assert!(evidence.process_scope_authority_digest.is_some());
+
+        let error = target_readiness_evidence(
+            &target_status(false, "protected_authority_absent", "enforce", "host"),
+            &requirements,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("protected_authority_absent"));
+
+        let error = target_readiness_evidence(
+            &target_status(true, "ready", "disabled", "host"),
+            &requirements,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("filesystem mode"));
+    }
+
+    #[test]
+    fn pooled_request_readiness_does_not_claim_exclusive_scope_authority() {
+        let requirements = TargetRuntimeRequirements {
+            process_control: TargetProcessControl::PooledRequests,
+            filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
+            network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
+        };
+        let evidence = target_readiness_evidence(
+            &target_status(false, "policy_unconfigured", "disabled", "host"),
+            &requirements,
+        )
+        .unwrap();
+        assert_eq!(evidence.process_control_reason, "not_required");
+        assert!(evidence.process_scope_authority_digest.is_none());
     }
 
     #[test]
@@ -2480,6 +2812,10 @@ mod tests {
         let config: WorkflowConfig = serde_json::from_value(config_value).unwrap();
         assert_eq!(config.schema, WORKFLOW_SCHEMA);
         assert_eq!(config.driver, "graph:ryeos/development/remote-worker");
+        assert_eq!(
+            config.target_requirements.process_control,
+            TargetProcessControl::ExclusiveSession
+        );
         assert!(config.ref_bindings.is_empty());
 
         let graph_value: Value = serde_yaml::from_str(
@@ -2593,6 +2929,46 @@ mod tests {
     }
 
     #[test]
+    fn every_nonterminal_response_exposes_retained_target_readiness() {
+        let operation = operation_fixture();
+        let readiness = readiness_fixture();
+        let mut progress = Progress::new();
+        progress.target_readiness = Some(readiness.clone());
+        let job = SyncJobRecord {
+            job_id: "remote-worker-workflow:fixture".into(),
+            operation_type: OPERATION_TYPE.into(),
+            operation: serde_json::json!({}),
+            peer: Some("default".into()),
+            state: SyncJobState::Running,
+            phase: "target_ready".into(),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            uploaded_hashes: Vec::new(),
+            fetched_hashes: Vec::new(),
+            attempt_count: 1,
+            max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
+            last_error: None,
+            result: None,
+            created_at: "2026-09-16T00:00:00Z".into(),
+            updated_at: "2026-09-16T00:00:01Z".into(),
+            finished_at: None,
+        };
+        let expected = serde_json::to_value(readiness).unwrap();
+        assert_eq!(
+            in_progress_response(&operation, &job, &progress)["target_readiness"],
+            expected
+        );
+        assert_eq!(
+            launch_accepted_response(&operation, &progress)["target_readiness"],
+            expected
+        );
+        assert_eq!(
+            completion_pending_response(&operation, &progress)["target_readiness"],
+            expected
+        );
+    }
+
+    #[test]
     fn workflow_graph_return_is_closed_and_names_a_terminal_coordinate() {
         let returned: WorkflowGraphResult = serde_json::from_value(serde_json::json!({
             "schema": WORKFLOW_GRAPH_RESULT_SCHEMA,
@@ -2629,6 +3005,7 @@ mod tests {
             workflow_digest: "1".repeat(64),
             target_request_digest: "2".repeat(64),
             target_launch_id: operation.target_launch_id.clone(),
+            target_readiness: readiness_fixture(),
             launch_acceptance_drive_root_id: operation.source_invocation_id.clone(),
             target_chain_root_id: "T-target-graph".into(),
             target_admission: TargetAdmissionEvidence {
@@ -2867,6 +3244,7 @@ mod tests {
             workflow_ref: operation.workflow_ref.clone(),
             workflow_digest: "e".repeat(64),
             target_launch_id: operation.target_launch_id.clone(),
+            target_readiness: readiness_fixture(),
             target_chain_root_id: "T-target".into(),
             target_admission: TargetAdmissionEvidence {
                 admitted_capsule_hash: "f".repeat(64),
@@ -2880,6 +3258,20 @@ mod tests {
             candidate_result,
             target_product_selections_digest: operation.target_product_selections_digest.clone(),
             settlement_drive_root_id: operation.source_invocation_id.clone(),
+        }
+    }
+
+    fn readiness_fixture() -> TargetReadinessEvidence {
+        TargetReadinessEvidence {
+            requirements: TargetRuntimeRequirements {
+                process_control: TargetProcessControl::ExclusiveSession,
+                filesystem_mode: ryeos_engine::isolation::IsolationMode::Enforce,
+                network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
+            },
+            daemon_revision: "fixture-revision".into(),
+            isolation_policy_digest: format!("sha256:{}", "8".repeat(64)),
+            process_scope_authority_digest: Some(format!("sha256:{}", "9".repeat(64))),
+            process_control_reason: "ready".into(),
         }
     }
 

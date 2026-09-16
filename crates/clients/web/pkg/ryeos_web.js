@@ -27,6 +27,27 @@ export function ryeos_dispatch(event_json) {
 }
 
 /**
+ * Route a browser key press through the SHARED ryeos keymap.
+ *
+ * JavaScript translates a DOM `KeyboardEvent` into a neutral `RyeOsKeyEvent`
+ * (`{ key, modifiers }`) and calls this. The binding table lives in
+ * `ryeos_client_base::ui::ryeos_key_command` — the exact function the
+ * terminal uses — so the two renderers never diverge on what a key does. The
+ * focus-context capabilities are resolved by the shared `key_context()`.
+ * Genuinely-web key handling (native text-input editing, launcher search,
+ * pointer, focus capture) stays in JavaScript and never reaches here.
+ * @param {any} event_json
+ * @returns {any}
+ */
+export function ryeos_key(event_json) {
+    const ret = wasm.ryeos_key(event_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Replay durable seat braid events into the in-memory RyeOs engine.
  * @param {any} events_json
  * @returns {any}
@@ -179,6 +200,10 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1);
             return ret;
         }, arguments); },
+        __wbg_codePointAt_41b74e314c0e4744: function(arg0, arg1) {
+            const ret = arg0.codePointAt(arg1 >>> 0);
+            return ret;
+        },
         __wbg_done_9158f7cc8751ba32: function(arg0) {
             const ret = arg0.done;
             return ret;
@@ -246,6 +271,10 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbg_length_3d4ecd04bd8d22f1: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
+        __wbg_length_6a846b3b23b74aca: function(arg0) {
             const ret = arg0.length;
             return ret;
         },

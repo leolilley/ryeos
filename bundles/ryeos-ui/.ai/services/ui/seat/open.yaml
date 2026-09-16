@@ -1,9 +1,11 @@
-# ryeos:signed:2026-09-14T10:03:09Z:a51d5f0219710a5231348548b8cb682bb29112762dbb72e8cf356d3368bfc8d5:4MVoE2fupPv0l+h6U8j2QvF2TpdyVxIgOZqFzLYr1uMmU1Pkw6BK6PhkurJ16KzjqJV/ROHtQ5GioJqh7xn5DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T02:16:20Z:be7fbb9806fe1b6df34c05b979457bd630cc12d25d6e82788e942c2c5ae8e183:/p5dLSPbpvhgPi6gobXhUwIBHKGir2ShVUlkUAaPTVuF3iWT5/dAI9Dx661iuxFyagvFLMqNyWzkEpvreRAEBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-open
 version: "1.0.0"
 description: Mint or attach the browser session's seat thread - the seat is itself a thread, braided and replayable
 endpoint: ui.seat.open
-ui_dispatch: session_local
+# Lifecycle routes preserve the authenticated browser context directly.
+# session_local is reserved for invocation through a compiled UI binding.
+ui_dispatch: verified
 record_thread: false
 availability: daemon_only
