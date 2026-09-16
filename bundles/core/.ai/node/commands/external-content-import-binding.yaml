@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T22:48:49Z:78dbfe07262d90d9f81cb9545e0db6ba6dce318ab02416733bab6fea947c3e0a:NJmbWG31LAV2+4pQAS5HeAzZlwC1y9KkaWK+Cd643EAWRPKCEqQFuxcb8J7daV2FodRg3rRF661SdVZJOK5zDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T03:00:17Z:07e63bc6e9b3147cbe918606384f383325eb1c07650b21034256a3c3a06e1f9a:KhpxbfXOX0u9hglHWQRtEjQNRpvT3Cfipf49trAZDzRFTct7jv9L/cViiKpFplduZUcrssQipAPxwtYSxS3fCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, import-binding]
 description: Stage an exact active binding's retained manifest for an independently authorized consumer
 defaults:
@@ -7,10 +7,15 @@ forms:
   - slots:
       - field: binding_hash
       - field: maximum_bytes
+  - slots:
+      - field: binding_hash
+      - field: maximum_bytes
+      - field: binding_owner_principal
 help:
-  usage: ryeos external-content import-binding <binding-hash> <maximum-bytes>
+  usage: ryeos external-content import-binding <binding-hash> <maximum-bytes> [binding-owner-principal]
   examples:
     - ryeos external-content import-binding <exact-active-binding-hash> 16777216
+    - ryeos external-content import-binding <exact-active-binding-hash> 16777216 fp:<admitted-remote-operator-fingerprint>
 dispatch:
   kind: execute_ref
   execute: service:external-content/import

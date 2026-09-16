@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-13T04:58:17Z:86ba333afd9f6b73edd55e4bbb3552d1c581de42b452fc91c76633ee85fec030:S5vKkALE66x+A7nwteTa6DJ5wEuV96o9TzE3tV96o+mCWCATWPloyUTYH9IUU8Mm2y9i37PI8qacI7u08X8VCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T03:58:59Z:e458533cc644716c4b241cf62bf9d3f7d9ddf430dfd39c23c497318eca575655:n8uDo8I1X78LdA78CqBlHWiFfV7knMsFm7CIV0YP94sDd+qggniw3OcujQlKxwATOy+3jgLO4LkRh6KTqbzKBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -97,7 +97,7 @@ bytes, or permission to find the latest target binding. The Graph owns provider
 selection and its exact worker environment; Core contains no Codex, model, or
 project-product branch.
 
-The v1 lifecycle is explicit and finite:
+The lifecycle is explicit and finite:
 
 1. `remote worker run` pushes the pinned source generation and establishes the
    target launch. Its intermediate result is `launch_accepted` with
@@ -128,6 +128,31 @@ admission resolves and seals the exact target-local batch, including a
 `content_dependency` selection targeting the worker's `environment` ref
 binding and any `workload_execution` selections needed by admitted child
 operations. Nothing inherits selections from the Graph parent.
+
+The signed workflow Config uses the current
+`ryeos.remote_worker_workflow.v2` schema and declares its exact target runtime
+requirements. For example, the RyeOS development workflow requires
+`process_control: exclusive_session`, `filesystem_mode: enforce`, and
+`network_mode: host`. Before any new project push or launch contact, the
+source calls the authenticated `service:node/status` action and verifies those
+three dimensions. The configured source-operator grant on the destination
+therefore needs the exact `ryeos.execute.service.node/status` capability.
+
+The source retains the observed daemon revision, isolation-policy digest,
+selected process-readiness reason, and protected process-scope authority
+digest in launch acceptance and the final receipt. Query, accepted, and
+completion-pending responses expose that evidence. A mismatch refuses before
+worker credentials or a provider can be contacted. `pooled_requests` requires
+the pool readiness reported by the node but deliberately does not claim an
+exclusive-session controller; `exclusive_session` requires the protected
+authority digest and a ready controller.
+
+Recovery preserves the ambiguity boundary: once a launch contact may have
+occurred, RyeOS first reconciles the exact retained launch ID. An already
+accepted launch remains authoritative if the target's current capabilities
+later change. Only a proved-absent launch is subjected to a fresh readiness
+check before another push or launch. Never relaunch merely because current
+readiness differs from the accepted evidence.
 
 Produce the batch on the destination with the existing
 `external-content compose-product` authority for each exact consumer and
@@ -215,6 +240,27 @@ Before creating a real cloud machine, decide all external inputs:
 - evidence retention location and deletion period.
 
 Stop before provisioning if any choice or credential is missing.
+
+There are two distinct daemon entry contracts. Native hosts use the supported
+administrator command `ryeos node host setup`, which provisions the Lillux
+controller, cgroup delegation, protected binding, and service lifecycle. A
+container managed by an external supervisor may instead receive the same typed
+protected binding at an absolute read-only path and set
+`RYEOS_HOST_RUNTIME_BINDING` to that path. The shared image entrypoint then
+executes only `ryeosd host-runtime --binding <path>`: it does not run root-side
+init, provision authority inside the container, or fall back to ordinary
+startup. The external administrator/environment builder owns initialization of
+the exact app-root generation and creation of the binding before container
+start.
+
+The protected binding and signed node policy are independent requirements. The
+binding supplies real controller authority; the policy must explicitly require
+process scopes. Either one without the other leaves exclusive sessions
+unavailable. The binding validates the exact app-root device/inode, node
+fingerprint, controller account, and inherited descriptor authority. Replacing
+the container, app-root filesystem identity, host lifetime, UID mapping, or
+binding requires explicit administrator reprovisioning; surviving volume bytes
+do not transfer host authority.
 
 On an already-provisioned stronger host, use an ordinary checkout outside the
 target app root and pin the source commit:

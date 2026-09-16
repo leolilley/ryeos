@@ -308,7 +308,19 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
 
     # The daemon consumes the create-once endpoint from config.yaml; ordinary
     # container startup must not present a competing runtime override.
-    grep -Fq 'exec ryeosd --app-root /data/app' "$root/deploy/entrypoint.sh"
+    unset RYEOS_HOST_RUNTIME_BINDING
+    build_ryeos_daemon_args /data/app
+    [[ "${DAEMON_ARGS[*]}" == "--app-root /data/app" ]]
+    RYEOS_HOST_RUNTIME_BINDING=/run/ryeos/host-runtime.json
+    build_ryeos_daemon_args /data/app
+    [[ "${DAEMON_ARGS[*]}" == "host-runtime --binding /run/ryeos/host-runtime.json" ]]
+    RYEOS_HOST_RUNTIME_BINDING=relative.json
+    if build_ryeos_daemon_args /data/app >/dev/null 2>&1; then
+      echo "relative external host-runtime binding was accepted" >&2
+      exit 1
+    fi
+    unset RYEOS_HOST_RUNTIME_BINDING
+    grep -Fq 'exec ryeosd "${DAEMON_ARGS[@]}"' "$root/deploy/entrypoint.sh"
     ! sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh" | grep -Fq -- '--bind'
 )
 

@@ -2312,6 +2312,19 @@ fn validate_session_process_control(
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<()> {
     if session.process_mode == PersistentSessionProcessMode::ExclusiveSession {
+        let readiness = &state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .exclusive_session;
+        if !readiness.ready {
+            bail!(
+                "exclusive session requires qualified node process-scope support ({})",
+                readiness.reason.as_str()
+            );
+        }
+        // Readiness is an inspection aid, not launch authority. Recheck the
+        // retained generation and exact qualified capability set at admission.
         state
             .isolation
             .process_scope_control_timeout()

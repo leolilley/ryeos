@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T13:46:53Z:ab07606b610fdb27f84dd48a7a0337e3160d8a7ae8224829fe763d9b0e7ed54f:ZlK6BGrbl5TbRrpZX1QkNU0kjZm7a4yLA0Fpr/WX6ePeNiC4jErg4Y+mEdCoBFt1Ev1GbQmJD6T4elk1zaGJDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T03:00:17Z:32c599741f796caf878a3f3b5948162de471bf21d60def75dd90ef6075b9e595:/8Nm+YuTd3446dbpmof/jwHZUMCoGKwLnTDv6jCihYnPSwaqsFhCBNCWhpW+nubEaKphUwlo1iL9KGmhtUkrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.import
 required_caps: ["ryeos.execute.service.external-content/import"]
@@ -9,6 +9,7 @@ schema:
   thread_id: string?
   result_project_snapshot_hash: string?
   binding_hash: string?
+  binding_owner_principal: string?
   witness_hash: string?
   witness_source: object?
   path: string?

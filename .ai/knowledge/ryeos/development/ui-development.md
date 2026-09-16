@@ -1,17 +1,25 @@
-<!-- ryeos:signed:2026-07-28T23:59:21Z:860be8e15cf6a37f0060e82d30dd4996f9166f9f65475962c4e901d8485871f0:1JCeRSVCbC4fa5/qnIF/XkxEEH+nAcY6EbyeLFzlbofIoJWKHOfcunD3ZIEcuj/++2vjohG/6pLe5BLWxcMuBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-16T03:44:59Z:da51122072df582a4857dfb7e5135f2af532c3fd7b20c05fdb58b95c5dd2967f:5pI11WNg8PsPh5TRNmJQVJncGlkUKnShDgAgxfRfW3IXZxVTAxj5LuXlfK0aaQHop7TFGNQcD8S+fuYG0AHyDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
 description: "How to iterate on RyeOS UI browser UI assets without republishing bundles for every JS/CSS edit"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Browser UI Development Workflow
 
 Use this when working on the RyeOS UI browser UI. The goal is to avoid the
 slow bundle/reinstall loop for ordinary JavaScript and CSS changes.
+
+Read `ui-design-system.md` first for the governing visual language and component
+rules. This workflow explains iteration, not aesthetic choices. The default
+operational UI is moving to restrained flat surfaces, selective warm accents,
+sans-serif interface text and technical monospace. The older mandates for
+universal monospace, thick frames and always-on HUD decoration are superseded.
+The implementation plan is
+`.tmp/ryeos-ui-visual-language-and-composition-implementation-plan.md`.
 
 ## Where the browser UI lives
 
@@ -148,6 +156,11 @@ unless the change actually touches Rust, WASM, bundle artifacts, or installed
 daemon behavior.
 
 ## Ambient scene state hooks
+
+These hooks remain applicable to explicitly composed scene/topology views.
+Their existence does not require a decorative scene behind operational pages.
+Select ambient composition through signed surface declarations; do not hide a
+named page's background through a renderer-specific canonical-ref check.
 
 The RyeOS UI scene model is the bridge between RyeOS state and the animation.
 `crates/clients/base/src/ui/scene_model.rs` emits semantic objects such as:

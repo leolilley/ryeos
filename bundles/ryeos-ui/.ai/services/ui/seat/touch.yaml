@@ -1,10 +1,12 @@
-# ryeos:signed:2026-09-14T10:03:09Z:82820a65f140d272ba5d969ca8900cd23e5437935da063ff52a5f8f2e905ff4d:xHhUSspRUgIjF3EQQITFglKx4W2Ld2qITXupQrNqvINP5ta8FIjfIDZru8pQdyHTb1vJoAqarCE0Nj8d4XXmDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T02:16:20Z:4316ba73d6cf84123598223cfa3786933346ede3f9612b67b364868e7c72c8ad:25AxvEyikzlMPou9Msg2UsaaY2J86rWN3mscJzRFwzXjBWi2WayA1WbBx0evEp/XL3s1GQs66jnlk0xGIScxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-touch
 version: "1.0.0"
 description: Refresh the runtime presence lease for the browser session seat
 endpoint: ui.seat.touch
-ui_dispatch: session_local
+# Lifecycle routes preserve the authenticated browser context directly.
+# session_local is reserved for invocation through a compiled UI binding.
+ui_dispatch: verified
 record_thread: false
 availability: daemon_only
 schema:

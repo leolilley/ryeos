@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Entrypoint for ryeosd-full container.
 #
-# Always runs `ryeos init --non-interactive` on every boot. Init is idempotent — on first boot
-# it creates keys, trust, and lays down bundles; on subsequent boots it
-# re-verifies and re-copies to bring bundles up to date with the image.
+# Ordinary mode runs `ryeos init --non-interactive` on every boot. Init is
+# idempotent — on first boot it creates keys, trust, and lays down bundles; on
+# subsequent boots it re-verifies and re-copies to bring bundles up to date
+# with the image. External host-runtime mode consumes an administrator-created
+# protected binding and does not run image-owned initialization.
 #
 # App root (/data/app) lives on the persistent /data volume, so operator
 # trust, signing keys, node identity, and runtime state survive redeploys.
@@ -53,6 +55,26 @@ collect_baked_publisher_trust_args() {
 
 container_bind() {
   printf '[::]:%s' "${PORT:-8000}"
+}
+
+# Select exactly one daemon entry contract. An external host-runtime binding
+# means the administrator/environment builder has already initialized the
+# bound app-root generation and delegated its process-scope controller. The
+# ordinary container entry must neither rewrite that generation as root nor
+# silently fall back to direct daemon execution.
+build_ryeos_daemon_args() {
+  local app_root="$1"
+
+  DAEMON_ARGS=()
+  if [[ -n "${RYEOS_HOST_RUNTIME_BINDING:-}" ]]; then
+    [[ "$RYEOS_HOST_RUNTIME_BINDING" = /* ]] || {
+      echo "[entrypoint] RYEOS_HOST_RUNTIME_BINDING must be an absolute protected path" >&2
+      return 1
+    }
+    DAEMON_ARGS=(host-runtime --binding "$RYEOS_HOST_RUNTIME_BINDING")
+    return 0
+  fi
+  DAEMON_ARGS=(--app-root "$app_root")
 }
 
 # Build the lifecycle argument vector without knowing any distribution or
@@ -109,6 +131,12 @@ main() {
   local effective_bind
   effective_bind="$(container_bind)"
 
+  build_ryeos_daemon_args /data/app
+  if [[ "${DAEMON_ARGS[0]}" == "host-runtime" ]]; then
+    echo "[entrypoint] starting with protected external host-runtime authority"
+    exec ryeosd "${DAEMON_ARGS[@]}"
+  fi
+
   echo "[entrypoint] running ryeos init --non-interactive"
   mkdir -p /data
 
@@ -121,7 +149,7 @@ main() {
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce
   # (e.g. public-identity.json, vault keypair). Idempotent — no-op when
   # already written.
-  exec ryeosd --app-root /data/app
+  exec ryeosd "${DAEMON_ARGS[@]}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

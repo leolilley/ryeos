@@ -104,6 +104,11 @@ async fn service_node_status_returns_snapshot() {
         !result.as_object().unwrap().is_empty(),
         "node.status returned empty object: {result}"
     );
+    assert_eq!(result["isolation"]["process_scopes"]["authority"], "absent");
+    assert_eq!(
+        result["isolation"]["process_scopes"]["exclusive_session"],
+        json!({"ready": false, "reason": "policy_unconfigured"})
+    );
 }
 
 // ── 3.2 identity/public_key ─────────────────────────────────────────────

@@ -309,6 +309,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertIsNotNone(match, "runbook HOSTED_SCOPES declaration is absent")
         hosted_scopes = set(match.group(1).split(","))
         self.assertIn("ryeos.execute.service.credential-profiles/list", hosted_scopes)
+        self.assertIn("ryeos.execute.service.node/status", hosted_scopes)
         declared_runtime_scopes = set()
         for path in WORKER_EXECUTION_PATHS:
             execution = yaml.safe_load(path.read_text(encoding="utf-8"))
