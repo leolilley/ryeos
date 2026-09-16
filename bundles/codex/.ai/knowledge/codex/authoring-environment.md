@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-12T04:00:24Z:938e2efd173b6759fc2e3da042e17b92acc8e409561e6a83c2297a466839f9c9:xBd5xOJSAoEVFWnH/Jq9pSLFN4m+7v/ZeVKZecn2b7r4q6cEbciKfzj+ux/ubbnP6PyNbBErHNzfFur1sPL3Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T03:00:17Z:05cff40c77424d1d06397679375ebb0e83208a01c87d323caa374f763c732ff7:xcSpUY6XAI01Sw8EaIdjgrm/nwsTFoQQt/m3uEeVqrbloPvJs3WRrqVrgZuYqbVPgK0eNQqtugKk1ybuJHIcAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [hosted-execution, environments, authoring, external-content]
@@ -44,6 +44,11 @@ independently bind each returned stage to `worker:codex/hosted-authoring` with
 shell comes from the retained production below. No managed activation recipe
 is claimed for that unpublished artifact; a partial recipe must not bypass the
 existing complete-consumer activation contract.
+
+If an exact source binding was created by an admitted remote operator, the
+target's configured local operator supplies that canonical principal as the
+third `import-binding` argument. This only identifies and revalidates the source
+owner; import and the destination bind remain target-local authority.
 
 ## Available commands and runtime
 

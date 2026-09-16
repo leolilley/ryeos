@@ -134,10 +134,82 @@ fn fixture(
 }
 
 fn request(hash: &str, maximum_bytes: u64) -> ImportRequest {
+    request_with_owner(hash, maximum_bytes, None)
+}
+
+fn request_with_owner(
+    hash: &str,
+    maximum_bytes: u64,
+    binding_owner_principal: Option<String>,
+) -> ImportRequest {
     ImportRequest::RetainedBinding(RetainedBindingImportRequest {
         binding_hash: hash.to_owned(),
         maximum_bytes,
+        binding_owner_principal,
     })
+}
+
+fn replace_binding_with_remote_owner(
+    directory: &tempfile::TempDir,
+    state: &Arc<AppState>,
+    binding_hash: &str,
+) -> (String, String) {
+    let remote_origin = format!("site:{}", "c".repeat(64));
+    let remote = NodeIdentity::create(&directory.path().join("remote-operator.pem")).unwrap();
+    let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
+    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        &state.config.authorized_keys_dir,
+        remote.fingerprint(),
+        &base64::engine::general_purpose::STANDARD.encode(remote.verifying_key().as_bytes()),
+        &scopes,
+        "remote binding owner",
+        state.identity.fingerprint(),
+        "2026-09-07T00:00:00Z",
+        &state.identity,
+        WildcardPolicy::Reject,
+        false,
+        Some(&remote_origin),
+        false,
+    )
+    .unwrap();
+    let grant = ryeos_app::identity::load_verified_authorized_key(
+        remote.fingerprint(),
+        &state.config.authorized_keys_dir,
+        &state.identity,
+    )
+    .unwrap()
+    .unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_exclusive_guard(true).unwrap();
+    let cas = authority.cas_store().unwrap();
+    let previous =
+        ExternalContentBinding::from_value(&cas.get_object(binding_hash).unwrap().unwrap())
+            .unwrap();
+    let binding = ExternalContentBinding::active(
+        previous.manifest_hash,
+        previous.manifest_kind,
+        previous.consumer,
+        previous.target_node_fingerprint,
+        remote.fingerprint().to_owned(),
+        grant.source_file_hash.clone(),
+    )
+    .unwrap();
+    let replacement_hash = cas.store_object(&binding.to_value().unwrap()).unwrap();
+    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    state
+        .state_store
+        .with_state_db(|db| {
+            db.advance_generic_head_ref(
+                ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+                &binding.binding_subject_id,
+                &replacement_hash,
+                Some(binding_hash),
+                &signer,
+                &guard,
+            )
+        })
+        .unwrap();
+    (remote.principal_id(), replacement_hash)
 }
 
 #[test]
@@ -365,6 +437,83 @@ async fn exact_binding_reuse_preserves_manifest_and_independent_durable_stage() 
             )
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
+    let (directory, state, context, original_hash, manifest_hash) = fixture(false);
+    let (remote_principal, binding_hash) =
+        replace_binding_with_remote_owner(&directory, &state, &original_hash);
+
+    let absent_owner = external_content_import::handle(
+        request(&binding_hash, 11),
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{absent_owner:#}").contains("declared binding operator"));
+
+    let wrong_owner = external_content_import::handle(
+        request_with_owner(&binding_hash, 11, Some(format!("fp:{}", "b".repeat(64)))),
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{wrong_owner:#}").contains("grant was revoked"));
+
+    let imported = external_content_import::handle(
+        request_with_owner(&binding_hash, 11, Some(remote_principal.clone())),
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap();
+    assert_eq!(imported["manifest_hash"], manifest_hash);
+
+    let remote_identity =
+        NodeIdentity::load(&directory.path().join("remote-operator.pem")).unwrap();
+    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        &state.config.authorized_keys_dir,
+        remote_identity.fingerprint(),
+        &base64::engine::general_purpose::STANDARD
+            .encode(remote_identity.verifying_key().as_bytes()),
+        &[
+            "ryeos.execute.service.external-content/activate".to_owned(),
+            "ryeos.execute.service.external-content/product".to_owned(),
+        ],
+        "changed remote binding owner",
+        state.identity.fingerprint(),
+        "2026-09-07T00:00:01Z",
+        &state.identity,
+        WildcardPolicy::Reject,
+        false,
+        Some(&format!("site:{}", "c".repeat(64))),
+        false,
+    )
+    .unwrap();
+    let changed_grant = external_content_import::handle(
+        request_with_owner(&binding_hash, 11, Some(remote_principal.clone())),
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{changed_grant:#}").contains("grant changed"));
+
+    let mut remote_caller = context;
+    remote_caller.fingerprint = remote_principal;
+    remote_caller.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote_caller.authenticated_origin_site_id = Some(format!("site:{}", "c".repeat(64)));
+    let error = external_content_import::handle(
+        request_with_owner(&binding_hash, 11, Some(remote_caller.fingerprint.clone())),
+        remote_caller,
+        state,
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("local_client configured operator"));
 }
 
 #[tokio::test]

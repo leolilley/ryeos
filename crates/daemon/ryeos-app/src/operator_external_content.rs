@@ -105,14 +105,17 @@ pub struct RetainedProductImportRequest {
     pub maximum_bytes: u64,
 }
 
-/// Reuse the complete exact manifest of a currently active local binding.
+/// Reuse the complete exact manifest of a currently active binding.
 /// The binding owns shape/storage/manifest identity; callers cannot restate
-/// them or use an old import receipt to authorize another consumer.
+/// them or use an old import receipt to authorize another consumer. A local
+/// operator must explicitly name an admitted non-local binding owner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedBindingImportRequest {
     pub binding_hash: String,
     pub maximum_bytes: u64,
+    #[serde(default)]
+    pub binding_owner_principal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

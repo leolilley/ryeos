@@ -42,8 +42,20 @@ pub(super) fn import(
             closure_policy.max_object_bytes,
         )?,
     )?;
-    if binding.authorized_by != operator {
-        bail!("retained binding is not owned by the configured operator");
+    let binding_owner = match request.binding_owner_principal.as_deref() {
+        Some(principal) => {
+            crate::operator_authority::admitted_binding_owner_authority_for_principal(
+                &state, principal,
+            )?
+            .owner_principal
+            .strip_prefix("fp:")
+            .expect("validated admitted binding owner is canonical")
+            .to_owned()
+        }
+        None => operator.clone(),
+    };
+    if binding.authorized_by != binding_owner {
+        bail!("retained binding is not owned by the declared binding operator");
     }
     let current = active_binding_from_store(
         &state.state_store,
@@ -194,6 +206,16 @@ fn validate_request(request: &RetainedBindingImportRequest) -> anyhow::Result<()
             "retained binding import requires a canonical binding hash and positive byte ceiling"
         );
     }
+    if let Some(principal) = &request.binding_owner_principal {
+        let fingerprint = principal
+            .strip_prefix("fp:")
+            .ok_or_else(|| anyhow::anyhow!("retained binding owner principal is not canonical"))?;
+        if !lillux::valid_hash(fingerprint)
+            || fingerprint.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            bail!("retained binding owner principal is not canonical");
+        }
+    }
     Ok(())
 }
 
@@ -247,7 +269,8 @@ mod tests {
             assert!(
                 validate_request(&RetainedBindingImportRequest {
                     binding_hash: hash,
-                    maximum_bytes: 1
+                    maximum_bytes: 1,
+                    binding_owner_principal: None,
                 })
                 .is_err()
             );
@@ -255,10 +278,25 @@ mod tests {
         assert!(
             validate_request(&RetainedBindingImportRequest {
                 binding_hash: "a".repeat(64),
-                maximum_bytes: 0
+                maximum_bytes: 0,
+                binding_owner_principal: None,
             })
             .is_err()
         );
+        for principal in [
+            "a".repeat(64),
+            format!("fp:{}", "A".repeat(64)),
+            format!("fp:{}", "a".repeat(63)),
+        ] {
+            assert!(
+                validate_request(&RetainedBindingImportRequest {
+                    binding_hash: "a".repeat(64),
+                    maximum_bytes: 1,
+                    binding_owner_principal: Some(principal),
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]
