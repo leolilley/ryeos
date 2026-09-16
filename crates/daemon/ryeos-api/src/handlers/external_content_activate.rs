@@ -84,7 +84,11 @@ impl<'a> ActivationReceiptAuthority<'a> {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let operator = ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
+    // Managed activation is an operator-owned durable operation. Preserve the
+    // exact admitted operator across a verified source-node forwarding hop;
+    // unlike low-level import/bind maintenance, activation does not require
+    // access to the target node's local operator private key.
+    let operator = ryeos_app::operator_authority::require_admitted_operator(&state, &ctx)?;
     let activation = ryeos_app::managed_external_content::resolve_activation(
         &state,
         &req.activation_ref,

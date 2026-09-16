@@ -32,7 +32,7 @@ use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
-const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v4";
+const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v5";
 const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v3";
 const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v3";
 const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v1";
@@ -69,6 +69,8 @@ pub struct StartRequest {
     workflow_ref: String,
     credential_profile_id: String,
     task: Value,
+    #[serde(default)]
+    source_snapshot_hash: Option<String>,
     target_product_selections:
         ryeos_state::external_content::products::composition::ProductSelectionInputs,
 }
@@ -104,6 +106,7 @@ struct Operation {
     target_signing_key: String,
     local_project_path: String,
     target_project_path: String,
+    admitted_source_snapshot_hash: String,
     source_snapshot_hash: String,
     workflow_ref: String,
     credential_profile_id: String,
@@ -259,8 +262,13 @@ pub async fn start(
     if workflow.kind != "config" || workflow.suffix.is_some() {
         bail!("remote-worker workflow_ref must be an unsuffixed config reference");
     }
-    let (local_project_path, source_snapshot_hash) =
+    let (local_project_path, admitted_source_snapshot_hash) =
         recorded_pinned_project(&state, &invocation_root)?;
+    let source_snapshot_hash = select_source_snapshot(
+        &state,
+        &admitted_source_snapshot_hash,
+        req.source_snapshot_hash.as_deref(),
+    )?;
     let (resolved_local_path, remote, target_project_path) =
         resolve_route(&state, &req.remote, Path::new(&local_project_path))?;
     if resolved_local_path != local_project_path {
@@ -290,6 +298,7 @@ pub async fn start(
         target_signing_key: remote.signing_key,
         local_project_path,
         target_project_path,
+        admitted_source_snapshot_hash,
         source_snapshot_hash,
         workflow_ref: req.workflow_ref,
         credential_profile_id: req.credential_profile_id,
@@ -1311,6 +1320,10 @@ fn validate_operation(operation: &Operation) -> Result<()> {
         || request.workflow_ref != operation.workflow_ref
         || request.credential_profile_id != operation.credential_profile_id
         || request.task != operation.task
+        || request
+            .source_snapshot_hash
+            .as_deref()
+            .is_some_and(|hash| hash != operation.source_snapshot_hash)
         || request.target_product_selections != operation.target_product_selections
     {
         bail!("remote-worker workflow operation differs from its admitted start request");
@@ -1337,6 +1350,7 @@ fn validate_operation(operation: &Operation) -> Result<()> {
     if !lillux::valid_hash(&operation.operator_fingerprint)
         || !lillux::valid_hash(&operation.operator_authority_digest)
         || !lillux::valid_hash(&operation.admitted_start_request_digest)
+        || !lillux::valid_hash(&operation.admitted_source_snapshot_hash)
         || !lillux::valid_hash(&operation.source_snapshot_hash)
     {
         bail!("remote-worker workflow operator authority is invalid");
@@ -1441,12 +1455,20 @@ fn validate_recorded_owner(state: &AppState, operation: &Operation) -> Result<()
     {
         bail!("remote-worker workflow recovery projection differs from admitted request authority");
     }
-    let (project_path, snapshot_hash) =
+    let (project_path, admitted_snapshot_hash) =
         recorded_pinned_project(state, &operation.source_invocation_id)?;
     if project_path != operation.local_project_path
-        || snapshot_hash != operation.source_snapshot_hash
+        || admitted_snapshot_hash != operation.admitted_source_snapshot_hash
     {
         bail!("remote-worker workflow recovery projection differs from recorded project authority");
+    }
+    if select_source_snapshot(
+        state,
+        &admitted_snapshot_hash,
+        Some(&operation.source_snapshot_hash),
+    )? != operation.source_snapshot_hash
+    {
+        bail!("remote-worker workflow selected source generation changed");
     }
     Ok(())
 }
@@ -2233,6 +2255,41 @@ fn validate_profile_id(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn select_source_snapshot(
+    state: &AppState,
+    admitted_snapshot_hash: &str,
+    requested_snapshot_hash: Option<&str>,
+) -> Result<String> {
+    let Some(requested_snapshot_hash) = requested_snapshot_hash else {
+        return Ok(admitted_snapshot_hash.to_owned());
+    };
+    if !lillux::valid_hash(requested_snapshot_hash) {
+        bail!("source_snapshot_hash is not a valid CAS hash");
+    }
+    if requested_snapshot_hash == admitted_snapshot_hash {
+        return Ok(admitted_snapshot_hash.to_owned());
+    }
+
+    let cas_read = state.acquire_cas_read()?;
+    let cas = cas_read.cas();
+    let admitted = cas
+        .get_object(admitted_snapshot_hash)?
+        .with_context(|| format!("admitted project snapshot {admitted_snapshot_hash} is absent"))?;
+    let admitted = ryeos_state::objects::ProjectSnapshot::from_value(&admitted)?;
+    let requested = cas
+        .get_object(requested_snapshot_hash)?
+        .with_context(|| format!("selected source snapshot {requested_snapshot_hash} is absent"))?;
+    let requested = ryeos_state::objects::ProjectSnapshot::from_value(&requested)?;
+    if requested.project_tree_hash != admitted.project_tree_hash
+        || requested.effective_policy_hash != admitted.effective_policy_hash
+    {
+        bail!(
+            "source_snapshot_hash does not contain the project tree and policy captured at admission"
+        );
+    }
+    Ok(requested_snapshot_hash.to_owned())
+}
+
 fn validate_target_product_selections(
     inputs: ryeos_state::external_content::products::composition::ProductSelectionInputs,
 ) -> Result<ryeos_state::external_content::products::composition::ProductSelectionInputs> {
@@ -2783,6 +2840,7 @@ mod tests {
             ),
             local_project_path: "/source".into(),
             target_project_path: "/target".into(),
+            admitted_source_snapshot_hash: "d".repeat(64),
             source_snapshot_hash: "d".repeat(64),
             workflow_ref: "config:development/remote-worker".into(),
             credential_profile_id: "personal".into(),

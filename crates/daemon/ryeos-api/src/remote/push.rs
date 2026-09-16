@@ -548,7 +548,9 @@ pub(crate) fn collect_snapshot_upload_hashes(
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if snapshot.parent_hashes != expected_parents {
+    // Re-publishing the exact current remote HEAD is idempotent. Its parent is
+    // necessarily the boundary that preceded it, not the snapshot itself.
+    if remote_known_parent != Some(snapshot_hash) && snapshot.parent_hashes != expected_parents {
         anyhow::bail!(
             "snapshot parent lineage does not match the server-issued previous HEAD boundary"
         );
