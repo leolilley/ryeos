@@ -61,6 +61,8 @@ pub(crate) struct LaunchRequest {
     pub(crate) project_path: Option<String>,
     #[serde(default)]
     pub(crate) parameters: Value,
+    #[serde(default)]
+    pub(crate) parameter_encoding: ryeos_app::command_invocation::ParameterEncoding,
     pub(crate) execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
     #[serde(skip)]
     pub(crate) launch_mode: String,
@@ -498,6 +500,20 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             }
             RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error}"))
         })?;
+
+        ryeos_app::command_invocation::normalize_selected_parameters(
+            req.parameter_encoding,
+            &mut req.parameters,
+            &project_ctx.request_engine,
+            &req.item_ref,
+            if req.project_path.is_none() {
+                None
+            } else {
+                Some(project_ctx.effective_path.clone())
+            },
+            resolved_contract.provenance.subject_resolution_authority(),
+        )
+        .map_err(RouteDispatchError::BadRequest)?;
 
         // Resolve the actual persisted root (including wrapper targets), verify
         // it, and capture its policy before exposing an id to the stream.
@@ -981,6 +997,10 @@ mod tests {
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "directive:foo/bar");
+        assert_eq!(
+            req.parameter_encoding,
+            ryeos_app::command_invocation::ParameterEncoding::Typed
+        );
         assert_eq!(req.project_path.as_deref(), Some("/tmp/project"));
         assert!(req.launch_mode.is_empty());
         assert_eq!(req.target_site_id, None);
@@ -997,12 +1017,17 @@ mod tests {
             "product_selections": [],
             "project_path": "/home/me/project",
             "parameters": {"key": "val"},
+            "parameter_encoding": "command",
             "execution_policy": local_live_policy(),
             "validate_only": true,
             "call": {"method": "run", "args": {"arg": 42}}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "tool:x/y");
+        assert_eq!(
+            req.parameter_encoding,
+            ryeos_app::command_invocation::ParameterEncoding::Command
+        );
         assert!(req.launch_mode.is_empty());
         assert_eq!(req.target_site_id, None);
         assert_eq!(

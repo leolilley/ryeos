@@ -14,6 +14,47 @@ use ryeos_runtime::{
 };
 use serde_json::Value;
 
+/// Input syntax only; this grants no authority. Direct API JSON is typed by
+/// default. Command arguments are normalized against the admitted callee.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterEncoding {
+    #[default]
+    Typed,
+    Command,
+}
+
+pub fn normalize_selected_parameters(
+    encoding: ParameterEncoding,
+    parameters: &mut Value,
+    engine: &ryeos_engine::engine::Engine,
+    item_ref: &str,
+    project_root: Option<PathBuf>,
+    authority: ryeos_engine::contracts::SubjectResolutionAuthority,
+) -> Result<(), String> {
+    if encoding == ParameterEncoding::Typed {
+        return Ok(());
+    }
+    let effective = engine
+        .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+                .map_err(|e| e.to_string())?,
+            expected_kind: None,
+            project_root,
+            subject_resolution_authority: authority,
+        })
+        .map_err(|e| format!("resolve command input contract: {e}"))?;
+    if let Some(schema) = effective.composed_value.get("schema") {
+        let contract =
+            ryeos_runtime::InvocationInputContract::from_lightweight_schema_value(schema)?;
+        *parameters = ryeos_runtime::arg_binder::normalize_params_with_contract(
+            std::mem::take(parameters),
+            contract.as_ref(),
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommandProjectPolicyError {
     #[error("{0}")]
@@ -36,6 +77,316 @@ pub struct CommandInvocationControls {
     pub state_root: Option<String>,
     pub ref_bindings: BTreeMap<String, String>,
     pub product_selections: Option<Value>,
+}
+
+/// A compiled command is caller intent, never admitted authority. Both terminal
+/// and daemon callers submit this through normal execution admission.
+#[derive(Debug)]
+pub struct CompiledCommandInvocation {
+    pub item_ref: String,
+    pub parameters: Value,
+    pub project_path: Option<PathBuf>,
+    pub controls: CommandInvocationControls,
+    pub execution_policy: crate::execution_policy::ExecutionPolicy,
+    pub validate_only: bool,
+    pub direct_execute: bool,
+}
+
+/// Compile the complete signed grammar. `load_input` is a caller-owned input
+/// adapter: only the terminal may read terminal files/stdin. It is never a
+/// request to read arbitrary files on the daemon.
+pub fn compile_command_invocation(
+    command: &CommandDef,
+    tail: &[String],
+    arguments: &Value,
+    default_project: Option<&Path>,
+    caller_cwd: Option<&Path>,
+    load_input: impl Fn(&str) -> Result<Value, String>,
+) -> Result<CompiledCommandInvocation, CommandProjectPolicyError> {
+    use CommandProjectPolicyError::Invalid;
+    use ryeos_runtime::CommandDispatch;
+    let mut tail = tail.to_vec();
+    if command.forms.is_empty()
+        && command
+            .project
+            .as_ref()
+            .map(|p| p.resolution)
+            .unwrap_or_default()
+            == CommandProjectResolution::None
+    {
+        tail = strip_project_control_flags(&tail);
+    }
+    let mut controls =
+        strip_declared_control_flags(&mut tail, &command.control_flags).map_err(Invalid)?;
+    let mut overlay = arguments.clone();
+    let direct_execute = matches!(
+        command.dispatch,
+        CommandDispatch::DirectExecuteItemRef { .. }
+    );
+    let (item_ref, validate_only) = match &command.dispatch {
+        CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
+        CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg,
+            validate_only,
+            ..
+        } => {
+            // A positional target leaves all structured item fields untouched.
+            // If the target is supplied structurally, consume that field only.
+            let target = if tail.first().is_some_and(|s| !s.starts_with('-')) {
+                tail.remove(0)
+            } else {
+                overlay
+                    .as_object_mut()
+                    .and_then(|o| o.remove(item_ref_arg))
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .ok_or_else(|| {
+                        Invalid(format!(
+                            "command '{}' requires argument '{}'",
+                            command.name, item_ref_arg
+                        ))
+                    })?
+            };
+            ryeos_engine::canonical_ref::CanonicalRef::parse(&target)
+                .map_err(|e| Invalid(format!("invalid item ref: {e}")))?;
+            (target, *validate_only)
+        }
+        _ => {
+            return Err(Invalid(format!(
+                "command '{}' does not dispatch to an executable item ref",
+                command.name
+            )));
+        }
+    };
+    let direct_command;
+    let binding_command = if direct_execute {
+        direct_command = CommandDef {
+            forms: Vec::new(),
+            ..command.clone()
+        };
+        &direct_command
+    } else {
+        command
+    };
+    let mut forbidden = vec!["--project-path".to_owned()];
+    if let Some(binding) = command
+        .project
+        .as_ref()
+        .and_then(|p| p.bind_parameter.as_deref())
+    {
+        let flag = format!("--{}", binding.replace('_', "-"));
+        if flag != "--project" {
+            forbidden.push(flag);
+        }
+    }
+    if let Some(flag) = forbidden.iter().find(|flag| {
+        tail.iter()
+            .any(|s| s == *flag || s.starts_with(&format!("{flag}=")))
+    }) {
+        return Err(Invalid(format!(
+            "{flag} is a runtime-bound service field, not a project selector; use --project <path>"
+        )));
+    }
+    let (mut parameters, project_path) = if direct_execute {
+        let (payload, selectors) = separate_project_control_flags(&tail).map_err(Invalid)?;
+        let mut selectors = Value::Object(selectors);
+        let project_path = apply_project_policy_with_context(
+            command,
+            &mut selectors,
+            default_project,
+            caller_cwd,
+        )?;
+        let mut parameters = bind_command_input(binding_command, &payload, &overlay, &load_input)
+            .map_err(Invalid)?;
+        for (field, value) in selectors.as_object().expect("selector object") {
+            let object = parameters
+                .as_object_mut()
+                .ok_or_else(|| Invalid("command parameters must be a JSON object".into()))?;
+            if object.contains_key(field) {
+                return Err(Invalid(format!(
+                    "parameter '{field}' conflicts with the command's runtime-bound project selector"
+                )));
+            }
+            object.insert(field.clone(), value.clone());
+        }
+        (parameters, project_path)
+    } else {
+        let mut parameters =
+            bind_command_input(binding_command, &tail, &overlay, &load_input).map_err(Invalid)?;
+        let path = apply_project_policy_with_context(
+            command,
+            &mut parameters,
+            default_project,
+            caller_cwd,
+        )?;
+        (parameters, path)
+    };
+    // The signed descriptor is mandatory, not merely another argv default.
+    controls.pin_project_at_admission |=
+        command.project.as_ref().is_some_and(|p| p.pin_at_admission);
+    for (requested, flag) in [
+        (controls.pin_project_at_admission, "--pin-project"),
+        (controls.pin_current_head_at_admission, "--current-head"),
+        (controls.retain_child_results, "--retain-child-results"),
+    ] {
+        if requested && project_path.is_none() {
+            return Err(Invalid(format!(
+                "{flag} requires a project root; it cannot be combined with --no-project"
+            )));
+        }
+    }
+    if controls.pin_project_at_admission && controls.pin_current_head_at_admission {
+        return Err(Invalid(
+            "capture-live and current-HEAD project sources are mutually exclusive".into(),
+        ));
+    }
+    if (controls.pin_project_at_admission || controls.pin_current_head_at_admission)
+        && controls.state_root.is_some()
+    {
+        let flag = if controls.pin_project_at_admission {
+            "--pin-project"
+        } else {
+            "--current-head"
+        };
+        return Err(Invalid(format!(
+            "{flag} cannot be combined with --state-root; the pinned generation owns runtime state"
+        )));
+    }
+    if let Some(root) = &mut controls.state_root {
+        let path = Path::new(root);
+        if !path.is_absolute() {
+            let base = caller_cwd.ok_or_else(|| {
+                Invalid("relative state-root requires explicit caller context".into())
+            })?;
+            *root = base.join(path).to_string_lossy().into_owned();
+        }
+    }
+    let policy = command_execution_policy(project_path.is_some(), &controls).map_err(Invalid)?;
+    // Keep structured payload values intact; effective schema normalization is
+    // performed against the selected callee by execution admission.
+    Ok(CompiledCommandInvocation {
+        item_ref,
+        parameters: std::mem::take(&mut parameters),
+        project_path,
+        controls,
+        execution_policy: policy,
+        validate_only,
+        direct_execute,
+    })
+}
+
+pub fn command_execution_policy(
+    project_backed: bool,
+    controls: &CommandInvocationControls,
+) -> Result<crate::execution_policy::ExecutionPolicy, String> {
+    use crate::execution_policy::{ExecutionPolicy, ExecutionResponse};
+    let response = if controls.async_launch {
+        ExecutionResponse::Accepted
+    } else {
+        ExecutionResponse::Wait
+    };
+    let mut policy = if controls.pin_current_head_at_admission {
+        ExecutionPolicy::local_pinned_current_head(response)
+    } else if controls.pin_project_at_admission {
+        ExecutionPolicy::local_pinned_capture(response)
+    } else if project_backed {
+        ExecutionPolicy::local_live(response)
+    } else {
+        ExecutionPolicy::projectless(response)
+    };
+    if controls.retain_child_results {
+        policy = policy.retain_child_results().map_err(|e| e.to_string())?;
+    }
+    if controls.exclude_operator_vault {
+        policy = policy.exclude_operator_vault();
+    }
+    policy.validate().map_err(|e| e.to_string())?;
+    Ok(policy)
+}
+
+/// Shared structured input grammar; external input acquisition is injected.
+pub fn bind_command_input(
+    command: &CommandDef,
+    tail: &[String],
+    overlay: &Value,
+    load_input: &impl Fn(&str) -> Result<Value, String>,
+) -> Result<Value, String> {
+    let binding = command.parameter_binding.as_ref();
+    let mut residual = Vec::new();
+    let mut source = None;
+    let mut tokens = tail.iter();
+    while let Some(token) = tokens.next() {
+        let input_flag = binding.and_then(|b| b.input_flag.as_deref());
+        let input = input_flag.and_then(|name| token.strip_prefix(&format!("--{name}=")));
+        let input = if input_flag.is_some_and(|name| token == &format!("--{name}")) {
+            Some(
+                tokens
+                    .next()
+                    .ok_or("--input requires an argument")?
+                    .as_str(),
+            )
+        } else {
+            input
+        };
+        if let Some(input) = input {
+            if source.replace(input).is_some() {
+                return Err("duplicate --input sources are not allowed".into());
+            }
+        } else {
+            residual.push(token.clone());
+        }
+    }
+    let mut input = source.map(load_input).transpose()?;
+    if input.is_none() && binding.is_some_and(|b| b.single_json_object_arg) && residual.len() == 1 {
+        if let Ok(value) = serde_json::from_str::<Value>(&residual[0])
+            && value.is_object()
+        {
+            input = Some(value);
+            residual.clear();
+        }
+    }
+    if let Some(mut input) = input {
+        if command.forms.is_empty() {
+            if command.project.is_some() {
+                let (rest, selectors) = separate_project_control_flags(&residual)?;
+                residual = rest;
+                if !selectors.is_empty() {
+                    let object = input
+                        .as_object_mut()
+                        .ok_or("project selectors require an input object")?;
+                    for (key, value) in selectors {
+                        if object.insert(key.clone(), value).is_some() {
+                            return Err(format!("duplicate project selector '{key}'"));
+                        }
+                    }
+                }
+            }
+            if !residual.is_empty() {
+                return Err("--input cannot be combined with undeclared positional arguments or parameter flags".into());
+            }
+        }
+        if !overlay.is_null() && overlay != &serde_json::json!({}) {
+            let object = input
+                .as_object_mut()
+                .ok_or("structured argument overlay requires an object")?;
+            for (key, value) in overlay
+                .as_object()
+                .ok_or("command argument overlay must be an object")?
+            {
+                if object.insert(key.clone(), value.clone()).is_some() {
+                    return Err(format!("duplicate argument '{key}'"));
+                }
+            }
+        }
+        if command.forms.is_empty() {
+            return Ok(input);
+        }
+        return ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
+            &residual,
+            Some(command),
+            &input,
+        );
+    }
+    ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(&residual, Some(command), overlay)
 }
 
 pub fn strip_declared_control_flags(
@@ -250,6 +601,16 @@ pub fn apply_project_policy(
     default_project: Option<&Path>,
     caller_cwd: &Path,
 ) -> Result<Option<PathBuf>, CommandProjectPolicyError> {
+    apply_project_policy_with_context(command, parameters, default_project, Some(caller_cwd))
+}
+
+/// Absence of caller context is not permission to discover a daemon project.
+pub fn apply_project_policy_with_context(
+    command: &CommandDef,
+    parameters: &mut Value,
+    default_project: Option<&Path>,
+    caller_cwd: Option<&Path>,
+) -> Result<Option<PathBuf>, CommandProjectPolicyError> {
     let no_project = match parameters.get("no_project") {
         None => false,
         Some(Value::Bool(value)) => *value,
@@ -317,14 +678,21 @@ pub fn apply_project_policy(
     if selected.is_none()
         && !no_project
         && project.default == CommandProjectDefault::DiscoverUpwardAi
+        && let Some(caller_cwd) = caller_cwd
     {
         selected =
             discover_upward_ai_project(caller_cwd).map_err(CommandProjectPolicyError::Invalid)?;
     }
     if let Some(path) = selected.take() {
+        let base = caller_cwd
+            .or_else(|| path.is_absolute().then_some(path.as_path()))
+            .ok_or_else(|| {
+                CommandProjectPolicyError::Invalid(
+                    "relative project selector requires explicit caller context".into(),
+                )
+            })?;
         selected = Some(
-            canonicalize_project_path(&path, caller_cwd)
-                .map_err(CommandProjectPolicyError::Invalid)?,
+            canonicalize_project_path(&path, base).map_err(CommandProjectPolicyError::Invalid)?,
         );
     }
     if project.resolution == CommandProjectResolution::Required && selected.is_none() && !no_project
@@ -499,5 +867,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(item_parameters["project"], "item-owned");
+    }
+
+    #[test]
+    fn compiler_preserves_direct_item_selectors_and_nested_policy() {
+        let mut command = command();
+        command.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            validate_only: false,
+            availability: Default::default(),
+        };
+        command.project.as_mut().unwrap().bind_parameter = None;
+        command.project.as_mut().unwrap().request_project_path = true;
+        let input = serde_json::json!({"project":"item-owned", "no_project":false,
+            "execution_policy":{"project":{"kind":"projectless"}}});
+        let compiled = compile_command_invocation(
+            &command,
+            &["service:test".into(), "--no-project".into()],
+            &input,
+            None,
+            None,
+            |_| panic!("no file input"),
+        )
+        .unwrap();
+        assert_eq!(compiled.parameters, input);
+        assert!(compiled.project_path.is_none());
+    }
+
+    #[test]
+    fn absent_caller_context_never_discovers_and_relative_paths_fail() {
+        let mut command = command();
+        command.project.as_mut().unwrap().default = CommandProjectDefault::DiscoverUpwardAi;
+        let mut empty = serde_json::json!({});
+        assert!(
+            apply_project_policy_with_context(&command, &mut empty, None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            apply_project_policy_with_context(
+                &command,
+                &mut serde_json::json!({"project":"relative"}),
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn typed_encoding_is_the_closed_default() {
+        assert_eq!(ParameterEncoding::default(), ParameterEncoding::Typed);
+        assert!(serde_json::from_value::<ParameterEncoding>(serde_json::json!("guess")).is_err());
+    }
+
+    #[test]
+    fn typed_parameters_are_not_reinterpreted_or_resolved() {
+        let engine = ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        );
+        let mut parameters = serde_json::json!({"limit":"007", "enabled":"false"});
+        let before = parameters.clone();
+        normalize_selected_parameters(
+            ParameterEncoding::Typed,
+            &mut parameters,
+            &engine,
+            "not a ref",
+            None,
+            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        )
+        .unwrap();
+        assert_eq!(parameters, before);
     }
 }

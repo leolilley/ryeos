@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ryeos_runtime::{
-    CommandDef, CommandDispatch, CommandParameterBindingMode, CommandProjectResolution,
-    CommandRegistry, InvocationInputContract,
-};
+use ryeos_runtime::{CommandDef, CommandDispatch, CommandRegistry};
 use serde_json::Value;
+
+#[cfg(test)]
+use ryeos_runtime::{
+    CommandParameterBindingMode, CommandProjectResolution, InvocationInputContract,
+};
 
 use crate::error::CliError;
 use crate::lifecycle_commands;
@@ -252,27 +254,19 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     //    revalidates the requested item and authority. Keep JSON typed across
     //    this boundary instead of manufacturing a second argv representation.
 
-    let mut resolved = resolve_command_for_daemon(
+    let resolved = resolve_command_for_daemon(
         &dispatch_rest,
         snapshot,
         &command_registration_policy,
         cli.project.as_deref(),
     )?;
     let mut presenter = Presenter::for_console(console);
-    let item_ref_for_contract = resolved.item_ref.clone();
-    normalize_resolved_parameters(
-        &app_root,
-        snapshot,
-        &item_ref_for_contract,
-        resolved.project_path.as_deref(),
-        &mut resolved.parameters,
-    )?;
-
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
         "product_selections": resolved.product_selections,
         "parameters": resolved.parameters,
+        "parameter_encoding": "command",
         "validate_only": resolved.validate_only,
         "execution_policy": execution_policy_value(
             resolved.project_path.is_some(),
@@ -519,33 +513,19 @@ fn execution_policy_value(
     retain_child_results: bool,
     exclude_operator_vault: bool,
 ) -> Value {
-    let response = if accepted {
-        ryeos_app::execution_policy::ExecutionResponse::Accepted
-    } else {
-        ryeos_app::execution_policy::ExecutionResponse::Wait
+    let controls = ryeos_app::command_invocation::CommandInvocationControls {
+        async_launch: accepted,
+        pin_project_at_admission,
+        pin_current_head_at_admission,
+        retain_child_results,
+        exclude_operator_vault,
+        ..Default::default()
     };
-    let policy = if pin_current_head_at_admission {
-        ryeos_app::execution_policy::ExecutionPolicy::local_pinned_current_head(response)
-    } else if pin_project_at_admission {
-        ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(response)
-    } else if project_backed {
-        ryeos_app::execution_policy::ExecutionPolicy::local_live(response)
-    } else {
-        ryeos_app::execution_policy::ExecutionPolicy::projectless(response)
-    };
-    let policy = if retain_child_results {
-        policy
-            .retain_child_results()
-            .expect("CLI validates retained child results require a project")
-    } else {
-        policy
-    };
-    let policy = if exclude_operator_vault {
-        policy.exclude_operator_vault()
-    } else {
-        policy
-    };
-    serde_json::to_value(policy).expect("typed execution policy serialization cannot fail")
+    serde_json::to_value(
+        ryeos_app::command_invocation::command_execution_policy(project_backed, &controls)
+            .expect("compiled command has valid execution policy"),
+    )
+    .expect("typed execution policy serialization cannot fail")
 }
 
 fn should_stream_direct_execute(
@@ -797,6 +777,7 @@ struct CliResolvedExecute {
 /// Outcome of stripping a command's declared control flags from its tail.
 /// Each field is a routing destination from the generic `ControlFlagBinding`
 /// vocabulary; the dispatcher applies these to the request body / display.
+#[cfg(test)]
 type ResolvedControlFlags = ryeos_app::command_invocation::CommandInvocationControls;
 
 fn resolve_command_for_daemon(
@@ -827,176 +808,56 @@ fn resolve_command_for_daemon_with_commands(
         detail: error.to_string(),
     })?;
     let command_label = command_display_label(rest, &matched);
-    let mut tail = rest[matched.consumed..].to_vec();
-    if matched.command.forms.is_empty()
-        && command_project_resolution(&matched.command) == CommandProjectResolution::None
-    {
-        // Preserve the existing global-selector behavior for commands that
-        // take no project. All other fields reach the one shared binder below
-        // unchanged; a JSON -> argv pre-pass loses authored types/defaults.
-        tail = strip_project_control_flags(&tail);
-    }
-    let direct_execute = matches!(
-        matched.command.dispatch,
-        CommandDispatch::DirectExecuteItemRef { .. }
-    );
-    let validate_only = match &matched.command.dispatch {
-        CommandDispatch::DirectExecuteItemRef { validate_only, .. } => *validate_only,
-        CommandDispatch::Group
-        | CommandDispatch::LocalHandler { .. }
-        | CommandDispatch::ExecuteRef { .. } => false,
-    };
-    // Strip the command's DECLARED control flags (from data) and route them.
-    // Commands that declare none get a no-op, so non-execute commands are
-    // unaffected; the execute command declares --async/--method/--args/etc.
-    let control = strip_declared_control_flags(&mut tail, &matched.command.control_flags)?;
-    let item_ref = match &matched.command.dispatch {
-        CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
-        CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => tail
-            .first()
-            .filter(|token| !token.starts_with('-'))
-            .cloned()
-            .ok_or_else(|| CliError::Local {
-                detail: format!(
-                    "command '{}' requires argument '{}'",
-                    matched.command.name, item_ref_arg
-                ),
-            })?,
-        CommandDispatch::Group | CommandDispatch::LocalHandler { .. } => {
-            return Err(CliError::Local {
-                detail: format!(
-                    "command '{}' does not dispatch to an executable item ref",
-                    matched.command.name
-                ),
-            });
-        }
-    };
-    let parameter_tail = match matched.command.dispatch {
-        CommandDispatch::DirectExecuteItemRef { .. } => &tail[1..],
-        _ => &tail,
-    };
-    crate::project_resolve::reject_bound_project_parameter_flag(
-        parameter_tail,
-        matched
-            .command
-            .project
-            .as_ref()
-            .and_then(|project| project.bind_parameter.as_deref()),
-    )?;
-    let (parameters, project_path) = if direct_execute && matched.command.project.is_some() {
-        // The direct command selects an arbitrary item. Its structured input
-        // belongs to that item, not this command's control namespace. Resolve
-        // only argv selectors through the existing project-policy owner;
-        // never strip an item's JSON `project`/`no_project` fields or infer a
-        // project fallback in the daemon to compensate for lost parameters.
-        let (payload_tail, controls) =
-            crate::arg_bind::separate_project_control_flags(parameter_tail)?;
-        let mut controls = Value::Object(controls);
-        let project_path = apply_project_policy(&matched.command, &mut controls, default_project)?;
-        let mut parameters = bind_command_parameters_for_daemon(&payload_tail, &matched.command)?;
-        // Honor explicit signed selector-to-payload bindings if declared, but
-        // refuse a competing item value rather than silently overwriting it.
-        for (field, value) in controls
-            .as_object()
-            .expect("project controls are an object")
-        {
-            let obj = parameters.as_object_mut().ok_or_else(|| {
-                CliError::ProjectResolution("command parameters must be a JSON object".into())
-            })?;
-            if obj.contains_key(field) {
-                return Err(CliError::ProjectResolution(format!(
-                    "parameter '{field}' conflicts with the command's runtime-bound project selector"
-                )));
-            }
-            obj.insert(field.clone(), value.clone());
-        }
-        (parameters, project_path)
-    } else {
-        let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
-        let project_path =
-            apply_project_policy(&matched.command, &mut parameters, default_project)?;
-        (parameters, project_path)
-    };
-    let descriptor_pin_at_admission = matched
-        .command
-        .project
-        .as_ref()
-        .is_some_and(|project| project.pin_at_admission);
-    let pin_project_at_admission = control.pin_project_at_admission || descriptor_pin_at_admission;
-    if pin_project_at_admission && project_path.is_none() {
-        return Err(CliError::Local {
-            detail:
-                "--pin-project requires a project root; it cannot be combined with --no-project"
-                    .to_string(),
-        });
-    }
-    if control.pin_current_head_at_admission && project_path.is_none() {
-        return Err(CliError::Local {
-            detail:
-                "--current-head requires a project root; it cannot be combined with --no-project"
-                    .to_string(),
-        });
-    }
-    if control.retain_child_results && project_path.is_none() {
-        return Err(CliError::Local {
-            detail: "--retain-child-results requires a project root; it cannot be combined with --no-project"
-                .to_string(),
-        });
-    }
-    if pin_project_at_admission && control.pin_current_head_at_admission {
-        return Err(CliError::Local {
-            detail: "capture-live and current-HEAD project sources are mutually exclusive"
-                .to_string(),
-        });
-    }
-    if pin_project_at_admission && control.state_root.is_some() {
-        return Err(CliError::Local {
-            detail: "--pin-project cannot be combined with --state-root; the pinned generation owns runtime state"
-                .to_string(),
-        });
-    }
-    if control.pin_current_head_at_admission && control.state_root.is_some() {
-        return Err(CliError::Local {
-            detail: "--current-head cannot be combined with --state-root; the pinned generation owns runtime state"
-                .to_string(),
-        });
-    }
-    // Absolutize (not canonicalize — the daemon creates it on demand) the
-    // state-root override against the CLI's cwd, which the daemon cannot see.
-    let state_root = control
-        .state_root
-        .map(|raw| -> Result<PathBuf, CliError> {
-            let path = PathBuf::from(&raw);
-            if path.is_absolute() {
-                return Ok(path);
-            }
-            let cwd = std::env::current_dir()
-                .map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
-            Ok(cwd.join(path))
-        })
-        .transpose()?;
+    let cwd =
+        std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
+    let compiled = ryeos_app::command_invocation::compile_command_invocation(
+        &matched.command,
+        &rest[matched.consumed..],
+        &Value::Null,
+        default_project,
+        Some(&cwd),
+        load_command_input,
+    )
+    .map_err(command_compilation_error)?;
+    let control = compiled.controls;
     Ok(CliResolvedExecute {
-        item_ref,
+        item_ref: compiled.item_ref,
         ref_bindings: control.ref_bindings,
         product_selections: control
             .product_selections
             .unwrap_or_else(|| serde_json::json!([])),
-        parameters,
-        project_path,
+        parameters: compiled.parameters,
+        project_path: compiled.project_path,
         async_launch: control.async_launch,
-        pin_project_at_admission,
+        pin_project_at_admission: control.pin_project_at_admission,
         pin_current_head_at_admission: control.pin_current_head_at_admission,
         retain_child_results: control.retain_child_results,
         exclude_operator_vault: control.exclude_operator_vault,
-        validate_only,
-        direct_execute,
+        validate_only: compiled.validate_only,
+        direct_execute: compiled.direct_execute,
         stream: control.stream,
         debug_raw: control.debug_raw,
         call_method: control.call_method,
         call_args: control.call_args,
-        state_root,
+        state_root: control.state_root.map(PathBuf::from),
         command_label,
     })
+}
+
+fn command_compilation_error(
+    error: ryeos_app::command_invocation::CommandProjectPolicyError,
+) -> CliError {
+    use ryeos_app::command_invocation::CommandProjectPolicyError;
+    match error {
+        CommandProjectPolicyError::Invalid(detail) => CliError::ProjectResolution(detail),
+        CommandProjectPolicyError::ProjectRequired(detail) => CliError::ProjectRequired(detail),
+    }
+}
+
+fn load_command_input(source: &str) -> Result<Value, String> {
+    crate::arg_bind::parse_input_arg(&["--input".into(), source.into()])
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "missing input source".into())
 }
 
 fn command_display_label(tokens: &[String], matched: &ryeos_runtime::MatchedCommand) -> String {
@@ -1076,6 +937,7 @@ fn command_display_label(tokens: &[String], matched: &ryeos_runtime::MatchedComm
 /// command data names the flags and the runtime knows only the binding
 /// vocabulary. Presence flags accept `--flag`, `--flag=true`, `--flag=false`;
 /// value flags take `--flag value` or `--flag=v`.
+#[cfg(test)]
 fn strip_declared_control_flags(
     tail: &mut Vec<String>,
     declared: &[ryeos_runtime::CommandControlFlag],
@@ -1101,74 +963,13 @@ fn bind_command_parameters_for_daemon(
     } else {
         command
     };
-
-    if let Some(params) = crate::arg_bind::bind_declared_shortcuts(tail, command)? {
-        return Ok(params);
-    }
-
-    let binding = command.parameter_binding.as_ref();
-    match binding.map(|binding| binding.mode).unwrap_or_default() {
-        CommandParameterBindingMode::None
-        | CommandParameterBindingMode::TailObject
-        | CommandParameterBindingMode::SchemaObject => {
-            ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
-                .map_err(CliError::ProjectResolution)
-        }
-    }
-}
-
-fn normalize_resolved_parameters(
-    app_root: &Path,
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
-    item_ref: &str,
-    project_path: Option<&Path>,
-    parameters: &mut Value,
-) -> Result<(), CliError> {
-    let Some(contract) = resolve_invocation_contract(app_root, snapshot, item_ref, project_path)?
-    else {
-        return Ok(());
-    };
-    let normalized = ryeos_runtime::arg_binder::normalize_params_with_contract(
-        std::mem::take(parameters),
-        Some(&contract),
+    ryeos_app::command_invocation::bind_command_input(
+        command,
+        tail,
+        &Value::Null,
+        &load_command_input,
     )
-    .map_err(CliError::ProjectResolution)?;
-    *parameters = normalized;
-    Ok(())
-}
-
-fn resolve_invocation_contract(
-    app_root: &Path,
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
-    item_ref: &str,
-    project_path: Option<&Path>,
-) -> Result<Option<InvocationInputContract>, CliError> {
-    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
-    if bundle_roots.is_empty() {
-        return Err(CliError::ProjectResolution(
-            "resolve invocation schema: installed node config has no bundle roots".into(),
-        ));
-    }
-    let engine = crate::effective_metadata::build_effective_item_engine(
-        app_root,
-        project_path,
-        &bundle_roots,
-    )
-    .map_err(|err| CliError::ProjectResolution(format!("resolve invocation schema: {err:#}")))?;
-    let Some(composed) = crate::effective_metadata::resolve_effective_composed_value(
-        &engine,
-        item_ref,
-        project_path,
-    )
-    .map_err(|err| CliError::ProjectResolution(format!("resolve invocation schema: {err:#}")))?
-    else {
-        return Ok(None);
-    };
-    let Some(schema) = composed.get("schema") else {
-        return Ok(None);
-    };
-    InvocationInputContract::from_lightweight_schema_value(schema)
-        .map_err(CliError::ProjectResolution)
+    .map_err(CliError::ProjectResolution)
 }
 
 /// Bind only project-control fields in place. Offline dispatch shares this
@@ -1196,16 +997,9 @@ pub(crate) fn apply_project_policy(
 /// following the bare `-p`/`--project` form) from a command tail. Used for
 /// commands that take no project, so a project selector placed after the verb
 /// is accepted and dropped rather than leaking to the handler.
+#[cfg(test)]
 fn strip_project_control_flags(tail: &[String]) -> Vec<String> {
     ryeos_app::command_invocation::strip_project_control_flags(tail)
-}
-
-fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {
-    command
-        .project
-        .as_ref()
-        .map(|p| p.resolution)
-        .unwrap_or_default()
 }
 
 /// POST a JSON body to a daemon execute route and return the response.

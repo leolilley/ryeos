@@ -15,7 +15,7 @@ use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_runtime::{CommandDispatch, CommandProjectResolution};
+use ryeos_runtime::CommandDispatch;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +26,9 @@ pub struct Request {
     pub project_path: Option<String>,
     #[serde(default)]
     pub arguments: Value,
+    /// Retained by the caller before requesting an accepted launch.
+    #[serde(default)]
+    pub launch_id: Option<String>,
 }
 
 pub async fn handle(
@@ -43,220 +46,74 @@ pub async fn handle(
         .resolve(&req.tokens)
         .map_err(|e| HandlerError::BadRequest(format!("unresolved command: {e}")))?;
 
-    let mut tail = matched.tail.clone();
-    if matched.command.forms.is_empty()
-        && matched
-            .command
-            .project
-            .as_ref()
-            .map(|policy| policy.resolution)
-            .unwrap_or_default()
-            == CommandProjectResolution::None
-    {
-        tail = ryeos_app::command_invocation::strip_project_control_flags(&tail);
+    if matches!(matched.command.dispatch, CommandDispatch::Group) {
+        let prefix = &matched.matched_tokens;
+        let candidates: Vec<Value> = state
+            .command_registry
+            .all_commands()
+            .iter()
+            .filter(|c| c.tokens.len() > prefix.len() && c.tokens.starts_with(prefix))
+            .map(|c| json!({"tokens": c.tokens, "description": c.description}))
+            .collect();
+        return Ok(json!({"group": prefix, "candidates": candidates}));
     }
-    let controls = ryeos_app::command_invocation::strip_declared_control_flags(
-        &mut tail,
-        &matched.command.control_flags,
-    )
-    .map_err(HandlerError::BadRequest)?;
-
-    let direct_execute = matches!(
+    if matches!(
         matched.command.dispatch,
-        CommandDispatch::DirectExecuteItemRef { .. }
-    );
-    let (parameter_tail, project_controls) = if direct_execute {
-        ryeos_app::command_invocation::separate_project_control_flags(
-            tail.get(1..).unwrap_or_default(),
-        )
-        .map_err(HandlerError::BadRequest)?
-    } else {
-        (tail.clone(), serde_json::Map::new())
-    };
-    let direct_command;
-    let binding_command = if direct_execute {
-        direct_command = ryeos_runtime::CommandDef {
-            forms: Vec::new(),
-            ..matched.command.clone()
-        };
-        &direct_command
-    } else {
-        &matched.command
-    };
-    let mut parameters = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
-        &parameter_tail,
-        Some(binding_command),
-        &req.arguments,
-    )
-    .map_err(HandlerError::BadRequest)?;
-
-    let (item_ref, validate_only) = match &matched.command.dispatch {
-        CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
-        CommandDispatch::DirectExecuteItemRef {
-            item_ref_arg,
-            validate_only,
-            ..
-        } => {
-            // The ref itself is a tail argument (e.g. `execute <ref>`).
-            let found = tail
-                .first()
-                .filter(|value| !value.starts_with('-'))
-                .map(String::as_str)
-                .or_else(|| parameters.get(item_ref_arg).and_then(Value::as_str));
-            let Some(found) = found else {
-                return Err(HandlerError::BadRequest(format!(
-                    "command requires `{item_ref_arg}` argument"
-                )));
-            };
-            (found.to_string(), *validate_only)
-        }
-        CommandDispatch::Group => {
-            // A group prefix is a prompt for more tokens, not an error:
-            // return the child candidates (completion data, not execution).
-            let prefix = &matched.matched_tokens;
-            let candidates: Vec<Value> = state
-                .command_registry
-                .all_commands()
-                .iter()
-                .filter(|c| c.tokens.len() > prefix.len() && c.tokens.starts_with(prefix))
-                .map(|c| json!({ "tokens": c.tokens, "description": c.description }))
-                .collect();
-            return Ok(json!({ "group": prefix, "candidates": candidates }));
-        }
-        CommandDispatch::LocalHandler { .. } => {
-            return Err(HandlerError::BadRequest(
-                "command is implemented by a local CLI handler; run it via the CLI".to_string(),
-            ));
-        }
-    };
-
-    let caller_cwd = req
-        .project_path
-        .as_deref()
-        .map(std::path::Path::new)
-        .unwrap_or(state.config.app_root.as_path());
-    let default_project = req.project_path.as_deref().map(std::path::Path::new);
-    let project_path = if direct_execute {
-        let mut controls = Value::Object(project_controls);
-        let selected = ryeos_app::command_invocation::apply_project_policy(
-            &matched.command,
-            &mut controls,
-            default_project,
-            caller_cwd,
-        )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-        for (field, value) in controls
-            .as_object()
-            .expect("project controls remain an object")
-        {
-            let object = parameters.as_object_mut().ok_or_else(|| {
-                HandlerError::BadRequest("command parameters must be a JSON object".to_string())
-            })?;
-            if object.insert(field.clone(), value.clone()).is_some() {
-                return Err(HandlerError::BadRequest(format!(
-                    "parameter '{field}' conflicts with the command's runtime-bound project selector"
-                )));
-            }
-        }
-        selected
-    } else {
-        ryeos_app::command_invocation::apply_project_policy(
-            &matched.command,
-            &mut parameters,
-            default_project,
-            caller_cwd,
-        )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?
-    };
-
-    if controls.async_launch
-        || controls.pin_project_at_admission
-        || controls.pin_current_head_at_admission
-        || controls.retain_child_results
-        || controls.exclude_operator_vault
-        || controls.state_root.is_some()
-        || controls.debug_raw
-        || controls.stream == Some(true)
-    {
+        CommandDispatch::LocalHandler { .. }
+    ) {
         return Err(HandlerError::BadRequest(
-            "this command's execution controls require the direct execute admission route"
-                .to_string(),
+            "command is implemented by a local CLI handler; run it via the CLI".into(),
+        ));
+    }
+    let project = req.project_path.as_deref().map(std::path::Path::new);
+    if project.is_some_and(|p| !p.is_absolute()) {
+        return Err(HandlerError::BadRequest(
+            "caller project context must be absolute".into(),
+        ));
+    }
+    let compiled = ryeos_app::command_invocation::compile_command_invocation(
+        &matched.command, &matched.tail, &req.arguments, project, project,
+        |source| {
+            // Literal structured input is portable. File/stdin acquisition
+            // belongs to the caller, never to the daemon's filesystem.
+            if !source.trim_start().starts_with(['{', '[']) {
+                return Err("command input files/stdin must be loaded by the caller and supplied as arguments".into());
+            }
+            serde_json::from_str(source).map_err(|e| format!("invalid input JSON: {e}"))
+        },
+    ).map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+    if compiled.controls.stream == Some(true) {
+        return Err(HandlerError::BadRequest(
+            "streaming requires the streaming transport; use buffered or accepted execution".into(),
         ));
     }
     let mut ref_bindings = req.ref_bindings;
-    for (name, item_ref) in controls.ref_bindings {
-        if ref_bindings.insert(name.clone(), item_ref).is_some() {
+    let mut controls = compiled.controls;
+    for (name, value) in std::mem::take(&mut controls.ref_bindings) {
+        if ref_bindings.insert(name.clone(), value).is_some() {
             return Err(HandlerError::BadRequest(format!(
                 "duplicate ref binding '{name}'"
             )));
         }
     }
-    let product_selections = controls
-        .product_selections
-        .unwrap_or_else(|| serde_json::json!([]));
-
-    let checkout_id = format!("command-{}", ryeos_app::thread_lifecycle::new_thread_id());
-    let mut no_project_guard = None;
-    let effective_project_path = if let Some(project_path) = project_path {
-        ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
-            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-        project_path
-    } else {
-        let (workspace, guard) =
-            crate::routes::response_modes::execute_mode::create_isolated_no_project_workspace(
-                &state,
-                &checkout_id,
-            )
-            .map_err(|error| {
-                HandlerError::Internal(format!(
-                    "prepare isolated projectless command workspace: {error:#}"
-                ))
-            })?;
-        no_project_guard = Some(guard);
-        workspace
-    };
-    let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
-        &state,
-        &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
-        &effective_project_path,
-        &ctx.fingerprint,
-        &checkout_id,
-        None,
-    )
-    .map_err(|error| HandlerError::BadRequest(format!("capture command project: {error}")))?;
-
-    use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
-    let site_id = state.threads.site_id().to_string();
-    let origin_site_id = ctx.execution_origin(&site_id);
-    let plan_ctx = PlanContext {
-        requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: ctx.fingerprint.clone(),
-            scopes: ctx.scopes.clone(),
-        }),
-        project_context: if no_project_guard.is_some() {
-            ProjectContext::None
-        } else {
-            ProjectContext::LocalPath {
-                path: project_ctx.effective_path.clone(),
-            }
-        },
-        subject_resolution_authority: if no_project_guard.is_some() {
-            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
-        } else {
-            ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
-        },
-        current_site_id: site_id.clone(),
-        origin_site_id,
-        execution_hints: Default::default(),
-        scheduled_fire: None,
-        validate_only,
-    };
-    let exec_ctx = ryeos_executor::executor::ExecutionContext {
-        principal_fingerprint: ctx.fingerprint.clone(),
-        caller_scopes: ctx.scopes.clone(),
-        engine: project_ctx.request_engine.clone(),
-        plan_ctx,
-        requested_call: if controls.call_method.is_some() || controls.call_args.is_some() {
+    let request = crate::routes::response_modes::execute_mode::ExecuteRequest {
+        item_ref: compiled.item_ref,
+        ref_bindings,
+        product_selections: serde_json::from_value(
+            controls.product_selections.unwrap_or_else(|| json!([])),
+        )?,
+        project_path: compiled
+            .project_path
+            .map(|p| p.to_string_lossy().into_owned()),
+        parameters: compiled.parameters,
+        parameter_encoding: ryeos_app::command_invocation::ParameterEncoding::Command,
+        execution_policy: compiled.execution_policy,
+        launch_id: req.launch_id,
+        required_origin_site_id: None,
+        launch_mode: String::new(),
+        target_site_id: None,
+        validate_only: compiled.validate_only,
+        call: if controls.call_method.is_some() || controls.call_args.is_some() {
             Some(ryeos_engine::method_call::MethodCall {
                 method: controls.call_method,
                 args: controls.call_args,
@@ -264,83 +121,54 @@ pub async fn handle(
         } else {
             None
         },
-    };
-    let (provenance, lifecycle_authority) = if no_project_guard.is_some() {
-        let authority = ryeos_state::objects::ExecutionProjectAuthority::projectless(
-            ryeos_state::objects::EnvironmentAuthority::None,
-        )
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
-        let policy = ryeos_app::execution_policy::ExecutionPolicy::projectless(
-            ryeos_app::execution_policy::ExecutionResponse::Wait,
-        );
-        (
-            ryeos_app::execution_provenance::ExecutionProvenance::root_projectless(
-                project_ctx.effective_path.clone(),
-                project_ctx.request_engine.clone(),
-                no_project_guard
-                    .as_ref()
-                    .expect("projectless guard exists")
-                    .clone(),
-                authority,
-            )
-            .map_err(|error| HandlerError::Internal(error.to_string()))?,
-            policy.lifecycle_authority(),
-        )
-    } else {
-        let resolved = ryeos_app::execution_policy::resolve_standard_local_live_authority(
-            &project_ctx.effective_path,
-            ctx.scopes.clone(),
-            &state.isolation,
-        )
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
-        (
-            ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.request_engine.clone(),
-                resolved.project,
-            )
-            .map_err(|error| HandlerError::Internal(error.to_string()))?,
-            resolved.lifecycle,
-        )
-    };
-    let kind = item_ref.split(':').next().unwrap_or("");
-    let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-        launch_mode: "wait",
-        target_site_id: None,
-        validate_only,
-        params: parameters,
-        ref_bindings,
-        product_selections: serde_json::from_value(product_selections)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
-        acting_principal: ctx.fingerprint.as_str(),
-        project_path: &project_ctx.effective_path,
-        provenance,
-        lifecycle_authority,
-        launch_timings: None,
-        original_root_kind: kind,
-        pre_minted_thread_id: None,
         usage_subject: None,
-        usage_subject_asserted_by: None,
-        previous_thread_id: None,
-        root_admission: None,
-        root_dispatch_evidence: None,
-        parent_execution_context: None,
-        effect_authority: None,
+        debug_raw: controls.debug_raw,
+        state_root: controls.state_root,
     };
-
-    let result = ryeos_executor::dispatch::dispatch_with_handler_context(
-        &item_ref,
-        ctx.clone(),
-        &dispatch_req,
-        &exec_ctx,
-        &state,
+    let outcome = crate::routes::response_modes::execute_mode::admit_execution(
+        request,
+        ctx,
+        (*state).clone(),
+        controls.async_launch,
+        None,
     )
     .await
-    .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
-    drop(dispatch_req);
-    drop(exec_ctx);
-    drop(no_project_guard);
-    result
+    .map_err(admission_error)?;
+    if !outcome.status.is_success() {
+        return Err(HandlerError::Structured {
+            code: outcome
+                .body
+                .get("code")
+                .or_else(|| outcome.body.get("error_code"))
+                .and_then(Value::as_str)
+                .unwrap_or("command_execution_failed")
+                .into(),
+            status: outcome.status.as_u16(),
+            body: outcome.body,
+        });
+    }
+    Ok(outcome.body)
+}
+
+fn admission_error(error: crate::route_error::RouteDispatchError) -> HandlerError {
+    use crate::route_error::RouteDispatchError as E;
+    match error {
+        E::BadRequest(message) => HandlerError::BadRequest(message),
+        E::Forbidden(message) => HandlerError::Forbidden(message),
+        E::Unauthorized => HandlerError::Forbidden("verified execution authority required".into()),
+        E::NotFound => HandlerError::NotFound,
+        E::Conflict(message) => HandlerError::Conflict(message),
+        E::Internal(message) => HandlerError::Internal(message),
+        E::BadLastEventId => HandlerError::BadRequest("bad Last-Event-ID".into()),
+        E::ServiceUnavailable { code, message } => HandlerError::Structured {
+            status: 503,
+            body: json!({"error_code": code, "error": message}),
+            code,
+        },
+        E::Structured {
+            code, status, body, ..
+        } => HandlerError::Structured { code, status, body },
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

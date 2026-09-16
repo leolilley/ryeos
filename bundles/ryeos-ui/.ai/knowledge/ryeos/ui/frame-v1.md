@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-16T07:40:34Z:01e534e6fbf733145f90190675f55bc01403b6fc91939f3d00aeef59b0fe8bb6:M/yXeR9dCLHIHC4y9SzOV78IHIpmlqKcEne/PACXunqH/bK92MO27xXxYqYL8ri94ijc5SkBqSReIKfg1ApJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T08:38:06Z:75cc212a4ca86375736fcd6535dd83ca754b1c5206b61bd01a7ad21177a06955:sgjpSmrSdtz6M1vBGeQMLmQICfOx40SSkcPUyOvaBW5N6J8gnHezMbwSYJA5ROrdf9Vzv8nx6D9MjLdESb4JAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -164,6 +164,27 @@ requires a project-scoped session and refuses otherwise;
 and JSON `null` otherwise. Command dispatch uses the latter so its signed
 descriptor—not the UI session—decides whether a token invocation is
 projectless, project-bound, or binds a selected source path into parameters.
+Absent session context never triggers project discovery from the daemon's
+app directory. Relative project selectors require explicit caller context.
+
+Terminal and daemon token invocations share command compilation, including
+typed input binding and descriptor-required pinned admission. Command dispatch
+uses the same execution admission owner as direct execution: permission to
+invoke `commands/dispatch` does not grant permission to its selected target or
+bound references. Nested executions preserve verified identity, grant evidence
+and origin, but acquire their own recorded-service root.
+
+Execute and streaming requests default to `parameter_encoding: typed`.
+Compiled command clients send `parameter_encoding: command`; its scalar
+coercion uses the selected callee's schema after project realization and before
+preflight. Clients must not normalize against a live checkout when requesting
+a retained generation. This input-format choice grants no execution authority.
+
+File/stdin input is acquired by the client and supplied as structured
+`arguments`; the daemon never opens a token-selected input file. Buffered
+command dispatch is not a streaming transport. An accepted command requires a
+caller-retained `launch_id` before submission; clients without that recovery
+coordinate must use buffered execution, not mint an identity after contact.
 
 Tones: `neutral | accent | good | warn | danger` (renderers map tone to
 palette; content never names colors). A tone map's optional `missing` tone is
