@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-12T04:00:24Z:1682163c03cbea062b011361fcd369b23cb91ac83aa18bc2a66726b7cfc6aae3:AIs4yXWz/nkmTptmlmv8R9othPm3awSJ7SYN0lS14SmvQqsedOxLxVYYGtu6E/Bzw7PMdk6Nl5bG+2oslUsUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T23:32:50Z:91441ed8893468a1bfc4d4787d353557cf5aa37778911c212917c6174d04515a:qJUDwYQ+cfBIRvteOV7dpbe3R7fE+cVuOoanHFUFK/JkVVNmCr6BIAY2NNQs98zWCqUdGbGsvtQoKKz053mzCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -32,6 +32,7 @@ WORKER_EXECUTION_PATHS = (
     BUNDLE / ".ai/worker-executions/codex/login.yaml",
     BUNDLE / ".ai/worker-executions/codex/session.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn.yaml",
+    BUNDLE / ".ai/worker-executions/codex/bounded-turn-recovery.yaml",
 )
 
 
@@ -356,7 +357,7 @@ class CodexContractTests(unittest.TestCase):
             with self.subTest(profile=path.stem):
                 execution = yaml.safe_load(path.read_text(encoding="utf-8"))
                 config = execution["config"]
-                bounded = path.stem == "bounded-turn"
+                bounded = path.stem.startswith("bounded-turn")
                 self.assertEqual(
                     config["mode"]["kind"], "bounded_turn" if bounded else "session"
                 )
@@ -371,6 +372,12 @@ class CodexContractTests(unittest.TestCase):
                 if bounded:
                     self.assertEqual(execution["limits"]["turns"], 1)
                     self.assertEqual(config["mode"]["max_uncontacted_attempts"], 3)
+                    self.assertEqual(
+                        config["mode"].get(
+                            "require_post_completion_recovery", False
+                        ),
+                        path.stem == "bounded-turn-recovery",
+                    )
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
         activation = ACTIVATION_PATH.read_text(encoding="utf-8")

@@ -1,7 +1,8 @@
 # RyeOS remote development completion plan and live ledger
 
 Updated: 2026-09-17, Pacific/Auckland. Owner: this execution thread.
-Status: REVIEWED — ready for gated execution. G0a is next; no E2E pass claimed.
+Status: EXECUTING — G0a complete; G3a source correction is focused-tested.
+Canonical-node lifecycle reconciliation and G0b are next. No E2E pass claimed.
 
 This tracked-path document is the sole canonical continuation plan. Keep its
 checkpoint and append-only journal current and commit material checkpoint updates
@@ -16,20 +17,22 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: G0a read-only inventory, then G3a static orchestration feasibility,
-then G0b freeze the accepted test generation. G1/G2 must follow that source review.
-Next action after plan review: read-only host-context inventory via supported node,
-remote, project, product, credential-status, and host-lifecycle interfaces.
-No worker launch, node replacement, release or lifecycle mutation during plan review.
+Current gate: commit the focused-tested G3a correction, then G0 lifecycle/G0b freeze
+of the accepted test generation. G1/G2 must follow that source review. G0a found and
+stopped obsolete `/tmp` daemons/restart loops without deleting retained evidence.
+No worker launch, node replacement, release or canonical-node lifecycle mutation
+until the G3a correction has focused coverage.
 
 Latest committed fix: `7c4854045 Make installed native verifier projectless`.
 Preceding fix: `e829e913f Package native verifier product relationships`.
 Both are installed in current target bundles by a successful stopped-node init.
 Native verifier live success is NOT established. Last launch 52 failed before that fix.
 
-Last host-context audit: target port 7445 unavailable; v059 log says sudo password
-required. Older GgHPTg target has a live descriptor-launched process; leave it alone.
-Source liveness is unverified. No host diagnosis should rely on sandbox visibility.
+Host-context audit at 2026-09-17T11:26:02+12:00: source 7423 and target 7445 are
+stopped. The obsolete GgHPTg target on 7444 and Sep-10 host-supervision daemon were
+still descriptor-launched under runit and are now down. Four additional stale
+`/tmp` services were in failed `want up` loops and are now down. The primary node at
+7400 remains running and untouched. No retained fixture data was deleted.
 
 ## Scope and finish line
 
@@ -62,6 +65,8 @@ onboarding remain separate roadmap phases, explicitly reported at handoff.
 - `.ai/config/development/ryeos/remote-worker.yaml` and
   `.ai/graphs/ryeos/development/remote-worker.yaml`: public workflow and driver.
 - `bundles/codex/.ai/worker-executions/codex/bounded-turn.yaml`: worker lifecycle.
+- `.ai/config/development/ryeos/remote-worker-recovery.yaml`, its matching Graph,
+  and `worker_execution:codex/bounded-turn-recovery`: explicit qualification path.
 - `.ai/config/development/ryeos/worker-environment.yaml`: allowed child operations.
 - `bundles/standard/.ai/knowledge/ryeos/core/execution/worker-hosted-execution.md`:
   supported worker/candidate authority.
@@ -88,7 +93,9 @@ These are last-known coordinates; G0 must confirm them without mutation.
 | Target vault identity | `dc60a9fba7956d4ac2bdaf6056b4da9f3b7f0220e08c07e0957d3340c447fdec` |
 | Target project display path | `/tmp/ryeos-remote-development.GgHPTg/target-project-current-20260915` |
 | Last pushed snapshot, NOT yet reconciled | `baf02426e1bd15c095ab92ea614b8e5d6b32fa013bfe1994e4847b15ed31a19d` |
-| Target daemon last known | `/usr/bin/ryeosd`, v0.5.87; installed bundles newer than daemon |
+| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.87, sha256 `811ef769…`; `/usr/bin/ryeosd` v0.5.87 revision `9f60c4bbeb28`, sha256 `a2100ac8…` |
+| Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` v0.5.87 revision `3a43ed50ee3e` |
+| Target daemon last known | canonical runit service `ryeos-08df80…`, currently down; installed bundles newer than daemon |
 | Credential profile | `personal`; state/generation require status check, never log tokens |
 
 G0 must fill source/target binary revisions and digests, bundle identities, runtime
@@ -151,7 +158,7 @@ Status values: pending / running / passed / failed / blocked / invalidated.
 Each passed gate requires a timestamp, source coordinate, node identity, exact
 operation/root IDs and evidence path. Historical claims alone cannot mark a pass.
 
-### G0 — reconcile and freeze prerequisites (pending)
+### G0 — reconcile and freeze prerequisites (running)
 
 G0a is step 1. Step 2 follows G3a. G0b is steps 3–4 and must wait for G3a source
 decisions. Static feasibility review precedes lifecycle mutation and source freeze.
@@ -174,6 +181,15 @@ AND retained source-project Cargo.toml hash is 23345c9b… whereas evaluator exp
 The prescribed Rust base still matches def27d76…. Confirm the immutable selected
 snapshot, then correct the base-owned manifest assertions if mismatched; do not
 change expected candidate Rust bytes just to accept a different edit.
+
+G0a checkpoint (2026-09-17T11:26:02+12:00): stored binds remain source 7423 and
+target 7445; neither canonical daemon is running. Host disk has 3.6 GiB available
+(96% used). All discovered `/tmp` runit services are down. Current Git HEAD is
+`898670a3d`; checkout Cargo.toml/Cargo.lock are `23345c9b…`/`2bb33708…`, while the
+retained source project is `23345c9b…`/`b218b761…`. The prescribed Rust source and
+crate manifest still match `def27d76…` and `acb8fd21…`. Remaining G0 inventory that
+requires healthy daemons (route, credential, grant, runtime epoch and product API
+receipts) is intentionally deferred until the G3a source decision is tested.
 
 Exit: filled topology ledger, healthy pair, compatible artifacts, known credentials,
 exact task/evaluator base, and approved bounded scopes. Only ask for missing actual
@@ -200,7 +216,7 @@ under operator authority, outside worker grants. Verify Cargo.lock/vendor agreem
 offline operation, selected executable closure, required file/space/time limits.
 Do not silently reduce acceptance to format-only to avoid vendor preparation.
 
-### G3 — prove the orchestration can satisfy the WHOLE test (pending)
+### G3 — prove the orchestration can satisfy the WHOLE test (running)
 
 G3a: static source/API feasibility, immediately after G0a inventory and BEFORE
 G0b snapshot freeze or G1/G2 provisioning. G3b: installed/live preflight after G2.
@@ -229,6 +245,32 @@ Record concrete API sequence, accepted request schemas, exact required capabilit
 coordinate ownership, and failure/retry behavior before a model turn.
 Verify complete workload-client routing, task payload, evaluator source authority,
 credential readiness and target requirements without replaying stale JSON.
+
+G3a design checkpoint (2026-09-17): the existing durable command observation and
+completion fence are sufficient authority; completion termination already admits an
+older fence epoch after a recovered worker attaches at a newer boot epoch. Add a
+closed, signed bounded-turn mode option that requires post-completion reattachment.
+When selected, session-runtime must retain the completed fence and refuse to begin
+candidate termination until the same placement/capsule reports a worker boot epoch
+strictly newer than the fence epoch. A restart kills the waiting runtime; ordinary
+daemon recovery relaunches it, idempotent command keys recover the exact settled
+session/turn without contact, and the newer epoch then releases termination. Keep
+the normal bounded-turn profile unchanged. Package the option in a separate Codex
+worker-execution profile and separate remote-development workflow/config variant so
+ordinary remote work never requires a restart. The operator detects the barrier via
+the exact command-observation fence, performs normal node restart, then follows the
+same workflow coordinate. No provider-specific hook, ambient FIFO, timing kill, new
+grant class, or caller-selected filesystem authority is introduced.
+
+G3a implementation checkpoint (2026-09-17T11:36+12:00): implemented the closed
+`require_post_completion_recovery` bounded-turn mode field, strict same-placement /
+same-capsule validation, and a strictly newer worker-epoch release condition. The
+ordinary profile and graph remain unchanged; a signed recovery profile, graph and
+workflow Config select the behavior explicitly. Focused evidence: 12 launch-preparer
+tests passed, 7 session-runtime tests passed, 17 Codex bundle contract tests passed,
+and the API recovery-workflow selection test passed (641 other tests filtered).
+`cargo fmt --all -- --check` and `git diff --check` pass. Live restart proof remains
+G4/G5 and is not inferred from these source tests.
 
 Exit: executable step sequence for G4–G7; any source changes signed, focused-tested,
 reviewed, installed through supported lifecycle, with invalidated gates rechecked.
@@ -323,6 +365,8 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 16 | historical | launch 52 | missing project_path runtime template | terminal failed; new launch needed after status check |
 | Sept 16 | historical | 7c4854045 | signed runtime fix; 21 tests; Standard validation; bundle refresh succeeded | consumer definitions/bindings need recheck |
 | Sept 17 | G0 audit | host read-only check | 7445 unavailable; v059 sudo authentication error | resume after plan reviews |
+| Sept 17 11:26 NZST | G0a | host process/service/config inventory | stopped obsolete 7444 and Sep-10 descriptor daemons plus four failed `want up` loops; canonical source/target remain stopped; `.tmp/remote-development-evidence-20260917/g0a-host-inventory.md` | retain fixture data; finish daemon-backed inventory after G3a |
+| Sept 17 11:36 NZST | G3a | recovery-qualified bounded-turn source correction | 12 preparer + 7 runtime + 17 bundle tests and focused API graph test passed; signed profile/graph/config | commit; reconcile supported target lifecycle, then freeze G0b |
 
 Before every stop/compaction/turn handoff: update this top checkpoint, gate states,
 in-flight process/tool session IDs, retained launch coordinates, exact next operation,

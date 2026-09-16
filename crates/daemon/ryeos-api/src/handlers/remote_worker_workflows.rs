@@ -2878,6 +2878,51 @@ mod tests {
     }
 
     #[test]
+    fn ryeos_recovery_qualification_workflow_selects_only_the_recovery_profile() {
+        let root = ryeos_engine::test_support::workspace_root();
+        let config_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/config/development/ryeos/remote-worker-recovery.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let config: WorkflowConfig = serde_json::from_value(config_value).unwrap();
+        assert_eq!(config.schema, WORKFLOW_SCHEMA);
+        assert_eq!(
+            config.driver,
+            "graph:ryeos/development/remote-worker-recovery"
+        );
+        assert_eq!(
+            config.target_requirements.process_control,
+            TargetProcessControl::ExclusiveSession
+        );
+
+        let graph_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/graphs/ryeos/development/remote-worker-recovery.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let graph: ryeos_graph_definition::GraphFile =
+            serde_json::from_value(graph_value.clone()).unwrap();
+        ryeos_graph_definition::validate_graph_file(&graph).unwrap();
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/item_id"),
+            Some(&Value::String(
+                "worker_execution:codex/bounded-turn-recovery".to_owned()
+            ))
+        );
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/ref_bindings/environment"),
+            Some(&Value::String(
+                "config:development/ryeos/worker-environment".to_owned()
+            ))
+        );
+    }
+
+    #[test]
     fn resume_contract_accepts_only_source_work_id() {
         let request = serde_json::json!({
             "source_work_id": "T-0025cdcf-c920-0783-ff3a-95250dd8f8d2",
