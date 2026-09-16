@@ -1008,13 +1008,18 @@ fn target_readiness_evidence(
     {
         bail!("exclusive target readiness omitted protected process-scope authority identity");
     }
-    Ok(TargetReadinessEvidence {
+    let evidence = TargetReadinessEvidence {
         requirements: requirements.clone(),
         daemon_revision: revision.to_owned(),
         isolation_policy_digest: policy_digest.to_owned(),
         process_scope_authority_digest: authority_digest,
         process_control_reason: reason.to_owned(),
-    })
+    };
+    // The status observation is the pre-contact admission boundary. Apply the
+    // same closed evidence contract used by durable receipt validation here,
+    // before project transfer or worker launch can occur.
+    validate_target_readiness_evidence(&evidence)?;
+    Ok(evidence)
 }
 
 /// Resolve an interrupted target contact without replaying an accepted launch.
@@ -2783,6 +2788,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("filesystem mode"));
+
+        let error = target_readiness_evidence(
+            &target_status(true, "unexpected", "enforce", "host"),
+            &requirements,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("readiness evidence is invalid"));
     }
 
     #[test]
@@ -2799,6 +2811,12 @@ mod tests {
         .unwrap();
         assert_eq!(evidence.process_control_reason, "not_required");
         assert!(evidence.process_scope_authority_digest.is_none());
+
+        let mut malformed = target_status(false, "policy_unconfigured", "disabled", "host");
+        malformed["isolation"]["process_scopes"]["pooled_requests"]["reason"] =
+            Value::String("ready".to_string());
+        let error = target_readiness_evidence(&malformed, &requirements).unwrap_err();
+        assert!(format!("{error:#}").contains("readiness evidence is invalid"));
     }
 
     #[test]
@@ -2838,6 +2856,17 @@ mod tests {
                 "config:development/ryeos/worker-environment".to_owned()
             ))
         );
+        let declared = graph_value
+            .pointer("/requires/capabilities/declared")
+            .and_then(Value::as_array)
+            .unwrap();
+        for capability in [
+            "ryeos.runtime.dedicated_session.start",
+            "ryeos.runtime.dedicated_session.command",
+            "ryeos.runtime.dedicated_session.terminate",
+        ] {
+            assert!(declared.contains(&Value::String(capability.to_owned())));
+        }
         assert_eq!(
             graph_value.pointer("/config/nodes/done/output/schema"),
             Some(&Value::String(WORKFLOW_GRAPH_RESULT_SCHEMA.to_owned()))

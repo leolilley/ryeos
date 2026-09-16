@@ -1,9 +1,8 @@
 //! Argument binding — parse remaining argv into a JSON parameters object.
 //!
-//! Delegates to the shared `ryeos_runtime::arg_binder` for consistency
-//! between CLI and daemon. The CLI only uses this for the `execute`
-//! escape-hatch path (item_ref direct mode). Token mode sends raw
-//! tokens to the daemon, which binds them server-side.
+//! Caller-owned file/stdin acquisition. Command grammar is compiled by
+//! `ryeos_app::command_invocation` for both terminal and daemon callers;
+//! this module must not introduce a second interpretation of that grammar.
 //!
 //! The `--input` flag provides a structured JSON/YAML file or stdin path, plus
 //! an inline-JSON escape hatch, for complex parameters (arrays, nested
@@ -41,176 +40,30 @@ pub fn bind_declared_shortcuts(
     command: &ryeos_runtime::CommandDef,
 ) -> Result<Option<Value>, CliDispatchError> {
     let binding = command.parameter_binding.as_ref();
-    if binding.is_some_and(|binding| binding.input_flag.is_some())
-        && let Some(input) = parse_input_arg(tail)?
-    {
-        let input = if command.project.is_some() {
-            merge_project_control_flags(input, tail)?
-        } else {
-            input
-        };
-        if !command.forms.is_empty() {
-            let residual = tail_without_input(tail);
-            let value = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
-                &residual,
-                Some(command),
-                &input,
-            )
-            .map_err(|detail| command_binding_error(command, detail))?;
-            return Ok(Some(value));
-        }
-        let residual = tail_without_input(tail);
-        let residual = if command.project.is_some() {
-            separate_project_control_flags(&residual)?.0
-        } else {
-            residual
-        };
-        if !residual.is_empty() {
-            return Err(command_binding_error(command,
-                "--input cannot be combined with undeclared positional arguments or parameter flags".into()));
-        }
-        return Ok(Some(input));
-    }
-    if binding.is_some_and(|binding| binding.single_json_object_arg)
+    let supplied_input = binding
+        .and_then(|b| b.input_flag.as_deref())
+        .is_some_and(|flag| {
+            tail.iter()
+                .any(|s| s == &format!("--{flag}") || s.starts_with(&format!("--{flag}=")))
+        });
+    let supplied_json = binding.is_some_and(|b| b.single_json_object_arg)
         && tail.len() == 1
-        && let Ok(value) = serde_json::from_str::<Value>(&tail[0])
-        && value.is_object()
-    {
-        if !command.forms.is_empty() {
-            let value = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
-                &[],
-                Some(command),
-                &value,
-            )
-            .map_err(|detail| command_binding_error(command, detail))?;
-            return Ok(Some(value));
-        }
-        return Ok(Some(value));
+        && serde_json::from_str::<Value>(&tail[0]).is_ok_and(|v| v.is_object());
+    if !supplied_input && !supplied_json {
+        return Ok(None);
     }
-    Ok(None)
-}
-
-fn tail_without_input(tail: &[String]) -> Vec<String> {
-    let mut residual = Vec::with_capacity(tail.len());
-    let mut index = 0usize;
-    while index < tail.len() {
-        if tail[index] == "--input" {
-            index = index.saturating_add(2);
-        } else if tail[index].starts_with("--input=") {
-            index += 1;
-        } else {
-            residual.push(tail[index].clone());
-            index += 1;
-        }
-    }
-    residual
-}
-
-fn command_binding_error(command: &ryeos_runtime::CommandDef, detail: String) -> CliDispatchError {
-    CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
-        path: command.source_file.display().to_string(),
-        item_ref: command.tokens.join(" "),
-        detail,
+    ryeos_app::command_invocation::bind_command_input(command, tail, &Value::Null, &|source| {
+        let text = read_input_source(source).map_err(|e| e.to_string())?;
+        parse_input_value(&text, source).map_err(|e| e.to_string())
     })
-}
-
-fn merge_project_control_flags(
-    mut input: Value,
-    tail: &[String],
-) -> Result<Value, CliDispatchError> {
-    let Some(obj) = input.as_object_mut() else {
-        return Ok(input);
-    };
-    let (_, controls) = separate_project_control_flags(tail)?;
-    obj.extend(controls);
-    Ok(input)
-}
-
-/// Keep argv project selectors separate from structured item input. In direct
-/// execution, an item's JSON `project`/`no_project` fields are not CLI controls.
-/// Aliases may explicitly map selectors into their service payload instead.
-pub(crate) fn separate_project_control_flags(
-    tail: &[String],
-) -> Result<(Vec<String>, serde_json::Map<String, Value>), CliDispatchError> {
-    let mut residual = Vec::with_capacity(tail.len());
-    let mut controls = serde_json::Map::new();
-    let mut i = 0;
-    while i < tail.len() {
-        let token = &tail[i];
-        // A structured input source is one opaque argument, even if its file
-        // name happens to spell a selector. Never inspect its contents here.
-        if token == "--input" {
-            residual.push(token.clone());
-            if let Some(source) = tail.get(i + 1) {
-                residual.push(source.clone());
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if token == "--no-project" || token.starts_with("--no-project=") {
-            let value = match token.strip_prefix("--no-project=") {
-                None | Some("true") => Value::Bool(true),
-                Some("false") => Value::Bool(false),
-                Some(value) => Value::String(value.to_owned()),
-            };
-            insert_project_control(&mut controls, "no_project", value)?;
-            i += 1;
-            continue;
-        }
-        if let Some(path) = token
-            .strip_prefix("--project=")
-            .or_else(|| token.strip_prefix("-p="))
-        {
-            insert_project_control(&mut controls, "project", Value::String(path.to_string()))?;
-            i += 1;
-            continue;
-        }
-        if token == "--project" || token == "-p" {
-            let Some(path) = tail.get(i + 1) else {
-                return Err(CliDispatchError::Config(
-                    crate::error::CliConfigError::InvalidExecuteRef {
-                        path: "<cli>".into(),
-                        item_ref: token.clone(),
-                        detail: format!("{token} requires a value (path to the project root)"),
-                    },
-                ));
-            };
-            if path.starts_with('-') {
-                return Err(CliDispatchError::Config(
-                    crate::error::CliConfigError::InvalidExecuteRef {
-                        path: "<cli>".into(),
-                        item_ref: token.clone(),
-                        detail: format!("{token} requires a value (path to the project root)"),
-                    },
-                ));
-            }
-            insert_project_control(&mut controls, "project", Value::String(path.clone()))?;
-            i += 2;
-            continue;
-        }
-        residual.push(token.clone());
-        i += 1;
-    }
-
-    Ok((residual, controls))
-}
-
-fn insert_project_control(
-    controls: &mut serde_json::Map<String, Value>,
-    field: &str,
-    value: Value,
-) -> Result<(), CliDispatchError> {
-    if controls.insert(field.to_owned(), value).is_some() {
-        return Err(CliDispatchError::Config(
-            crate::error::CliConfigError::InvalidExecuteRef {
-                path: "<cli>".into(),
-                item_ref: field.into(),
-                detail: format!("duplicate --{} selector", field.replace('_', "-")),
-            },
-        ));
-    }
-    Ok(())
+    .map(Some)
+    .map_err(|detail| {
+        CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
+            path: command.source_file.display().to_string(),
+            item_ref: command.tokens.join(" "),
+            detail,
+        })
+    })
 }
 
 /// - `--input -` — reads stdin as JSON

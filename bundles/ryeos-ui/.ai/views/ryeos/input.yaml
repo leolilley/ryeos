@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:04eb5574d1dd551fcd970763863b263524ee0bdda1e3ff4bb20c9a7dec265de5:Bs40Cvhr/+vRoPgw5UZSfHtgOVRL1AYuAaxaLYriJqCGNVHeXYwJUy34a+gC3b4GqAffVUGvCIMSePQpDAenBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T07:40:34Z:2a88c8b9b58669fb84a02bc7bebd38268ac30a2f4a5bde6a409e2e03a24ce7e7:RWi1PECQ8Fqcs9NQLERNLa9rLyLr62C9I7bM1DLn8JrtGe3TGbbrQnp900xGgbTl12BFEI27lF8tpylN9lKxAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: input
 version: "1.0.0"
 description: The ryeos-ui chat box - an input buffer that dispatches through the engine route-fold
@@ -34,7 +34,7 @@ affordances:
   - id: command_dispatch
     label: Run command
     producer: tokens
-    requires_project: true
+    requires_project: false
     invoke:
       plane: rye
       ref: service:commands/dispatch
@@ -42,7 +42,7 @@ affordances:
         tokens: "{tokens}"
         arguments: "{arguments}"
         ref_bindings: {}
-        project_path: "@session:project_root"
+        project_path: "@session:project_root_or_null"
   - id: thread_control
     label: Control thread
     producer: selection

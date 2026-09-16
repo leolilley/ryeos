@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-13T04:38:33Z:1242267ebda4e19aed6a6952c58d147e427271825bae6dceecc69543b14d2f38:Sqwlsw8BTRFCHdJy31e7ym+KGBY9l/k5lgfRIlcj1z3Xa08o4tvz/InGxsIgZO+WstW3sRAHgXmL7DMC7gvFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T05:30:16Z:35906601bcf03e293feb46cb30b4ff7475b05a22d01e1ac382571303056c881c:RTzVs/86T4Dsvo6QCbyRniQHSPgzJswCCktAWQDZPtf/I0ho0JmQzxIznv3dqyeUpuQonH9l2vpuMcHb9HTgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
 description: Run one bounded Codex development turn and return its exact terminal candidate coordinate
@@ -8,6 +8,9 @@ requires:
     declared:
       - ryeos.execute.config.development/ryeos/worker-environment
       - ryeos.execute.worker_execution.codex/bounded-turn
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate
 config:
   start: run
   max_steps: 2

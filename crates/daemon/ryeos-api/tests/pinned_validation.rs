@@ -13,8 +13,8 @@ use ryeos_state::project_sync::{PROJECT_SNAPSHOT_CONFIG_RELATIVE, ProjectSyncSco
 use serde_json::{Value, json};
 
 // Exercise the real execute response mode and retained bundle engine. The
-// subject is an installed service so a successful validation can be clearly
-// distinguished from invoking its handler (which returns health, not schema).
+// Subject schema is retained in HEAD while the live descriptor is invalid.
+// Command coercion must use HEAD, without invoking or publishing anything.
 #[tokio::test]
 async fn current_head_validation_uses_pinned_authority_without_invoking_or_publishing() {
     let (_node, state) = test_state::build_test_state_with_bundles();
@@ -23,7 +23,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     let mut principal = RoutePrincipal::anonymous(operator.principal_id(), "ryeos_signed");
     principal.verified = true;
     principal.authorized_key_class = Some(AuthorizedKeyPrincipalClass::LocalClient);
-    principal.scopes = vec!["ryeos.execute.service.health/status".to_owned()];
+    principal.scopes = vec!["ryeos.execute.service.threads/list".to_owned()];
     let principal_key = ryeos_state::refs::principal_storage_key(&principal.id)
         .unwrap()
         .to_owned();
@@ -46,11 +46,26 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         size: config.len() as u64,
         normalized_mode: 0o644,
     };
+    let service_path = ".ai/services/threads/list.yaml";
+    let service_bytes =
+        std::fs::read(ryeos_engine::test_support::standard_bundle_root().join(service_path))
+            .unwrap();
+    let service_file = ProjectFile {
+        blob_hash: cas.store_blob(&service_bytes).unwrap(),
+        size: service_bytes.len() as u64,
+        normalized_mode: 0o644,
+    };
     let tree = ProjectTree {
-        files: [(
-            PROJECT_SNAPSHOT_CONFIG_RELATIVE.to_owned(),
-            cas.store_object(&file.to_value()).unwrap(),
-        )]
+        files: [
+            (
+                PROJECT_SNAPSHOT_CONFIG_RELATIVE.to_owned(),
+                cas.store_object(&file.to_value()).unwrap(),
+            ),
+            (
+                service_path.to_owned(),
+                cas.store_object(&service_file.to_value()).unwrap(),
+            ),
+        ]
         .into(),
     };
     let snapshot = ProjectSnapshot {
@@ -76,6 +91,9 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
 
     // Live source drift must not replace the exact generation selected above.
     std::fs::write(&config_path, "not valid snapshot policy").unwrap();
+    let live_service = project.path().join(service_path);
+    std::fs::create_dir_all(live_service.parent().unwrap()).unwrap();
+    std::fs::write(&live_service, "invalid live descriptor: [").unwrap();
     let raw = serde_json::from_value(json!({
         "id": "core/execute", "path": "/execute", "methods": ["POST"],
         "auth": "ryeos_signed", "response": {"mode": "execute"},
@@ -112,12 +130,13 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         captures: Default::default(),
         request_parts,
         body_raw: serde_json::to_vec(&json!({
-            "item_ref": "service:health/status",
+            "item_ref": "service:threads/list",
             "ref_bindings": {},
             "project_path": project.path(),
             "execution_policy": ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Wait).exclude_operator_vault(),
             "validate_only": true,
-            "parameters": {},
+            "parameters": {"limit": "007"},
+            "parameter_encoding": "command",
         })).unwrap(),
         principal,
         state: state.clone(),
@@ -133,7 +152,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     .unwrap();
     assert_eq!(status, StatusCode::OK, "{body:#}");
     assert_eq!(body["validated"], true, "{body:#}");
-    assert_eq!(body["item_ref"], "service:health/status");
+    assert_eq!(body["item_ref"], "service:threads/list");
     assert!(
         body.get("status").is_none(),
         "handler must not run: {body:#}"

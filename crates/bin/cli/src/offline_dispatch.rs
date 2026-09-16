@@ -1193,7 +1193,12 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
+            // Exec tests are re-entered in a subprocess. Their parent owns
+            // cleanup because successful exec cannot run Rust destructors.
+            let tmp = match std::env::var_os("RYEOS_CLIENT_EXEC_TEST_ROOT") {
+                Some(root) => tempfile::tempdir_in(root).unwrap(),
+                None => tempfile::tempdir().unwrap(),
+            };
             let system = tmp.path().join("system");
             let project = tmp.path().join("project");
             std::fs::create_dir_all(project.join(ryeos_engine::AI_DIR)).unwrap();
@@ -1273,8 +1278,9 @@ mod tests {
             this.write_node_policy_generation();
             this.write_registration();
             this.write_core_bundle_registration(&core_bundle);
+            // Exercise the real signed identity composer, including its current
+            // policy-fact contract. Only parser I/O is mocked by this fixture.
             for handler_bin in [
-                "rye-composer-identity",
                 "rye-parser-regex-kv",
                 "rye-parser-yaml-document",
                 "rye-parser-yaml-header-document",
@@ -1405,10 +1411,13 @@ mod tests {
         }
 
         fn write_capture_bin(&self, capture_file: &Path) {
+            let quoted = format!(
+                "'{}'",
+                capture_file.to_string_lossy().replace('\'', "'\"'\"'")
+            );
             let script = format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$RYEOS_CLIENT_PROJECT_PATH\" > {}\nprintf '%s\\n' \"$@\" >> {}\n",
-                capture_file.display(),
-                capture_file.display()
+                quoted, quoted
             );
             self.write_bin("capture-client", script.as_bytes());
         }
@@ -1589,53 +1598,28 @@ mod tests {
 import json
 import sys
 
-req = json.load(sys.stdin)
+envelope = json.load(sys.stdin)
+assert envelope["schema_version"] == 6
+req = envelope["request"]
+
+def emit(response):
+    print(json.dumps({"schema_version": 6, "response": response}))
 cmd = req.get("command")
 
 if cmd == "validate_parser_config":
-    print(json.dumps({"result": "validate_ok"}))
-elif cmd == "validate_composer_config":
-    config = req.get("composer_config")
-    requirements = req.get("field_requirements", [])
-    if config not in (None, {}):
-        print(json.dumps({
-            "result": "validate_err",
-            "message": "identity composer takes no config",
-        }))
-    elif any(not item.get("field") for item in requirements):
-        print(json.dumps({
-            "result": "validate_err",
-            "message": "identity composer field requirement must not be empty",
-        }))
-    elif any(item.get("semantics") != "root_verbatim" for item in requirements):
-        print(json.dumps({
-            "result": "validate_err",
-            "message": "identity composer only preserves root fields verbatim",
-        }))
-    else:
-        print(json.dumps({
-            "result": "validate_composer_ok",
-            "field_requirements": requirements,
-        }))
+    emit({"result": "validate_ok"})
 elif cmd == "parse":
     try:
         import yaml
         value = yaml.safe_load(req.get("content") or "")
         if value is None:
             value = {}
-        print(json.dumps({"result": "parse_ok", "value": value}))
+        emit({"result": "parse_ok", "value": value})
     except Exception as exc:
-        print(json.dumps({"result": "parse_err", "kind": "syntax", "message": str(exc)}))
-elif cmd == "compose":
-    root = req.get("root", {})
-    print(json.dumps({
-        "result": "compose_ok",
-        "composed": root.get("parsed", {}),
-        "derived": {},
-        "policy_facts": {},
-    }))
+        emit({"result": "parse_err", "kind": "syntax", "message": str(exc)})
+
 else:
-    print(json.dumps({"result": "validate_err", "message": "unknown command"}))
+    emit({"result": "validate_err", "message": "unknown command"})
 "#
     }
 
@@ -1852,6 +1836,17 @@ else:
             "tokens: [\"custom\"]\ndescription: Other offline command\ndispatch:\n  kind: execute_ref\n  execute: service:other\n",
         );
 
+        // Authorize both sources so this reaches token collision validation,
+        // rather than correctly failing the earlier source-authority gate.
+        let policy_path = fixture
+            .system
+            .join(".ai/node/policies/command_registration.yaml");
+        let raw = std::fs::read_to_string(&policy_path).unwrap();
+        let mut policy: Value =
+            serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap();
+        policy["bundle_source_caps"]["second"] = serde_json::json!([]);
+        fixture.write_signed(&policy_path, &serde_yaml::to_string(&policy).unwrap());
+
         let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
             .unwrap_err();
         match err {
@@ -2003,11 +1998,57 @@ else:
         assert_eq!(result["arg"], "print(f'{tool_path}')");
     }
 
+    fn run_client_exec_test(name: &str) -> Option<(String, String)> {
+        if std::env::var_os("RYEOS_CLIENT_EXEC_TEST_ROOT").is_some() {
+            return None;
+        }
+        let root = tempfile::Builder::new()
+            .prefix("ryeos client's exec ")
+            .tempdir()
+            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("offline_dispatch::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("RYEOS_CLIENT_EXEC_TEST_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some((
+            std::fs::read_to_string(root.path().join("expected-project")).unwrap(),
+            std::fs::read_to_string(root.path().join("capture")).unwrap(),
+        ))
+    }
+
+    fn client_exec_capture(fixture: &Fixture) -> PathBuf {
+        let root = PathBuf::from(std::env::var_os("RYEOS_CLIENT_EXEC_TEST_ROOT").unwrap());
+        std::fs::write(root.join("expected-project"), fixture.project_str()).unwrap();
+        root.join("capture")
+    }
+
     #[test]
-    fn offline_client_forwards_tail_and_returns_silent() {
+    fn offline_client_exec_forwards_tail() {
+        if let Some((project, captured)) = run_client_exec_test("offline_client_exec_forwards_tail")
+        {
+            let lines: Vec<&str> = captured.lines().collect();
+            assert_eq!(lines[0], project);
+            assert!(
+                lines[1..]
+                    .windows(2)
+                    .any(|pair| pair == ["--surface", "main"])
+            );
+            assert!(lines[1..].contains(&"--mock"));
+            return;
+        }
         let fixture = Fixture::new();
         fixture.write_client_kind_schema();
-        let capture_file = fixture._tmp.path().join("client-capture.txt");
+        let capture_file = client_exec_capture(&fixture);
         fixture.write_capture_bin(&capture_file);
         fixture.write_signed(
             &fixture
@@ -2028,7 +2069,7 @@ else:
             "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\n    mock: \"--mock\"\nserves:\n  kind: surface\n",
         );
 
-        let outcome = try_offline_dispatch_for_test(
+        let _ = try_offline_dispatch_for_test(
             &[
                 "capture".to_string(),
                 "--surface".to_string(),
@@ -2041,23 +2082,22 @@ else:
         .unwrap()
         .expect("handled offline");
 
-        assert!(matches!(outcome, OfflineDispatchOutcome::Silent));
-        let captured = std::fs::read_to_string(capture_file).unwrap();
-        let lines: Vec<&str> = captured.lines().collect();
-        assert_eq!(lines[0], fixture.project_str());
-        assert!(
-            lines[1..]
-                .windows(2)
-                .any(|pair| pair == ["--surface", "main"])
-        );
-        assert!(lines[1..].contains(&"--mock"));
+        panic!("a successful client must replace the child process");
     }
 
     #[test]
     fn offline_client_maps_command_defaults_through_launch_args() {
+        if let Some((project, captured)) =
+            run_client_exec_test("offline_client_maps_command_defaults_through_launch_args")
+        {
+            let lines: Vec<&str> = captured.lines().collect();
+            assert_eq!(lines[0], project);
+            assert_eq!(lines[1..], ["--surface", "surface:demo/base"]);
+            return;
+        }
         let fixture = Fixture::new();
         fixture.write_client_kind_schema();
-        let capture_file = fixture._tmp.path().join("client-default-capture.txt");
+        let capture_file = client_exec_capture(&fixture);
         fixture.write_capture_bin(&capture_file);
         fixture.write_signed(
             &fixture
@@ -2078,7 +2118,7 @@ else:
             "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\nserves:\n  kind: surface\n",
         );
 
-        let outcome = try_offline_dispatch_for_test(
+        let _ = try_offline_dispatch_for_test(
             &["capture".to_string(), "base".to_string()],
             &fixture.system,
             &fixture.project_str(),
@@ -2086,10 +2126,6 @@ else:
         .unwrap()
         .expect("handled offline");
 
-        assert!(matches!(outcome, OfflineDispatchOutcome::Silent));
-        let captured = std::fs::read_to_string(capture_file).unwrap();
-        let lines: Vec<&str> = captured.lines().collect();
-        assert_eq!(lines[0], fixture.project_str());
-        assert_eq!(lines[1..], ["--surface", "surface:demo/base"]);
+        panic!("a successful client must replace the child process");
     }
 }

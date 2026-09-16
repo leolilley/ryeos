@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T12:26:55Z:7260c8249586eaee3203f9d1e1d9c5099e2ea04b04c67c048cc7272434095a03:tR0LvHD7o+9PQ7UX8zolQMx7hdr6W4wCH5MWplFXVYPNMGml/wsumvv4W8ivG2UmUHXCe2e2A4RPo0oOvq/aBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T07:23:10Z:5cee57f0b67504157824cba60e8a0add35f8c500fafcc2ee143af7379ca8a594:lFXCFqWFkVbaAlNstoNkmG/2JYQByIdwlJwEqvIM6Cb1vkrtXMlzpHSXrXYeevTytrdMGxHwEj+V48pvmip2BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - run
@@ -34,7 +34,7 @@ defaults:
       name_policy:
         kind: declared_required
     project:
-      kind: live_authority
+      kind: live_direct
       access: read_write
       child_policy:
         kind: inherit

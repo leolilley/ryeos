@@ -667,6 +667,9 @@ fn bind_authored_parameter(
 
 fn resolve_session_markers(value: &Value, project_root: Option<&str>) -> Result<Value> {
     match value {
+        Value::String(marker) if marker == "@session:project_root_or_null" => {
+            Ok(project_root.map(Value::from).unwrap_or(Value::Null))
+        }
         Value::String(marker) if marker == "@session:project_root" => {
             project_root.map(Value::from).ok_or_else(|| {
                 HandlerError::BadRequest(
@@ -1149,5 +1152,30 @@ mod tests {
         assert_eq!(selected.fingerprint, browser_context.fingerprint);
         assert_eq!(selected.scopes, browser_context.scopes);
         assert!(!selected.verified);
+    }
+
+    #[test]
+    fn optional_project_marker_preserves_projectless_command_dispatch() {
+        assert_eq!(
+            resolve_session_markers(
+                &json!({"project_path": "@session:project_root_or_null"}),
+                None,
+            )
+            .unwrap(),
+            json!({"project_path": null})
+        );
+        assert_eq!(
+            resolve_session_markers(
+                &json!({"project_path": "@session:project_root_or_null"}),
+                Some("/project"),
+            )
+            .unwrap(),
+            json!({"project_path": "/project"})
+        );
+    }
+
+    #[test]
+    fn required_project_marker_still_refuses_projectless_sessions() {
+        assert!(resolve_session_markers(&json!("@session:project_root"), None).is_err());
     }
 }
