@@ -18,7 +18,11 @@ pub struct NodeAccountingPolicy {
 
 impl NodeAccountingPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 1 {
+        // Schema 2 is the clean-cut accounting generation that shares the
+        // durable budget/anchor ledger with execution-resource operations.
+        // Its bounded acceptance-window field is unchanged, but a schema-1
+        // profile cannot authorize the expanded ledger semantics by omission.
+        if self.schema != 2 {
             bail!("node accounting policy schema is not current");
         }
         if self.issue_acceptance_window_ms == 0

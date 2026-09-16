@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,8 @@ pub(crate) enum SessionCapsuleVerificationStage {
     RetainedProtocol,
     #[error("session-capsule/process-control")]
     ProcessControl,
+    #[error("session-capsule/nested-authority")]
+    NestedAuthority,
     #[error("session-capsule/exact-program")]
     ExactProgram,
     #[error("session-capsule/captured-dependency")]
@@ -77,10 +80,11 @@ pub(crate) enum SessionCapsuleVerificationStage {
 
 impl SessionCapsuleVerificationStage {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 17] = [
+    pub(crate) const ALL: [Self; 18] = [
         Self::Load,
         Self::RetainedProtocol,
         Self::ProcessControl,
+        Self::NestedAuthority,
         Self::ExactProgram,
         Self::CapturedDependency,
         Self::ExecutableSearch,
@@ -102,6 +106,7 @@ impl SessionCapsuleVerificationStage {
             Self::Load => "session-capsule/load",
             Self::RetainedProtocol => "session-capsule/retained-protocol",
             Self::ProcessControl => "session-capsule/process-control",
+            Self::NestedAuthority => "session-capsule/nested-authority",
             Self::ExactProgram => "session-capsule/exact-program",
             Self::CapturedDependency => "session-capsule/captured-dependency",
             Self::ExecutableSearch => "session-capsule/executable-search",
@@ -226,6 +231,7 @@ pub struct ExclusivePersistentSessionIdentity {
     pub boot_epoch: u64,
     pub lifecycle_generation: u64,
     pub control_channel_identity: String,
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 /// Typed evidence for the caller that a start failure crossed process
@@ -246,6 +252,134 @@ struct HeldPersistentSession {
     process: ryeos_app::thread_lifecycle::SpawnedPersistentSessionAwaitingAttachment,
     socket: lillux::InheritedDuplexChannel,
     lifelines: Vec<Box<dyn Send + Sync>>,
+}
+
+#[derive(Clone)]
+enum PersistentResourceOwner {
+    Pooled(String),
+    Dedicated(String),
+}
+
+fn resource_cleanup_observer(
+    state: &AppState,
+    identity: &ryeos_app::process::ExecutionProcessIdentity,
+    owner: PersistentResourceOwner,
+) -> Option<ryeos_app::persistent_session::PersistentSessionCleanupObserver> {
+    if identity.resource_operations.is_empty() {
+        return None;
+    }
+    let accounting = state.accounting.clone();
+    let state_store = state.state_store.clone();
+    let identity = identity.clone();
+    Some(Arc::new(move || {
+        let proposed = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(&identity)?;
+        let evidence = match &owner {
+            PersistentResourceOwner::Pooled(owner_coordinate) => state_store
+                .prove_pooled_resource_owner_cleanup(owner_coordinate, &identity, &proposed)?,
+            PersistentResourceOwner::Dedicated(owner_coordinate) => state_store
+                .prove_dedicated_resource_owner_cleanup(owner_coordinate, &identity, &proposed)?,
+        };
+        let settlement =
+            ryeos_app::execution_resources::settle_process_resource_operations_with_accounting(
+                accounting.as_deref(),
+                &identity,
+                &evidence,
+            );
+        let owner_clear = match &owner {
+            PersistentResourceOwner::Pooled(owner_coordinate) if settlement.is_ok() => {
+                state_store.clear_pooled_resource_owner(owner_coordinate, &identity)
+            }
+            PersistentResourceOwner::Pooled(_) | PersistentResourceOwner::Dedicated(_) => Ok(()),
+        };
+        match (settlement, owner_clear) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(settlement), Ok(())) => Err(settlement),
+            (Ok(()), Err(clear)) => Err(clear),
+            (Err(settlement), Err(clear)) => {
+                Err(settlement.context(format!("resource owner clear also failed: {clear:#}")))
+            }
+        }
+    }))
+}
+
+fn resource_attribution_sink(
+    state: &AppState,
+    identity: &ryeos_app::process::ExecutionProcessIdentity,
+) -> Option<ryeos_app::persistent_session::PersistentSessionResourceAttributionSink> {
+    if identity.resource_operations.is_empty() {
+        return None;
+    }
+    let accounting = state.accounting.clone();
+    let operations = identity.resource_operations.clone();
+    Some(Arc::new(move |request, start, end| {
+        end.elapsed_nanoseconds_since(start)
+            .map_err(anyhow::Error::msg)
+            .context("validate persistent-session request occupancy interval")?;
+        let attributions = operations
+            .iter()
+            .map(|operation| {
+                ryeos_accounting::ResourceRequestAttribution {
+                    version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+                    attribution_id: ryeos_accounting::HexDigest::new("0".repeat(64))
+                        .expect("placeholder attribution digest is canonical"),
+                    operation_id: operation.operation_id.clone(),
+                    thread_id: request.thread_id.clone(),
+                    request_digest: request.request_digest.clone(),
+                    interval: ryeos_accounting::ResourceUsageInterval {
+                        start_tick_ns: start.tick_ns,
+                        end_tick_ns: end.tick_ns,
+                    },
+                }
+                .sealed()
+                .map_err(anyhow::Error::msg)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        accounting
+            .as_ref()
+            .context("resource request attribution requires the shared accounting ledger")?
+            .record_resource_request_attributions(&attributions, lillux::time::timestamp_millis())
+    }))
+}
+
+fn resource_eligibility(
+    state: &AppState,
+    identity: &ryeos_app::process::ExecutionProcessIdentity,
+) -> Option<ryeos_app::persistent_session::PersistentSessionResourceEligibility> {
+    let first = identity.resource_operations.first()?;
+    let gate_id = first.owner_gate_id.clone();
+    let owner = first.owner_incarnation.clone();
+    if identity
+        .resource_operations
+        .iter()
+        .any(|binding| binding.owner_gate_id != gate_id || binding.owner_incarnation != owner)
+    {
+        return Some(Arc::new(|| {
+            bail!("resident resource operations do not share one owner accounting gate")
+        }));
+    }
+    let accounting = state.accounting.clone();
+    Some(Arc::new(move || {
+        let accounting = accounting
+            .as_ref()
+            .context("resident resource eligibility requires the accounting ledger")?;
+        accounting.begin_resource_owner_request(
+            gate_id.as_str(),
+            owner.as_str(),
+            lillux::time::timestamp_millis(),
+        )?;
+        let accounting = Arc::clone(accounting);
+        let gate_id = gate_id.clone();
+        let owner = owner.clone();
+        Ok(
+            ryeos_app::persistent_session::PersistentSessionResourceRequestLease::new(move || {
+                accounting.finish_resource_owner_request(
+                    gate_id.as_str(),
+                    owner.as_str(),
+                    lillux::time::timestamp_millis(),
+                )
+            }),
+        )
+    }))
 }
 
 pub(crate) struct AdmittedSessionPublications {
@@ -792,6 +926,9 @@ pub(crate) fn admit_or_verify_prepared_sessions(
     recovered: bool,
     handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    outer_filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    outer_network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    outer_resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
 ) -> Result<AdmittedSessionPublications> {
     prepare_product_selections(
         state,
@@ -864,6 +1001,9 @@ pub(crate) fn admit_or_verify_prepared_sessions(
                 target_environment,
                 target_evidence,
                 content_target_contract,
+                outer_filesystem_authority_ceiling,
+                outer_network_authority_ceiling,
+                outer_resource_authority_ceiling,
             )
             .with_context(|| format!("verify recovered session dependency `{name}`"))?;
         } else {
@@ -890,6 +1030,9 @@ pub(crate) fn admit_or_verify_prepared_sessions(
                 target_environment,
                 target_evidence,
                 content_target_contract,
+                outer_filesystem_authority_ceiling,
+                outer_network_authority_ceiling,
+                outer_resource_authority_ceiling,
             )
             .inspect_err(|error| {
                 tracing::warn!(
@@ -1813,10 +1956,12 @@ pub(crate) fn session_contract(
         .ok_or_else(|| anyhow!("persistent-session protocol `{protocol_ref}` is not installed"))?;
     validate_persistent_session_protocol(&protocol.descriptor)
         .map_err(|error| anyhow!("persistent-session protocol `{protocol_ref}`: {error}"))?;
-    validate_session_target(
-        &dependency.resolution.composed.composed,
-        &declaration.target_path,
-    )?;
+    if let Some(target) = execution
+        .project_target_requirement(&dependency.resolution.composed.composed)
+        .map_err(anyhow::Error::msg)?
+    {
+        target.validate_current_platform()?;
+    }
     Ok(Some((declaration, protocol)))
 }
 
@@ -1854,37 +1999,6 @@ fn apply_resource_overrides(
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistentSessionTarget {
-    os: String,
-    arch: String,
-}
-
-fn validate_session_target(composed: &Value, path: &[String]) -> Result<()> {
-    let mut value = composed;
-    for segment in path {
-        value = value.get(segment).ok_or_else(|| {
-            anyhow!(
-                "persistent-session subject has no target constraint at `{}`",
-                path.join(".")
-            )
-        })?;
-    }
-    let target: PersistentSessionTarget = serde_json::from_value(value.clone())
-        .context("decode persistent-session target constraint")?;
-    if target.os != std::env::consts::OS || target.arch != std::env::consts::ARCH {
-        bail!(
-            "persistent-session target {}-{} does not admit this {}-{} node",
-            target.arch,
-            target.os,
-            std::env::consts::ARCH,
-            std::env::consts::OS
-        );
-    }
-    Ok(())
-}
-
 fn admit_session_capsule(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,
@@ -1896,6 +2010,9 @@ fn admit_session_capsule(
     environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
     evidence_attachments: &[PreparedEvidenceAttachment],
     content_target_contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
+    outer_filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    outer_network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    outer_resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
 ) -> Result<(String, Vec<ryeos_state::PendingCasPublication>)> {
     let session = validate_persistent_session_protocol(&protocol.descriptor)
         .map_err(|error| anyhow!(error))?;
@@ -2022,9 +2139,22 @@ fn admit_session_capsule(
     // Testimony and every later boot consume this same narrowed pair, not a
     // presumed isolation mode derived from the fact that this is a session.
     plan.restrict_isolation_authority(
-        session.workspace_authority.filesystem_ceiling(),
-        session.network_authority.network_ceiling(),
+        session
+            .workspace_authority
+            .filesystem_ceiling()
+            .intersect(outer_filesystem_authority_ceiling),
+        session
+            .network_authority
+            .network_ceiling()
+            .intersect(outer_network_authority_ceiling),
+        outer_resource_authority_ceiling,
     );
+    engine
+        .admit_execution_target(
+            plan.target_requirement(),
+            plan.execution_plan().resource_authority_ceiling,
+        )
+        .map_err(|error| anyhow!(error))?;
     plan.bind_persistent_session_workspace(&workspace)?;
     let artifact_identity = plan.admitted_artifact_identity(&request, protocol)?;
 
@@ -2149,9 +2279,19 @@ fn verify_session_capsule(
     environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
     evidence_attachments: &[PreparedEvidenceAttachment],
     content_target_contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
+    outer_filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    outer_network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    outer_resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule =
         load_capsule(state, capsule_hash).context(SessionCapsuleVerificationStage::Load)?;
+    validate_capsule_nested_authority(
+        &capsule,
+        outer_filesystem_authority_ceiling,
+        outer_network_authority_ceiling,
+        outer_resource_authority_ceiling,
+    )
+    .context(SessionCapsuleVerificationStage::NestedAuthority)?;
     validate_session_process_control(
         state,
         &retained_session_protocol(engine, &capsule)
@@ -2220,6 +2360,62 @@ fn verify_session_capsule(
     Ok(capsule)
 }
 
+fn validate_capsule_nested_authority(
+    capsule: &AdmittedPersistentSessionCapsule,
+    outer_filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    outer_network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    outer_resources: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+) -> Result<()> {
+    let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+        execution_plan, ..
+    } = &capsule.execution_closure
+    else {
+        bail!("persistent-session capsule has a non-direct execution closure");
+    };
+    let plan: ryeos_engine::contracts::ExecutionPlan =
+        serde_json::from_value(execution_plan.clone())
+            .context("decode persistent-session execution plan")?;
+    validate_nested_authority_values(
+        plan.filesystem_authority_ceiling,
+        plan.network_authority_ceiling,
+        plan.resource_authority_ceiling,
+        plan.target_requirement.as_ref(),
+        outer_filesystem,
+        outer_network,
+        outer_resources,
+    )
+}
+
+fn validate_nested_authority_values(
+    inner_filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    inner_network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    inner_resources: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+    target: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    outer_filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    outer_network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    outer_resources: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+) -> Result<()> {
+    if inner_filesystem.intersect(outer_filesystem) != inner_filesystem {
+        bail!("persistent-session filesystem authority exceeds its outer launch ceiling");
+    }
+    if inner_network.intersect(outer_network) != inner_network {
+        bail!("persistent-session network authority exceeds its outer launch ceiling");
+    }
+    validate_nested_resource_authority(inner_resources, target, outer_resources)
+}
+
+fn validate_nested_resource_authority(
+    inner: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+    target: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    outer: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+) -> Result<()> {
+    if inner.intersect(outer) != inner {
+        bail!("persistent-session resource authority exceeds its outer launch ceiling");
+    }
+    inner.admits(target)?;
+    Ok(())
+}
+
 pub fn inspect_capsule(
     state: &AppState,
     capsule_hash: &str,
@@ -2253,6 +2449,8 @@ pub fn inspect_capsule(
 pub fn execute_capsule<C, D>(
     state: &AppState,
     capsule_hash: &str,
+    accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+    request_identity: &ryeos_app::persistent_session::PersistentSessionRequestIdentity,
     request_body: Value,
     cancelled: C,
     on_delta: D,
@@ -2290,15 +2488,26 @@ where
         "capsule_hash": capsule_hash,
         "execution_realization_hash": capsule.execution_realization_hash,
         "authority": capsule.authority().digest()?,
+        "accounting_scope": accounting_scope,
     }))?;
     let lifecycle = capsule.lifecycle.clone();
     let wire = capsule.wire.clone();
-    state.persistent_sessions.execute(
+    state.persistent_sessions.execute_attributed(
         &pool_key,
         &lifecycle,
         &wire,
+        Some(request_identity),
         request_body,
-        || start_capsule_process(state, capsule_hash, &capsule, &exact),
+        || {
+            start_capsule_process(
+                state,
+                capsule_hash,
+                &capsule,
+                &exact,
+                accounting_scope,
+                &pool_key,
+            )
+        },
         cancelled,
         on_delta,
     )
@@ -2388,6 +2597,8 @@ fn start_capsule_process(
     capsule_hash: &str,
     capsule: &AdmittedPersistentSessionCapsule,
     exact: &PersistentSessionExactProgram,
+    accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+    funding_owner: &str,
 ) -> Result<StartedPersistentSession> {
     let session_protocol = retained_session_protocol(&state.engine, capsule)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
@@ -2413,20 +2624,154 @@ fn start_capsule_process(
         None,
         &BTreeMap::new(),
         Vec::new(),
+        accounting_scope,
+        funding_owner,
+        "pooled_session",
+        &workspace_name,
+        None,
         None,
     )?;
     held.lifelines.push(Box::new(workspace_lifeline));
-    // The fixed pool becomes the process owner as soon as this constructor
-    // succeeds. It has no durable cross-restart attachment: restart recovery
-    // deliberately reconstructs an equivalent pooled process from the
-    // immutable capsule.
-    let running = held.process.release_after_attachment()?;
+    let pooled_owner_coordinate = workspace_name;
+    if let Err(error) = state
+        .state_store
+        .attach_pooled_resource_owner(&pooled_owner_coordinate, &held.process.process_identity)
+    {
+        let process_identity = held.process.process_identity.clone();
+        let cleanup = held.process.abort_and_reap();
+        return Err(match cleanup {
+            Ok(()) => {
+                let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                    &process_identity,
+                );
+                match evidence.and_then(|evidence| {
+                    ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                        state,
+                        &process_identity,
+                        &evidence,
+                    )
+                }) {
+                    Ok(()) => error,
+                    Err(financial) => error.context(format!(
+                        "pooled owner attachment financial cleanup remained incomplete: {financial:#}"
+                    )),
+                }
+            }
+            Err(cleanup) => error.context(format!(
+                "pooled owner attachment cleanup remained incomplete: {cleanup:#}"
+            )),
+        });
+    }
+    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
+        state,
+        &held.process.process_identity.resource_operations,
+    ) {
+        let process_identity = held.process.process_identity.clone();
+        let cleanup = held.process.abort_and_reap();
+        let settlement = cleanup.as_ref().ok().map(|()| {
+            let proposed =
+                ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(&process_identity)?;
+            let evidence = state.state_store.prove_pooled_resource_owner_cleanup(
+                &pooled_owner_coordinate,
+                &process_identity,
+                &proposed,
+            )?;
+            ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                state,
+                &process_identity,
+                &evidence,
+            )?;
+            state
+                .state_store
+                .clear_pooled_resource_owner(&pooled_owner_coordinate, &process_identity)
+        });
+        return Err(match (cleanup, settlement) {
+            (Ok(()), Some(Ok(()))) => error,
+            (cleanup, settlement) => error.context(format!(
+                "pooled resource issue cleanup remained incomplete: process={cleanup:?}, settlement={settlement:?}"
+            )),
+        });
+    }
+    let cleanup_observer = resource_cleanup_observer(
+        state,
+        &held.process.process_identity,
+        PersistentResourceOwner::Pooled(pooled_owner_coordinate.clone()),
+    );
+    let resource_attribution_sink =
+        resource_attribution_sink(state, &held.process.process_identity);
+    let resource_eligibility = resource_eligibility(state, &held.process.process_identity);
+    let resource_occupancy_limit = held
+        .process
+        .process_identity
+        .resource_occupancy_limit
+        .clone();
+    let released_process_identity = held.process.process_identity.clone();
+    let release_authorization = if released_process_identity.resource_selections.is_empty() {
+        Ok(())
+    } else {
+        ryeos_app::execution_resources::authorize_process_resource_release(
+            state,
+            &released_process_identity.resource_operations,
+        )
+        .and_then(|()| {
+            state.state_store.authorize_pooled_resource_owner_release(
+                &pooled_owner_coordinate,
+                &released_process_identity,
+            )
+        })
+    };
+    let running = match release_authorization.and_then(|()| held.process.release_after_attachment())
+    {
+        Ok(running) => running,
+        Err(error) => {
+            let mut error = error;
+            if ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity)
+                .is_ok()
+            {
+                if let Err(settlement) =
+                    ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                        &released_process_identity,
+                    )
+                    .and_then(|proposed| {
+                        let evidence = state.state_store.prove_pooled_resource_owner_cleanup(
+                            &pooled_owner_coordinate,
+                            &released_process_identity,
+                            &proposed,
+                        )?;
+                        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                            state,
+                            &released_process_identity,
+                            &evidence,
+                        )
+                    })
+                    .and_then(|()| {
+                        state
+                            .state_store
+                            .clear_pooled_resource_owner(
+                                &pooled_owner_coordinate,
+                                &released_process_identity,
+                            )
+                    })
+                {
+                    error = error.context(format!(
+                        "settle pooled resource owner after release failure: {settlement:#}"
+                    ));
+                }
+            }
+            return Err(error);
+        }
+    };
     Ok(StartedPersistentSession {
         running,
         socket: held.socket,
         lifelines: held.lifelines,
         expected_boot_identity: None,
         observation_sink: None,
+        cleanup_observer,
+        resource_occupancy_limit,
+        resource_cleanup_allowance_ms: released_process_identity.resource_cleanup_allowance_ms,
+        resource_attribution_sink,
+        resource_eligibility,
     })
 }
 
@@ -2595,6 +2940,11 @@ fn spawn_capsule_process_held(
     state_root: Option<&Path>,
     runtime_environment: &BTreeMap<String, String>,
     mut extra_target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
+    accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+    funding_owner: &str,
+    resource_owner_kind: &str,
+    resource_owner_coordinate: &str,
+    process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
     process_scope: Option<lillux::ProcessScope>,
 ) -> Result<HeldPersistentSession> {
     let resolution = exact.resolution_output.restore();
@@ -2809,6 +3159,11 @@ fn spawn_capsule_process_held(
         session_protocol.network_authority,
         state_root,
         &format!("session-{}", &capsule_hash[..24]),
+        accounting_scope,
+        funding_owner,
+        resource_owner_kind,
+        resource_owner_coordinate,
+        process_scope_allocation,
         process_scope,
     )?;
     let mut lifelines: Vec<Box<dyn Send + Sync>> = Vec::with_capacity(leases.len());
@@ -2951,6 +3306,11 @@ pub fn start_exclusive_capsule(
         state_root,
         &runtime_environment,
         extra_target_channels,
+        identity.accounting_scope.as_ref(),
+        &identity.boot_identity_hash,
+        "dedicated_worker",
+        &identity.worker_instance_id,
+        Some(&allocation),
         Some(scope),
     )
     .map_err(|error| {
@@ -2994,6 +3354,7 @@ pub fn start_exclusive_capsule(
         updated_at_ms: now,
     };
     if let Err(error) = state.state_store.attach_worker_process(&record) {
+        let process_identity = held.process.process_identity.clone();
         let cleanup = held.process.abort_and_reap().err();
         return Err(match cleanup {
             Some(cleanup) => {
@@ -3011,13 +3372,114 @@ pub fn start_exclusive_capsule(
                         .context(ExclusiveWorkerCleanupUnproved),
                 }
             }
-            None => error,
+            None => {
+                let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                    &process_identity,
+                );
+                match evidence.and_then(|evidence| {
+                    ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                        state,
+                        &process_identity,
+                        &evidence,
+                    )
+                }) {
+                    Ok(()) => error,
+                    Err(financial) => error.context(format!(
+                        "exclusive attachment financial cleanup remained incomplete: {financial:#}"
+                    )),
+                }
+            }
         });
     }
-    let running = match held.process.release_after_attachment() {
+    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
+        state,
+        &held.process.process_identity.resource_operations,
+    ) {
+        let process_identity = held.process.process_identity.clone();
+        let cleanup = held.process.abort_and_reap();
+        let financial = cleanup.as_ref().ok().map(|()| {
+            let proposed =
+                ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(&process_identity)?;
+            let evidence = state.state_store.prove_dedicated_resource_owner_cleanup(
+                &identity.worker_instance_id,
+                &process_identity,
+                &proposed,
+            )?;
+            ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                state,
+                &process_identity,
+                &evidence,
+            )
+        });
+        let cleanup_state = if cleanup.is_ok() && financial.is_some_and(|result| result.is_ok()) {
+            "reaped"
+        } else {
+            "unproved"
+        };
+        let _ = state.state_store.settle_worker_process(
+            &identity.worker_instance_id,
+            &identity.placement_thread_id,
+            identity.boot_epoch,
+            cleanup_state,
+            "resource operation issue failed",
+        );
+        return Err(error.context(if cleanup_state == "reaped" {
+            "issue persistent-session resource operation"
+        } else {
+            "issue persistent-session resource operation; cleanup or financial settlement remains unproved"
+        }));
+    }
+    let released_process_identity = held.process.process_identity.clone();
+    let cleanup_observer = resource_cleanup_observer(
+        state,
+        &released_process_identity,
+        PersistentResourceOwner::Dedicated(identity.worker_instance_id.clone()),
+    );
+    let resource_attribution_sink = resource_attribution_sink(state, &released_process_identity);
+    let resource_eligibility = resource_eligibility(state, &released_process_identity);
+    let release_authorization = if released_process_identity.resource_selections.is_empty() {
+        Ok(())
+    } else {
+        ryeos_app::execution_resources::authorize_process_resource_release(
+            state,
+            &released_process_identity.resource_operations,
+        )
+        .and_then(|()| {
+            state
+                .state_store
+                .authorize_dedicated_resource_owner_release(
+                    &identity.worker_instance_id,
+                    &released_process_identity,
+                )
+        })
+    };
+    let running = match release_authorization.and_then(|()| held.process.release_after_attachment())
+    {
         Ok(running) => running,
         Err(error) => {
             let mut error = error;
+            if ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity)
+                .is_ok()
+                && let Err(financial) = (|| {
+                    let proposed = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                        &released_process_identity,
+                    )?;
+                    let evidence = state.state_store.prove_dedicated_resource_owner_cleanup(
+                        &identity.worker_instance_id,
+                        &released_process_identity,
+                        &proposed,
+                    )?;
+                    ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                        state,
+                        &released_process_identity,
+                        &evidence,
+                    )
+                })()
+            {
+                error = error.context(format!(
+                    "settle resource operation after release failure also failed: {financial:#}"
+                ));
+            }
             if let Err(settlement) = state.state_store.settle_worker_process(
                 &identity.worker_instance_id,
                 &identity.placement_thread_id,
@@ -3038,6 +3500,11 @@ pub fn start_exclusive_capsule(
         lifelines: held.lifelines,
         expected_boot_identity: Some(identity.boot_identity_hash.clone()),
         observation_sink: Some(observation_sink),
+        cleanup_observer,
+        resource_occupancy_limit: released_process_identity.resource_occupancy_limit.clone(),
+        resource_cleanup_allowance_ms: released_process_identity.resource_cleanup_allowance_ms,
+        resource_attribution_sink,
+        resource_eligibility,
     };
     let start_guard = match reservation.bind(started) {
         Ok(start_guard) => start_guard,
@@ -3384,6 +3851,7 @@ mod tests {
                 "session-capsule/load",
                 "session-capsule/retained-protocol",
                 "session-capsule/process-control",
+                "session-capsule/nested-authority",
                 "session-capsule/exact-program",
                 "session-capsule/captured-dependency",
                 "session-capsule/executable-search",
@@ -3405,6 +3873,75 @@ mod tests {
         }
         let unique = labels.into_iter().collect::<BTreeSet<_>>();
         assert_eq!(unique.len(), SessionCapsuleVerificationStage::ALL.len());
+    }
+
+    #[test]
+    fn nested_session_authority_is_non_narrowable_by_the_dependency() {
+        use ryeos_engine::contracts::{
+            ExecutionResourceAccess, ExecutionResourceAllocation,
+            ExecutionResourceAuthorityCeiling as Ceiling, ExecutionResourceRequirement,
+            ExecutionTargetRequirement,
+        };
+
+        let target = ExecutionTargetRequirement {
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            resources: vec![ExecutionResourceRequirement {
+                class: "accelerator".to_owned(),
+                count: 1,
+                allocation: ExecutionResourceAllocation::Exclusive,
+                access: ExecutionResourceAccess::ExecutionRestricted,
+                exact_facts: BTreeMap::new(),
+                minimum_facts: BTreeMap::new(),
+            }],
+        };
+        use ryeos_engine::isolation::{
+            IsolationFilesystemAuthorityCeiling as Filesystem,
+            IsolationNetworkAuthorityCeiling as Network,
+        };
+        assert!(
+            validate_nested_authority_values(
+                Filesystem::NodePolicy,
+                Network::NodePolicy,
+                Ceiling::NodePolicy,
+                None,
+                Filesystem::CapturedExecution,
+                Network::NodePolicy,
+                Ceiling::NodePolicy,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_nested_authority_values(
+                Filesystem::CapturedExecution,
+                Network::NodePolicy,
+                Ceiling::NodePolicy,
+                None,
+                Filesystem::CapturedExecution,
+                Network::Isolated,
+                Ceiling::NodePolicy,
+            )
+            .is_err()
+        );
+        assert!(validate_nested_resource_authority(
+            Ceiling::NodePolicy,
+            Some(&target),
+            Ceiling::Denied,
+        )
+        .is_err());
+        assert!(
+            validate_nested_resource_authority(Ceiling::Denied, Some(&target), Ceiling::Denied,)
+                .is_err()
+        );
+        assert!(
+            validate_nested_resource_authority(Ceiling::Denied, None, Ceiling::Denied,).is_ok()
+        );
+
+        let inherited = Ceiling::NodePolicy
+            .intersect(Ceiling::Denied)
+            .intersect(Ceiling::NodePolicy);
+        assert_eq!(inherited, Ceiling::Denied);
+        assert!(validate_nested_resource_authority(Ceiling::NodePolicy, None, inherited,).is_err());
     }
 
     #[test]
@@ -3749,7 +4286,6 @@ mod tests {
 
     fn resource_override_declaration() -> PersistentSessionDecl {
         PersistentSessionDecl {
-            target_path: vec!["supported_target".to_owned()],
             max_processes: 1,
             max_inflight_per_process: 1,
             max_address_space_bytes: 64 * 1024 * 1024,
@@ -3821,8 +4357,9 @@ mod tests {
             effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({
                 "supported_target": {
-                    "os": std::env::consts::OS,
-                    "arch": std::env::consts::ARCH
+                    "os": lillux::platform::current_target().os,
+                    "arch": lillux::platform::current_target().arch,
+                    "resources": []
                 }
             })),
         };
@@ -4241,24 +4778,5 @@ mod tests {
             downstream_identities(&first),
             downstream_identities(&retained_program_fixture("/opt/first/worker.yaml", 'b'))
         );
-    }
-
-    #[test]
-    fn persistent_session_target_is_checked_before_launch() {
-        let path = vec!["supported_target".to_owned()];
-        validate_session_target(
-            &json!({"supported_target": {
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH
-            }}),
-            &path,
-        )
-        .unwrap();
-        let error = validate_session_target(
-            &json!({"supported_target": {"os": "other", "arch": "other"}}),
-            &path,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("does not admit this"));
     }
 }

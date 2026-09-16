@@ -44,6 +44,8 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
     pub launch_owner: &'a str,
+    pub chain_root_id: &'a str,
+    pub accounting_scope: Option<&'a ryeos_state::objects::AdmittedAccountingScope>,
     pub vault_bindings: &'a [(String, String)],
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
@@ -62,6 +64,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     /// successor process has crossed the durable attachment boundary. Its
     /// later same-thread restart budget is a distinct recovery coordinate.
     pub rearm_native_resume_budget_after_attach: bool,
+    pub selected_resources: ryeos_app::execution_resources::SelectedExecutionResources,
 }
 
 pub(super) struct SpawnedRuntime {
@@ -70,6 +73,8 @@ pub(super) struct SpawnedRuntime {
     observation_declarations:
         BTreeMap<String, ryeos_engine::runtime_registry::ChildObservationDecl>,
     process: Option<lillux::RunningProcess>,
+    resource_occupancy_limit: Option<lillux::time::OccupancyLimit>,
+    resource_cleanup_allowance_ms: Option<u64>,
     attached_process: Option<AttachedProcessGuard>,
     workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     external_realizations: Option<super::super::external_content::BoundExternalRealizations>,
@@ -83,6 +88,18 @@ pub(super) struct SpawnedRuntimeWaitResult {
     /// exact process group absent and compare-cleared its workspace binding.
     /// An immediate spawn failure has no such attached-wait proof.
     pub settled_attached_wait: bool,
+}
+
+fn abort_unattached_runtime_resource_scope(
+    state: &ryeos_app::state::AppState,
+    reservation: Option<&ryeos_app::runtime_db::ProcessResourceReservationRecord>,
+    spawned: lillux::ProcessAwaitingAttachment,
+) -> Result<lillux::AbortedProcess> {
+    let proof = spawned.abort_and_reap().map_err(anyhow::Error::from)?;
+    if let Some(reservation) = reservation {
+        ryeos_app::execution_resources::cleanup_process_resource_reservation(state, reservation)?;
+    }
+    Ok(proof)
 }
 
 impl SpawnedRuntime {
@@ -101,7 +118,11 @@ impl SpawnedRuntime {
                 settled_attached_wait: false,
             };
         };
-        let result = process.wait();
+        let limit = self.resource_occupancy_limit.take();
+        let cleanup = self.resource_cleanup_allowance_ms.take();
+        let result = process.wait_interruptible(move || {
+            ryeos_app::process::resource_service_window_exhausted(limit.as_ref(), cleanup)
+        });
         emit_captured_child_observation_records(
             &self.thread_id,
             &self.runtime_ref,
@@ -173,6 +194,8 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         callback,
         thread_id,
         launch_owner,
+        chain_root_id,
+        accounting_scope,
         vault_bindings,
         thread_auth_token,
         roots,
@@ -185,6 +208,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         checkpoint_authority,
         is_resume,
         rearm_native_resume_budget_after_attach,
+        selected_resources,
     } = params;
     // Only this bounded protocol/environment construction precedes all
     // isolation setup and process contact. An arbitrary error returned later
@@ -339,31 +363,59 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         // above; its original owner explicitly returns no template descriptor.
         None
     };
-    let applied = match isolation.apply_awaiting_attachment_with_provenance(
-        request,
-        ryeos_engine::isolation::IsolationLaunchContext {
-            project_path: &spec.project_path,
-            project_authority,
-            immutable_project: immutable_project.as_ref(),
-            workspace_view: workspace_view.as_ref(),
-            filesystem_authority_ceiling,
-            network_authority_ceiling,
-            live_access: live_access.as_ref(),
-            state_root,
-            checkpoint_dir,
-            checkpoint_authority,
-            daemon_socket_path: isolation_daemon_socket_path,
-            bundle_roots: &envelope.roots.bundle_roots,
-            node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
-            verified_code: &[],
-            verified_command: Some(verified_command),
-            external_read_only_mounts: &admitted_mounts,
-            writable_runtime_view_mounts: &[],
-            target_channels: &[],
-            item_ref: &isolation_item_ref,
-            thread_id,
-        },
-    ) {
+    let isolation_context = ryeos_engine::isolation::IsolationLaunchContext {
+        project_path: &spec.project_path,
+        project_authority,
+        immutable_project: immutable_project.as_ref(),
+        workspace_view: workspace_view.as_ref(),
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+        live_access: live_access.as_ref(),
+        state_root,
+        checkpoint_dir,
+        checkpoint_authority,
+        daemon_socket_path: isolation_daemon_socket_path,
+        bundle_roots: &envelope.roots.bundle_roots,
+        node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
+        verified_code: &[],
+        verified_command: Some(verified_command),
+        external_read_only_mounts: &admitted_mounts,
+        writable_runtime_view_mounts: &[],
+        target_channels: &[],
+        item_ref: &isolation_item_ref,
+        thread_id,
+    };
+    let mut resource_scope = ryeos_app::execution_resources::prepare_process_resource_scope(
+        state,
+        &selected_resources,
+        "thread",
+        thread_id,
+    )
+    .map_err(|error| settle_unattached_runtime_failure(state, thread_id, launch_owner, error))?;
+    let resource_reservation = resource_scope
+        .as_ref()
+        .map(|prepared| prepared.reservation().clone());
+    let process_scope = resource_scope
+        .as_mut()
+        .map(ryeos_app::execution_resources::PreparedProcessResourceScope::take_scope)
+        .transpose()
+        .map_err(|error| {
+            settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
+        })?;
+    let applied_result = match selected_resources.devices() {
+        Some(devices) => isolation.apply_awaiting_attachment_in_scope_with_devices(
+            request,
+            isolation_context,
+            process_scope,
+            devices.as_ref(),
+        ),
+        None => isolation.apply_awaiting_attachment_in_scope_with_provenance(
+            request,
+            isolation_context,
+            process_scope,
+        ),
+    };
+    let applied = match applied_result {
         Ok(applied) => applied,
         Err(error) => {
             // This exact seam only compiles a held-launch request, including
@@ -372,6 +424,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             // borrowed descriptor before settling membership. This is not a
             // classification of arbitrary EngineError values as no-contact.
             drop(workspace_view);
+            if let Some(reservation) = resource_reservation.as_ref() {
+                ryeos_app::execution_resources::cleanup_process_resource_reservation(
+                    state,
+                    reservation,
+                )
+                .context("retire resource scope after isolation apply failure")?;
+            }
             return Err(settle_unattached_runtime_failure(
                 state,
                 thread_id,
@@ -391,6 +450,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         // its descriptor lifelines before settling the borrow, not via Drop
         // after the launch claim has disappeared.
         drop(request);
+        if let Some(reservation) = resource_reservation.as_ref() {
+            ryeos_app::execution_resources::cleanup_process_resource_reservation(
+                state,
+                reservation,
+            )
+            .context("retire resource scope after provenance persistence failure")?;
+        }
         return Err(settle_unattached_runtime_failure(
             state,
             thread_id,
@@ -409,6 +475,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 result.stderr_truncated,
             );
             if result.aborted_before_attachment.is_some() {
+                if let Some(reservation) = resource_reservation.as_ref() {
+                    ryeos_app::execution_resources::cleanup_process_resource_reservation(
+                        state,
+                        reservation,
+                    )
+                    .context("retire resource scope after aborted runtime spawn")?;
+                }
                 let failure = runtime_failure_result(
                     &result.stderr,
                     result.timed_out,
@@ -425,6 +498,11 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                     error,
                 ));
             }
+            if resource_reservation.is_some() {
+                return Err(anyhow::anyhow!(
+                    "managed resource-bearing runtime spawn has uncertain process contact; retained scope requires recovery"
+                ));
+            }
             // No checked abort proof: preserve the failed outcome but never
             // turn it into permission to erase borrowed workspace membership.
             return Ok(SpawnedRuntime {
@@ -432,6 +510,8 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 runtime_ref: item_ref.to_string(),
                 observation_declarations: observation_declarations.clone(),
                 process: None,
+                resource_occupancy_limit: None,
+                resource_cleanup_allowance_ms: None,
                 attached_process: None,
                 workspace_lifeline,
                 external_realizations,
@@ -444,27 +524,100 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             });
         }
     };
-    #[cfg(target_os = "linux")]
-    let process_identity_result =
-        ryeos_app::process::capture_execution_process_identity_from_pidfd(
-            spawned.pid() as i64,
-            Some(spawned.pgid()),
-            spawned.pidfd(),
-        )
-        .context("capture held managed-runtime identity from Lillux pidfd");
-    #[cfg(not(target_os = "linux"))]
-    let process_identity_result = ryeos_app::process::capture_execution_process_identity(
-        spawned.pid() as i64,
-        Some(spawned.pgid()),
-    )
-    .context("capture held managed-runtime identity");
+    let process_identity_result = spawned
+        .exact_process_identity()
+        .map_err(anyhow::Error::msg)
+        .and_then(|identity| {
+            ryeos_app::process::execution_process_identity_from_lillux(
+                identity,
+                spawned.scope_recovery().cloned(),
+            )
+        })
+        .context("capture held managed-runtime identity through Lillux");
     let process_identity = match process_identity_result {
-        Ok(identity) => identity,
+        Ok(mut identity) => {
+            let financial =
+                match ryeos_app::execution_resources::reserve_process_resource_operations(
+                    state,
+                    &selected_resources,
+                    accounting_scope,
+                    chain_root_id,
+                    thread_id,
+                    launch_owner,
+                    &identity,
+                ) {
+                    Ok(financial) => financial,
+                    Err(error) => {
+                        return Err(match abort_unattached_runtime_resource_scope(
+                            state,
+                            resource_reservation.as_ref(),
+                            spawned,
+                        ) {
+                        Err(cleanup) => error.context(format!(
+                            "resource reservation failed and held-process cleanup failed: {cleanup}"
+                        )),
+                        Ok(_) => settle_unattached_runtime_failure(
+                            state,
+                            thread_id,
+                            launch_owner,
+                            error,
+                        ),
+                    });
+                    }
+                };
+            if let Err(error) = identity.bind_execution_resources(
+                selected_resources.selections().to_vec(),
+                financial.bindings().to_vec(),
+                selected_resources.max_concurrent_exclusive_allocations(),
+                financial.occupancy_start(),
+                financial.occupancy_limit(),
+                financial.cleanup_allowance_ms(),
+            ) {
+                let financial_cleanup =
+                    ryeos_app::execution_resources::abandon_prepared_process_resource_operations(
+                        state,
+                        financial.bindings(),
+                    );
+                return Err(
+                    match abort_unattached_runtime_resource_scope(
+                        state,
+                        resource_reservation.as_ref(),
+                        spawned,
+                    ) {
+                        Err(cleanup) => {
+                            error.context(format!("pending-process cleanup failed: {cleanup}"))
+                        }
+                        Ok(_) => match financial_cleanup {
+                            Ok(()) => settle_unattached_runtime_failure(
+                                state,
+                                thread_id,
+                                launch_owner,
+                                error,
+                            ),
+                            Err(financial_cleanup) => error.context(format!(
+                                "resource reservation cleanup failed: {financial_cleanup:#}"
+                            )),
+                        },
+                    },
+                );
+            }
+            identity
+        }
         Err(error) => {
-            return Err(match spawned.abort_and_reap() {
-                Err(cleanup) => error.context(format!("pending-process cleanup failed: {cleanup}")),
-                Ok(_) => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
-            });
+            return Err(
+                match abort_unattached_runtime_resource_scope(
+                    state,
+                    resource_reservation.as_ref(),
+                    spawned,
+                ) {
+                    Err(cleanup) => {
+                        error.context(format!("pending-process cleanup failed: {cleanup}"))
+                    }
+                    Ok(_) => {
+                        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
+                    }
+                },
+            );
         }
     };
     // The runtime cannot self-attach before release. An existing identity at
@@ -490,16 +643,33 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     };
     if let Err(error) = attach_result {
         let error = error.context("attach held managed runtime process identity");
-        return match spawned.abort_and_reap() {
+        return match abort_unattached_runtime_resource_scope(
+            state,
+            resource_reservation.as_ref(),
+            spawned,
+        ) {
             Err(cleanup) => {
                 Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
             }
-            Ok(_) => Err(settle_unattached_runtime_failure(
-                state,
-                thread_id,
-                launch_owner,
-                error,
-            )),
+            Ok(_) => {
+                let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                    &process_identity,
+                );
+                let financial = ryeos_app::execution_resources::
+                    settle_process_resource_operations_after_cleanup(
+                        state,
+                        &process_identity,
+                        &evidence?,
+                    );
+                Err(match financial {
+                    Ok(()) => {
+                        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
+                    }
+                    Err(financial) => {
+                        error.context(format!("resource cleanup settlement failed: {financial:#}"))
+                    }
+                })
+            }
         };
     }
     let mut attached_process =
@@ -546,11 +716,46 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             None => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
         });
     }
-    if let Err(error) =
+    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
+        state,
+        &process_identity.resource_operations,
+    ) {
+        let cleanup = spawned
+            .abort_and_reap()
+            .map_err(anyhow::Error::from)
+            .and_then(|_| {
+                let proposed = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                    &process_identity,
+                )?;
+                let evidence = state.state_store.prove_thread_resource_owner_cleanup(
+                    thread_id,
+                    &process_identity,
+                    &proposed,
+                )?;
+                ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                    state,
+                    &process_identity,
+                    &evidence,
+                )
+            })
+            .and_then(|_| attached_process.settle_after_reap())
+            .err();
+        return Err(match cleanup {
+            Some(cleanup) => error.context(format!(
+                "resource issue failed and cleanup remains unresolved: {cleanup:#}"
+            )),
+            None => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
+        });
+    }
+    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
+        state,
+        &process_identity.resource_operations,
+    )
+    .and_then(|()| {
         state
             .threads
             .authorize_process_release_owned(thread_id, &process_identity, launch_owner)
-    {
+    }) {
         let cleanup = spawned
             .abort_and_reap()
             .map_err(anyhow::Error::from)
@@ -579,7 +784,18 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             error,
         ));
     }
-    let spawned = match spawned.release_after_attachment() {
+    let release = match (
+        process_identity.resource_occupancy_limit.clone(),
+        process_identity.resource_cleanup_allowance_ms,
+    ) {
+        (Some(limit), Some(cleanup_ms)) => spawned.release_after_attachment_with_occupancy(
+            limit,
+            lillux::time::Duration::from_millis(cleanup_ms),
+        ),
+        (None, None) => spawned.release_after_attachment(),
+        _ => unreachable!("validated process identity has a complete occupancy contract"),
+    };
+    let spawned = match release {
         Ok(spawned) => spawned,
         Err(error) => {
             if !error.cleanup_is_settled() {
@@ -609,6 +825,8 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         runtime_ref: item_ref.to_string(),
         observation_declarations: observation_declarations.clone(),
         process: Some(spawned),
+        resource_occupancy_limit: process_identity.resource_occupancy_limit.clone(),
+        resource_cleanup_allowance_ms: process_identity.resource_cleanup_allowance_ms,
         attached_process: Some(attached_process),
         workspace_lifeline,
         external_realizations,
@@ -933,6 +1151,8 @@ mod tests {
             runtime_ref: "runtime:test/unproved".to_owned(),
             observation_declarations: BTreeMap::new(),
             process: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
             attached_process: None,
             workspace_lifeline: None,
             external_realizations: None,
@@ -974,6 +1194,8 @@ mod tests {
             runtime_ref: "runtime:test/immediate".to_string(),
             observation_declarations: BTreeMap::new(),
             process: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
             attached_process: None,
             workspace_lifeline: None,
             external_realizations: None,

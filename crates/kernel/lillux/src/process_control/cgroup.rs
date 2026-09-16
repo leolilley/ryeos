@@ -497,6 +497,12 @@ pub struct ProcessCgroup {
 }
 
 impl ProcessCgroup {
+    pub(crate) fn clone_kill_descriptor(&self) -> Result<File, String> {
+        self.kill
+            .try_clone()
+            .map_err(|error| format!("clone exact cgroup kill authority: {error}"))
+    }
+
     /// Prove this controller can place a child in the exact reserved scope,
     /// then freeze and terminate it. The child performs only async-signal-safe
     /// syscalls and never execs a host program or workload. CLONE_PIDFD retains

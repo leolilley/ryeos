@@ -2520,6 +2520,39 @@ pub fn get_provider_attempt_budget_transition_identity(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceBudgetTransitionIdentity {
+    pub transition_id: String,
+    pub operation_id: String,
+    pub transition_sequence: i64,
+    pub payload_fingerprint: String,
+    pub chain_seq: i64,
+}
+
+pub fn get_resource_budget_transition_identity(
+    db: &ProjectionDb,
+    transition_id: &str,
+) -> anyhow::Result<Option<ResourceBudgetTransitionIdentity>> {
+    db.connection()
+        .query_row(
+            "SELECT transition_id, operation_id, transition_sequence,
+                    payload_fingerprint, chain_seq
+             FROM resource_budget_transition_once WHERE transition_id=?1",
+            [transition_id],
+            |row| {
+                Ok(ResourceBudgetTransitionIdentity {
+                    transition_id: row.get(0)?,
+                    operation_id: row.get(1)?,
+                    transition_sequence: row.get(2)?,
+                    payload_fingerprint: row.get(3)?,
+                    chain_seq: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .context("query resource budget transition identity")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectObservationIdentity {
     pub observation_id: String,
     pub chain_root_id: String,
@@ -2684,6 +2717,48 @@ pub fn provider_attempt_budget_projection_bounds(
             },
         )
         .context("query provider attempt budget projection bounds")
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceCostSummary {
+    pub operation_count: i64,
+    pub settled_operation_count: i64,
+    pub unresolved_operation_count: i64,
+    pub budget_charge_usd_nanos: i64,
+}
+
+/// Exact resource purchases directly owned by one thread. This never joins
+/// provider attempts and never expands into descendants; callers must retain
+/// that direct basis rather than presenting it as a rollup.
+pub fn summarize_direct_resource_cost(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<ResourceCostSummary> {
+    db.connection()
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(transition IN (
+                        'reconciled', 'charged_reserved_maximum',
+                        'reservation_bound_violated', 'advisory_reconciled',
+                        'released_unissued', 'advisory_released_unissued',
+                        'reservation_denied'
+                    )), 0),
+                    COALESCE(SUM(transition IN (
+                        'reserved', 'issued', 'advisory_pending', 'advisory_issued'
+                    )), 0),
+                    COALESCE(SUM(COALESCE(budget_charge_usd_nanos, 0)), 0)
+             FROM resource_budget_latest WHERE thread_id=?1",
+            [thread_id],
+            |row| {
+                Ok(ResourceCostSummary {
+                    operation_count: row.get(0)?,
+                    settled_operation_count: row.get(1)?,
+                    unresolved_operation_count: row.get(2)?,
+                    budget_charge_usd_nanos: row.get(3)?,
+                })
+            },
+        )
+        .context("query direct resource cost summary")
 }
 
 pub fn summarize_provider_attempt_budget(
@@ -2864,6 +2939,81 @@ mod tests {
         .build_with_ts("2026-07-24T00:00:00Z".to_string())
     }
 
+    fn resource_transition_event(
+        chain_seq: u64,
+        transition_sequence: u32,
+        transition: ryeos_accounting::ResourceBudgetState,
+    ) -> crate::ThreadEvent {
+        resource_transition_event_for(
+            "R-projection",
+            "T-runtime",
+            chain_seq,
+            transition_sequence,
+            transition,
+        )
+    }
+
+    fn resource_transition_event_for(
+        operation_id: &str,
+        thread_id: &str,
+        chain_seq: u64,
+        transition_sequence: u32,
+        transition: ryeos_accounting::ResourceBudgetState,
+    ) -> crate::ThreadEvent {
+        let charged = matches!(
+            transition,
+            ryeos_accounting::ResourceBudgetState::Reconciled
+                | ryeos_accounting::ResourceBudgetState::ChargedReservedMaximum
+                | ryeos_accounting::ResourceBudgetState::ReservationBoundViolated
+        );
+        let observed = matches!(
+            transition,
+            ryeos_accounting::ResourceBudgetState::Reconciled
+                | ryeos_accounting::ResourceBudgetState::ReservationBoundViolated
+                | ryeos_accounting::ResourceBudgetState::AdvisoryReconciled
+        );
+        let advisory = matches!(
+            transition,
+            ryeos_accounting::ResourceBudgetState::AdvisoryPending
+                | ryeos_accounting::ResourceBudgetState::AdvisoryReleasedUnissued
+                | ryeos_accounting::ResourceBudgetState::AdvisoryIssued
+                | ryeos_accounting::ResourceBudgetState::AdvisoryReconciled
+        );
+        NewEvent::new(
+            "T-root",
+            thread_id,
+            crate::event_types::RESOURCE_BUDGET_TRANSITION_V1,
+        )
+        .chain_seq(chain_seq)
+        .thread_seq(chain_seq)
+        .payload(
+            serde_json::to_value(ryeos_accounting::ResourceBudgetTransitionV1 {
+                version: ryeos_accounting::RESOURCE_BUDGET_TRANSITION_VERSION,
+                transition_id: ryeos_accounting::transition_id(operation_id, transition_sequence),
+                transition_sequence,
+                operation_id: operation_id.to_string(),
+                budget_authority_site_id: "S-site".to_string(),
+                ledger_epoch: 1,
+                execution_budget_id: "B-execution".to_string(),
+                root_chain_id: "T-root".to_string(),
+                audit_chain_root_id: "T-root".to_string(),
+                thread_id: thread_id.to_string(),
+                launch_generation: "G-launch".to_string(),
+                owner_incarnation: "I-process".to_string(),
+                stable_resource_id: "gpu-0".to_string(),
+                authority_digest: ryeos_accounting::HexDigest::new("a".repeat(64)).unwrap(),
+                transition,
+                reserved_usd_nanos: if advisory { 0 } else { 2_000_000 },
+                budget_charge_usd_nanos: charged.then_some(1_500_000),
+                usage_digest: observed
+                    .then(|| ryeos_accounting::HexDigest::new("b".repeat(64)).unwrap()),
+                occurred_at_ms: 1_000 + i64::from(transition_sequence),
+            })
+            .unwrap(),
+        )
+        .build_with_ts("2026-07-24T00:00:00Z".to_string())
+    }
+
     #[test]
     fn accounting_transition_projection_retains_exact_append_once_identity() {
         let db = test_db();
@@ -2932,6 +3082,153 @@ mod tests {
         project_event(&db, &budget_transition_event(1, "cfg")).unwrap();
         let error = project_event(&db, &budget_transition_event(2, "changed")).unwrap_err();
         assert!(format!("{error:#}").contains("contradicts its projected publication identity"));
+    }
+
+    #[test]
+    fn resource_transition_projection_is_typed_monotonic_and_append_once() {
+        use ryeos_accounting::ResourceBudgetState::{Issued, Reconciled, Reserved};
+
+        let db = test_db();
+        let reserved = resource_transition_event(1, 1, Reserved);
+        project_event(&db, &reserved).unwrap();
+        project_event(&db, &reserved).unwrap();
+        project_event(&db, &resource_transition_event(2, 2, Issued)).unwrap();
+        project_event(&db, &resource_transition_event(3, 3, Reconciled)).unwrap();
+
+        let transition_id = ryeos_accounting::transition_id("R-projection", 3);
+        let identity = get_resource_budget_transition_identity(&db, &transition_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.operation_id, "R-projection");
+        assert_eq!(identity.transition_sequence, 3);
+        assert_eq!(identity.chain_seq, 3);
+
+        let regression = resource_transition_event(4, 4, Reserved);
+        let error = project_event(&db, &regression).unwrap_err();
+        assert!(format!("{error:#}").contains("illegal resource budget transition"));
+
+        let mut contradictory = resource_transition_event(5, 1, Reserved);
+        contradictory.payload["occurred_at_ms"] = json!(9_999);
+        let error = project_event(&db, &contradictory).unwrap_err();
+        assert!(format!("{error:#}").contains("contradicts its projected publication identity"));
+    }
+
+    #[test]
+    fn advisory_projection_retains_partial_then_accepts_exact_completion() {
+        use ryeos_accounting::ResourceBudgetState::{
+            AdvisoryIssued, AdvisoryPending, AdvisoryReconciled,
+        };
+
+        let db = test_db();
+        project_event(&db, &resource_transition_event(1, 1, AdvisoryPending)).unwrap();
+        project_event(&db, &resource_transition_event(2, 2, AdvisoryIssued)).unwrap();
+
+        let mut partial = resource_transition_event(3, 3, AdvisoryIssued);
+        partial.payload["usage_digest"] = json!("b".repeat(64));
+        project_event(&db, &partial).unwrap();
+        let pending = summarize_direct_resource_cost(&db, "T-runtime").unwrap();
+        assert_eq!(pending.operation_count, 1);
+        assert_eq!(pending.settled_operation_count, 0);
+        assert_eq!(pending.unresolved_operation_count, 1);
+
+        project_event(&db, &resource_transition_event(4, 4, AdvisoryReconciled)).unwrap();
+        let settled = summarize_direct_resource_cost(&db, "T-runtime").unwrap();
+        assert_eq!(settled.operation_count, 1);
+        assert_eq!(settled.settled_operation_count, 1);
+        assert_eq!(settled.unresolved_operation_count, 0);
+        assert_eq!(settled.budget_charge_usd_nanos, 0);
+    }
+
+    #[test]
+    fn direct_resource_cost_summary_covers_every_terminal_and_pending_branch() {
+        use ryeos_accounting::ResourceBudgetState as S;
+
+        let db = test_db();
+        let scenarios: &[(&str, &str, &[S], i64, i64)] = &[
+            ("denied", "T-denied", &[S::ReservationDenied], 1, 0),
+            (
+                "released",
+                "T-released",
+                &[S::Reserved, S::ReleasedUnissued],
+                1,
+                0,
+            ),
+            (
+                "charged-max",
+                "T-charged-max",
+                &[S::Reserved, S::Issued, S::ChargedReservedMaximum],
+                1,
+                1_500_000,
+            ),
+            (
+                "max-refined",
+                "T-max-refined",
+                &[
+                    S::Reserved,
+                    S::Issued,
+                    S::ChargedReservedMaximum,
+                    S::Reconciled,
+                ],
+                1,
+                1_500_000,
+            ),
+            (
+                "violated",
+                "T-violated",
+                &[S::Reserved, S::Issued, S::ReservationBoundViolated],
+                1,
+                1_500_000,
+            ),
+            (
+                "advisory-released",
+                "T-advisory-released",
+                &[S::AdvisoryPending, S::AdvisoryReleasedUnissued],
+                1,
+                0,
+            ),
+            (
+                "advisory-reconciled",
+                "T-advisory-reconciled",
+                &[S::AdvisoryPending, S::AdvisoryIssued, S::AdvisoryReconciled],
+                1,
+                0,
+            ),
+            ("pending", "T-pending", &[S::Reserved], 0, 0),
+            (
+                "advisory-pending",
+                "T-advisory-pending",
+                &[S::AdvisoryPending, S::AdvisoryIssued],
+                0,
+                0,
+            ),
+        ];
+
+        let mut chain_seq = 10u64;
+        for (operation, thread, transitions, settled, charge) in scenarios {
+            for (index, transition) in transitions.iter().copied().enumerate() {
+                project_event(
+                    &db,
+                    &resource_transition_event_for(
+                        &format!("R-{operation}"),
+                        thread,
+                        chain_seq,
+                        u32::try_from(index + 1).unwrap(),
+                        transition,
+                    ),
+                )
+                .unwrap();
+                chain_seq += 1;
+            }
+            let summary = summarize_direct_resource_cost(&db, thread).unwrap();
+            assert_eq!(summary.operation_count, 1, "{operation}");
+            assert_eq!(summary.settled_operation_count, *settled, "{operation}");
+            assert_eq!(
+                summary.unresolved_operation_count,
+                1 - *settled,
+                "{operation}"
+            );
+            assert_eq!(summary.budget_charge_usd_nanos, *charge, "{operation}");
+        }
     }
 
     fn insert_thread(

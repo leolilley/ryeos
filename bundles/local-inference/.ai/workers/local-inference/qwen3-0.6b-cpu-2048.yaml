@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:54Z:4180c78deddc48aaabaeedf1c4cbe7c416adadcbb82c72345d77ec10468b2030:YAe4iHnq5Ctgo4hXQzd4mhlh13663KzSTcprv26MSeVUC/RjyFBSg5YZYnWn9BXpG35KhKriMitDQaP4jdTtDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:8ccb94b63fea73858a2755d1adcb16f140e6ae05e705693f2803758b317fdd04:QoLOVTTmcL1QB+tgGvF4CnDNgRrAGy+tAqnTxJ3tjFY/0PxGwmRpKyaQuMo4WK9WpR+8yYe9m8ra4fXwBsJrCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -7,6 +7,7 @@ execution_protocol: protocol:ryeos/core/persistent_session
 supported_target:
   os: linux
   arch: x86_64
+  resources: []
 
 # This profile intentionally narrows the same kind-owned process ceiling. Its
 # implementation source and four immutable realizations are shared with the
@@ -17,7 +18,7 @@ session_resources:
 source:
   root: "lib/local-tinygrad"
   entry: "bootstrap.py"
-  digest: "e97688fbf4cd92d2e620db3e01b47dad7326ae403e0879869a21e63fbab4f28c"
+  digest: "4d814b3f959b6037ff9e3a4ee3cce9268a7e216b002d85baa70e00a76b96a3ec"
 
 external_content:
   - id: runtime

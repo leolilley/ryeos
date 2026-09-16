@@ -155,6 +155,10 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         project_provider_attempt_budget_latest(db, event)?;
     }
 
+    if event.event_type == crate::event_types::RESOURCE_BUDGET_TRANSITION_V1 {
+        project_resource_budget_latest(db, event)?;
+    }
+
     if event.event_type == crate::event_types::PROJECT_OBSERVATION_RECORDED {
         project_project_observation_once(db, event, &event_hash)?;
     }
@@ -757,6 +761,287 @@ fn project_provider_attempt_budget_latest(
         )
         .context("failed to project provider_attempt_budget_latest")?;
 
+    Ok(())
+}
+
+fn project_resource_budget_latest(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    let transition: ryeos_accounting::ResourceBudgetTransitionV1 =
+        serde_json::from_value(event.payload.clone())
+            .context("invalid resource_budget_transition_v1 payload")?;
+    transition
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid resource budget transition: {error}"))?;
+    if event.chain_root_id != transition.audit_chain_root_id {
+        anyhow::bail!(
+            "resource transition {} appended to chain {} but declares audit chain {}",
+            transition.transition_id,
+            event.chain_root_id,
+            transition.audit_chain_root_id
+        );
+    }
+    let payload_fingerprint = lillux::sha256_hex(
+        lillux::canonical_json(&event.payload)
+            .context("canonicalize resource budget transition payload")?
+            .as_bytes(),
+    );
+    let incoming_chain_seq = u64_to_i64(event.chain_seq, "chain_seq")?;
+
+    let existing_identity: Option<(String, i64, String)> = db
+        .connection()
+        .query_row(
+            "SELECT operation_id, transition_sequence, payload_fingerprint
+             FROM resource_budget_transition_once WHERE transition_id=?1",
+            rusqlite::params![&transition.transition_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .context("read resource transition publication identity")?;
+    let identity_replayed = existing_identity.is_some();
+    if let Some((operation_id, sequence, fingerprint)) = existing_identity {
+        if operation_id != transition.operation_id
+            || sequence != i64::from(transition.transition_sequence)
+            || fingerprint != payload_fingerprint
+        {
+            anyhow::bail!(
+                "resource transition ID {} contradicts its projected publication identity",
+                transition.transition_id
+            );
+        }
+    } else {
+        let coordinate: Option<(String, String)> = db
+            .connection()
+            .query_row(
+                "SELECT transition_id, payload_fingerprint
+                 FROM resource_budget_transition_once
+                 WHERE operation_id=?1 AND transition_sequence=?2",
+                rusqlite::params![
+                    &transition.operation_id,
+                    i64::from(transition.transition_sequence)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("read resource transition coordinate identity")?;
+        if let Some((transition_id, fingerprint)) = coordinate {
+            anyhow::bail!(
+                "resource transition coordinate {}/{} is already projected as ID {} fingerprint {}, not ID {} fingerprint {}",
+                transition.operation_id,
+                transition.transition_sequence,
+                transition_id,
+                fingerprint,
+                transition.transition_id,
+                payload_fingerprint
+            );
+        }
+        db.connection()
+            .execute(
+                "INSERT INTO resource_budget_transition_once (
+                    transition_id, operation_id, transition_sequence,
+                    payload_fingerprint, chain_seq
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    &transition.transition_id,
+                    &transition.operation_id,
+                    i64::from(transition.transition_sequence),
+                    &payload_fingerprint,
+                    incoming_chain_seq,
+                ],
+            )
+            .context("project resource transition publication identity")?;
+    }
+
+    let existing: Option<(
+        i64,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+    )> = db
+        .connection()
+        .query_row(
+            "SELECT transition_sequence, transition, budget_authority_site_id, ledger_epoch,
+                    execution_budget_id, root_chain_id, audit_chain_root_id, thread_id,
+                    launch_generation, owner_incarnation, stable_resource_id, authority_digest,
+                    reserved_usd_nanos
+               FROM resource_budget_latest
+             WHERE operation_id=?1",
+            rusqlite::params![&transition.operation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                ))
+            },
+        )
+        .optional()
+        .context("read resource budget latest row")?;
+    if let Some((
+        existing_sequence,
+        existing_state,
+        site,
+        epoch,
+        execution,
+        root,
+        audit_root,
+        thread,
+        generation,
+        owner,
+        resource,
+        authority,
+        reserved,
+    )) = existing
+    {
+        if site != transition.budget_authority_site_id
+            || epoch != u64_to_i64(transition.ledger_epoch, "ledger_epoch")?
+            || execution != transition.execution_budget_id
+            || root != transition.root_chain_id
+            || audit_root != transition.audit_chain_root_id
+            || thread != transition.thread_id
+            || generation != transition.launch_generation
+            || owner != transition.owner_incarnation
+            || resource != transition.stable_resource_id
+            || authority != transition.authority_digest.as_str()
+            || reserved != u64_to_i64(transition.reserved_usd_nanos, "reserved_usd_nanos")?
+        {
+            anyhow::bail!(
+                "resource operation {} changed immutable publication coordinates",
+                transition.operation_id
+            );
+        }
+        let incoming_sequence = i64::from(transition.transition_sequence);
+        if incoming_sequence < existing_sequence {
+            if identity_replayed {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "resource operation {} published a new stale transition sequence {} behind {}",
+                transition.operation_id,
+                incoming_sequence,
+                existing_sequence
+            );
+        }
+        if incoming_sequence == existing_sequence {
+            if existing_state != transition.transition.as_str() {
+                anyhow::bail!(
+                    "contradictory duplicate resource transition for operation {} sequence {}",
+                    transition.operation_id,
+                    existing_sequence
+                );
+            }
+            return Ok(());
+        }
+        if incoming_sequence != existing_sequence + 1 {
+            anyhow::bail!(
+                "resource operation {} skipped transition sequence {} -> {}",
+                transition.operation_id,
+                existing_sequence,
+                incoming_sequence
+            );
+        }
+        let previous =
+            ryeos_accounting::ResourceBudgetState::parse(&existing_state).ok_or_else(|| {
+                anyhow::anyhow!("unknown projected resource state `{existing_state}`")
+            })?;
+        if !previous.may_transition_to(transition.transition) {
+            anyhow::bail!(
+                "illegal resource budget transition for operation {}: `{}` -> `{}`",
+                transition.operation_id,
+                existing_state,
+                transition.transition.as_str()
+            );
+        }
+    } else if transition.transition_sequence != 1
+        || !matches!(
+            transition.transition,
+            ryeos_accounting::ResourceBudgetState::Reserved
+                | ryeos_accounting::ResourceBudgetState::ReservationDenied
+                | ryeos_accounting::ResourceBudgetState::AdvisoryPending
+        )
+    {
+        anyhow::bail!(
+            "resource operation {} must begin at sequence 1 with a reservation decision",
+            transition.operation_id
+        );
+    }
+
+    db.connection()
+        .execute(
+            "INSERT INTO resource_budget_latest (
+                operation_id, transition_sequence, budget_authority_site_id, ledger_epoch,
+                execution_budget_id, root_chain_id, audit_chain_root_id, thread_id,
+                launch_generation, owner_incarnation, stable_resource_id, authority_digest,
+                transition, reserved_usd_nanos, budget_charge_usd_nanos, usage_digest,
+                occurred_at_ms, chain_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                       ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(operation_id) DO UPDATE SET
+                transition_sequence=excluded.transition_sequence,
+                budget_authority_site_id=excluded.budget_authority_site_id,
+                ledger_epoch=excluded.ledger_epoch,
+                execution_budget_id=excluded.execution_budget_id,
+                root_chain_id=excluded.root_chain_id,
+                audit_chain_root_id=excluded.audit_chain_root_id,
+                thread_id=excluded.thread_id,
+                launch_generation=excluded.launch_generation,
+                owner_incarnation=excluded.owner_incarnation,
+                stable_resource_id=excluded.stable_resource_id,
+                authority_digest=excluded.authority_digest,
+                transition=excluded.transition,
+                reserved_usd_nanos=excluded.reserved_usd_nanos,
+                budget_charge_usd_nanos=excluded.budget_charge_usd_nanos,
+                usage_digest=excluded.usage_digest,
+                occurred_at_ms=excluded.occurred_at_ms,
+                chain_seq=excluded.chain_seq",
+            rusqlite::params![
+                &transition.operation_id,
+                i64::from(transition.transition_sequence),
+                &transition.budget_authority_site_id,
+                u64_to_i64(transition.ledger_epoch, "ledger_epoch")?,
+                &transition.execution_budget_id,
+                &transition.root_chain_id,
+                &transition.audit_chain_root_id,
+                &transition.thread_id,
+                &transition.launch_generation,
+                &transition.owner_incarnation,
+                &transition.stable_resource_id,
+                transition.authority_digest.as_str(),
+                transition.transition.as_str(),
+                u64_to_i64(transition.reserved_usd_nanos, "reserved_usd_nanos")?,
+                transition
+                    .budget_charge_usd_nanos
+                    .map(|value| u64_to_i64(value, "budget_charge_usd_nanos"))
+                    .transpose()?,
+                transition
+                    .usage_digest
+                    .as_ref()
+                    .map(|digest| digest.as_str()),
+                transition.occurred_at_ms,
+                incoming_chain_seq,
+            ],
+        )
+        .context("project resource_budget_latest")?;
     Ok(())
 }
 

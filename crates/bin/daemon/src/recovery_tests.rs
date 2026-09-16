@@ -4,8 +4,8 @@ use std::sync::Arc;
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::runtime_db::{
     DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession,
-    NewDedicatedSessionCommand, WorkerProcessRecord, WorkerProcessState, WorkspaceBinding,
-    WorkspaceState,
+    NewDedicatedSessionCommand, ProcessResourceReservationRecord, WorkerProcessRecord,
+    WorkerProcessState, WorkspaceBinding, WorkspaceState,
 };
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{
@@ -131,6 +131,475 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn precontact_resource_scope_recovery_discards_without_relaunch() {
+    let (_tmpdir, state) = build_test_state();
+    let planned = serde_json::json!({
+        "version": 2,
+        "control_timeout": {"secs": 1, "nanos": 0},
+        "configuration": {"version": 3, "backend": {
+            "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+        }},
+        "backend": {"implementation": "linux_cgroup_v2",
+            "boot_id": "00000000-0000-4000-8000-000000000000",
+            "parent": {"containing_device": 1, "inode": 2},
+            "name": "resource-startup-fixture"}
+    });
+    let reservation = ProcessResourceReservationRecord {
+        owner_kind: "thread".to_owned(),
+        owner_coordinate: "T-resource-precontact".to_owned(),
+        daemon_generation_id: ryeos_app::runtime_db::daemon_generation_id().to_owned(),
+        selections: vec![ryeos_engine::contracts::ExecutionResourceSelection {
+            stable_id: "accelerator-precontact".to_owned(),
+            class: "accelerator".to_owned(),
+            matched_facts: BTreeMap::new(),
+            observation_contract_digest: "1".repeat(64),
+            device_binding_digest: "2".repeat(64),
+            access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+            enforcement: ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+            character_devices: Vec::new(),
+        }],
+        allocation_limit: 1,
+        scope_allocation: serde_json::from_value(planned).unwrap(),
+        scope_recovery: None,
+    };
+    state
+        .state_store
+        .reserve_process_resource_launch(&reservation)
+        .unwrap();
+    assert_eq!(
+        state.state_store.process_resource_reservations().unwrap(),
+        vec![reservation]
+    );
+
+    super::reconcile::reconcile_process_resource_reservations(&state).unwrap();
+    assert!(
+        state
+            .state_store
+            .process_resource_reservations()
+            .unwrap()
+            .is_empty()
+    );
+    super::reconcile::reconcile_process_resource_reservations(&state).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch() {
+    let (tmpdir, mut state) = build_test_state();
+    let accounting = Arc::new(
+        ryeos_app::accounting_db::AccountingDb::open_default(
+            &tmpdir.path().join("unattached-resource-accounting"),
+        )
+        .unwrap(),
+    );
+    let execution_budget_id = "exec-unattached-resource";
+    let root_chain_id = "T-unattached-resource";
+    let now = lillux::time::timestamp_millis();
+    accounting
+        .create_execution_account_prepared(
+            execution_budget_id,
+            root_chain_id,
+            Some(ryeos_accounting::UsdNanos::parse_canonical("1").unwrap()),
+        )
+        .unwrap();
+    accounting
+        .activate_account(execution_budget_id, "execution", execution_budget_id)
+        .unwrap();
+    accounting.startup_verify().unwrap();
+
+    // This exact stale process occurrence crossed financial reservation but
+    // crashed before any RuntimeDb owner attachment. Startup may only prove it
+    // dead, release the unissued hold, and fence its gate; it cannot relaunch.
+    let process_identity = ryeos_app::process::ExecutionProcessIdentity {
+        schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+        process_scope: None,
+        boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+        target_pid: 999_990,
+        target_start_time_ticks: 11,
+        group_leader_pid: 999_990,
+        group_leader_start_time_ticks: 11,
+        resource_selections: Vec::new(),
+        resource_operations: Vec::new(),
+        resource_allocation_limit: None,
+        resource_occupancy_start: None,
+        resource_occupancy_limit: None,
+        resource_cleanup_allowance_ms: None,
+    };
+    let owner_incarnation = process_identity.owner_incarnation_digest().unwrap();
+    let owner_gate_id = accounting
+        .open_resource_owner_accounting_gate(
+            &process_identity,
+            execution_budget_id,
+            None,
+            root_chain_id,
+            root_chain_id,
+            now,
+        )
+        .unwrap();
+    let meter = ryeos_accounting::ResourceMeterContract {
+        version: ryeos_accounting::RESOURCE_METER_CONTRACT_VERSION,
+        kind: ryeos_accounting::ResourceMeterKind::OccupancyDuration,
+        clock_contract_digest: ryeos_accounting::HexDigest::new(
+            lillux::time::occupancy_now().unwrap().contract_digest,
+        )
+        .unwrap(),
+        contract_digest: ryeos_accounting::HexDigest::new("0".repeat(64)).unwrap(),
+    }
+    .sealed()
+    .unwrap();
+    let tariff = ryeos_accounting::ResourceTariffDocument {
+        version: ryeos_accounting::RESOURCE_TARIFF_VERSION,
+        currency: ryeos_accounting::Currency::Usd,
+        pricing_generation: "unattached-recovery-v1".to_owned(),
+        charge_class: ryeos_accounting::ResourceChargeClass::InternalAllocation,
+        rate_per_million_milliseconds: ryeos_accounting::UsdNanos::parse_canonical("1").unwrap(),
+        billing_quantum_milliseconds: 1_000,
+        minimum_billable_milliseconds: 1_000,
+        expires_at_ms: None,
+    };
+    let maximum_occupancy_milliseconds = 60_000;
+    let authority = ryeos_accounting::ResourceAccountingAuthority {
+        version: ryeos_accounting::RESOURCE_ACCOUNTING_AUTHORITY_VERSION,
+        authority_digest: ryeos_accounting::HexDigest::new("0".repeat(64)).unwrap(),
+        stable_resource_id: "accelerator-unattached-fixture".to_owned(),
+        resource_class: "accelerator".to_owned(),
+        observation_contract_digest: ryeos_accounting::HexDigest::new("1".repeat(64)).unwrap(),
+        meter,
+        spend: ryeos_accounting::ResourceSpendAuthority::Bounded {
+            maximum_occupancy_milliseconds,
+            maximum: tariff
+                .charge_for_nanoseconds(maximum_occupancy_milliseconds * 1_000_000)
+                .unwrap(),
+        },
+        tariff,
+    }
+    .sealed()
+    .unwrap();
+    let request_digest = ryeos_accounting::HexDigest::of_canonical_json(&serde_json::json!({
+        "fixture": "unattached-resource-owner-startup",
+    }))
+    .unwrap();
+    let operation_id = ryeos_accounting::HexDigest::of_canonical_json(&serde_json::json!({
+        "kind": "unattached-resource-owner-startup",
+        "request_digest": request_digest,
+    }))
+    .unwrap();
+    accounting
+        .reserve_resource_operation(ryeos_app::accounting_db::ReserveResourceOperationArgs {
+            owner_gate_id: owner_gate_id.as_str(),
+            operation_id: operation_id.as_str(),
+            request_digest: request_digest.as_str(),
+            execution_budget_id,
+            directive_budget_id: None,
+            root_chain_id,
+            audit_chain_root_id: root_chain_id,
+            thread_id: root_chain_id,
+            launch_generation: "unattached-generation",
+            owner_incarnation: &owner_incarnation,
+            authority: &authority,
+            now_ms: now,
+        })
+        .unwrap();
+    assert!(
+        accounting
+            .resource_owner_gate_eligible(owner_gate_id.as_str(), &owner_incarnation, now + 1)
+            .unwrap()
+    );
+    assert!(
+        !accounting.account_snapshot(execution_budget_id).unwrap()[0]
+            .held
+            .is_zero()
+    );
+    state.accounting = Some(accounting.clone());
+
+    super::reconcile::reconcile_process_resource_owners(&state).unwrap();
+    assert!(
+        state
+            .state_store
+            .process_resource_owners()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        accounting
+            .open_resource_owner_recoveries()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        accounting
+            .resource_operation_state(operation_id.as_str())
+            .unwrap(),
+        ryeos_accounting::ResourceBudgetState::ReleasedUnissued
+    );
+    assert!(
+        !accounting
+            .resource_owner_gate_eligible(owner_gate_id.as_str(), &owner_incarnation, now + 2)
+            .unwrap()
+    );
+    assert_eq!(
+        accounting.account_snapshot(execution_budget_id).unwrap()[0].held,
+        ryeos_accounting::UsdNanos::ZERO
+    );
+
+    super::reconcile::reconcile_process_resource_owners(&state).unwrap();
+    assert_eq!(
+        accounting
+            .resource_operation_state(operation_id.as_str())
+            .unwrap(),
+        ryeos_accounting::ResourceBudgetState::ReleasedUnissued
+    );
+    assert_eq!(
+        accounting.account_snapshot(execution_budget_id).unwrap()[0].held,
+        ryeos_accounting::UsdNanos::ZERO
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
+    let (tmpdir, mut state) = build_test_state();
+    let accounting = Arc::new(
+        ryeos_app::accounting_db::AccountingDb::open_default(
+            &tmpdir.path().join("resource-accounting"),
+        )
+        .unwrap(),
+    );
+    let execution_budget_id = "exec-resource-recovery";
+    let root_chain_id = "T-resource-recovery";
+    let now = lillux::time::timestamp_millis();
+    accounting
+        .create_execution_account_prepared(
+            execution_budget_id,
+            root_chain_id,
+            Some(ryeos_accounting::UsdNanos::parse_canonical("1").unwrap()),
+        )
+        .unwrap();
+    accounting
+        .activate_account(execution_budget_id, "execution", execution_budget_id)
+        .unwrap();
+    accounting.startup_verify().unwrap();
+
+    let base_identity = ryeos_app::process::ExecutionProcessIdentity {
+        schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+        process_scope: None,
+        boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+        target_pid: 999_991,
+        target_start_time_ticks: 11,
+        group_leader_pid: 999_991,
+        group_leader_start_time_ticks: 11,
+        resource_selections: Vec::new(),
+        resource_operations: Vec::new(),
+        resource_allocation_limit: None,
+        resource_occupancy_start: None,
+        resource_occupancy_limit: None,
+        resource_cleanup_allowance_ms: None,
+    };
+    let owner_incarnation = base_identity.owner_incarnation_digest().unwrap();
+    let owner_gate_id = accounting
+        .open_resource_owner_accounting_gate(
+            &base_identity,
+            execution_budget_id,
+            None,
+            root_chain_id,
+            root_chain_id,
+            now,
+        )
+        .unwrap();
+
+    let clock_contract_digest =
+        ryeos_accounting::HexDigest::new(lillux::time::occupancy_now().unwrap().contract_digest)
+            .unwrap();
+    let meter = ryeos_accounting::ResourceMeterContract {
+        version: ryeos_accounting::RESOURCE_METER_CONTRACT_VERSION,
+        kind: ryeos_accounting::ResourceMeterKind::OccupancyDuration,
+        clock_contract_digest: clock_contract_digest.clone(),
+        contract_digest: ryeos_accounting::HexDigest::new("0".repeat(64)).unwrap(),
+    }
+    .sealed()
+    .unwrap();
+    let tariff = ryeos_accounting::ResourceTariffDocument {
+        version: ryeos_accounting::RESOURCE_TARIFF_VERSION,
+        currency: ryeos_accounting::Currency::Usd,
+        pricing_generation: "recovery-fixture-v1".to_owned(),
+        charge_class: ryeos_accounting::ResourceChargeClass::InternalAllocation,
+        rate_per_million_milliseconds: ryeos_accounting::UsdNanos::parse_canonical("1").unwrap(),
+        billing_quantum_milliseconds: 1_000,
+        minimum_billable_milliseconds: 1_000,
+        expires_at_ms: None,
+    };
+    let maximum_occupancy_milliseconds = 60_000;
+    let maximum = tariff
+        .charge_for_nanoseconds(maximum_occupancy_milliseconds * 1_000_000)
+        .unwrap();
+    let authority = ryeos_accounting::ResourceAccountingAuthority {
+        version: ryeos_accounting::RESOURCE_ACCOUNTING_AUTHORITY_VERSION,
+        authority_digest: ryeos_accounting::HexDigest::new("0".repeat(64)).unwrap(),
+        stable_resource_id: "accelerator-recovery-fixture".to_owned(),
+        resource_class: "accelerator".to_owned(),
+        observation_contract_digest: ryeos_accounting::HexDigest::new("1".repeat(64)).unwrap(),
+        meter,
+        tariff,
+        spend: ryeos_accounting::ResourceSpendAuthority::Bounded {
+            maximum_occupancy_milliseconds,
+            maximum,
+        },
+    }
+    .sealed()
+    .unwrap();
+    let request_digest = ryeos_accounting::HexDigest::of_canonical_json(&serde_json::json!({
+        "fixture": "resource-owner-startup-recovery",
+    }))
+    .unwrap();
+    let operation_id = ryeos_accounting::HexDigest::of_canonical_json(&serde_json::json!({
+        "kind": "resource-owner-startup-recovery",
+        "request_digest": request_digest,
+    }))
+    .unwrap();
+    accounting
+        .reserve_resource_operation(ryeos_app::accounting_db::ReserveResourceOperationArgs {
+            owner_gate_id: owner_gate_id.as_str(),
+            operation_id: operation_id.as_str(),
+            request_digest: request_digest.as_str(),
+            execution_budget_id,
+            directive_budget_id: None,
+            root_chain_id,
+            audit_chain_root_id: root_chain_id,
+            thread_id: root_chain_id,
+            launch_generation: "recovery-generation",
+            owner_incarnation: &owner_incarnation,
+            authority: &authority,
+            now_ms: now,
+        })
+        .unwrap();
+    accounting
+        .issue_resource_operation(operation_id.as_str(), request_digest.as_str(), now + 1)
+        .unwrap();
+
+    let occupancy_start = lillux::time::occupancy_now().unwrap();
+    let occupancy_limit = lillux::time::OccupancyLimit::new(
+        occupancy_start.clone(),
+        maximum_occupancy_milliseconds * 1_000_000,
+    )
+    .unwrap();
+    let mut attached_identity = base_identity.clone();
+    attached_identity
+        .bind_execution_resources(
+            vec![ryeos_engine::contracts::ExecutionResourceSelection {
+                stable_id: authority.stable_resource_id.clone(),
+                class: authority.resource_class.clone(),
+                matched_facts: BTreeMap::new(),
+                observation_contract_digest: authority
+                    .observation_contract_digest
+                    .as_str()
+                    .to_owned(),
+                device_binding_digest: "2".repeat(64),
+                access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+                enforcement:
+                    ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+                character_devices: Vec::new(),
+            }],
+            vec![ryeos_accounting::ResourceOperationBinding {
+                version: ryeos_accounting::RESOURCE_OPERATION_BINDING_VERSION,
+                owner_gate_id: owner_gate_id.clone(),
+                operation_id: operation_id.clone(),
+                request_digest: request_digest.clone(),
+                owner_incarnation: ryeos_accounting::HexDigest::new(owner_incarnation).unwrap(),
+                stable_resource_id: authority.stable_resource_id.clone(),
+                authority_digest: authority.authority_digest.clone(),
+                meter_contract_digest: authority.meter.contract_digest.clone(),
+                clock_contract_digest,
+                maximum_occupancy_milliseconds: Some(maximum_occupancy_milliseconds),
+            }],
+            Some(1),
+            Some(occupancy_start),
+            Some(occupancy_limit),
+            Some(1_000),
+        )
+        .unwrap();
+    let planned_scope = serde_json::json!({
+        "version": 2,
+        "control_timeout": {"secs": 1, "nanos": 0},
+        "configuration": {"version": 3, "backend": {
+            "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+        }},
+        "backend": {"implementation": "linux_cgroup_v2",
+            "boot_id": "00000000-0000-4000-8000-000000000000",
+            "parent": {"containing_device": 1, "inode": 2},
+            "name": "resource-owner-recovery"}
+    });
+    let allocation: lillux::ProcessScopeAllocation =
+        serde_json::from_value(planned_scope.clone()).unwrap();
+    let mut bound_scope = planned_scope;
+    bound_scope["version"] = 4.into();
+    bound_scope["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
+    let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound_scope).unwrap();
+    attached_identity.process_scope = Some(recovery.clone());
+    state
+        .state_store
+        .reserve_process_resource_launch(&ProcessResourceReservationRecord {
+            owner_kind: "pooled_session".to_owned(),
+            owner_coordinate: "pool-resource-recovery".to_owned(),
+            daemon_generation_id: ryeos_app::runtime_db::daemon_generation_id().to_owned(),
+            selections: attached_identity.resource_selections.clone(),
+            allocation_limit: attached_identity.resource_allocation_limit.unwrap(),
+            scope_allocation: allocation,
+            scope_recovery: Some(recovery),
+        })
+        .unwrap();
+    state
+        .state_store
+        .attach_pooled_resource_owner("pool-resource-recovery", &attached_identity)
+        .unwrap();
+
+    // First startup has lost the accounting service. Cleanup proof must still
+    // release capacity, while the exact owner and operation remain retryable.
+    super::reconcile::reconcile_process_resource_owners(&state).unwrap();
+    let retained = state.state_store.process_resource_owners().unwrap();
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].cleanup_proved);
+    assert_eq!(
+        accounting
+            .resource_operation_state(operation_id.as_str())
+            .unwrap(),
+        ryeos_accounting::ResourceBudgetState::Issued
+    );
+
+    // Restoring the same ledger completes settlement and clears ownership.
+    // A repeated startup pass is an exact no-op rather than a second charge.
+    state.accounting = Some(accounting.clone());
+    super::reconcile::reconcile_process_resource_owners(&state).unwrap();
+    assert!(
+        state
+            .state_store
+            .process_resource_owners()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        accounting
+            .resource_operation_state(operation_id.as_str())
+            .unwrap(),
+        ryeos_accounting::ResourceBudgetState::ChargedReservedMaximum
+    );
+    let charged = accounting
+        .account_snapshot(execution_budget_id)
+        .unwrap()
+        .remove(0)
+        .committed;
+    super::reconcile::reconcile_process_resource_owners(&state).unwrap();
+    assert_eq!(
+        accounting
+            .account_snapshot(execution_budget_id)
+            .unwrap()
+            .remove(0)
+            .committed,
+        charged
+    );
+}
+
 fn build_test_state() -> (tempfile::TempDir, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
     let runtime_state_dir = tmpdir.path().join(".ai/state");
@@ -252,6 +721,9 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         vault_fingerprint: None,
         accounting: None,
         persistent_sessions: Arc::new(ryeos_app::persistent_session::PersistentSessionPool::new()),
+        execution_resources: Arc::new(
+            ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
+        ),
     };
     (tmpdir, state)
 }
@@ -1454,6 +1926,12 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                 target_start_time_ticks: 1,
                 group_leader_pid: 999_999,
                 group_leader_start_time_ticks: 1,
+                resource_selections: Vec::new(),
+                resource_operations: Vec::new(),
+                resource_allocation_limit: None,
+                resource_occupancy_start: None,
+                resource_occupancy_limit: None,
+                resource_cleanup_allowance_ms: None,
             },
             control_channel_identity: "fd:fixture-dead".to_owned(),
             state: WorkerProcessState::Attached,

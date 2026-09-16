@@ -216,6 +216,18 @@ impl AttachedProcessGuard {
                 anyhow::bail!("reaped subprocess acquired a workspace under another launch owner");
             }
         }
+        let proposed =
+            ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(&self.identity)?;
+        let evidence = self.state.state_store.prove_thread_resource_owner_cleanup(
+            &self.thread_id,
+            &self.identity,
+            &proposed,
+        )?;
+        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+            &self.state,
+            &self.identity,
+            &evidence,
+        )?;
         let cleared = if let Some(binding) = current_binding.as_ref() {
             self.state
                 .state_store

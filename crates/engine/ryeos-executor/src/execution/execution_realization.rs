@@ -100,6 +100,61 @@ pub(crate) fn admitted_parent_isolation_ceilings(
     ))
 }
 
+pub(crate) fn project_launch_resource_authority_ceiling(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: Option<&ryeos_engine::resolution::ResolutionOutput>,
+    parent_thread_id: Option<&str>,
+) -> Result<ryeos_engine::contracts::ExecutionResourceAuthorityCeiling> {
+    let execution = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("execution kind `{kind}` has no registered contract"))?;
+    if resolution.is_none() && execution.resource_authority_ceiling.is_some() {
+        anyhow::bail!(
+            "kind `{kind}` requires an admitted composed subject for resource-authority projection"
+        );
+    }
+    let empty = serde_json::Value::Null;
+    let composed = resolution
+        .map(|resolution| &resolution.composed.composed)
+        .unwrap_or(&empty);
+    let mut ceiling = execution.project_resource_authority_ceiling(composed)?;
+    if let Some(parent) = parent_thread_id {
+        ceiling = ceiling.intersect(admitted_parent_resource_authority_ceiling(state, parent)?);
+    }
+    let target = execution.project_target_requirement(composed)?;
+    ceiling.admits(target.as_ref())?;
+    Ok(ceiling)
+}
+
+pub(crate) fn admitted_parent_resource_authority_ceiling(
+    state: &AppState,
+    parent_thread_id: &str,
+) -> Result<ryeos_engine::contracts::ExecutionResourceAuthorityCeiling> {
+    let capsule = state
+        .state_store
+        .admitted_launch_capsule(parent_thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "parent {parent_thread_id} has no admitted capsule for child resource authority"
+            )
+        })?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let realization = capsule.verify_retained_execution_realization(
+        &authority.cas_store()?,
+        &authority.large_object_store()?,
+        authority.trust_store(),
+    )?;
+    let value = realization
+        .properties
+        .get(ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::REALIZATION_PROPERTY)
+        .ok_or_else(|| anyhow::anyhow!("parent realization has no resource-authority ceiling"))?;
+    Ok(serde_json::from_value(value.clone())?)
+}
+
 pub(crate) fn admit_or_verify(
     state: &AppState,
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
@@ -107,6 +162,7 @@ pub(crate) fn admit_or_verify(
     effective_definition_digest: &str,
     contract_ref: &str,
     contract_digest: &str,
+    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
     staged_publication: Option<&mut ryeos_state::PendingCasPublication>,
 ) -> Result<ExecutionRealizationAdmission> {
     let launch_authority = metadata
@@ -116,7 +172,7 @@ pub(crate) fn admit_or_verify(
     let launch_authority_digest = launch_authority.digest()?;
     let artifact_identity_digest = launch_authority.artifact_identity_digest()?;
     let execution_closure_digest = launch_authority.execution_closure_digest()?;
-    let (filesystem, network) = match metadata
+    let (filesystem, network, target, resource_authority) = match metadata
         .admitted_execution_closure
         .as_ref()
         .context("execution realization has no admitted closure")?
@@ -131,6 +187,8 @@ pub(crate) fn admit_or_verify(
             (
                 plan.filesystem_authority_ceiling,
                 plan.network_authority_ceiling,
+                plan.target_requirement,
+                plan.resource_authority_ceiling,
             )
         }
         ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
@@ -143,10 +201,19 @@ pub(crate) fn admit_or_verify(
             (
                 prepared.filesystem_authority_ceiling,
                 prepared.network_authority_ceiling,
+                prepared.target_requirement,
+                prepared.resource_authority_ceiling,
             )
         }
     };
-    let properties = execution_properties(state, filesystem, network)?;
+    let properties = execution_properties(
+        state,
+        filesystem,
+        network,
+        target.as_ref(),
+        resource_authority,
+        selected_resources,
+    )?;
 
     if let Some(existing_hash) = metadata.execution_realization_hash.as_deref() {
         let existing = load_realization(state, existing_hash)?;
@@ -183,6 +250,9 @@ pub(crate) fn admit_or_verify(
         components,
         filesystem,
         network,
+        target.as_ref(),
+        resource_authority,
+        selected_resources,
         staged_publication,
     )
 }
@@ -197,8 +267,9 @@ pub(crate) fn admit_persistent_session(
     staged_publication: Option<&mut ryeos_state::PendingCasPublication>,
 ) -> Result<ExecutionRealizationAdmission> {
     authority.validate()?;
-    let (filesystem, network) =
-        persistent_session_isolation_ceilings(&authority.execution_closure)?;
+    let (filesystem, network, target, resource_authority) =
+        persistent_session_execution_authority(&authority.execution_closure)?;
+    let selected_resources = state.execution_resources.select(target.as_ref())?;
     store_new_realization(
         state,
         authority.digest()?,
@@ -210,6 +281,9 @@ pub(crate) fn admit_persistent_session(
         execution_components(state, resolution)?,
         filesystem,
         network,
+        target.as_ref(),
+        resource_authority,
+        selected_resources.selections(),
         staged_publication,
     )
 }
@@ -225,9 +299,17 @@ pub(crate) fn verify_persistent_session(
     capsule.validate()?;
     let authority = capsule.authority();
     let existing = load_realization(state, &capsule.execution_realization_hash)?;
-    let (filesystem, network) =
-        persistent_session_isolation_ceilings(&authority.execution_closure)?;
-    let properties = execution_properties(state, filesystem, network)?;
+    let (filesystem, network, target, resource_authority) =
+        persistent_session_execution_authority(&authority.execution_closure)?;
+    let selected_resources = state.execution_resources.select(target.as_ref())?;
+    let properties = execution_properties(
+        state,
+        filesystem,
+        network,
+        target.as_ref(),
+        resource_authority,
+        selected_resources.selections(),
+    )?;
     if existing.launch_authority_digest != authority.digest()?
         || existing.effective_definition_digest != effective_definition_digest
         || existing.artifact_identity_digest != authority.artifact_identity_digest()?
@@ -243,11 +325,13 @@ pub(crate) fn verify_persistent_session(
     verify_realization_components(state, &existing)
 }
 
-fn persistent_session_isolation_ceilings(
+fn persistent_session_execution_authority(
     closure: &ryeos_state::objects::AdmittedExecutionClosure,
 ) -> Result<(
     IsolationFilesystemAuthorityCeiling,
     IsolationNetworkAuthorityCeiling,
+    Option<ryeos_engine::contracts::ExecutionTargetRequirement>,
+    ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
 )> {
     let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
         execution_plan, ..
@@ -261,6 +345,8 @@ fn persistent_session_isolation_ceilings(
     Ok((
         plan.filesystem_authority_ceiling,
         plan.network_authority_ceiling,
+        plan.target_requirement,
+        plan.resource_authority_ceiling,
     ))
 }
 
@@ -322,6 +408,9 @@ fn store_new_realization(
     components: Vec<ExecutionComponentReference>,
     filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    target_requirement: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
     staged_publication: Option<&mut ryeos_state::PendingCasPublication>,
 ) -> Result<ExecutionRealizationAdmission> {
     let node = state
@@ -333,6 +422,9 @@ fn store_new_realization(
         state,
         filesystem_authority_ceiling,
         network_authority_ceiling,
+        target_requirement,
+        resource_authority_ceiling,
+        selected_resources,
     )?;
     let candidate = AdmittedExecutionRealization {
         schema: EXECUTION_REALIZATION_SCHEMA_VERSION,
@@ -418,12 +510,19 @@ fn execution_properties(
     state: &AppState,
     filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    target_requirement: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<BTreeMap<String, serde_json::Value>> {
     let inspection = state.isolation.inspection();
     let mut properties = BTreeMap::new();
     properties.insert(
         "isolation_enforced".to_owned(),
         serde_json::Value::Bool(state.isolation.is_enforced()),
+    );
+    properties.insert(
+        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
+        serde_json::to_value(resource_authority_ceiling)?,
     );
     properties.insert(
         "isolation_policy_digest".to_owned(),
@@ -441,6 +540,20 @@ fn execution_properties(
         filesystem_authority_ceiling,
         network_authority_ceiling,
     ));
+    properties.insert(
+        ryeos_engine::contracts::ExecutionTargetRequirement::REALIZATION_PROPERTY.to_owned(),
+        target_requirement
+            .map(|target| {
+                lillux::canonical_json(&serde_json::to_value(target)?).map_err(anyhow::Error::from)
+            })
+            .transpose()?
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    properties.insert(
+        ryeos_engine::contracts::ExecutionResourceSelection::REALIZATION_PROPERTY.to_owned(),
+        serde_json::to_value(selected_resources)?,
+    );
     Ok(properties)
 }
 

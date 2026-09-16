@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T12:59:28Z:1675baaf664eb48f1cc1380829833781eaa320b0ae599d9fcfdbafba59efc818:z+ZKOA975wPo+6K1kWX66z49z6PadBDgkBl9BsDc4hXkFzvzh4C6EpiTM7feAoVIfxBGA3e7ZDKyHIbVdLxiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:7917e32321c8a6d79e07133d2909cbf8bfe5a14091a8bfffaa49d5e26533ed1c:aW9Ej7Nt9cusjmPw5dM286swFqZS2QeCjjD5YojYLfy4LBPCbgWszteIAQJQVBjhsaX2kF463a220KV5COW/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -8,7 +8,7 @@ exact_bundles:
   - web
 policies:
   accounting:
-    schema: 1
+    schema: 2
     issue_acceptance_window_ms: 60000
   command_registration:
     schema: 1
@@ -92,11 +92,12 @@ policies:
       tv-tracker-authoring: []
       web: []
   execution:
-    schema: 2
+    schema: 3
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    resource_authority: null
   object_closure:
     schema: 1
     max_roots: 256

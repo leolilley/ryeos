@@ -135,6 +135,15 @@ pub struct LinuxSandboxAggregateLimits {
     pub max_cpu_micros_per_second: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxSandboxCharacterDevice {
+    pub source_fd: u32,
+    pub destination: PathBuf,
+    pub access: crate::CharacterDeviceAccess,
+    pub major: u32,
+    pub minor: u32,
+}
+
 /// Complete low-level request for a private Linux execution view.
 #[derive(Debug, Clone)]
 pub struct LinuxSandboxRequest {
@@ -150,6 +159,7 @@ pub struct LinuxSandboxRequest {
     pub private_tmp: bool,
     pub proc_filesystem: LinuxSandboxProcFilesystem,
     pub minimal_devices: bool,
+    pub character_devices: Vec<LinuxSandboxCharacterDevice>,
     pub target_channels: Vec<(u32, u32)>,
     pub lifecycle: LinuxSandboxLifecycle,
     pub contain_process_group: bool,
@@ -169,6 +179,7 @@ pub struct LinuxSandboxInspection {
     pub private_root: bool,
     pub private_tmp: bool,
     pub minimal_devices: bool,
+    pub character_devices: bool,
     pub exact_environment: bool,
     pub isolated_pid_namespace: bool,
     pub pid_namespace_proc: bool,
@@ -191,6 +202,7 @@ impl LinuxSandboxInspection {
             private_root: true,
             private_tmp: true,
             minimal_devices: true,
+            character_devices: true,
             exact_environment: true,
             isolated_pid_namespace: true,
             pid_namespace_proc: true,
@@ -634,6 +646,9 @@ mod imp {
         if request.minimal_devices {
             create_minimal_devices(request.nested_sandbox)?;
         }
+        for device in &request.character_devices {
+            attach_character_device(device)?;
+        }
         if request.private_tmp {
             create_private_tmp()?;
         }
@@ -786,6 +801,22 @@ mod imp {
             if !destinations.insert(mount.destination.clone()) {
                 return Err("sandbox mount destinations must be unique".to_string());
             }
+        }
+        for device in &request.character_devices {
+            validate_inherited_fd(device.source_fd, "sandbox character device")?;
+            if !descriptor_roles.insert(device.source_fd) {
+                return Err("character-device descriptor aliases another authority role".to_owned());
+            }
+            validate_absolute_path(&device.destination, "sandbox character-device destination")?;
+            if !device.destination.starts_with("/dev")
+                || device.destination == PathBuf::from("/dev")
+                || !destinations.insert(device.destination.clone())
+            {
+                return Err(
+                    "sandbox character-device destination is invalid or duplicated".to_owned(),
+                );
+            }
+            validate_character_device_descriptor(device)?;
         }
         fixed_parents::validate(request)?;
         if let Some(overlay) = &request.overlay {
@@ -1461,6 +1492,89 @@ mod imp {
             if name != "tty" {
                 prove_minimal_device_usable(&target)?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_character_device_descriptor(
+        device: &LinuxSandboxCharacterDevice,
+    ) -> Result<(), String> {
+        if device.access == crate::CharacterDeviceAccess::ReadOnly {
+            return Err(
+                "read-only character-device access has no qualified enforcement backend".to_owned(),
+            );
+        }
+        let fd = raw_fd(device.source_fd)?;
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        syscall_zero(
+            unsafe { libc::fstat(fd, metadata.as_mut_ptr()) },
+            "inspect admitted character device",
+        )?;
+        let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFCHR
+            || libc::major(metadata.st_rdev) != device.major
+            || libc::minor(metadata.st_rdev) != device.minor
+        {
+            return Err("admitted character-device descriptor changed identity".to_owned());
+        }
+        Ok(())
+    }
+
+    fn attach_character_device(device: &LinuxSandboxCharacterDevice) -> Result<(), String> {
+        validate_character_device_descriptor(device)?;
+        if matches!(
+            device.destination.as_path(),
+            path if [
+                PathBuf::from("/dev/null"),
+                PathBuf::from("/dev/zero"),
+                PathBuf::from("/dev/full"),
+                PathBuf::from("/dev/random"),
+                PathBuf::from("/dev/urandom"),
+                PathBuf::from("/dev/tty"),
+            ]
+            .iter()
+            .any(|reserved| reserved == path)
+        ) {
+            return Err("selected character device overlaps the minimal device floor".to_owned());
+        }
+        let target = rooted(&device.destination)?;
+        create_regular_target(&target)?;
+        bind_fd_to_path(raw_fd(device.source_fd)?, &target, false)?;
+        set_mount_attributes(
+            &target,
+            device.access == crate::CharacterDeviceAccess::ReadOnly,
+            false,
+            false,
+        )?;
+        let encoded = c_string(target.as_os_str(), "attached character device")?;
+        let flags = match device.access {
+            crate::CharacterDeviceAccess::ReadOnly => libc::O_RDONLY,
+            crate::CharacterDeviceAccess::ReadWrite => libc::O_RDWR,
+        };
+        let opened = unsafe {
+            libc::open(
+                encoded.as_ptr(),
+                flags | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if opened < 0 {
+            return Err(format!(
+                "open attached character device: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let file = unsafe { File::from_raw_fd(opened) };
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        syscall_zero(
+            unsafe { libc::fstat(file.as_raw_fd(), metadata.as_mut_ptr()) },
+            "revalidate attached character device",
+        )?;
+        let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFCHR
+            || libc::major(metadata.st_rdev) != device.major
+            || libc::minor(metadata.st_rdev) != device.minor
+        {
+            return Err("attached character device differs from admitted descriptor".to_owned());
         }
         Ok(())
     }
@@ -4838,6 +4952,7 @@ mod tests {
             private_tmp: true,
             proc_filesystem: LinuxSandboxProcFilesystem::Empty,
             minimal_devices: true,
+            character_devices: Vec::new(),
             target_channels: Vec::new(),
             lifecycle: LinuxSandboxLifecycle::Run,
             contain_process_group: true,
@@ -4856,6 +4971,34 @@ mod tests {
         });
         let error = launch_linux_sandbox(request).unwrap_err();
         assert!(error.contains("delegated cgroup-v2 authority"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn character_device_grant_rejects_wrong_identity_and_substitution() {
+        let device = std::fs::File::open("/dev/null").unwrap();
+        let mut request = minimal_request();
+        request.character_devices = vec![LinuxSandboxCharacterDevice {
+            source_fd: u32::try_from(device.as_raw_fd()).unwrap(),
+            destination: PathBuf::from("/dev/selected"),
+            access: crate::CharacterDeviceAccess::ReadWrite,
+            major: 1,
+            minor: 5,
+        }];
+        let error = launch_linux_sandbox(request).unwrap_err();
+        assert!(error.contains("changed identity"), "{error}");
+
+        let substitute = tempfile::tempfile().unwrap();
+        let mut request = minimal_request();
+        request.character_devices = vec![LinuxSandboxCharacterDevice {
+            source_fd: u32::try_from(substitute.as_raw_fd()).unwrap(),
+            destination: PathBuf::from("/dev/selected"),
+            access: crate::CharacterDeviceAccess::ReadWrite,
+            major: 1,
+            minor: 3,
+        }];
+        let error = launch_linux_sandbox(request).unwrap_err();
+        assert!(error.contains("changed identity"), "{error}");
     }
 
     #[cfg(target_os = "linux")]

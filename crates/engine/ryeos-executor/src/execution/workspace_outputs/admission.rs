@@ -433,6 +433,9 @@ mod tests {
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             network_authority_ceiling:
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+            target_requirement: None,
+            resource_authority_ceiling:
+                ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             runtime_data: BTreeMap::new(),
             required_secrets: Vec::new(),
             runtime_facts: recipe

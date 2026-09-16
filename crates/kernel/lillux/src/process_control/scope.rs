@@ -1247,6 +1247,15 @@ fn valid_boot_id(value: &str) -> bool {
 }
 
 impl ProcessScope {
+    pub(crate) fn occupancy_watchdog_kill_descriptor(&self) -> Result<std::fs::File, String> {
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => scope.clone_kill_descriptor(),
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("process-scope lifetime enforcement is unavailable".to_owned()),
+        }
+    }
+
     pub(crate) fn require_held_member(&self, pid: u32, timeout: Duration) -> Result<(), String> {
         let timeout = timeout.min(self.recovery.control_timeout);
         match &self.backend {

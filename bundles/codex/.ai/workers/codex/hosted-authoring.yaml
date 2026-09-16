@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-12T04:00:44Z:e0576c8f87ca25e0cb5138567120a904f5f16bc6eb3aedb42b6de2285acc301a:FHrPiSTemOucA4awlcK8Rf93+htCfvWTQhtI/6DYITDO2mAanptKkADJvvOc6+yRqk2E2yd+jLEPjV+5IeF9BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:e587b16a6bab6508e627af80afbe7446700ba7f1e13410519d89adc76a9c8bd2:eFfRF0k4S5tg5+/A2Uu51O85MYY190aAXNwKop8GA0dZUScsUtc33SvbqHLBbMNmUa0zsdlu7rMHPg6cz3E5AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.3"
 executor_id: "@subprocess"
@@ -8,6 +8,7 @@ filesystem_authority: captured_execution
 supported_target:
   os: linux
   arch: x86_64
+  resources: []
 
 # RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
 # process tree. The kind-owned compiler caps and freezes this signed override;

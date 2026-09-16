@@ -27,6 +27,8 @@ pub enum CostBasis {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunCostSample {
+    /// Provider/model-call component only. It never includes machine/resource
+    /// occupancy.
     pub status: CostSampleStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turns: Option<u32>,
@@ -38,6 +40,14 @@ pub struct RunCostSample {
     pub spend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basis: Option<CostBasis>,
+    pub resource_status: CostSampleStatus,
+    pub resource_operation_count: u64,
+    /// Exact request shares derived from already-rated resource purchases.
+    pub resource_attributed_spend: String,
+    /// Startup, idle, teardown, and rounding remainder owned by this thread.
+    pub resource_owned_overhead_spend: String,
+    pub resource_basis: CostBasis,
+    pub resource_components: Vec<crate::accounting_db::ThreadResourceCostComponent>,
 }
 
 impl RunCostSample {
@@ -49,6 +59,12 @@ impl RunCostSample {
             output_tokens: None,
             spend: None,
             basis: None,
+            resource_status: CostSampleStatus::Unavailable,
+            resource_operation_count: 0,
+            resource_attributed_spend: "0".to_string(),
+            resource_owned_overhead_spend: "0".to_string(),
+            resource_basis: CostBasis::Direct,
+            resource_components: Vec::new(),
         }
     }
 }
@@ -57,27 +73,55 @@ impl RunCostSample {
 /// and child chains or trusting UI-shaped facets.
 pub fn run_cost_sample(
     state: &StateStore,
+    accounting: Option<&crate::accounting_db::AccountingDb>,
     subject: &AuthoritativeThreadSubject,
 ) -> Result<RunCostSample> {
-    if !subject.status.is_terminal() {
-        return project_cost_sample(false, None);
-    }
-
-    let terminal = state
-        .get_thread_terminal_authority(&subject.thread_id)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "terminal thread {} has no authoritative terminal state",
-                subject.thread_id
-            )
-        })?;
-    if terminal.status != subject.status {
+    let terminal = if subject.status.is_terminal() {
+        Some(
+            state
+                .get_thread_terminal_authority(&subject.thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "terminal thread {} has no authoritative terminal state",
+                        subject.thread_id
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    if let Some(terminal) = &terminal
+        && terminal.status != subject.status
+    {
         bail!(
             "thread {} terminal status changed across authoritative reads",
             subject.thread_id
         );
     }
-    project_cost_sample(true, terminal.final_cost.as_ref())
+    let mut sample = project_cost_sample(
+        terminal.is_some(),
+        terminal
+            .as_ref()
+            .and_then(|terminal| terminal.final_cost.as_ref()),
+    )?;
+    if let Some(accounting) = accounting {
+        let resource = accounting.thread_resource_cost_sample(&subject.thread_id)?;
+        sample.resource_status = if terminal.is_none() || resource.pending_operation_count != 0 {
+            CostSampleStatus::Pending
+        } else {
+            CostSampleStatus::Available
+        };
+        sample.resource_operation_count = resource.operation_count;
+        sample.resource_attributed_spend =
+            ryeos_accounting::UsdNanos::from_nanos(i64::try_from(resource.attributed_usd_nanos)?)?
+                .to_canonical_string();
+        sample.resource_owned_overhead_spend = ryeos_accounting::UsdNanos::from_nanos(
+            i64::try_from(resource.owned_overhead_usd_nanos)?,
+        )?
+        .to_canonical_string();
+        sample.resource_components = resource.components;
+    }
+    Ok(sample)
 }
 
 fn project_cost_sample(
@@ -103,6 +147,12 @@ fn project_cost_sample(
         output_tokens: Some(cost.output_tokens),
         spend: Some(cost.spend.to_canonical_string()),
         basis: Some(basis),
+        resource_status: CostSampleStatus::Unavailable,
+        resource_operation_count: 0,
+        resource_attributed_spend: "0".to_string(),
+        resource_owned_overhead_spend: "0".to_string(),
+        resource_basis: CostBasis::Direct,
+        resource_components: Vec::new(),
     })
 }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T02:30:00Z:7ea581c2437d27ec146fc4607d305184bbe2cc0e9dd067e9d2137da813859a32:PAgqAB7iOItJye3oVH9jpbnuvZypMKsajNrZFbIsgunfF2+djYNJs05W6jX9PwjMtdA1tRPytFP7J71rYUUTAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:539215e8afdb4e336dfcd11f3f476015739809acbeee5876aadcbb120cb92fde:IJOuBFo2uE6gfOyw4qbteBj2TzHgrwK9RTktp/2mj78WuDmjADTKD1R/SryTAIRAmt89B4HPLa02pZdnlsgfDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -7,7 +7,7 @@ exact_bundles:
   - standard
 policies:
   accounting:
-    schema: 1
+    schema: 2
     issue_acceptance_window_ms: 60000
   command_registration:
     schema: 1
@@ -90,11 +90,24 @@ policies:
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
-    schema: 2
+    schema: 3
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    resource_authority:
+      cleanup_allowance_ms: 30000
+      admission:
+        limits:
+          max_requirements: 1
+          max_resource_count: 1
+          max_facts_per_requirement: 16
+        max_total_resource_count: 1
+        max_concurrent_exclusive_allocations: 1
+        allowed_classes: [accelerator]
+        allowed_allocations: [exclusive]
+        allowed_access: [deployment_visible]
+      resources: []
   object_closure:
     schema: 1
     max_roots: 256
@@ -147,7 +160,11 @@ policies:
     policy:
       version: 6
       process_scopes:
-        mode: unconfigured
+        # Device allocation and bounded occupancy are released only after
+        # Lillux proves this exact process scope empty.
+        mode: required
+        control_timeout_ms: 5000
+        nested_sandbox: false
       mode: disabled
       backend: null
       filesystem:

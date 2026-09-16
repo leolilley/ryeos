@@ -2188,6 +2188,12 @@ mod pinned_child_authority_tests {
             target_start_time_ticks: 200,
             group_leader_pid: 39,
             group_leader_start_time_ticks: 190,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         let mut groups = BTreeMap::new();
         assert!(register_workspace_capture_group(&mut groups, &identity).unwrap());
@@ -2231,6 +2237,12 @@ mod pinned_child_authority_tests {
             target_start_time_ticks: 200,
             group_leader_pid: 39,
             group_leader_start_time_ticks: 190,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         let mut groups = BTreeMap::new();
         assert!(register_workspace_capture_group(&mut groups, &identity).unwrap());
@@ -2257,6 +2269,12 @@ mod pinned_child_authority_tests {
             target_start_time_ticks: 200,
             group_leader_pid: 39,
             group_leader_start_time_ticks: 0,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         let mut groups = BTreeMap::new();
         assert!(register_workspace_capture_group(&mut groups, &identity).is_err());

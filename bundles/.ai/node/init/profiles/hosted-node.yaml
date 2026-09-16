@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T12:59:28Z:90c739d4dad387f677b7730e0f1688d6889c8db322f92e275d8fc783b2d5e4d6:wPIH8p9YtGoPWXSLaTj5k9Lr/0wbQM2stekvkSjTvnRShUy+TCi1k77rH+dF/rJLXVT8tegqIh0s1B2xsNdUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:503ca0d39fc07005c3a9c6266f268c397c8d2811592a745327baebc4a1ad9768:xa2xHG+/h/Juvtv8jz+fhnU9T/SmpuAtYT5TnVPFOyu3piVYd8C/VxpKnZzR6F1AlHB/Kf0efP1CCYWF9NffAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -6,7 +6,7 @@ exact_bundles:
   - hosted-node
 policies:
   accounting:
-    schema: 1
+    schema: 2
     issue_acceptance_window_ms: 60000
   command_registration:
     schema: 1
@@ -87,11 +87,12 @@ policies:
         - ryeos.register.command.root.system
       hosted-node: []
   execution:
-    schema: 2
+    schema: 3
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    resource_authority: null
   object_closure:
     schema: 1
     max_roots: 256

@@ -986,6 +986,7 @@ mod tests {
             boot_epoch: 1,
             lifecycle_generation: 1,
             control_channel_identity: "channel-test".to_owned(),
+            accounting_scope: None,
         };
         // The production transaction supplies the tuple before worker_process
         // exists. Empty fields cannot stand in for this pending authority.

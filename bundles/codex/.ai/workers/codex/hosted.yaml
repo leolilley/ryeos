@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-12T04:00:44Z:54c60707efebaa00e7954cb4bb8dd5ab6f10db5ef064b0fd548b61bc2bf68957:09Sjn3nXGA7Kr+6c+aU5ibV5yD6UIShLfEeNUxPZW85k4Xoo3thB+gHNQsb/HXIZ9/GTCwUDXwT6IpSWlFriBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:87d8b857f8e4c840aa71f5df2d27aa89940a3b1aaa63e77fee942b9424bfeb6f:eqeOfWU5OT6b7sgP4PyO6DZCBfmuN0R0N2jQ5MUcCdh+TdUKSeGUdwJ2RKyqslSwhvV67c6ltdwzrymw8ag+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.4"
 executor_id: "@subprocess"
@@ -7,6 +7,7 @@ execution_protocol: protocol:ryeos/core/structured_session
 supported_target:
   os: linux
   arch: x86_64
+  resources: []
 
 # RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
 # process tree. The kind-owned compiler caps and freezes this signed override;

@@ -38,6 +38,38 @@ fn scoped_stdout_observer_settles_silent_child_at_existing_deadline() {
 }
 
 #[test]
+fn semantic_interrupt_terminates_reaps_and_closes_stdout_capture() {
+    let mut request = shell("printf started; /bin/sleep 30");
+    request.timeout = 10.0;
+    let process = lillux::spawn(request).unwrap();
+    let started = std::time::Instant::now();
+    let (completion, observation) = process.wait_with_stdout_interruptible(
+        |mut reader| {
+            let mut bytes = vec![];
+            reader.read_to_end(&mut bytes).map(|_| bytes)
+        },
+        || started.elapsed() >= Duration::from_millis(50),
+    );
+    assert!(!completion.success, "{completion:?}");
+    assert!(
+        !completion.timed_out,
+        "semantic interruption is not a timeout"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(observation.unwrap(), b"started");
+    let alive = unsafe { libc::kill(completion.pid as i32, 0) } == 0;
+    assert!(
+        !alive,
+        "supervised child remained alive after wait returned"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "terminated child identity was not fully quiescent"
+    );
+}
+
+#[test]
 fn scoped_stdout_observer_failure_and_panic_interrupt_exact_wait() {
     for panic in [false, true] {
         let process = lillux::spawn(shell("printf broken; /bin/sleep 30")).unwrap();

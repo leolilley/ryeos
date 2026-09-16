@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:54Z:e373dfc97599a4ce47c94053a17461a9f983c37b9041da1eead29850f7d052cf:7JoKFM1WGy62dG8WLJN3M/5jJr9fQILX1vKuqIeAUrySCcps2tn8cXkq+sN0JVXR82yDfUoob8TOEIGsnMEhCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:b37ea3bdd5137ab7b27362b1c939379e4d2ae65a9c2c35c662639246da700225:ZzSkKFQkOz2rHnGzqjAjDfKfFzALuqEpEF3lKHHE5dTC9Wx7Y83gbCgTz4z8H3ieD/XoYa9ezqpbneHDAb+UBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -7,6 +7,7 @@ execution_protocol: protocol:ryeos/core/persistent_session
 supported_target:
   os: linux
   arch: x86_64
+  resources: []
 
 # RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
 # process tree. The kind-owned compiler caps and freezes this signed override;
@@ -18,7 +19,7 @@ session_resources:
 source:
   root: "lib/local-tinygrad"
   entry: "bootstrap.py"
-  digest: "e97688fbf4cd92d2e620db3e01b47dad7326ae403e0879869a21e63fbab4f28c"
+  digest: "4d814b3f959b6037ff9e3a4ee3cce9268a7e216b002d85baa70e00a76b96a3ec"
 
 external_content:
   - id: runtime

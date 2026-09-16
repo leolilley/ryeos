@@ -2080,6 +2080,18 @@ pub(crate) fn clear_finished_process(
 ) -> Result<()> {
     let settled = (|| -> Result<bool> {
         ryeos_app::process::assert_reaped_process_group_absent(process_identity)?;
+        let proposed =
+            ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(process_identity)?;
+        let evidence = state.state_store.prove_thread_resource_owner_cleanup(
+            thread_id,
+            process_identity,
+            &proposed,
+        )?;
+        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+            state,
+            process_identity,
+            &evidence,
+        )?;
         if let Some(binding) = state.state_store.thread_workspace_binding(thread_id)? {
             state.state_store.settle_reaped_thread_workspace_owned(
                 thread_id,
@@ -3882,7 +3894,11 @@ fn admitted_root_launch_metadata(
                 state,
                 parent_thread_id,
             )?;
-        prepared_plan.restrict_isolation_authority(filesystem, network);
+        let resources = super::execution_realization::admitted_parent_resource_authority_ceiling(
+            state,
+            parent_thread_id,
+        )?;
+        prepared_plan.restrict_isolation_authority(filesystem, network, resources);
     }
     if let Some(source_policy) = source_policy.as_ref() {
         source_policy.assert_matches_plan(prepared_plan.execution_plan())?;
@@ -3984,6 +4000,9 @@ fn admitted_root_launch_metadata(
         .with_admitted_execution_closure(execution_closure)
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
+    let selected_resources = state
+        .execution_resources
+        .select(prepared_plan.target_requirement())?;
     let realization_admission = super::execution_realization::admit_or_verify(
         state,
         &metadata,
@@ -3991,6 +4010,7 @@ fn admitted_root_launch_metadata(
         finalized_program.effective_definition_digest().as_str(),
         &realization_contract_ref,
         &realization_contract_digest,
+        selected_resources.selections(),
         external_publication.as_mut(),
     )?;
     if external_publication.is_none() {
@@ -4844,14 +4864,24 @@ pub async fn run_and_wait(
     let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let wait_isolation_workspace =
         projectless_isolation_workspace(process_project_class(&params.provenance), &effective_path);
+    let wait_selected_resources = state
+        .execution_resources
+        .select(prepared_plan.target_requirement())
+        .map_err(|error| guard.fail_before_spawn(error))?;
+    let wait_spawn_state = state.clone();
+    let wait_accounting_scope = wait_launch_metadata.accounting_scope.clone();
+    let wait_spawn_launch_owner = wait_launch_owner.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
+            state: &wait_spawn_state,
             engine: &engine,
             resolved: &resolved,
             prepared_plan,
             thread_id: &tid,
             chain_root_id: &crid,
+            launch_owner: &wait_spawn_launch_owner,
+            accounting_scope: wait_accounting_scope.as_ref(),
             vault_bindings: vault,
             protocol_env_bindings,
             roots: wait_roots,
@@ -4871,6 +4901,7 @@ pub async fn run_and_wait(
             is_resume: false,
             original_snapshot_hash: wait_snapshot.as_deref(),
             state_root: wait_state_root.as_deref(),
+            selected_resources: wait_selected_resources,
         })
     });
 
@@ -5020,11 +5051,39 @@ pub async fn run_and_wait(
             return Err(anyhow::Error::new(failure));
         }
     };
-    if let Err(error) = state.threads.authorize_process_release_owned(
-        &created.thread_id,
-        &spawned.process_identity,
-        &wait_launch_owner,
+    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
+        &state,
+        &spawned.process_identity.resource_operations,
     ) {
+        let failure = abort_and_settle_pending_attach_failure(
+            &state,
+            &created.thread_id,
+            &wait_launch_owner,
+            spawned,
+            PendingAttachFailure {
+                operation: "issue waiting execution resource operations",
+                outcome_code: "resource_operation_issue_failed".to_string(),
+                process_attached: true,
+                error,
+            },
+        );
+        if failure.cleanup_disarms_guard() {
+            guard.mark_finalized();
+        }
+        guard.cleanup();
+        return Err(anyhow::Error::new(failure));
+    }
+    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
+        &state,
+        &spawned.process_identity.resource_operations,
+    )
+    .and_then(|()| {
+        state.threads.authorize_process_release_owned(
+            &created.thread_id,
+            &spawned.process_identity,
+            &wait_launch_owner,
+        )
+    }) {
         let failure = abort_and_settle_pending_attach_failure(
             &state,
             &created.thread_id,
@@ -5954,6 +6013,30 @@ async fn dispatch_detached_bg_task(
             return;
         }
     };
+    let admitted_launch_metadata = match bg_state
+        .state_store
+        .get_launch_metadata(&bg_thread_id)
+        .and_then(|metadata| {
+            metadata.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thread {bg_thread_id} has no admitted launch metadata before process spawn"
+                )
+            })
+        }) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::error!(thread_id = %bg_thread_id, %error, "load admitted launch metadata before detached spawn");
+            if let Err(cleanup) = fail_settled_unattached_thread(
+                &bg_state,
+                &bg_thread_id,
+                "launch_metadata_missing",
+                &launch_owner,
+            ) {
+                tracing::error!(thread_id = %bg_thread_id, %cleanup, "settle launch with missing metadata");
+            }
+            return;
+        }
+    };
     // Revoke every protocol-requested credential on every exit path. A
     // callback-free protocol passes `None` and installs inert guards.
     let _cb_guard = defer_cb_token_revocation(&bg_state, &bg_thread_id, &bg_cb_token);
@@ -6050,6 +6133,9 @@ async fn dispatch_detached_bg_task(
     }
 
     let bg_node_trusted_keys_dir = bg_state.config.runtime_root().trusted_keys_dir();
+    let bg_spawn_state = bg_state.clone();
+    let bg_accounting_scope = admitted_launch_metadata.accounting_scope.clone();
+    let bg_spawn_launch_owner = launch_owner.clone();
     let bg_workspace_view = if bg_isolation_project_authority
         == ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
     {
@@ -6093,14 +6179,35 @@ async fn dispatch_detached_bg_task(
             return;
         }
     };
+    let bg_selected_resources = match bg_state
+        .execution_resources
+        .select(bg_prepared_plan.target_requirement())
+    {
+        Ok(selected) => selected,
+        Err(error) => {
+            tracing::error!(thread_id = %bg_thread_id, %error, "select detached execution resources");
+            if let Err(cleanup) = fail_settled_unattached_thread(
+                &bg_state,
+                &bg_thread_id,
+                "resource_selection_refused",
+                &launch_owner,
+            ) {
+                tracing::error!(thread_id = %bg_thread_id, %cleanup, "settle resource selection refusal");
+            }
+            return;
+        }
+    };
     let spawn_result = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
+            state: &bg_spawn_state,
             engine: &eng_for_spawn,
             resolved: &res_for_spawn,
             prepared_plan: bg_prepared_plan,
             thread_id: &tid_for_spawn,
             chain_root_id: &crid_for_spawn,
+            launch_owner: &bg_spawn_launch_owner,
+            accounting_scope: bg_accounting_scope.as_ref(),
             vault_bindings: vault_for_spawn,
             protocol_env_bindings: protocol_env_for_spawn,
             roots,
@@ -6120,6 +6227,7 @@ async fn dispatch_detached_bg_task(
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),
             state_root: state_root_for_spawn.as_deref(),
+            selected_resources: bg_selected_resources,
         })
     })
     .await;
@@ -6169,41 +6277,6 @@ async fn dispatch_detached_bg_task(
                     "spawn-task panic and terminal cleanup both failed"
                 );
             }
-            drop(bg_temp_dir.take());
-            return;
-        }
-    };
-    let admitted_launch_metadata = match bg_state
-        .state_store
-        .get_launch_metadata(&bg_thread_id)
-        .and_then(|metadata| {
-            metadata.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "thread {bg_thread_id} has no admitted launch metadata before process attach"
-                )
-            })
-        }) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            tracing::error!(
-                phase = log_phase,
-                thread_id = %bg_thread_id,
-                %error,
-                "load admitted launch metadata before process attach"
-            );
-            let failure = abort_and_settle_pending_attach_failure(
-                &bg_state,
-                &bg_thread_id,
-                &launch_owner,
-                spawned,
-                PendingAttachFailure {
-                    operation: "load admitted launch metadata",
-                    outcome_code: "launch_metadata_missing".to_string(),
-                    process_attached: false,
-                    error,
-                },
-            );
-            tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
             drop(bg_temp_dir.take());
             return;
         }
@@ -6339,11 +6412,39 @@ async fn dispatch_detached_bg_task(
         return;
     }
 
-    if let Err(error) = bg_state.threads.authorize_process_release_owned(
-        &bg_thread_id,
-        &spawned.process_identity,
-        &launch_owner,
+    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
+        &bg_state,
+        &spawned.process_identity.resource_operations,
     ) {
+        tracing::error!(phase = log_phase, thread_id = %bg_thread_id, %error, "issue detached execution resource operations");
+        let failure = abort_and_settle_pending_attach_failure(
+            &bg_state,
+            &bg_thread_id,
+            &launch_owner,
+            spawned,
+            PendingAttachFailure {
+                operation: "issue detached execution resource operations",
+                outcome_code: "resource_operation_issue_failed".to_string(),
+                process_attached: true,
+                error,
+            },
+        );
+        tracing::error!(thread_id = %bg_thread_id, %failure, "pending launch refused");
+        drop(bg_temp_dir.take());
+        return;
+    }
+
+    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
+        &bg_state,
+        &spawned.process_identity.resource_operations,
+    )
+    .and_then(|()| {
+        bg_state.threads.authorize_process_release_owned(
+            &bg_thread_id,
+            &spawned.process_identity,
+            &launch_owner,
+        )
+    }) {
         tracing::error!(
             phase = log_phase,
             thread_id = %bg_thread_id,

@@ -7929,6 +7929,8 @@ requires:
             workspace_access: None,
             network_authority_ceiling: None,
             filesystem_authority_ceiling: None,
+            target: None,
+            resource_authority_ceiling: None,
         }
     }
 
