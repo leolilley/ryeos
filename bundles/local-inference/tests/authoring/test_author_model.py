@@ -18,16 +18,14 @@ from unittest import mock
 
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "author-local-inference-model.py"
-CONTRACT = HERE / "local-inference-qwen3-4b-bf16-model-source-v1.json"
+BUNDLE = HERE.parent.parent
+SCRIPT = BUNDLE / "authoring/author_model.py"
+CONTRACT = BUNDLE / "authoring/contracts/qwen3-4b-bf16-model-source-v1.json"
 SPEC = importlib.util.spec_from_file_location("local_inference_model_author", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 AUTHOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTHOR)
-WORKER_SOURCE = (
-    HERE.parent.parent
-    / "bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad"
-)
+WORKER_SOURCE = BUNDLE / ".ai/workers/local-inference/lib/local-tinygrad"
 sys.path.insert(0, str(WORKER_SOURCE))
 from model_contract import QWEN3_4B  # noqa: E402
 
